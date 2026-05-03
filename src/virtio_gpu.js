@@ -31,6 +31,12 @@ const VIRTIO_GPU_EVENT_DISPLAY = 1 << 0;
 // virtio_gpu_formats
 const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM = 1;
 const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM = 2;
+const VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM = 3;
+const VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM = 4;
+const VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM = 67;
+const VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM = 68;
+const VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM = 121;
+const VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM = 134;
 
 const VIRTIO_GPU_FLAG_FENCE = 0x01;
 
@@ -337,8 +343,7 @@ VirtioGPU.prototype.cmd_resource_create_2d = function(view, hdr)
         return this.resp_err(hdr);
     }
 
-    if(format !== VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM &&
-        format !== VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM)
+    if(!is_supported_format(format))
     {
         console.warn("virtio-gpu: unsupported format", format);
         return this.resp_err(hdr);
@@ -617,14 +622,12 @@ VirtioGPU.prototype.copy_scanout_to_display = function(resource, scanout)
             const src_i = src_row_byte + col * 4;
             const dst_i = dst_row_byte + col * 4;
 
-            const b = src[src_i + 0];
-            const g = src[src_i + 1];
-            const r = src[src_i + 2];
+            const pixel = read_pixel_rgba(resource.format, src, src_i, true);
 
-            dst[dst_i + 0] = r;
-            dst[dst_i + 1] = g;
-            dst[dst_i + 2] = b;
-            dst[dst_i + 3] = 255;
+            dst[dst_i + 0] = pixel >>> 24;
+            dst[dst_i + 1] = pixel >>> 16 & 0xFF;
+            dst[dst_i + 2] = pixel >>> 8 & 0xFF;
+            dst[dst_i + 3] = pixel & 0xFF;
         }
     }
 };
@@ -884,20 +887,11 @@ VirtioGPU.prototype.composite_cursor = function(image_data, cursor_resource)
             }
 
             const src_i = (cy * cursor_resource.width + cx) * 4;
-            const b = src[src_i + 0];
-            const g = src[src_i + 1];
-            const r = src[src_i + 2];
-            let a = src[src_i + 3];
-
-            // Linux cursors may arrive as X8 resources while still carrying a
-            // useful alpha byte in the unused channel. Treating all X8 pixels as
-            // opaque turns transparent cursor padding into a black square.
-            if(cursor_resource.format === VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM &&
-                a === 0 &&
-                (r !== 0 || g !== 0 || b !== 0))
-            {
-                a = 255;
-            }
+            const pixel = read_pixel_rgba(cursor_resource.format, src, src_i, false);
+            const r = pixel >>> 24;
+            const g = pixel >>> 16 & 0xFF;
+            const b = pixel >>> 8 & 0xFF;
+            const a = pixel & 0xFF;
 
             if(a === 0)
             {
@@ -985,6 +979,105 @@ function createGPUConfigStruct(gpu)
     ];
 }
 
+function is_supported_format(format)
+{
+    switch(format)
+    {
+        case VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM:
+        case VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM:
+        case VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM:
+        case VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM:
+        case VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM:
+        case VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM:
+        case VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM:
+        case VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM:
+            return true;
+        default:
+            return false;
+    }
+}
+
+function read_pixel_rgba(format, src, i, opaque)
+{
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let a = 255;
+
+    switch(format)
+    {
+        case VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM:
+            b = src[i + 0];
+            g = src[i + 1];
+            r = src[i + 2];
+            a = src[i + 3];
+            break;
+
+        case VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM:
+            b = src[i + 0];
+            g = src[i + 1];
+            r = src[i + 2];
+            a = x_channel_to_alpha(src[i + 3], r, g, b);
+            break;
+
+        case VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM:
+            a = src[i + 0];
+            r = src[i + 1];
+            g = src[i + 2];
+            b = src[i + 3];
+            break;
+
+        case VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM:
+            a = x_channel_to_alpha(src[i + 0], src[i + 1], src[i + 2], src[i + 3]);
+            r = src[i + 1];
+            g = src[i + 2];
+            b = src[i + 3];
+            break;
+
+        case VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM:
+            r = src[i + 0];
+            g = src[i + 1];
+            b = src[i + 2];
+            a = src[i + 3];
+            break;
+
+        case VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM:
+            a = x_channel_to_alpha(src[i + 0], src[i + 3], src[i + 2], src[i + 1]);
+            b = src[i + 1];
+            g = src[i + 2];
+            r = src[i + 3];
+            break;
+
+        case VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM:
+            a = src[i + 0];
+            b = src[i + 1];
+            g = src[i + 2];
+            r = src[i + 3];
+            break;
+
+        case VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM:
+            r = src[i + 0];
+            g = src[i + 1];
+            b = src[i + 2];
+            a = x_channel_to_alpha(src[i + 3], r, g, b);
+            break;
+    }
+
+    if(opaque)
+    {
+        a = 255;
+    }
+
+    return (r << 24 | g << 16 | b << 8 | a) >>> 0;
+}
+
+function x_channel_to_alpha(x, r, g, b)
+{
+    // Cursor resources sometimes use an X8 format while putting alpha in the
+    // unused byte. If the byte is zero but the pixel has color, keep it visible.
+    return x || r || g || b ? (x || 255) : 0;
+}
+
 function debug_gpu_frame_stats(resource, scanout)
 {
     const rect = scanout.rect;
@@ -1003,9 +1096,10 @@ function debug_gpu_frame_stats(resource, scanout)
         for(let x = rect.x; x < rect.x + rect.width; x += step_x)
         {
             const i = (y * resource.width + x) * 4;
-            const b = src[i + 0];
-            const g = src[i + 1];
-            const r = src[i + 2];
+            const pixel = read_pixel_rgba(resource.format, src, i, true);
+            const r = pixel >>> 24;
+            const g = pixel >>> 16 & 0xFF;
+            const b = pixel >>> 8 & 0xFF;
 
             if(r || g || b)
             {
@@ -1036,11 +1130,12 @@ function debug_gpu_pixel(resource, x, y)
 {
     const i = (y * resource.width + x) * 4;
     const src = resource.host_buffer;
+    const pixel = read_pixel_rgba(resource.format, src, i, true);
 
     return "#" +
-        debug_hex_byte(src[i + 2]) +
-        debug_hex_byte(src[i + 1]) +
-        debug_hex_byte(src[i + 0]);
+        debug_hex_byte(pixel >>> 24) +
+        debug_hex_byte(pixel >>> 16 & 0xFF) +
+        debug_hex_byte(pixel >>> 8 & 0xFF);
 }
 
 function debug_hex_byte(value)
