@@ -398,6 +398,8 @@ VirtIO.prototype.create_common_capability = function(options)
                 read: () => this.device_status,
                 write: data =>
                 {
+                    const old_status = this.device_status;
+
                     if(data === 0)
                     {
                         dbg_log("Reset device<" + this.name + ">", LOG_VIRTIO);
@@ -418,8 +420,8 @@ VirtIO.prototype.create_common_capability = function(options)
                                 LOG_VIRTIO);
                     }
 
-                    if((data & ~this.device_status & VIRTIO_STATUS_DRIVER_OK) &&
-                        (this.device_status & VIRTIO_STATUS_DEVICE_NEEDS_RESET))
+                    if((data & ~old_status & VIRTIO_STATUS_DRIVER_OK) &&
+                        (old_status & VIRTIO_STATUS_DEVICE_NEEDS_RESET))
                     {
                         // We couldn't notify NEEDS_RESET earlier because DRIVER_OK was not set.
                         // Now it has been set, notify now.
@@ -438,7 +440,7 @@ VirtIO.prototype.create_common_capability = function(options)
 
                     this.device_status = data;
 
-                    if(data & ~this.device_status & VIRTIO_STATUS_DRIVER_OK)
+                    if(data & ~old_status & VIRTIO_STATUS_DRIVER_OK)
                     {
                         options.on_driver_ok();
                     }

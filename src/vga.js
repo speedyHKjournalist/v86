@@ -379,6 +379,7 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.plane2 = new Uint8Array(this.vga_memory.buffer, 2 * VGA_BANK_SIZE, VGA_BANK_SIZE);
     this.plane3 = new Uint8Array(this.vga_memory.buffer, 3 * VGA_BANK_SIZE, VGA_BANK_SIZE);
     this.pixel_buffer = new Uint8Array(VGA_PIXEL_BUFFER_SIZE);
+    this.external_graphics_provider = null;
 
     io.mmap_register(0xA0000, 0x20000,
         addr => this.vga_memory_read(addr),
@@ -1186,6 +1187,19 @@ VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, 
 
         this.screen.set_size_graphical(width, height, virtual_width, virtual_height);
         this.bus.send("screen-set-size", [width, height, bpp]);
+    }
+};
+
+VGAScreen.prototype.set_external_graphics_provider = function(provider)
+{
+    this.external_graphics_provider = provider || null;
+};
+
+VGAScreen.prototype.clear_external_graphics_provider = function(provider)
+{
+    if(!provider || this.external_graphics_provider === provider)
+    {
+        this.external_graphics_provider = null;
     }
 };
 
@@ -2472,6 +2486,17 @@ VGAScreen.prototype.vga_redraw = function()
 
 VGAScreen.prototype.screen_fill_buffer = function()
 {
+    if(this.external_graphics_provider)
+    {
+        const frame = this.external_graphics_provider();
+        if(frame)
+        {
+            this.screen.update_buffer([frame]);
+        }
+        this.update_vertical_retrace();
+        return;
+    }
+
     if(!this.graphical_mode)
     {
         // text mode
