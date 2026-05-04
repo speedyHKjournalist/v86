@@ -26,7 +26,24 @@ const VIRTIO_GPU_RESP_OK_DISPLAY_INFO = 0x1101;
 const VIRTIO_GPU_RESP_ERR_UNSPEC      = 0x1200;
 
 const VIRTIO_GPU_MAX_SCANOUTS = 16;
+const VIRTIO_GPU_NUM_SCANOUTS = 1;
 const VIRTIO_GPU_EVENT_DISPLAY = 1 << 0;
+
+const VIRTIO_GPU_CTRL_HDR_SIZE = 24;
+const VIRTIO_GPU_RESOURCE_CREATE_2D_SIZE = 40;
+const VIRTIO_GPU_RESOURCE_REF_SIZE = 32;
+const VIRTIO_GPU_SET_SCANOUT_SIZE = 48;
+const VIRTIO_GPU_RESOURCE_FLUSH_SIZE = 48;
+const VIRTIO_GPU_TRANSFER_TO_HOST_2D_SIZE = 56;
+const VIRTIO_GPU_ATTACH_BACKING_HEADER_SIZE = 32;
+const VIRTIO_GPU_MEM_ENTRY_SIZE = 16;
+const VIRTIO_GPU_UPDATE_CURSOR_SIZE = 56;
+const VIRTIO_GPU_MOVE_CURSOR_SIZE = 40;
+const VIRTIO_GPU_EMPTY_HDR = Object.freeze({
+    flags: 0,
+    fence_id: 0n,
+    ctx_id: 0,
+});
 
 // virtio_gpu_formats
 const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM = 1;
@@ -64,6 +81,7 @@ export function VirtioGPU(cpu, bus, vga)
     this.bus = bus;
     this.vga = vga || null;
     this.events_read = 0;
+    this.num_scanouts = Math.min(VIRTIO_GPU_NUM_SCANOUTS, VIRTIO_GPU_MAX_SCANOUTS);
     this.resources = new Map();
     this.scanouts = new Map();
 
@@ -78,6 +96,8 @@ export function VirtioGPU(cpu, bus, vga)
     this.vga_provider = () => this.get_vga_provider_frame();
     this.debug_last_frame_log_ms = 0;
     this.debug_last_frame_hash = 0;
+    this.display_resource_id = 0;
+    this.display_scanout = null;
 
     this.cursor = {
         scanout_id: 0,
@@ -149,8 +169,19 @@ VirtioGPU.prototype.handle_ctrlq = function()
         chain.get_next_blob(req_buf);
 
         const view = new DataView(req_buf.buffer);
+        if(!this.require_length(view, VIRTIO_GPU_CTRL_HDR_SIZE, "control header"))
+        {
+            chain.set_next_blob(this.resp_err(VIRTIO_GPU_EMPTY_HDR));
+            q.push_reply(chain);
+            continue;
+        }
+
         const hdr = parse_ctrl_hdr(view, 0);
-        this.debug_log_ctrl_command(view, req_buf.length, hdr);
+
+        if(LOG_LEVEL & LOG_VIRTIO)
+        {
+            this.debug_log_ctrl_command(view, req_buf.length, hdr);
+        }
 
         let resp = null;
         switch(hdr.type)
@@ -202,19 +233,50 @@ VirtioGPU.prototype.handle_cursorq = function()
         chain.get_next_blob(req_buf);
 
         const view = new DataView(req_buf.buffer);
+        if(!this.require_length(view, VIRTIO_GPU_CTRL_HDR_SIZE, "cursor header"))
+        {
+            chain.set_next_blob(this.resp_err(VIRTIO_GPU_EMPTY_HDR));
+            q.push_reply(chain);
+            continue;
+        }
+
         const hdr = parse_ctrl_hdr(view, 0);
-        this.debug_log_ctrl_command(view, req_buf.length, hdr);
+        if(LOG_LEVEL & LOG_VIRTIO)
+        {
+            this.debug_log_ctrl_command(view, req_buf.length, hdr);
+        }
         let resp = this.resp_ok_nodata(hdr);
 
         switch(hdr.type)
         {
             case VIRTIO_GPU_CMD_UPDATE_CURSOR:
-                if(req_buf.length >= 56)
+                if(!this.require_length(view, VIRTIO_GPU_UPDATE_CURSOR_SIZE, "UPDATE_CURSOR"))
                 {
-                    this.cursor.scanout_id = view.getUint32(24, true);
+                    resp = this.resp_err(hdr);
+                    break;
+                }
+
+                {
+                    const scanout_id = view.getUint32(24, true);
+                    const resource_id = view.getUint32(40, true);
+                    if(!this.is_valid_scanout_id(scanout_id))
+                    {
+                        console.warn("virtio-gpu: invalid cursor scanout", scanout_id);
+                        resp = this.resp_err(hdr);
+                        break;
+                    }
+
+                    if(resource_id !== 0 && !this.resources.has(resource_id))
+                    {
+                        console.warn("virtio-gpu: cursor resource not found", resource_id);
+                        resp = this.resp_err(hdr);
+                        break;
+                    }
+
+                    this.cursor.scanout_id = scanout_id;
                     this.cursor.x = view.getUint32(28, true);
                     this.cursor.y = view.getUint32(32, true);
-                    this.cursor.resource_id = view.getUint32(40, true);
+                    this.cursor.resource_id = resource_id;
                     this.cursor.hot_x = view.getUint32(44, true);
                     this.cursor.hot_y = view.getUint32(48, true);
                     this.cursor.visible = this.cursor.resource_id !== 0;
@@ -223,12 +285,25 @@ VirtioGPU.prototype.handle_cursorq = function()
                 break;
 
             case VIRTIO_GPU_CMD_MOVE_CURSOR:
-                if(req_buf.length >= 40)
+                if(!this.require_length(view, VIRTIO_GPU_MOVE_CURSOR_SIZE, "MOVE_CURSOR"))
                 {
-                    this.cursor.scanout_id = view.getUint32(24, true);
-                    this.cursor.x = view.getUint32(28, true);
-                    this.cursor.y = view.getUint32(32, true);
+                    resp = this.resp_err(hdr);
+                    break;
                 }
+
+                {
+                    const scanout_id = view.getUint32(24, true);
+                    if(!this.is_valid_scanout_id(scanout_id))
+                    {
+                        console.warn("virtio-gpu: invalid cursor scanout", scanout_id);
+                        resp = this.resp_err(hdr);
+                        break;
+                    }
+
+                    this.cursor.scanout_id = scanout_id;
+                }
+                this.cursor.x = view.getUint32(28, true);
+                this.cursor.y = view.getUint32(32, true);
                 this.present_display_surface();
                 break;
 
@@ -256,14 +331,26 @@ VirtioGPU.prototype.debug_log_ctrl_command = function(view, length, hdr)
         " ctx=" + hdr.ctx_id +
         (details ? " " + details : "");
 
-    if(LOG_LEVEL & LOG_VIRTIO)
+    dbg_log(message, LOG_VIRTIO);
+};
+
+VirtioGPU.prototype.require_length = function(view, required, command)
+{
+    if(view.byteLength >= required)
     {
-        dbg_log(message, LOG_VIRTIO);
+        return true;
     }
-    else
-    {
-        console.log(message);
-    }
+
+    console.warn("virtio-gpu: short " + command + " command", {
+        length: view.byteLength,
+        required,
+    });
+    return false;
+};
+
+VirtioGPU.prototype.is_valid_scanout_id = function(scanout_id)
+{
+    return scanout_id < this.num_scanouts;
 };
 
 VirtioGPU.prototype.debug_log_frame_stats = function(resource, scanout)
@@ -289,14 +376,7 @@ VirtioGPU.prototype.debug_log_frame_stats = function(resource, scanout)
         " center=" + stats.center +
         " br=" + stats.bottom_right;
 
-    if(LOG_LEVEL & LOG_VIRTIO)
-    {
-        dbg_log(message, LOG_VIRTIO);
-    }
-    else
-    {
-        console.log(message);
-    }
+    dbg_log(message, LOG_VIRTIO);
 };
 
 VirtioGPU.prototype.cmd_get_display_info = function(hdr)
@@ -311,24 +391,39 @@ VirtioGPU.prototype.cmd_get_display_info = function(hdr)
     view.setUint32(16, hdr.ctx_id, true);
     view.setUint32(20, 0, true);
 
-    const base = 24;
+    for(let scanout_id = 0; scanout_id < this.num_scanouts; scanout_id++)
+    {
+        const base = 24 + scanout_id * 24;
+        const enabled = scanout_id === 0 ? 1 : 0;
 
-    view.setUint32(base + 0, 0, true);
-    view.setUint32(base + 4, 0, true);
-    view.setUint32(base + 8, 1024, true);
-    view.setUint32(base + 12, 768, true);
-    view.setUint32(base + 16, 1, true);
-    view.setUint32(base + 20, 0, true);
+        view.setUint32(base + 0, 0, true);
+        view.setUint32(base + 4, 0, true);
+        view.setUint32(base + 8, enabled ? 800 : 0, true);
+        view.setUint32(base + 12, enabled ? 600 : 0, true);
+        view.setUint32(base + 16, enabled, true);
+        view.setUint32(base + 20, 0, true);
+    }
 
     return new Uint8Array(buf);
 };
 
 VirtioGPU.prototype.cmd_resource_create_2d = function(view, hdr)
 {
+    if(!this.require_length(view, VIRTIO_GPU_RESOURCE_CREATE_2D_SIZE, "RESOURCE_CREATE_2D"))
+    {
+        return this.resp_err(hdr);
+    }
+
     const resource_id = view.getUint32(24, true);
     const format = view.getUint32(28, true);
     const width = view.getUint32(32, true);
     const height = view.getUint32(36, true);
+
+    if(resource_id === 0 || this.resources.has(resource_id))
+    {
+        console.warn("virtio-gpu: invalid resource id", resource_id);
+        return this.resp_err(hdr);
+    }
 
     if(width === 0 || height === 0)
     {
@@ -364,8 +459,21 @@ VirtioGPU.prototype.cmd_resource_create_2d = function(view, hdr)
 
 VirtioGPU.prototype.cmd_attach_backing = function(view, hdr)
 {
+    if(!this.require_length(view, VIRTIO_GPU_ATTACH_BACKING_HEADER_SIZE, "RESOURCE_ATTACH_BACKING"))
+    {
+        return this.resp_err(hdr);
+    }
+
     const resource_id = view.getUint32(24, true);
     const nr_entries = view.getUint32(28, true);
+    const required_length = VIRTIO_GPU_ATTACH_BACKING_HEADER_SIZE +
+        nr_entries * VIRTIO_GPU_MEM_ENTRY_SIZE;
+
+    if(!this.require_length(view, required_length, "RESOURCE_ATTACH_BACKING entries"))
+    {
+        return this.resp_err(hdr);
+    }
+
     const resource = this.resources.get(resource_id);
 
     if(!resource)
@@ -396,6 +504,11 @@ VirtioGPU.prototype.cmd_attach_backing = function(view, hdr)
 
 VirtioGPU.prototype.cmd_detach_backing = function(view, hdr)
 {
+    if(!this.require_length(view, VIRTIO_GPU_RESOURCE_REF_SIZE, "RESOURCE_DETACH_BACKING"))
+    {
+        return this.resp_err(hdr);
+    }
+
     const resource_id = view.getUint32(24, true);
     const resource = this.resources.get(resource_id);
 
@@ -413,6 +526,11 @@ VirtioGPU.prototype.cmd_detach_backing = function(view, hdr)
 
 VirtioGPU.prototype.cmd_resource_unref = function(view, hdr)
 {
+    if(!this.require_length(view, VIRTIO_GPU_RESOURCE_REF_SIZE, "RESOURCE_UNREF"))
+    {
+        return this.resp_err(hdr);
+    }
+
     const resource_id = view.getUint32(24, true);
 
     if(!this.resources.has(resource_id))
@@ -441,6 +559,12 @@ VirtioGPU.prototype.cmd_resource_unref = function(view, hdr)
         this.display_has_content = false;
     }
 
+    if(this.display_resource_id === resource_id)
+    {
+        this.display_resource_id = 0;
+        this.display_scanout = null;
+    }
+
     this.update_display_visibility();
 
     return this.resp_ok_nodata(hdr);
@@ -448,6 +572,11 @@ VirtioGPU.prototype.cmd_resource_unref = function(view, hdr)
 
 VirtioGPU.prototype.cmd_set_scanout = function(view, hdr)
 {
+    if(!this.require_length(view, VIRTIO_GPU_SET_SCANOUT_SIZE, "SET_SCANOUT"))
+    {
+        return this.resp_err(hdr);
+    }
+
     const r_x = view.getUint32(24, true);
     const r_y = view.getUint32(28, true);
     const r_width = view.getUint32(32, true);
@@ -455,12 +584,26 @@ VirtioGPU.prototype.cmd_set_scanout = function(view, hdr)
     const scanout_id = view.getUint32(40, true);
     const resource_id = view.getUint32(44, true);
 
+    if(!this.is_valid_scanout_id(scanout_id))
+    {
+        console.warn("virtio-gpu: invalid scanout", scanout_id);
+        return this.resp_err(hdr);
+    }
+
     if(resource_id === 0)
     {
         this.scanouts.delete(scanout_id);
-        if(!this.scanouts.size)
+        if(this.display_scanout && this.display_scanout.id === scanout_id)
         {
             this.display_has_content = false;
+            this.display_resource_id = 0;
+            this.display_scanout = null;
+        }
+        else if(!this.scanouts.size)
+        {
+            this.display_has_content = false;
+            this.display_resource_id = 0;
+            this.display_scanout = null;
         }
         this.update_display_visibility();
         return this.resp_ok_nodata(hdr);
@@ -480,7 +623,8 @@ VirtioGPU.prototype.cmd_set_scanout = function(view, hdr)
         return this.resp_err(hdr);
     }
 
-    this.scanouts.set(scanout_id, {
+    const scanout = {
+        id: scanout_id,
         resource_id,
         rect: {
             x: r_x,
@@ -488,8 +632,9 @@ VirtioGPU.prototype.cmd_set_scanout = function(view, hdr)
             width: r_width,
             height: r_height,
         },
-    });
+    };
 
+    this.scanouts.set(scanout_id, scanout);
     this.ensure_display_surface(r_width, r_height);
     this.update_display_visibility();
 
@@ -498,6 +643,11 @@ VirtioGPU.prototype.cmd_set_scanout = function(view, hdr)
 
 VirtioGPU.prototype.cmd_transfer_to_host_2d = function(view, hdr)
 {
+    if(!this.require_length(view, VIRTIO_GPU_TRANSFER_TO_HOST_2D_SIZE, "TRANSFER_TO_HOST_2D"))
+    {
+        return this.resp_err(hdr);
+    }
+
     const base = 24;
     const x = view.getUint32(base + 0, true);
     const y = view.getUint32(base + 4, true);
@@ -547,6 +697,11 @@ VirtioGPU.prototype.cmd_transfer_to_host_2d = function(view, hdr)
 
 VirtioGPU.prototype.cmd_resource_flush = function(view, hdr)
 {
+    if(!this.require_length(view, VIRTIO_GPU_RESOURCE_FLUSH_SIZE, "RESOURCE_FLUSH"))
+    {
+        return this.resp_err(hdr);
+    }
+
     const base = 24;
     const x = view.getUint32(base + 0, true);
     const y = view.getUint32(base + 4, true);
@@ -585,7 +740,13 @@ VirtioGPU.prototype.cmd_resource_flush = function(view, hdr)
     }
 
     this.copy_scanout_to_display(resource, scanout);
-    this.debug_log_frame_stats(resource, scanout);
+    this.display_resource_id = resource_id;
+    this.display_scanout = scanout;
+
+    if(LOG_LEVEL & LOG_VIRTIO)
+    {
+        this.debug_log_frame_stats(resource, scanout);
+    }
     this.display_has_content = true;
     this.update_display_visibility();
     this.present_display_surface();
@@ -731,7 +892,7 @@ VirtioGPU.prototype.release_vga_provider = function()
     {
         return;
     }
-    
+
     this.vga.clear_external_graphics_provider(this.vga_provider);
     this.vga_provider_registered = false;
     this.claimed_width = 0;
@@ -837,6 +998,11 @@ VirtioGPU.prototype.get_present_image_data = function()
     if(!this.display_image_data)
     {
         return null;
+    }
+
+    if(this.display_scanout && this.display_scanout.id !== this.cursor.scanout_id)
+    {
+        return this.display_image_data;
     }
 
     const cursor_resource = this.cursor.visible ?
@@ -967,7 +1133,7 @@ function createGPUConfigStruct(gpu)
         {
             bytes: 4,
             name: "num_scanouts",
-            read: () => 1,
+            read: () => gpu.num_scanouts,
             write: data => {},
         },
         {
