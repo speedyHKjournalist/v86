@@ -135,8 +135,9 @@ export type ScreenConfig =
 /**
  * Experimental GeForce/NV20 PCI shell.
  *
- * This currently only exposes a PCI VGA-compatible device. It does not yet
- * implement MMIO, VRAM access, option ROM, legacy VGA decode, or acceleration.
+ * This exposes a PCI VGA-compatible device with BAR0 MMIO stubs, BAR1 VRAM
+ * backing, and an experimental fixed-size framebuffer bridge. It does not yet
+ * implement option ROM POST, legacy VGA decode, PFIFO/PGRAPH, or acceleration.
  */
 export type GeForceConfig =
     {
@@ -163,6 +164,24 @@ export type GeForceConfig =
          * @default 64 * 1024 * 1024
          */
         vram_size?: number;
+
+        /**
+         * Fixed framebuffer bridge width in pixels.
+         * @default 1024
+         */
+        render_width?: number;
+
+        /**
+         * Fixed framebuffer bridge height in pixels.
+         * @default 768
+         */
+        render_height?: number;
+
+        /**
+         * Fixed framebuffer byte layout.
+         * @default "xrgb8888"
+         */
+        render_format?: "xrgb8888" | "xbgr8888" | "rgba8888";
     };
 
 /**

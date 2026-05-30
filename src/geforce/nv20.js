@@ -30,6 +30,9 @@ const NV20_PMC_INTR_PBUS = 1 << 28;
 const NV20_FIFO_CACHE_ENTRY_COUNT = 0x100;
 const NV20_VRAM_LOG_BLOCK_SIZE = 1024 * 1024;
 const NV20_VRAM_LOG_SAMPLE_WRITES = 0x10000;
+const NV20_DEFAULT_RENDER_WIDTH = 1024;
+const NV20_DEFAULT_RENDER_HEIGHT = 768;
+const NV20_DEFAULT_RENDER_BPP = 32;
 
 function nv20_now_ms()
 {
@@ -69,6 +72,21 @@ export function NV20GeForce(cpu, options)
     this.vram_write_count = 0;
     this.vram_dirty_min = vram_size;
     this.vram_dirty_max = 0;
+    this.render_width = options.render_width || NV20_DEFAULT_RENDER_WIDTH;
+    this.render_height = options.render_height || NV20_DEFAULT_RENDER_HEIGHT;
+    this.render_bpp = NV20_DEFAULT_RENDER_BPP;
+    this.render_format = options.render_format || "xrgb8888";
+    this.render_frame_size = this.render_width * this.render_height * 4;
+    this.render_dirty_min = this.render_frame_size;
+    this.render_dirty_max = 0;
+    this.render_active = false;
+    this.render_initialized = false;
+    this.render_pending = false;
+    this.render_update_count = 0;
+    this.render_buffer = null;
+    this.render_image_data = null;
+    this.screen = options.screen || cpu.devices.vga && cpu.devices.vga.screen;
+    this.bus = options.bus || cpu.devices.vga && cpu.devices.vga.bus;
     this.mmio_registers = new Map();
     this.mmio_trace = options.mmio_trace !== false;
     this.mmio_trace_all = !!options.mmio_trace_all;
@@ -289,6 +307,24 @@ NV20GeForce.prototype.vram_mark_write = function(offset, width, value)
     }
 
     this.vram_log_write(offset, width, value);
+
+    if(offset < this.render_frame_size)
+    {
+        if(offset < this.render_dirty_min)
+        {
+            this.render_dirty_min = offset;
+        }
+
+        const render_end = Math.min(this.render_frame_size, offset + width);
+
+        if(render_end > this.render_dirty_max)
+        {
+            this.render_dirty_max = render_end;
+        }
+
+        this.activate_rendering();
+        this.schedule_render();
+    }
 };
 
 NV20GeForce.prototype.vram_log_write = function(offset, width, value)
@@ -321,6 +357,169 @@ NV20GeForce.prototype.vram_log_write = function(offset, width, value)
             " value=" + h(value >>> 0, width === 1 ? 2 : 8) +
             " count=" + this.vram_write_count +
             " " + reason, LOG_PCI);
+};
+
+NV20GeForce.prototype.activate_rendering = function()
+{
+    if(this.render_active)
+    {
+        return true;
+    }
+
+    if(!this.screen || !this.screen.set_mode || !this.screen.set_size_graphical || !this.screen.update_buffer)
+    {
+        return false;
+    }
+
+    this.screen.set_mode(true);
+    this.screen.set_size_graphical(this.render_width, this.render_height, this.render_width, this.render_height);
+
+    if(this.bus)
+    {
+        this.bus.send("screen-set-size", [this.render_width, this.render_height, this.render_bpp]);
+    }
+
+    this.render_active = true;
+    dbg_log(this.name + " render bridge enabled " +
+            this.render_width + "x" + this.render_height + "x" + this.render_bpp +
+            " format=" + this.render_format, LOG_PCI);
+    return true;
+};
+
+NV20GeForce.prototype.schedule_render = function()
+{
+    if(!this.render_active || this.render_pending)
+    {
+        return;
+    }
+
+    this.render_pending = true;
+
+    const render = () =>
+    {
+        this.render_pending = false;
+        this.screen_fill_buffer();
+    };
+
+    if(typeof requestAnimationFrame !== "undefined")
+    {
+        requestAnimationFrame(render);
+    }
+    else if(typeof setTimeout !== "undefined")
+    {
+        setTimeout(render, 0);
+    }
+    else
+    {
+        render();
+    }
+};
+
+NV20GeForce.prototype.ensure_render_buffer = function()
+{
+    if(this.render_initialized)
+    {
+        return true;
+    }
+
+    if(typeof ImageData === "undefined")
+    {
+        return false;
+    }
+
+    this.render_buffer = new Uint8ClampedArray(this.render_frame_size);
+    this.render_image_data = new ImageData(this.render_buffer, this.render_width, this.render_height);
+    this.render_initialized = true;
+    return true;
+};
+
+NV20GeForce.prototype.screen_fill_buffer = function()
+{
+    if(!this.render_active)
+    {
+        return false;
+    }
+
+    if(this.render_dirty_min >= this.render_dirty_max)
+    {
+        return true;
+    }
+
+    if(!this.ensure_render_buffer())
+    {
+        this.render_dirty_min = this.render_frame_size;
+        this.render_dirty_max = 0;
+        return true;
+    }
+
+    const stride = this.render_width * 4;
+    const min_y = Math.max(0, Math.min(this.render_height, this.render_dirty_min / stride | 0));
+    const max_y = Math.max(min_y, Math.min(this.render_height, (this.render_dirty_max + stride - 1) / stride | 0));
+
+    if(min_y < max_y)
+    {
+        this.render_rows(min_y, max_y);
+        this.screen.update_buffer([{
+            image_data: this.render_image_data,
+            screen_x: 0,
+            screen_y: min_y,
+            buffer_x: 0,
+            buffer_y: min_y,
+            buffer_width: this.render_width,
+            buffer_height: max_y - min_y,
+        }]);
+        this.render_update_count++;
+
+        if(this.render_update_count === 1)
+        {
+            dbg_log(this.name + " render bridge frame update y=" + min_y +
+                    " rows=" + (max_y - min_y), LOG_PCI);
+        }
+    }
+
+    this.render_dirty_min = this.render_frame_size;
+    this.render_dirty_max = 0;
+    return true;
+};
+
+NV20GeForce.prototype.render_rows = function(min_y, max_y)
+{
+    const start = min_y * this.render_width * 4;
+    const end = max_y * this.render_width * 4;
+    const src = this.vram;
+    const dst = this.render_buffer;
+
+    if(this.render_format === "rgba8888")
+    {
+        for(var i = start; i < end; i += 4)
+        {
+            dst[i] = src[i];
+            dst[i + 1] = src[i + 1];
+            dst[i + 2] = src[i + 2];
+            dst[i + 3] = 0xFF;
+        }
+    }
+    else if(this.render_format === "xbgr8888")
+    {
+        for(var i = start; i < end; i += 4)
+        {
+            dst[i] = src[i + 1];
+            dst[i + 1] = src[i + 2];
+            dst[i + 2] = src[i + 3];
+            dst[i + 3] = 0xFF;
+        }
+    }
+    else
+    {
+        // Linux fbdev's common XRGB8888 layout has memory bytes B, G, R, X.
+        for(var i = start; i < end; i += 4)
+        {
+            dst[i] = src[i + 2];
+            dst[i + 1] = src[i + 1];
+            dst[i + 2] = src[i];
+            dst[i + 3] = 0xFF;
+        }
+    }
 };
 
 NV20GeForce.prototype.mmio_read8 = function(offset)

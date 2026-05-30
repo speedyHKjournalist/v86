@@ -291,7 +291,17 @@ V86.prototype.continue_init = async function(emulator, options)
 
     if(screen_options.container)
     {
-        this.screen_adapter = new ScreenAdapter(screen_options, () => this.v86.cpu.devices.vga && this.v86.cpu.devices.vga.screen_fill_buffer());
+        this.screen_adapter = new ScreenAdapter(screen_options, () =>
+        {
+            const devices = this.v86.cpu.devices;
+
+            if(devices.geforce && devices.geforce.screen_fill_buffer())
+            {
+                return;
+            }
+
+            devices.vga && devices.vga.screen_fill_buffer();
+        });
     }
     else if(screen_options.ansi)
     {
