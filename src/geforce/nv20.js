@@ -1,7 +1,7 @@
 // Minimal NVIDIA NV20/GeForce3 PCI shell.
 //
-// This intentionally stays at the PCI + BAR0/BAR1 stub stage. VRAM
-// rendering, option ROM POST, PFIFO execution and PGRAPH are later milestones.
+// This intentionally stays at the PCI + BAR0/BAR1 + framebuffer bridge stage.
+// Option ROM POST, PFIFO execution and PGRAPH are later milestones.
 
 // For Types Only
 import { CPU } from "../cpu.js";
@@ -33,6 +33,52 @@ const NV20_VRAM_LOG_SAMPLE_WRITES = 0x10000;
 const NV20_DEFAULT_RENDER_WIDTH = 1024;
 const NV20_DEFAULT_RENDER_HEIGHT = 768;
 const NV20_DEFAULT_RENDER_BPP = 32;
+const NV20_DEFAULT_RENDER_FORMAT = "xrgb8888";
+
+const NV20_PRMCIO_CRTC_INDEX_COLOR = 0x6013D4;
+const NV20_PRMCIO_CRTC_DATA_COLOR = 0x6013D5;
+const NV20_PRMCIO_CRTC_INDEX_MONO = 0x6013B4;
+const NV20_PRMCIO_CRTC_DATA_MONO = 0x6013B5;
+
+const NV20_MIN_RENDER_WIDTH = 320;
+const NV20_MIN_RENDER_HEIGHT = 200;
+const NV20_MAX_RENDER_WIDTH = 4096;
+const NV20_MAX_RENDER_HEIGHT = 4096;
+
+function nv20_render_bytes_per_pixel(bpp)
+{
+    switch(bpp)
+    {
+        case 8:
+            return 1;
+        case 15:
+        case 16:
+            return 2;
+        case 24:
+            return 3;
+        case 32:
+            return 4;
+        default:
+            return Math.max(1, bpp + 7 >>> 3);
+    }
+}
+
+function nv20_sane_render_bpp(bpp)
+{
+    return bpp === 8 || bpp === 15 || bpp === 16 || bpp === 24 || bpp === 32;
+}
+
+function nv20_init_default_crtc_regs(regs)
+{
+    // rivafb uses the current CRTC state if no explicit mode is requested.
+    // Seed a conservative 640x480x8 state so probe-only loads still expose a
+    // real framebuffer layout instead of the render bridge fallback.
+    regs[0x01] = 0x4F; // horizontal display end: (0x4f + 1) * 8 = 640
+    regs[0x07] = 0x02; // vertical display bit 8
+    regs[0x12] = 0xDF; // vertical display low: 0x1df + 1 = 480
+    regs[0x13] = 0x50; // CRTC offset: 0x50 * 8 = 640 bytes/line
+    regs[0x28] = 0x01; // pixel depth: 8 bpp
+}
 
 function nv20_now_ms()
 {
@@ -72,19 +118,23 @@ export function NV20GeForce(cpu, options)
     this.vram_write_count = 0;
     this.vram_dirty_min = vram_size;
     this.vram_dirty_max = 0;
+    this.render_auto_detect = options.render_auto_detect !== false;
     this.render_width = options.render_width || NV20_DEFAULT_RENDER_WIDTH;
     this.render_height = options.render_height || NV20_DEFAULT_RENDER_HEIGHT;
-    this.render_bpp = NV20_DEFAULT_RENDER_BPP;
-    this.render_format = options.render_format || "xrgb8888";
-    this.render_frame_size = this.render_width * this.render_height * 4;
-    this.render_dirty_min = this.render_frame_size;
-    this.render_dirty_max = 0;
+    this.render_bpp = options.render_bpp || NV20_DEFAULT_RENDER_BPP;
+    this.render_stride = options.render_stride || this.render_width * nv20_render_bytes_per_pixel(this.render_bpp);
+    this.render_offset = options.render_offset || 0;
+    this.render_format = options.render_format || NV20_DEFAULT_RENDER_FORMAT;
+    this.render_frame_size = Math.min(this.vram_size - this.render_offset, this.render_stride * this.render_height);
+    this.render_dirty_min = this.render_offset + this.render_frame_size;
+    this.render_dirty_max = this.render_offset;
     this.render_active = false;
     this.render_initialized = false;
     this.render_pending = false;
     this.render_update_count = 0;
     this.render_buffer = null;
     this.render_image_data = null;
+    this.render_source = "default";
     this.screen = options.screen || cpu.devices.vga && cpu.devices.vga.screen;
     this.bus = options.bus || cpu.devices.vga && cpu.devices.vga.bus;
     this.mmio_registers = new Map();
@@ -154,6 +204,9 @@ export function NV20GeForce(cpu, options)
     this.crtc_config = 0;
     this.crtc_cursor_offset = 0;
     this.crtc_cursor_config = 0;
+    this.prmcio_crtc_index = 0;
+    this.prmcio_crtc_regs = new Uint8Array(0x100);
+    nv20_init_default_crtc_regs(this.prmcio_crtc_regs);
 
     this.ramdac_cursor_start = 0;
     this.ramdac_vpll = 0;
@@ -308,18 +361,22 @@ NV20GeForce.prototype.vram_mark_write = function(offset, width, value)
 
     this.vram_log_write(offset, width, value);
 
-    if(offset < this.render_frame_size)
+    const render_start = this.render_offset;
+    const render_end = render_start + this.render_frame_size;
+
+    if(end > render_start && offset < render_end)
     {
-        if(offset < this.render_dirty_min)
+        const dirty_start = Math.max(offset, render_start);
+        const dirty_end = Math.min(end, render_end);
+
+        if(dirty_start < this.render_dirty_min)
         {
-            this.render_dirty_min = offset;
+            this.render_dirty_min = dirty_start;
         }
 
-        const render_end = Math.min(this.render_frame_size, offset + width);
-
-        if(render_end > this.render_dirty_max)
+        if(dirty_end > this.render_dirty_max)
         {
-            this.render_dirty_max = render_end;
+            this.render_dirty_max = dirty_end;
         }
 
         this.activate_rendering();
@@ -359,6 +416,126 @@ NV20GeForce.prototype.vram_log_write = function(offset, width, value)
             " " + reason, LOG_PCI);
 };
 
+NV20GeForce.prototype.set_render_mode = function(width, height, bpp, stride, offset, source)
+{
+    width = width >>> 0;
+    height = height >>> 0;
+    bpp = bpp >>> 0;
+    offset = offset >>> 0;
+
+    if(!nv20_sane_render_bpp(bpp) ||
+        width < NV20_MIN_RENDER_WIDTH || width > NV20_MAX_RENDER_WIDTH ||
+        height < NV20_MIN_RENDER_HEIGHT || height > NV20_MAX_RENDER_HEIGHT ||
+        offset >= this.vram_size)
+    {
+        return false;
+    }
+
+    const bytes_per_pixel = nv20_render_bytes_per_pixel(bpp);
+    const min_stride = width * bytes_per_pixel;
+    stride = (stride >>> 0) || min_stride;
+
+    if(stride < min_stride)
+    {
+        stride = min_stride;
+    }
+
+    const max_height = (this.vram_size - offset) / stride | 0;
+
+    if(!max_height)
+    {
+        return false;
+    }
+
+    if(height > max_height)
+    {
+        height = max_height;
+    }
+
+    const frame_size = stride * height;
+    const changed =
+        this.render_width !== width ||
+        this.render_height !== height ||
+        this.render_bpp !== bpp ||
+        this.render_stride !== stride ||
+        this.render_offset !== offset;
+
+    if(!changed)
+    {
+        return true;
+    }
+
+    this.render_width = width;
+    this.render_height = height;
+    this.render_bpp = bpp;
+    this.render_stride = stride;
+    this.render_offset = offset;
+    this.render_frame_size = frame_size;
+    this.render_dirty_min = offset;
+    this.render_dirty_max = offset + frame_size;
+    this.render_initialized = false;
+    this.render_buffer = null;
+    this.render_image_data = null;
+    this.render_source = source || "registers";
+
+    if(this.render_active)
+    {
+        this.screen.set_size_graphical(width, height, width, height);
+
+        if(this.bus)
+        {
+            this.bus.send("screen-set-size", [width, height, bpp]);
+        }
+
+        this.schedule_render();
+    }
+
+    dbg_log(this.name + " render bridge mode " +
+            width + "x" + height + "x" + bpp +
+            " stride=" + h(stride >>> 0, 8) +
+            " offset=" + h(offset >>> 0, 8) +
+            " source=" + this.render_source, LOG_PCI);
+    return true;
+};
+
+NV20GeForce.prototype.update_render_mode_from_crtc = function(source)
+{
+    if(!this.render_auto_detect)
+    {
+        return;
+    }
+
+    const crtc = this.prmcio_crtc_regs;
+
+    const horizontal_display_chars = (crtc[0x01] | (crtc[0x2D] & 0x02) << 7) + 1;
+    const width = horizontal_display_chars * 8;
+    const vertical_display =
+        crtc[0x12] |
+        (crtc[0x07] & 0x02) << 7 |
+        (crtc[0x07] & 0x40) << 3 |
+        (crtc[0x25] & 0x02) << 9 |
+        (crtc[0x41] & 0x04) << 9;
+    const height = vertical_display + 1;
+    const pixel_mode = crtc[0x28] & 3;
+    const row_offset = crtc[0x13] | (crtc[0x19] & 0xE0) << 3;
+
+    if(!pixel_mode || !row_offset)
+    {
+        return;
+    }
+
+    const bpp = pixel_mode === 1 ? 8 : pixel_mode === 2 ? 16 : pixel_mode === 3 ? 32 : this.render_bpp;
+    const bytes_per_pixel = nv20_render_bytes_per_pixel(bpp);
+    var stride = row_offset * 8;
+
+    if(stride < width * bytes_per_pixel)
+    {
+        stride = width * bytes_per_pixel;
+    }
+
+    this.set_render_mode(width, height, bpp, stride, this.crtc_start, source);
+};
+
 NV20GeForce.prototype.activate_rendering = function()
 {
     if(this.render_active)
@@ -382,6 +559,8 @@ NV20GeForce.prototype.activate_rendering = function()
     this.render_active = true;
     dbg_log(this.name + " render bridge enabled " +
             this.render_width + "x" + this.render_height + "x" + this.render_bpp +
+            " stride=" + h(this.render_stride >>> 0, 8) +
+            " offset=" + h(this.render_offset >>> 0, 8) +
             " format=" + this.render_format, LOG_PCI);
     return true;
 };
@@ -427,7 +606,7 @@ NV20GeForce.prototype.ensure_render_buffer = function()
         return false;
     }
 
-    this.render_buffer = new Uint8ClampedArray(this.render_frame_size);
+    this.render_buffer = new Uint8ClampedArray(this.render_width * this.render_height * 4);
     this.render_image_data = new ImageData(this.render_buffer, this.render_width, this.render_height);
     this.render_initialized = true;
     return true;
@@ -447,14 +626,16 @@ NV20GeForce.prototype.screen_fill_buffer = function()
 
     if(!this.ensure_render_buffer())
     {
-        this.render_dirty_min = this.render_frame_size;
-        this.render_dirty_max = 0;
+        this.render_dirty_min = this.render_offset + this.render_frame_size;
+        this.render_dirty_max = this.render_offset;
         return true;
     }
 
-    const stride = this.render_width * 4;
-    const min_y = Math.max(0, Math.min(this.render_height, this.render_dirty_min / stride | 0));
-    const max_y = Math.max(min_y, Math.min(this.render_height, (this.render_dirty_max + stride - 1) / stride | 0));
+    const stride = this.render_stride;
+    const dirty_min = Math.max(0, this.render_dirty_min - this.render_offset);
+    const dirty_max = Math.min(this.render_frame_size, this.render_dirty_max - this.render_offset);
+    const min_y = Math.max(0, Math.min(this.render_height, dirty_min / stride | 0));
+    const max_y = Math.max(min_y, Math.min(this.render_height, (dirty_max + stride - 1) / stride | 0));
 
     if(min_y < max_y)
     {
@@ -477,58 +658,210 @@ NV20GeForce.prototype.screen_fill_buffer = function()
         }
     }
 
-    this.render_dirty_min = this.render_frame_size;
-    this.render_dirty_max = 0;
+    this.render_dirty_min = this.render_offset + this.render_frame_size;
+    this.render_dirty_max = this.render_offset;
     return true;
 };
 
 NV20GeForce.prototype.render_rows = function(min_y, max_y)
 {
-    const start = min_y * this.render_width * 4;
-    const end = max_y * this.render_width * 4;
     const src = this.vram;
     const dst = this.render_buffer;
 
-    if(this.render_format === "rgba8888")
+    if(this.render_bpp === 8)
     {
-        for(var i = start; i < end; i += 4)
+        for(var y = min_y; y < max_y; y++)
         {
-            dst[i] = src[i];
-            dst[i + 1] = src[i + 1];
-            dst[i + 2] = src[i + 2];
-            dst[i + 3] = 0xFF;
+            var src_i = this.render_offset + y * this.render_stride;
+            var dst_i = y * this.render_width * 4;
+
+            for(var x = 0; x < this.render_width; x++, src_i++, dst_i += 4)
+            {
+                const color = src[src_i];
+                dst[dst_i] = color;
+                dst[dst_i + 1] = color;
+                dst[dst_i + 2] = color;
+                dst[dst_i + 3] = 0xFF;
+            }
         }
     }
-    else if(this.render_format === "xbgr8888")
+    else if(this.render_bpp === 15 || this.render_bpp === 16)
     {
-        for(var i = start; i < end; i += 4)
+        const is_555 = this.render_bpp === 15;
+
+        for(var y = min_y; y < max_y; y++)
         {
-            dst[i] = src[i + 1];
-            dst[i + 1] = src[i + 2];
-            dst[i + 2] = src[i + 3];
-            dst[i + 3] = 0xFF;
+            var src_i = this.render_offset + y * this.render_stride;
+            var dst_i = y * this.render_width * 4;
+
+            for(var x = 0; x < this.render_width; x++, src_i += 2, dst_i += 4)
+            {
+                const pixel = src[src_i] | src[src_i + 1] << 8;
+
+                if(is_555)
+                {
+                    dst[dst_i] = (pixel >> 10 & 0x1F) * 0xFF / 0x1F | 0;
+                    dst[dst_i + 1] = (pixel >> 5 & 0x1F) * 0xFF / 0x1F | 0;
+                    dst[dst_i + 2] = (pixel & 0x1F) * 0xFF / 0x1F | 0;
+                }
+                else
+                {
+                    dst[dst_i] = (pixel >> 11 & 0x1F) * 0xFF / 0x1F | 0;
+                    dst[dst_i + 1] = (pixel >> 5 & 0x3F) * 0xFF / 0x3F | 0;
+                    dst[dst_i + 2] = (pixel & 0x1F) * 0xFF / 0x1F | 0;
+                }
+
+                dst[dst_i + 3] = 0xFF;
+            }
+        }
+    }
+    else if(this.render_bpp === 24)
+    {
+        for(var y = min_y; y < max_y; y++)
+        {
+            var src_i = this.render_offset + y * this.render_stride;
+            var dst_i = y * this.render_width * 4;
+
+            for(var x = 0; x < this.render_width; x++, src_i += 3, dst_i += 4)
+            {
+                dst[dst_i] = src[src_i + 2];
+                dst[dst_i + 1] = src[src_i + 1];
+                dst[dst_i + 2] = src[src_i];
+                dst[dst_i + 3] = 0xFF;
+            }
         }
     }
     else
     {
-        // Linux fbdev's common XRGB8888 layout has memory bytes B, G, R, X.
-        for(var i = start; i < end; i += 4)
+        for(var y = min_y; y < max_y; y++)
         {
-            dst[i] = src[i + 2];
-            dst[i + 1] = src[i + 1];
-            dst[i + 2] = src[i];
-            dst[i + 3] = 0xFF;
+            var src_i = this.render_offset + y * this.render_stride;
+            var dst_i = y * this.render_width * 4;
+
+            if(this.render_format === "rgba8888")
+            {
+                for(var x = 0; x < this.render_width; x++, src_i += 4, dst_i += 4)
+                {
+                    dst[dst_i] = src[src_i];
+                    dst[dst_i + 1] = src[src_i + 1];
+                    dst[dst_i + 2] = src[src_i + 2];
+                    dst[dst_i + 3] = 0xFF;
+                }
+            }
+            else if(this.render_format === "xbgr8888")
+            {
+                for(var x = 0; x < this.render_width; x++, src_i += 4, dst_i += 4)
+                {
+                    dst[dst_i] = src[src_i + 1];
+                    dst[dst_i + 1] = src[src_i + 2];
+                    dst[dst_i + 2] = src[src_i + 3];
+                    dst[dst_i + 3] = 0xFF;
+                }
+            }
+            else
+            {
+                // Linux fbdev's common XRGB8888 layout has memory bytes B, G, R, X.
+                for(var x = 0; x < this.render_width; x++, src_i += 4, dst_i += 4)
+                {
+                    dst[dst_i] = src[src_i + 2];
+                    dst[dst_i + 1] = src[src_i + 1];
+                    dst[dst_i + 2] = src[src_i];
+                    dst[dst_i + 3] = 0xFF;
+                }
+            }
         }
     }
 };
 
+NV20GeForce.prototype.prmcio_read8 = function(offset)
+{
+    offset = offset >>> 0;
+
+    if(offset === NV20_PRMCIO_CRTC_INDEX_COLOR || offset === NV20_PRMCIO_CRTC_INDEX_MONO)
+    {
+        return this.prmcio_crtc_index;
+    }
+
+    if(offset === NV20_PRMCIO_CRTC_DATA_COLOR || offset === NV20_PRMCIO_CRTC_DATA_MONO)
+    {
+        return this.prmcio_crtc_regs[this.prmcio_crtc_index];
+    }
+
+    return -1;
+};
+
+NV20GeForce.prototype.prmcio_write8 = function(offset, value)
+{
+    offset = offset >>> 0;
+    value &= 0xFF;
+
+    if(offset === NV20_PRMCIO_CRTC_INDEX_COLOR || offset === NV20_PRMCIO_CRTC_INDEX_MONO)
+    {
+        this.prmcio_crtc_index = value;
+        this.update_render_mode_from_crtc("crtc-index[" + h(this.prmcio_crtc_index, 2) + "]");
+        return true;
+    }
+
+    if(offset === NV20_PRMCIO_CRTC_DATA_COLOR || offset === NV20_PRMCIO_CRTC_DATA_MONO)
+    {
+        this.prmcio_crtc_regs[this.prmcio_crtc_index] = value;
+        this.update_render_mode_from_crtc("crtc[" + h(this.prmcio_crtc_index, 2) + "]");
+        return true;
+    }
+
+    return false;
+};
+
+NV20GeForce.prototype.prmcio_read32 = function(offset)
+{
+    const low = this.prmcio_read8(offset);
+
+    if(low < 0)
+    {
+        return -1;
+    }
+
+    const high = this.prmcio_read8(offset + 1);
+    return low | (high < 0 ? 0 : high << 8);
+};
+
+NV20GeForce.prototype.prmcio_write32 = function(offset, value)
+{
+    if(!this.prmcio_write8(offset, value))
+    {
+        return false;
+    }
+
+    // Packed index/data writes are valid, but a plain 32-bit write of only an
+    // index often has zero in the upper bytes. Avoid turning that into data.
+    if(value & 0xFFFFFF00)
+    {
+        this.prmcio_write8(offset + 1, value >>> 8);
+    }
+
+    return true;
+};
+
 NV20GeForce.prototype.mmio_read8 = function(offset)
 {
+    const value = this.prmcio_read8(offset);
+
+    if(value >= 0)
+    {
+        return value;
+    }
+
     return this.mmio_read32(offset & ~3) >>> ((offset & 3) << 3) & 0xFF;
 };
 
 NV20GeForce.prototype.mmio_write8 = function(offset, value)
 {
+    if(this.prmcio_write8(offset, value))
+    {
+        this.mmio_log("write", offset & ~3, this.register_read32(offset & ~3).value, true);
+        return;
+    }
+
     const shift = (offset & 3) << 3;
     const mask = 0xFF << shift;
     const old_value = this.register_read32(offset & ~3).value;
@@ -539,6 +872,14 @@ NV20GeForce.prototype.mmio_read32 = function(offset)
 {
     offset = offset & (NV20_MMIO_SIZE - 1) & ~3;
 
+    const prmcio_value = this.prmcio_read32(offset);
+
+    if(prmcio_value >= 0)
+    {
+        this.mmio_log("read", offset, prmcio_value, true);
+        return prmcio_value;
+    }
+
     const result = this.register_read32(offset);
     this.mmio_log("read", offset, result.value, result.known);
     return result.value;
@@ -548,6 +889,12 @@ NV20GeForce.prototype.mmio_write32 = function(offset, value)
 {
     offset = offset & (NV20_MMIO_SIZE - 1) & ~3;
     value = value >>> 0;
+
+    if(this.prmcio_write32(offset, value))
+    {
+        this.mmio_log("write", offset, this.register_read32(offset).value, true);
+        return;
+    }
 
     const known = this.register_write32(offset, value);
     this.mmio_log("write", offset, value, known);
@@ -747,6 +1094,10 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 break;
             case 0x600868:
                 value = 0;
+                break;
+            case 0x6013B4:
+            case 0x6013D4:
+                value = this.prmcio_read32(offset);
                 break;
 
             case 0x680300:
@@ -949,15 +1300,21 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             return true;
         case 0x600800:
             this.crtc_start = value;
+            this.update_render_mode_from_crtc("pcrtc_start");
             return true;
         case 0x600804:
             this.crtc_config = value;
+            this.update_render_mode_from_crtc("pcrtc_config");
             return true;
         case 0x60080C:
             this.crtc_cursor_offset = value;
             return true;
         case 0x600810:
             this.crtc_cursor_config = value;
+            return true;
+        case 0x6013B4:
+        case 0x6013D4:
+            this.prmcio_write32(offset, value);
             return true;
 
         case 0x680300:

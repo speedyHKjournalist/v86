@@ -166,19 +166,45 @@ export type GeForceConfig =
         vram_size?: number;
 
         /**
-         * Fixed framebuffer bridge width in pixels.
+         * Initial framebuffer bridge width in pixels. The NV20 stub can
+         * replace this when rivafb programs CRTC mode registers.
          * @default 1024
          */
         render_width?: number;
 
         /**
-         * Fixed framebuffer bridge height in pixels.
+         * Initial framebuffer bridge height in pixels. The NV20 stub can
+         * replace this when rivafb programs CRTC mode registers.
          * @default 768
          */
         render_height?: number;
 
         /**
-         * Fixed framebuffer byte layout.
+         * Initial framebuffer bridge bits per pixel.
+         * @default 32
+         */
+        render_bpp?: 8 | 15 | 16 | 24 | 32;
+
+        /**
+         * Initial framebuffer bridge line length in bytes.
+         * @default render_width * bytes_per_pixel
+         */
+        render_stride?: number;
+
+        /**
+         * Initial framebuffer byte offset inside BAR1.
+         * @default 0
+         */
+        render_offset?: number;
+
+        /**
+         * Infer framebuffer mode from rivafb/NV CRTC register writes.
+         * @default true
+         */
+        render_auto_detect?: boolean;
+
+        /**
+         * Framebuffer byte layout for 32-bpp modes.
          * @default "xrgb8888"
          */
         render_format?: "xrgb8888" | "xbgr8888" | "rgba8888";
