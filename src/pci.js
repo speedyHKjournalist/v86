@@ -1,4 +1,4 @@
-import { LOG_PCI } from "./const.js";
+import { LOG_PCI, MMAP_BLOCK_SIZE } from "./const.js";
 import { h } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
 
@@ -244,17 +244,22 @@ PCI.prototype.set_state = function(state)
         for(var bar_nr = 0; bar_nr < device.pci_bars.length; bar_nr++)
         {
             var value = space[(0x10 >> 2) + bar_nr];
+            var bar = device.pci_bars[bar_nr];
+
+            if(!bar)
+            {
+                continue;
+            }
 
             if(value & 1)
             {
-                var bar = device.pci_bars[bar_nr];
                 var from = bar.original_bar & ~1 & 0xFFFF;
                 var to = value & ~1 & 0xFFFF;
                 this.set_io_bars(bar, from, to);
             }
-            else
+            else if(this.is_memory_bar_remappable(bar))
             {
-                // memory, cannot be changed
+                this.set_memory_bar(bar, value);
             }
         }
 
@@ -402,46 +407,51 @@ PCI.prototype.pci_write32 = function(address, written)
             dbg_assert(!(bar.size & bar.size - 1), "bar size should be power of 2");
 
             var space_addr = addr >> 2;
-            var type = space[space_addr] & 1;
+            var type = bar.original_bar & 1;
+            var flags = type === 1 ? bar.original_bar & 3 : bar.original_bar & 0xF;
+            var addr_mask = type === 1 ? 3 : 0xF;
 
-            if((written | 3 | bar.size - 1)  === -1) // size check
+            if((written | addr_mask | bar.size - 1)  === -1) // size check
             {
-                written = ~(bar.size - 1) | type;
-
-                if(type === 0)
-                {
-                    space[space_addr] = written;
-                }
+                space[space_addr] = ~(bar.size - 1) | flags;
             }
             else
             {
                 if(type === 0)
                 {
                     // memory
-                    var original_bar = bar.original_bar;
-
-                    if((written & ~0xF) !== (original_bar & ~0xF))
+                    if(this.is_memory_bar_remappable(bar))
                     {
-                        // seabios
-                        dbg_log("Warning: Changing memory bar not supported, ignored", LOG_PCI);
+                        written = (written & ~(bar.size - 1) & ~0xF) | flags;
+                        this.set_memory_bar(bar, written);
+                        space[space_addr] = written;
                     }
+                    else
+                    {
+                        var original_bar = bar.original_bar;
 
-                    // changing isn't supported yet, reset to default
-                    space[space_addr] = original_bar;
+                        if((written & ~0xF) !== (original_bar & ~0xF))
+                        {
+                            // seabios
+                            dbg_log("Warning: Changing memory bar not supported, ignored", LOG_PCI);
+                        }
+
+                        // changing isn't supported yet, reset to default
+                        space[space_addr] = original_bar;
+                    }
                 }
-            }
+                else
+                {
+                    // io
+                    dbg_assert(type === 1);
 
-            if(type === 1)
-            {
-                // io
-                dbg_assert(type === 1);
-
-                var from = space[space_addr] & ~1 & 0xFFFF;
-                var to = written & ~1 & 0xFFFF;
-                dbg_log("io bar changed from " + h(from >>> 0, 8) +
-                        " to " + h(to >>> 0, 8) + " size=" + bar.size, LOG_PCI);
-                this.set_io_bars(bar, from, to);
-                space[space_addr] = written | 1;
+                    var from = bar.current_addr === undefined ? space[space_addr] & ~1 & 0xFFFF : bar.current_addr;
+                    var to = written & ~1 & 0xFFFF;
+                    dbg_log("io bar changed from " + h(from >>> 0, 8) +
+                            " to " + h(to >>> 0, 8) + " size=" + bar.size, LOG_PCI);
+                    this.set_io_bars(bar, from, to);
+                    space[space_addr] = written | 1;
+                }
             }
         }
         else
@@ -524,16 +534,22 @@ PCI.prototype.register_device = function(device)
         dbg_log("device "+ device.name +" register bar of size "+bar.size +" at " + h(bar_base), LOG_PCI);
 
         bar.original_bar = bar_base;
+        bar.device = device;
+        bar.current_addr = undefined;
         bar.entries = [];
 
         if(type === 0)
         {
-            // memory, not needed currently
+            if(this.is_memory_bar_remappable(bar))
+            {
+                this.set_memory_bar(bar, bar_base);
+            }
         }
         else
         {
             dbg_assert(type === 1);
             var port = bar_base & ~1;
+            bar.current_addr = port;
 
             for(var j = 0; j < bar.size; j++)
             {
@@ -545,8 +561,118 @@ PCI.prototype.register_device = function(device)
     return space;
 };
 
+PCI.prototype.is_memory_bar_remappable = function(bar)
+{
+    return !!(bar.remappable || bar.read8 || bar.write8 || bar.read32 || bar.write32 || bar.on_remap);
+};
+
+PCI.prototype.set_memory_bar = function(bar, value)
+{
+    var from = bar.current_addr;
+    var to = (value & ~0xF) >>> 0;
+
+    dbg_assert((bar.size & MMAP_BLOCK_SIZE - 1) === 0, "memory bar size should be mmap-block aligned");
+    dbg_assert((to & MMAP_BLOCK_SIZE - 1) === 0, "memory bar address should be mmap-block aligned");
+
+    if(from === to)
+    {
+        return;
+    }
+
+    dbg_log("memory bar changed from " + h(from === undefined ? 0 : from >>> 0, 8) +
+            " to " + h(to >>> 0, 8) + " size=" + bar.size, LOG_PCI);
+
+    if(from !== undefined && this.memory_bar_has_handlers(bar))
+    {
+        this.io.mmap_unregister(from, bar.size);
+    }
+
+    bar.current_addr = to;
+
+    if(to && this.memory_bar_has_handlers(bar))
+    {
+        this.create_memory_bar_handlers(bar);
+        this.io.mmap_register(to, bar.size,
+            bar.mmap_read8,
+            bar.mmap_write8,
+            bar.mmap_read32,
+            bar.mmap_write32);
+    }
+
+    if(bar.on_remap)
+    {
+        bar.on_remap.call(bar.device, from === undefined ? 0 : from, to);
+    }
+};
+
+PCI.prototype.memory_bar_has_handlers = function(bar)
+{
+    return !!(bar.read8 || bar.write8 || bar.read32 || bar.write32);
+};
+
+PCI.prototype.create_memory_bar_handlers = function(bar)
+{
+    if(bar.mmap_read8)
+    {
+        return;
+    }
+
+    var device = bar.device;
+
+    bar.mmap_read8 = function(addr)
+    {
+        var offset = addr - bar.current_addr >>> 0;
+
+        if(bar.read8)
+        {
+            return bar.read8.call(device, offset);
+        }
+        else if(bar.read32)
+        {
+            return bar.read32.call(device, offset & ~3) >>> ((offset & 3) << 3) & 0xFF;
+        }
+        else
+        {
+            return 0xFF;
+        }
+    };
+
+    bar.mmap_write8 = function(addr, value)
+    {
+        var offset = addr - bar.current_addr >>> 0;
+
+        if(bar.write8)
+        {
+            bar.write8.call(device, offset, value);
+        }
+        else if(bar.write32)
+        {
+            var aligned_offset = offset & ~3;
+            var shift = (offset & 3) << 3;
+            var mask = 0xFF << shift;
+            var old_value = bar.read32 ? bar.read32.call(device, aligned_offset) : 0;
+            bar.write32.call(device, aligned_offset, old_value & ~mask | (value & 0xFF) << shift);
+        }
+    };
+
+    bar.mmap_read32 = bar.read32 ? function(addr)
+    {
+        return bar.read32.call(device, addr - bar.current_addr >>> 0);
+    } : undefined;
+
+    bar.mmap_write32 = bar.write32 ? function(addr, value)
+    {
+        bar.write32.call(device, addr - bar.current_addr >>> 0, value);
+    } : undefined;
+};
+
 PCI.prototype.set_io_bars = function(bar, from, to)
 {
+    if(bar.current_addr !== undefined)
+    {
+        from = bar.current_addr;
+    }
+
     var count = bar.size;
     dbg_log("Move io bars: from=" + h(from) + " to=" + h(to) + " count=" + count, LOG_PCI);
 
@@ -570,6 +696,8 @@ PCI.prototype.set_io_bars = function(bar, from, to)
             ports[to + i] = entry;
         }
     }
+
+    bar.current_addr = to;
 };
 
 PCI.prototype.raise_irq = function(pci_id)

@@ -1752,6 +1752,7 @@ function onload()
                     name: p["name"],
                     memory_size: p["memory_size"],
                     vga_memory_size: p["vga_memory_size"],
+                    geforce: p["geforce"],
                     acpi: p["acpi"],
                     boot_order: p["boot_order"],
                     hda: handle_image(p["hda"]),
@@ -1768,6 +1769,7 @@ function onload()
 
     if(query_args.has("m")) $("memory_size").value = query_args.get("m");
     if(query_args.has("vram")) $("vga_memory_size").value = query_args.get("vram");
+    if(query_args.has("geforce")) $("geforce").checked = bool_arg(query_args.get("geforce"));
     if(query_args.has("relay_url")) $("relay_url").value = query_args.get("relay_url");
     if(query_args.has("mute")) $("disable_audio").checked = bool_arg(query_args.get("mute"));
     if(query_args.has("acpi")) $("acpi").checked = bool_arg(query_args.get("acpi"));
@@ -2075,6 +2077,7 @@ function start_emulation(profile, query_args)
         settings.acpi = profile.acpi;
         settings.memory_size = profile.memory_size;
         settings.vga_memory_size = profile.vga_memory_size;
+        settings.geforce = profile.geforce;
         settings.boot_order = profile.boot_order;
         settings.net_device_type = profile.net_device_type;
         settings.modem = profile.modem;
@@ -2176,6 +2179,7 @@ function start_emulation(profile, query_args)
             }
 
             settings.acpi = query_args.has("acpi") ? bool_arg(query_args.get("acpi")) : settings.acpi;
+            settings.geforce = query_args.has("geforce") ? bool_arg(query_args.get("geforce")) : settings.geforce;
             settings.use_bochs_bios = query_args.get("bios") === "bochs";
             settings.net_device_type = query_args.get("net_device_type") || settings.net_device_type;
             settings.mtu = parseInt(query_args.get("mtu"), 10) || undefined;
@@ -2308,6 +2312,12 @@ function start_emulation(profile, query_args)
         }
         if(vga_memory_size !== DEFAULT_VGA_MEMORY_SIZE) new_query_args.set("vram", String(vga_memory_size));
 
+        if(settings.geforce === undefined)
+        {
+            settings.geforce = $("geforce").checked;
+        }
+        if(settings.geforce) new_query_args.set("geforce", "1");
+
         const boot_order = parseInt($("boot_order").value, 16) || DEFAULT_BOOT_ORDER;
         if(!settings.boot_order || boot_order !== DEFAULT_BOOT_ORDER)
         {
@@ -2381,6 +2391,7 @@ function start_emulation(profile, query_args)
 
         memory_size: settings.memory_size,
         vga_memory_size: settings.vga_memory_size,
+        geforce: settings.geforce,
         boot_order: settings.boot_order,
 
         bios: settings.bios,

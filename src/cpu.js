@@ -30,6 +30,7 @@ import { FloppyController } from "./floppy.js";
 import { IDEController } from "./ide.js";
 import { VirtioNet } from "./virtio_net.js";
 import { VGAScreen } from "./vga.js";
+import { NV20GeForce } from "./geforce/nv20.js";
 import { VirtioBalloon } from "./virtio_balloon.js";
 import { Virtio9p, Virtio9pHandler, Virtio9pProxy } from "../lib/9p.js";
 
@@ -1174,6 +1175,11 @@ CPU.prototype.init = function(settings, device_bus)
         this.devices.dma = new DMA(this);
 
         this.devices.vga = new VGAScreen(this, device_bus, settings.screen, settings.vga_memory_size || 8 * 1024 * 1024);
+
+        if(settings.geforce)
+        {
+            this.devices.geforce = new NV20GeForce(this, settings.geforce === true ? undefined : settings.geforce);
+        }
 
         this.devices.ps2 = new PS2(this, device_bus);
 

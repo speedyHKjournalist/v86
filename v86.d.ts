@@ -133,6 +133,39 @@ export type ScreenConfig =
     };
 
 /**
+ * Experimental GeForce/NV20 PCI shell.
+ *
+ * This currently only exposes a PCI VGA-compatible device. It does not yet
+ * implement MMIO, VRAM access, option ROM, legacy VGA decode, or acceleration.
+ */
+export type GeForceConfig =
+    {
+        /**
+         * PCI devfn used by v86's simple PCI bus.
+         * @default 0x13 << 3
+         */
+        pci_id?: number;
+
+        /**
+         * Initial BAR0 address for the MMIO aperture.
+         * @default 0xF1000000
+         */
+        mmio_base?: number;
+
+        /**
+         * Initial BAR1 address for the framebuffer aperture.
+         * @default 0xD0000000
+         */
+        vram_base?: number;
+
+        /**
+         * Framebuffer aperture size in bytes.
+         * @default 64 * 1024 * 1024
+         */
+        vram_size?: number;
+    };
+
+/**
  * Debug log levels.
  */
 export enum LogLevel {
@@ -360,6 +393,12 @@ export interface V86Options {
      * @default 8 * 1024 * 1024
      */
     vga_memory_size?: number;
+
+    /**
+     * Add an experimental NVIDIA NV20/GeForce3 PCI shell alongside the default VGA device.
+     * @default false
+     */
+    geforce?: boolean | GeForceConfig;
 
     /**
      * If emulation should be started when emulator is ready.
