@@ -18,6 +18,8 @@ const NV20_DEFAULT_MMIO_BASE = 0xF1000000;
 const NV20_MMIO_SIZE = 16 * 1024 * 1024;
 const NV20_DEFAULT_VRAM_BASE = 0xD0000000;
 const NV20_DEFAULT_VRAM_SIZE = 64 * 1024 * 1024;
+const NV20_PRAMIN_BASE = 0x00700000;
+const NV20_PRAMIN_SIZE = 1024 * 1024;
 const NV20_PMC_BOOT_0 = 0x020200A5;
 const NV20_PFB_CFG0 = 0x00007FFF;
 
@@ -28,6 +30,7 @@ const NV20_PMC_INTR_PCRTC = 1 << 24;
 const NV20_PMC_INTR_PBUS = 1 << 28;
 
 const NV20_FIFO_CACHE_ENTRY_COUNT = 0x100;
+const NV20_FIFO_CACHE_GET_MASK = 0xFF;
 const NV20_VRAM_LOG_BLOCK_SIZE = 1024 * 1024;
 const NV20_VRAM_LOG_SAMPLE_WRITES = 0x10000;
 const NV20_DEFAULT_RENDER_WIDTH = 1024;
@@ -44,6 +47,193 @@ const NV20_MIN_RENDER_WIDTH = 320;
 const NV20_MIN_RENDER_HEIGHT = 200;
 const NV20_MAX_RENDER_WIDTH = 4096;
 const NV20_MAX_RENDER_HEIGHT = 4096;
+
+const NV20_MMIO_REGISTER_NAMES = new Map([
+    [0x000000, "PMC_BOOT_0"],
+    [0x000100, "PMC_INTR_0"],
+    [0x000140, "PMC_INTR_EN_0"],
+    [0x000200, "PMC_ENABLE"],
+
+    [0x001100, "PBUS_INTR_0"],
+    [0x001140, "PBUS_INTR_EN_0"],
+
+    [0x002100, "PFIFO_INTR_0"],
+    [0x002140, "PFIFO_INTR_EN_0"],
+    [0x002210, "PFIFO_RAMHT"],
+    [0x002214, "PFIFO_RAMFC"],
+    [0x002218, "PFIFO_RAMRO"],
+    [0x002400, "PFIFO_RUNOUT_STATUS"],
+    [0x002504, "PFIFO_MODE"],
+    [0x003200, "PFIFO_CACHE1_PUSH0"],
+    [0x003204, "PFIFO_CACHE1_PUSH1"],
+    [0x003210, "PFIFO_CACHE1_PUT"],
+    [0x003214, "PFIFO_CACHE1_STATUS"],
+    [0x003220, "PFIFO_CACHE1_DMA_PUSH"],
+    [0x00322C, "PFIFO_CACHE1_DMA_INSTANCE"],
+    [0x003230, "PFIFO_CACHE1_DMA_STATE"],
+    [0x003240, "PFIFO_CACHE1_DMA_PUT"],
+    [0x003244, "PFIFO_CACHE1_DMA_GET"],
+    [0x003248, "PFIFO_CACHE1_REF_CNT"],
+    [0x003250, "PFIFO_CACHE1_PULL0"],
+    [0x003270, "PFIFO_CACHE1_GET"],
+    [0x0032E0, "PFIFO_CACHE1_ENGINE"],
+    [0x003304, "PFIFO_RUNOUT_STATUS"],
+
+    [0x009100, "PTIMER_INTR_0"],
+    [0x009140, "PTIMER_INTR_EN_0"],
+    [0x009200, "PTIMER_NUMERATOR"],
+    [0x009210, "PTIMER_DENOMINATOR"],
+    [0x009400, "PTIMER_TIME_0"],
+    [0x009410, "PTIMER_TIME_1"],
+    [0x009420, "PTIMER_ALARM_0"],
+
+    [0x0C03C2, "PRMVIO_MISC_WRITE"],
+    [0x0C03CC, "PRMVIO_MISC_READ"],
+
+    [0x100000, "PFB_BOOT_0"],
+    [0x100200, "PFB_CFG"],
+    [0x10020C, "PFB_CSTATUS"],
+    [0x100320, "PFB_CFG0"],
+    [0x101000, "PEXTDEV_BOOT_0"],
+
+    [0x400100, "PGRAPH_INTR"],
+    [0x400108, "PGRAPH_NSOURCE"],
+    [0x400140, "PGRAPH_INTR_EN"],
+    [0x40014C, "PGRAPH_CTX_SWITCH1"],
+    [0x400150, "PGRAPH_CTX_SWITCH2"],
+    [0x400158, "PGRAPH_CTX_SWITCH4"],
+    [0x40032C, "PGRAPH_CTXCTL_CUR"],
+    [0x400700, "PGRAPH_STATUS"],
+    [0x400704, "PGRAPH_TRAPPED_ADDR"],
+    [0x400708, "PGRAPH_TRAPPED_DATA"],
+    [0x400718, "PGRAPH_NOTIFY"],
+    [0x40071C, "PGRAPH_NOTIFY_INSTANCE"],
+    [0x400720, "PGRAPH_FIFO"],
+    [0x400724, "PGRAPH_BPIXEL"],
+    [0x400780, "PGRAPH_CHANNEL_CTX_TABLE"],
+    [0x400820, "PGRAPH_OFFSET0"],
+    [0x400850, "PGRAPH_PITCH0"],
+
+    [0x600100, "PCRTC_INTR_0"],
+    [0x600140, "PCRTC_INTR_EN_0"],
+    [0x600800, "PCRTC_START"],
+    [0x600804, "PCRTC_CONFIG"],
+    [0x600808, "PCRTC_RASTER"],
+    [0x60080C, "PCRTC_CURSOR_OFFSET"],
+    [0x600810, "PCRTC_CURSOR_CONFIG"],
+    [0x60081C, "PCRTC_GPIO_EXT"],
+    [0x600868, "PCRTC_ENGINE_CTRL"],
+    [0x6013B4, "PRMCIO_CRTC_INDEX_MONO"],
+    [0x6013B5, "PRMCIO_CRTC_DATA_MONO"],
+    [0x6013D4, "PRMCIO_CRTC_INDEX_COLOR"],
+    [0x6013D5, "PRMCIO_CRTC_DATA_COLOR"],
+
+    [0x680300, "PRAMDAC_CURSOR_START"],
+    [0x680404, "PRAMDAC_FP_TG_CONTROL"],
+    [0x680508, "PRAMDAC_VPLL"],
+    [0x68050C, "PRAMDAC_PLL_SELECT"],
+    [0x680578, "PRAMDAC_VPLL_B"],
+    [0x680600, "PRAMDAC_GENERAL_CONTROL"],
+    [0x680828, "PRAMDAC_DACCLK"],
+]);
+
+function nv20_mmio_register_name(offset)
+{
+    offset = offset >>> 0;
+
+    const name = NV20_MMIO_REGISTER_NAMES.get(offset);
+
+    if(name)
+    {
+        return name;
+    }
+
+    if(offset >= 0x1800 && offset < 0x1900)
+    {
+        return "PBUS_PCI_CONFIG[" + h(offset - 0x1800, 2) + "]";
+    }
+
+    if(offset >= 0x3800 && offset < 0x4000)
+    {
+        const index = offset - 0x3800 >>> 3;
+        return (offset & 4 ? "PFIFO_CACHE1_DATA" : "PFIFO_CACHE1_METHOD") + "[" + h(index, 2) + "]";
+    }
+
+    if(offset >= NV20_PRAMIN_BASE && offset < NV20_PRAMIN_BASE + NV20_PRAMIN_SIZE)
+    {
+        return "PRAMIN[" + h(offset - NV20_PRAMIN_BASE, 5) + "]";
+    }
+
+    if(offset >= 0x800000 && offset < 0xA00000)
+    {
+        return "PFIFO_USER[" + h(offset - 0x800000, 5) + "]";
+    }
+
+    if(offset >= 0xC00000 && offset < 0xE00000)
+    {
+        return "PFIFO_DMA[" + h(offset - 0xC00000, 5) + "]";
+    }
+
+    if((offset >= 0x0C0300 && offset < 0x0C0400) ||
+        (offset >= 0x0C2300 && offset < 0x0C2400))
+    {
+        return "PRMVIO[" + h(offset & 0xFF, 2) + "]";
+    }
+
+    if((offset >= 0x601300 && offset < 0x601400) ||
+        (offset >= 0x603300 && offset < 0x603400))
+    {
+        return "PRMCIO[" + h(offset & 0xFF, 2) + "]";
+    }
+
+    if((offset >= 0x681300 && offset < 0x681400) ||
+        (offset >= 0x683300 && offset < 0x683400))
+    {
+        return "PRAMDIO[" + h(offset & 0xFF, 2) + "]";
+    }
+
+    if(offset < 0x1000)
+    {
+        return "PMC[" + h(offset, 4) + "]";
+    }
+
+    if(offset >= 0x1000 && offset < 0x2000)
+    {
+        return "PBUS[" + h(offset - 0x1000, 4) + "]";
+    }
+
+    if(offset >= 0x2000 && offset < 0x4000)
+    {
+        return "PFIFO[" + h(offset - 0x2000, 4) + "]";
+    }
+
+    if(offset >= 0x9000 && offset < 0xA000)
+    {
+        return "PTIMER[" + h(offset - 0x9000, 4) + "]";
+    }
+
+    if(offset >= 0x100000 && offset < 0x102000)
+    {
+        return "PFB[" + h(offset - 0x100000, 4) + "]";
+    }
+
+    if(offset >= 0x400000 && offset < 0x402000)
+    {
+        return "PGRAPH[" + h(offset - 0x400000, 4) + "]";
+    }
+
+    if(offset >= 0x600000 && offset < 0x602000)
+    {
+        return "PCRTC[" + h(offset - 0x600000, 4) + "]";
+    }
+
+    if(offset >= 0x680000 && offset < 0x682000)
+    {
+        return "PRAMDAC[" + h(offset - 0x680000, 4) + "]";
+    }
+
+    return "";
+}
 
 function nv20_render_bytes_per_pixel(bpp)
 {
@@ -111,6 +301,7 @@ export function NV20GeForce(cpu, options)
     this.vram_base = vram_base;
     this.vram_size = vram_size;
     this.vram = new Uint8Array(vram_size);
+    this.ramin_flip = vram_size - 64;
     this.vram_trace = options.vram_trace !== false;
     this.vram_log_block_size = options.vram_log_block_size || NV20_VRAM_LOG_BLOCK_SIZE;
     this.vram_log_sample_writes = options.vram_log_sample_writes || NV20_VRAM_LOG_SAMPLE_WRITES;
@@ -147,6 +338,7 @@ export function NV20GeForce(cpu, options)
     this.pci_config_space = null;
     this.pci_config_space8 = null;
 
+    this.mc_soft_intr = false;
     this.mc_intr_en = 0;
     this.mc_enable = 0;
 
@@ -159,6 +351,7 @@ export function NV20GeForce(cpu, options)
     this.fifo_ramfc = 0;
     this.fifo_ramro = 0;
     this.fifo_mode = 0;
+    this.fifo_cache1_push0 = 0;
     this.fifo_cache1_push1 = 0;
     this.fifo_cache1_put = 0;
     this.fifo_dma_push = 0;
@@ -196,14 +389,19 @@ export function NV20GeForce(cpu, options)
     this.graph_trapped_data = 0;
     this.graph_notify = 0;
     this.graph_fifo = 0;
+    this.graph_bpixel = 0;
     this.graph_channel_ctx_table = 0;
+    this.graph_offset0 = 0;
+    this.graph_pitch0 = 0;
 
     this.crtc_intr = 0;
     this.crtc_intr_en = 0;
     this.crtc_start = 0;
     this.crtc_config = 0;
+    this.crtc_raster_pos = 0;
     this.crtc_cursor_offset = 0;
     this.crtc_cursor_config = 0;
+    this.crtc_gpio_ext = 0;
     this.prmcio_crtc_index = 0;
     this.prmcio_crtc_regs = new Uint8Array(0x100);
     nv20_init_default_crtc_regs(this.prmcio_crtc_regs);
@@ -341,6 +539,20 @@ NV20GeForce.prototype.vram_write32 = function(offset, value)
     }
 
     this.vram_mark_write(offset, 4, value);
+};
+
+NV20GeForce.prototype.ramin_read32 = function(offset)
+{
+    offset = offset & (NV20_PRAMIN_SIZE - 1) & ~3;
+
+    return this.vram_read32((offset ^ this.ramin_flip) >>> 0);
+};
+
+NV20GeForce.prototype.ramin_write32 = function(offset, value)
+{
+    offset = offset & (NV20_PRAMIN_SIZE - 1) & ~3;
+
+    this.vram_write32((offset ^ this.ramin_flip) >>> 0, value);
 };
 
 NV20GeForce.prototype.vram_mark_write = function(offset, width, value)
@@ -905,7 +1117,11 @@ NV20GeForce.prototype.register_read32 = function(offset)
     var known = true;
     var value = 0;
 
-    if(offset >= 0x1800 && offset < 0x1900)
+    if(offset >= NV20_PRAMIN_BASE && offset < NV20_PRAMIN_BASE + NV20_PRAMIN_SIZE)
+    {
+        value = this.ramin_read32(offset - NV20_PRAMIN_BASE);
+    }
+    else if(offset >= 0x1800 && offset < 0x1900)
     {
         value = this.pci_config_read32(offset - 0x1800);
     }
@@ -923,6 +1139,10 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 break;
             case 0x000100:
                 value = this.get_master_interrupt_status();
+                if(this.mc_soft_intr)
+                {
+                    value |= 0x80000000;
+                }
                 break;
             case 0x000140:
                 value = this.mc_intr_en;
@@ -954,10 +1174,13 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.fifo_ramro;
                 break;
             case 0x002400:
-                value = 0x10;
+                value = this.fifo_get === this.fifo_cache1_put ? 0x10 : 0;
                 break;
             case 0x002504:
                 value = this.fifo_mode;
+                break;
+            case 0x003200:
+                value = this.fifo_cache1_push0;
                 break;
             case 0x003204:
                 value = this.fifo_cache1_push1;
@@ -966,7 +1189,7 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.fifo_cache1_put;
                 break;
             case 0x003214:
-                value = 0x10;
+                value = this.fifo_get === this.fifo_cache1_put ? 0x10 : 0;
                 break;
             case 0x003220:
                 value = this.fifo_dma_push;
@@ -987,7 +1210,11 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.fifo_ref_cnt;
                 break;
             case 0x003250:
-                value = this.fifo_pull0 | (this.fifo_dma_get !== this.fifo_dma_put ? 0x100 : 0);
+                if(this.fifo_get !== this.fifo_cache1_put)
+                {
+                    this.fifo_pull0 |= 0x100;
+                }
+                value = this.fifo_pull0;
                 break;
             case 0x003270:
                 value = this.fifo_get;
@@ -1067,8 +1294,17 @@ NV20GeForce.prototype.register_read32 = function(offset)
             case 0x400720:
                 value = this.graph_fifo;
                 break;
+            case 0x400724:
+                value = this.graph_bpixel;
+                break;
             case 0x400780:
                 value = this.graph_channel_ctx_table;
+                break;
+            case 0x400820:
+                value = this.graph_offset0;
+                break;
+            case 0x400850:
+                value = this.graph_pitch0;
                 break;
 
             case 0x600100:
@@ -1084,13 +1320,17 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.crtc_config;
                 break;
             case 0x600808:
-                value = 0;
+                this.crtc_raster_pos ^= 1;
+                value = this.crtc_raster_pos;
                 break;
             case 0x60080C:
                 value = this.crtc_cursor_offset;
                 break;
             case 0x600810:
                 value = this.crtc_cursor_config;
+                break;
+            case 0x60081C:
+                value = this.crtc_gpio_ext;
                 break;
             case 0x600868:
                 value = 0;
@@ -1123,7 +1363,7 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 break;
 
             default:
-                known = false;
+                known = !!nv20_mmio_register_name(offset);
                 value = this.mmio_registers.get(offset) || 0;
                 break;
         }
@@ -1137,6 +1377,12 @@ NV20GeForce.prototype.register_read32 = function(offset)
 
 NV20GeForce.prototype.register_write32 = function(offset, value)
 {
+    if(offset >= NV20_PRAMIN_BASE && offset < NV20_PRAMIN_BASE + NV20_PRAMIN_SIZE)
+    {
+        this.ramin_write32(offset - NV20_PRAMIN_BASE, value);
+        return true;
+    }
+
     if(offset >= 0x1800 && offset < 0x1900)
     {
         this.pci_config_write32(offset - 0x1800, value);
@@ -1161,6 +1407,9 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
 
     switch(offset)
     {
+        case 0x000100:
+            this.mc_soft_intr = !!(value >>> 31);
+            return true;
         case 0x000140:
             this.mc_intr_en = value;
             return true;
@@ -1193,6 +1442,9 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
         case 0x002504:
             this.fifo_mode = value;
             return true;
+        case 0x003200:
+            this.fifo_cache1_push0 = value;
+            return true;
         case 0x003204:
             this.fifo_cache1_push1 = value;
             return true;
@@ -1218,7 +1470,16 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             this.fifo_pull0 = value;
             return true;
         case 0x003270:
-            this.fifo_get = value;
+            this.fifo_get = value & NV20_FIFO_CACHE_GET_MASK;
+            if(this.fifo_get !== this.fifo_cache1_put)
+            {
+                this.fifo_intr |= 1;
+            }
+            else
+            {
+                this.fifo_intr &= ~1;
+                this.fifo_pull0 &= ~0x100;
+            }
             return true;
         case 0x0032E0:
             this.fifo_grctx_instance = value;
@@ -1288,8 +1549,17 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
         case 0x400720:
             this.graph_fifo = value;
             return true;
+        case 0x400724:
+            this.graph_bpixel = value;
+            return true;
         case 0x400780:
             this.graph_channel_ctx_table = value;
+            return true;
+        case 0x400820:
+            this.graph_offset0 = value;
+            return true;
+        case 0x400850:
+            this.graph_pitch0 = value;
             return true;
 
         case 0x600100:
@@ -1311,6 +1581,9 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             return true;
         case 0x600810:
             this.crtc_cursor_config = value;
+            return true;
+        case 0x60081C:
+            this.crtc_gpio_ext = value;
             return true;
         case 0x6013B4:
         case 0x6013D4:
@@ -1343,7 +1616,7 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
         this.mmio_registers.delete(offset);
     }
 
-    return false;
+    return !!nv20_mmio_register_name(offset);
 };
 
 NV20GeForce.prototype.mmio_log = function(kind, offset, value, known)
@@ -1362,7 +1635,10 @@ NV20GeForce.prototype.mmio_log = function(kind, offset, value, known)
 
     seen.add(offset);
 
+    const name = nv20_mmio_register_name(offset);
+
     dbg_log(this.name + " mmio " + kind + " " + h(offset >>> 0, 6) +
+            (name ? " (" + name + ")" : "") +
             (kind === "read" ? " -> " : " <- ") + h(value >>> 0, 8) +
             (known ? "" : " (unknown)"), LOG_PCI);
 };
