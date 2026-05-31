@@ -136,8 +136,9 @@ export type ScreenConfig =
  * Experimental GeForce/NV20 PCI shell.
  *
  * This exposes a PCI VGA-compatible device with BAR0 MMIO stubs, BAR1 VRAM
- * backing, and an experimental fixed-size framebuffer bridge. It does not yet
- * implement option ROM POST, legacy VGA decode, PFIFO/PGRAPH, or acceleration.
+ * backing, an external PCI option ROM BAR, and an experimental framebuffer
+ * bridge. It does not yet implement option ROM POST, legacy VGA decode,
+ * PFIFO/PGRAPH, or acceleration.
  */
 export type GeForceConfig =
     {
@@ -208,6 +209,11 @@ export type GeForceConfig =
          * @default "xrgb8888"
          */
         render_format?: "xrgb8888" | "xbgr8888" | "rgba8888";
+
+        /**
+         * External PCI option ROM/VBIOS image for this GeForce device.
+         */
+        option_rom?: V86Image | ArrayBuffer | Uint8Array;
     };
 
 /**
@@ -477,6 +483,11 @@ export interface V86Options {
      * @see {@link https://github.com/copy/v86/tree/master/bios} for BIOS images
      */
     vga_bios?: V86Image;
+
+    /**
+     * External GeForce/NV20 VBIOS image.
+     */
+    geforce_rom?: V86Image;
 
     /**
      * First hard disk

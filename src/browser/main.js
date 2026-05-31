@@ -1726,7 +1726,8 @@ function onload()
     {
         // TODO: if one of the file form fields has a value (firefox), start here?
 
-        if(query_args.has("hda.url") || query_args.has("cdrom.url") || query_args.has("fda.url"))
+        if(query_args.has("hda.url") || query_args.has("cdrom.url") ||
+            query_args.has("fda.url") || query_args.has("geforce_rom.url"))
         {
             start_emulation(null, query_args);
             return;
@@ -1753,6 +1754,7 @@ function onload()
                     memory_size: p["memory_size"],
                     vga_memory_size: p["vga_memory_size"],
                     geforce: p["geforce"],
+                    geforce_rom: handle_image(p["geforce_rom"]),
                     acpi: p["acpi"],
                     boot_order: p["boot_order"],
                     hda: handle_image(p["hda"]),
@@ -1777,6 +1779,15 @@ function onload()
     if(query_args.has("net_device_type")) $("net_device_type").value = query_args.get("net_device_type");
     if(query_args.has("mtu")) $("mtu").value = query_args.get("mtu");
     if(query_args.has("modem")) $("modem").value = query_args.get("modem");
+
+    const geforce_rom_input = $("geforce_rom");
+    geforce_rom_input.onchange = function()
+    {
+        if(geforce_rom_input.files.length)
+        {
+            $("geforce").checked = true;
+        }
+    };
 
     for(const dev of ["fda", "fdb"])
     {
@@ -2078,6 +2089,7 @@ function start_emulation(profile, query_args)
         settings.memory_size = profile.memory_size;
         settings.vga_memory_size = profile.vga_memory_size;
         settings.geforce = profile.geforce;
+        settings.geforce_rom = profile.geforce_rom;
         settings.boot_order = profile.boot_order;
         settings.net_device_type = profile.net_device_type;
         settings.modem = profile.modem;
@@ -2166,6 +2178,16 @@ function start_emulation(profile, query_args)
                 };
             }
 
+            if(query_args.has("geforce_rom.url"))
+            {
+                settings.geforce_rom = {
+                    size: parseInt(query_args.get("geforce_rom.size"), 10) || undefined,
+                    url: query_args.get("geforce_rom.url"),
+                    async: false,
+                };
+                settings.geforce = settings.geforce || true;
+            }
+
             const m = parseInt(query_args.get("m"), 10);
             if(m > 0)
             {
@@ -2224,6 +2246,12 @@ function start_emulation(profile, query_args)
         if(vga_bios)
         {
             settings.vga_bios = { buffer: vga_bios };
+        }
+        const geforce_rom = $("geforce_rom").files[0];
+        if(geforce_rom)
+        {
+            settings.geforce_rom = { buffer: geforce_rom };
+            settings.geforce = true;
         }
         const fda = $("fda_image")?.files[0];
         if(fda)
@@ -2392,6 +2420,7 @@ function start_emulation(profile, query_args)
         memory_size: settings.memory_size,
         vga_memory_size: settings.vga_memory_size,
         geforce: settings.geforce,
+        geforce_rom: settings.geforce_rom,
         boot_order: settings.boot_order,
 
         bios: settings.bios,

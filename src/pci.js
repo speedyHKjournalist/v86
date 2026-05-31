@@ -472,6 +472,10 @@ PCI.prototype.pci_write32 = function(address, written)
             {
                 space[addr >> 2] = -device.pci_rom_size | 0;
             }
+            else if(this.device_has_pci_rom_handlers(device))
+            {
+                this.set_pci_rom_bar(device, space, written);
+            }
             else
             {
                 space[addr >> 2] = device.pci_rom_address | 0;
@@ -559,6 +563,132 @@ PCI.prototype.register_device = function(device)
     }
 
     return space;
+};
+
+PCI.prototype.device_has_pci_rom_handlers = function(device)
+{
+    return !!(device.pci_rom_read8 || device.pci_rom_read32 || device.pci_rom_on_remap);
+};
+
+PCI.prototype.pci_rom_size_mask = function(device)
+{
+    return ~(device.pci_rom_size - 1) & ~0x7FF;
+};
+
+PCI.prototype.set_pci_rom_bar = function(device, space, written)
+{
+    var old_addr = device.pci_rom_address || 0;
+    var old_enabled = !!device.pci_rom_enabled;
+    var enabled = !!(written & 1);
+    var address = written & this.pci_rom_size_mask(device);
+
+    if(old_enabled && (!enabled || old_addr !== address))
+    {
+        this.unmap_pci_rom(device);
+    }
+
+    device.pci_rom_address = address >>> 0;
+    device.pci_rom_enabled = enabled;
+    space[0x30 >> 2] = (device.pci_rom_address | (enabled ? 1 : 0)) | 0;
+
+    if(enabled && address)
+    {
+        this.map_pci_rom(device);
+    }
+
+    if(device.pci_rom_on_remap)
+    {
+        device.pci_rom_on_remap(old_addr >>> 0, device.pci_rom_address, enabled);
+    }
+};
+
+PCI.prototype.map_pci_rom = function(device)
+{
+    if(device.pci_rom_mapped || !device.pci_rom_address)
+    {
+        return;
+    }
+
+    if(!device.pci_rom_read8 && !device.pci_rom_read32)
+    {
+        return;
+    }
+
+    var size = device.pci_rom_mmap_size || device.pci_rom_size;
+
+    dbg_assert((device.pci_rom_address & MMAP_BLOCK_SIZE - 1) === 0,
+        "pci rom address should be mmap-block aligned");
+    dbg_assert((size & MMAP_BLOCK_SIZE - 1) === 0,
+        "pci rom mmap size should be mmap-block aligned");
+
+    var read8 = function(addr)
+    {
+        var offset = addr - device.pci_rom_address >>> 0;
+
+        if(offset >= device.pci_rom_size)
+        {
+            return 0;
+        }
+
+        if(device.pci_rom_read8)
+        {
+            return device.pci_rom_read8.call(device, offset);
+        }
+
+        return device.pci_rom_read32.call(device, offset & ~3) >>> (offset & 3) * 8 & 0xFF;
+    };
+
+    var read32 = function(addr)
+    {
+        var offset = addr - device.pci_rom_address >>> 0;
+
+        if(offset >= device.pci_rom_size)
+        {
+            return 0;
+        }
+
+        if(device.pci_rom_read32)
+        {
+            return device.pci_rom_read32.call(device, offset);
+        }
+
+        return (read8(addr) |
+                read8(addr + 1) << 8 |
+                read8(addr + 2) << 16 |
+                read8(addr + 3) << 24) >>> 0;
+    };
+
+    var write8 = function(addr, value)
+    {
+        if(device.pci_rom_write8)
+        {
+            device.pci_rom_write8.call(device, addr - device.pci_rom_address >>> 0, value);
+        }
+    };
+
+    var write32 = function(addr, value)
+    {
+        if(device.pci_rom_write32)
+        {
+            device.pci_rom_write32.call(device, addr - device.pci_rom_address >>> 0, value);
+        }
+    };
+
+    this.io.mmap_register(device.pci_rom_address, size, read8, write8, read32, write32);
+    device.pci_rom_mapped = true;
+    device.pci_rom_mapped_size = size;
+};
+
+PCI.prototype.unmap_pci_rom = function(device)
+{
+    if(!device.pci_rom_mapped)
+    {
+        return;
+    }
+
+    this.io.mmap_unregister(device.pci_rom_address, device.pci_rom_mapped_size);
+    device.pci_rom_mapped = false;
+    device.pci_rom_mapped_size = 0;
 };
 
 PCI.prototype.is_memory_bar_remappable = function(bar)

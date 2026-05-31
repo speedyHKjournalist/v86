@@ -6,7 +6,7 @@
 // For Types Only
 import { CPU } from "../cpu.js";
 
-import { LOG_PCI } from "../const.js";
+import { LOG_PCI, MMAP_BLOCK_SIZE } from "../const.js";
 import { h } from "../lib.js";
 import { dbg_log } from "../log.js";
 
@@ -18,6 +18,7 @@ const NV20_DEFAULT_MMIO_BASE = 0xF1000000;
 const NV20_MMIO_SIZE = 16 * 1024 * 1024;
 const NV20_DEFAULT_VRAM_BASE = 0xD0000000;
 const NV20_DEFAULT_VRAM_SIZE = 64 * 1024 * 1024;
+const NV20_DEFAULT_ROM_BASE = 0xFE000000;
 const NV20_PRAMIN_BASE = 0x00700000;
 const NV20_PRAMIN_SIZE = 1024 * 1024;
 const NV20_PMC_BOOT_0 = 0x020200A5;
@@ -280,6 +281,49 @@ function nv20_now_ms()
     return Date.now();
 }
 
+function nv20_next_power_of_2(value)
+{
+    value = Math.max(1, value >>> 0);
+    value--;
+    value |= value >>> 1;
+    value |= value >>> 2;
+    value |= value >>> 4;
+    value |= value >>> 8;
+    value |= value >>> 16;
+
+    return value + 1 >>> 0;
+}
+
+function nv20_option_rom_bar_size(length)
+{
+    return Math.max(MMAP_BLOCK_SIZE, nv20_next_power_of_2(length));
+}
+
+function nv20_normalize_option_rom(rom)
+{
+    if(!rom)
+    {
+        return null;
+    }
+
+    if(rom instanceof Uint8Array)
+    {
+        return rom;
+    }
+
+    if(rom instanceof ArrayBuffer)
+    {
+        return new Uint8Array(rom);
+    }
+
+    if(ArrayBuffer.isView(rom))
+    {
+        return new Uint8Array(rom.buffer, rom.byteOffset, rom.byteLength);
+    }
+
+    return null;
+}
+
 /**
  * @constructor
  * @param {CPU} cpu
@@ -296,11 +340,30 @@ export function NV20GeForce(cpu, options)
     const mmio_base = options.mmio_base || NV20_DEFAULT_MMIO_BASE;
     const vram_base = options.vram_base || NV20_DEFAULT_VRAM_BASE;
     const vram_size = options.vram_size || NV20_DEFAULT_VRAM_SIZE;
+    const option_rom = nv20_normalize_option_rom(options.option_rom || options.rom || options.pci_rom);
 
     this.mmio_base = mmio_base;
     this.vram_base = vram_base;
     this.vram_size = vram_size;
     this.vram = new Uint8Array(vram_size);
+    this.option_rom = option_rom;
+
+    if(option_rom)
+    {
+        this.pci_rom_size = nv20_option_rom_bar_size(option_rom.length);
+        this.pci_rom_mmap_size = this.pci_rom_size;
+        this.pci_rom_address = options.rom_base || NV20_DEFAULT_ROM_BASE;
+        this.pci_rom_enabled = false;
+
+        dbg_log("geforce-nv20 external option rom size=" + option_rom.length +
+                " bar-size=" + h(this.pci_rom_size >>> 0, 8), LOG_PCI);
+
+        if(option_rom.length < 2 || option_rom[0] !== 0x55 || option_rom[1] !== 0xAA)
+        {
+            dbg_log("geforce-nv20 option rom has no 55 AA signature", LOG_PCI);
+        }
+    }
+
     this.ramin_flip = vram_size - 64;
     this.vram_trace = options.vram_trace !== false;
     this.vram_log_block_size = options.vram_log_block_size || NV20_VRAM_LOG_BLOCK_SIZE;
@@ -440,8 +503,9 @@ export function NV20GeForce(cpu, options)
         0x00, 0x00, 0x00, 0x00,
         // 2C: subsystem vendor/device, unknown for the generic shell
         0x00, 0x00, 0x00, 0x00,
-        // 30: expansion ROM base, disabled until option ROM plumbing exists
-        0x00, 0x00, 0x00, 0x00,
+        // 30: expansion ROM base, disabled by bit 0 until the guest enables it
+        this.pci_rom_address & 0xFF, this.pci_rom_address >> 8 & 0xFF,
+        this.pci_rom_address >> 16 & 0xFF, this.pci_rom_address >>> 24,
         // 34: capabilities pointer
         0x00, 0x00, 0x00, 0x00,
         // 38: reserved
@@ -473,6 +537,32 @@ export function NV20GeForce(cpu, options)
     this.pci_config_space = this.pci.register_device(this);
     this.pci_config_space8 = new Uint8Array(this.pci_config_space.buffer);
 }
+
+NV20GeForce.prototype.pci_rom_read8 = function(offset)
+{
+    if(this.option_rom && offset < this.option_rom.length)
+    {
+        return this.option_rom[offset];
+    }
+
+    return 0;
+};
+
+NV20GeForce.prototype.pci_rom_read32 = function(offset)
+{
+    return (this.pci_rom_read8(offset) |
+            this.pci_rom_read8(offset + 1) << 8 |
+            this.pci_rom_read8(offset + 2) << 16 |
+            this.pci_rom_read8(offset + 3) << 24) >>> 0;
+};
+
+NV20GeForce.prototype.pci_rom_on_remap = function(from, to, enabled)
+{
+    dbg_log("geforce-nv20 option rom " + (enabled ? "mapped" : "disabled") +
+            " base=" + h(to >>> 0, 8) +
+            " size=" + h((this.pci_rom_size || 0) >>> 0, 8) +
+            " old=" + h(from >>> 0, 8), LOG_PCI);
+};
 
 NV20GeForce.prototype.vram_offset = function(offset)
 {

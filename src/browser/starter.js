@@ -398,6 +398,9 @@ V86.prototype.continue_init = async function(emulator, options)
             case "vga_bios":
                 settings.vga_bios = buffer.buffer;
                 break;
+            case "geforce_rom":
+                settings.geforce_rom = buffer.buffer;
+                break;
             case "initial_state":
                 settings.initial_state = buffer.buffer;
                 break;
@@ -427,7 +430,7 @@ V86.prototype.continue_init = async function(emulator, options)
             return;
         }
 
-        if(name === "bios" || name === "vga_bios" ||
+        if(name === "bios" || name === "vga_bios" || name === "geforce_rom" ||
             name === "initial_state" || name === "multiboot" ||
             name === "bzimage" || name === "initrd")
         {
@@ -466,6 +469,8 @@ V86.prototype.continue_init = async function(emulator, options)
 
     add_file("bios", options.bios);
     add_file("vga_bios", options.vga_bios);
+    add_file("geforce_rom", options.geforce_rom ||
+        options.geforce && options.geforce !== true && options.geforce.option_rom);
     add_file("cdrom", options.cdrom);
     add_file("hda", options.hda);
     add_file("hdb", options.hdb);
@@ -627,6 +632,13 @@ V86.prototype.continue_init = async function(emulator, options)
 
         this.serial_adapter && this.serial_adapter.show && this.serial_adapter.show();
         this.virtio_console_adapter && this.virtio_console_adapter.show && this.virtio_console_adapter.show();
+
+        if(settings.geforce_rom)
+        {
+            const geforce_options = settings.geforce && settings.geforce !== true ? Object.assign({}, settings.geforce) : {};
+            geforce_options.option_rom = settings.geforce_rom;
+            settings.geforce = geforce_options;
+        }
 
         this.v86.init(settings);
 
