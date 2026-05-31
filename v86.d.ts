@@ -137,8 +137,9 @@ export type ScreenConfig =
  *
  * This exposes a PCI VGA-compatible device with BAR0 MMIO stubs, BAR1 VRAM
  * backing, an external PCI option ROM BAR, and an experimental framebuffer
- * bridge. It does not yet implement option ROM POST, legacy VGA decode,
- * PFIFO/PGRAPH, or acceleration.
+ * bridge. It also has a minimal RAMIN/RAMHT/PFIFO path for channel setup and
+ * command submission. It does not yet implement full option ROM POST, legacy
+ * VGA decode, PGRAPH execution, or acceleration.
  */
 export type GeForceConfig =
     {
@@ -209,6 +210,18 @@ export type GeForceConfig =
          * @default "xrgb8888"
          */
         render_format?: "xrgb8888" | "xbgr8888" | "rgba8888";
+
+        /**
+         * Log early PFIFO method/object activity.
+         * @default true
+         */
+        fifo_trace?: boolean;
+
+        /**
+         * Maximum number of non-bind PFIFO methods to log.
+         * @default 32
+         */
+        fifo_log_method_limit?: number;
 
         /**
          * External PCI option ROM/VBIOS image for this GeForce device.

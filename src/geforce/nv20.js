@@ -1,7 +1,8 @@
 // Minimal NVIDIA NV20/GeForce3 PCI shell.
 //
-// This intentionally stays at the PCI + BAR0/BAR1 + framebuffer bridge stage.
-// Option ROM POST, PFIFO execution and PGRAPH are later milestones.
+// This intentionally stays at the PCI + BAR0/BAR1 + framebuffer bridge stage
+// with enough PFIFO/RAMIN plumbing for drivers to create channels and submit
+// commands. Full PGRAPH execution is a later milestone.
 
 // For Types Only
 import { CPU } from "../cpu.js";
@@ -21,6 +22,7 @@ const NV20_DEFAULT_VRAM_SIZE = 64 * 1024 * 1024;
 const NV20_DEFAULT_ROM_BASE = 0xFE000000;
 const NV20_PRAMIN_BASE = 0x00700000;
 const NV20_PRAMIN_SIZE = 1024 * 1024;
+const NV20_RAMIN_REVERSE_UNIT = 64;
 const NV20_PMC_BOOT_0 = 0x020200A5;
 const NV20_PFB_CFG0 = 0x00007FFF;
 
@@ -32,6 +34,31 @@ const NV20_PMC_INTR_PBUS = 1 << 28;
 
 const NV20_FIFO_CACHE_ENTRY_COUNT = 0x100;
 const NV20_FIFO_CACHE_GET_MASK = 0xFF;
+const NV20_FIFO_CACHE_EMPTY = 0x10;
+const NV20_FIFO_INTR_CACHE_ERROR = 1 << 0;
+const NV20_FIFO_INTR_DMA_PUSHER = 1 << 12;
+const NV20_FIFO_INTR_DMA_PTE = 1 << 16;
+const NV20_FIFO_USER_BASE = 0x800000;
+const NV20_FIFO_USER_SIZE = 0x200000;
+const NV20_FIFO_USER_CHANNEL_STRIDE = 0x10000;
+const NV20_FIFO_USER_SUBCHANNEL_STRIDE = 0x2000;
+const NV20_FIFO_DMA_USER_BASE = 0xC00000;
+const NV20_FIFO_DMA_USER_SIZE = 0x200000;
+const NV20_FIFO_DMA_USER_CHANNEL_STRIDE = 0x2000;
+const NV20_FIFO_DMA_PUT = 0x40;
+const NV20_FIFO_DMA_GET = 0x44;
+const NV20_FIFO_REF = 0x48;
+const NV20_FIFO_DMA_PUT_HIGH = 0x4C;
+const NV20_FIFO_DMA_CGET = 0x54;
+const NV20_FIFO_DMA_MGET = 0x58;
+const NV20_FIFO_DMA_MGET_HIGH = 0x5C;
+const NV20_FIFO_DMA_GET_HIGH = 0x60;
+const NV20_FIFO_DMA_KICK_LIMIT = 0x1000;
+const NV20_FIFO_METHOD_LOG_LIMIT = 32;
+const NV20_RAMHT_ENTRY_SIZE = 8;
+const NV20_RAMFC_NV04_STRIDE = 32;
+const NV20_RAMFC_NV10_STRIDE = 64;
+const NV20_GRAPH_OBJECT_ENGINE = 1;
 const NV20_VRAM_LOG_BLOCK_SIZE = 1024 * 1024;
 const NV20_VRAM_LOG_SAMPLE_WRITES = 0x10000;
 const NV20_DEFAULT_RENDER_WIDTH = 1024;
@@ -58,17 +85,23 @@ const NV20_MMIO_REGISTER_NAMES = new Map([
     [0x001100, "PBUS_INTR_0"],
     [0x001140, "PBUS_INTR_EN_0"],
 
+    [0x002080, "PFIFO_CACHE_ERROR"],
     [0x002100, "PFIFO_INTR_0"],
     [0x002140, "PFIFO_INTR_EN_0"],
+    [0x002200, "PFIFO_CONFIG"],
     [0x002210, "PFIFO_RAMHT"],
     [0x002214, "PFIFO_RAMFC"],
     [0x002218, "PFIFO_RAMRO"],
     [0x002400, "PFIFO_RUNOUT_STATUS"],
+    [0x002410, "PFIFO_RUNOUT_PUT"],
+    [0x002420, "PFIFO_RUNOUT_GET"],
+    [0x002500, "PFIFO_CACHES"],
     [0x002504, "PFIFO_MODE"],
     [0x003200, "PFIFO_CACHE1_PUSH0"],
     [0x003204, "PFIFO_CACHE1_PUSH1"],
     [0x003210, "PFIFO_CACHE1_PUT"],
     [0x003214, "PFIFO_CACHE1_STATUS"],
+    [0x003218, "PFIFO_CACHE1_DMA_DCOUNT"],
     [0x003220, "PFIFO_CACHE1_DMA_PUSH"],
     [0x00322C, "PFIFO_CACHE1_DMA_INSTANCE"],
     [0x003230, "PFIFO_CACHE1_DMA_STATE"],
@@ -76,8 +109,10 @@ const NV20_MMIO_REGISTER_NAMES = new Map([
     [0x003244, "PFIFO_CACHE1_DMA_GET"],
     [0x003248, "PFIFO_CACHE1_REF_CNT"],
     [0x003250, "PFIFO_CACHE1_PULL0"],
+    [0x003254, "PFIFO_CACHE1_PULL1"],
     [0x003270, "PFIFO_CACHE1_GET"],
     [0x0032E0, "PFIFO_CACHE1_ENGINE"],
+    [0x0032E4, "PFIFO_CACHE1_DMA_FETCH"],
     [0x003304, "PFIFO_RUNOUT_STATUS"],
 
     [0x009100, "PTIMER_INTR_0"],
@@ -334,6 +369,7 @@ export function NV20GeForce(cpu, options)
     options = options || {};
 
     this.name = "geforce-nv20";
+    this.cpu = cpu;
 
     this.pci_id = options.pci_id || NV20_DEFAULT_PCI_ID;
 
@@ -364,7 +400,7 @@ export function NV20GeForce(cpu, options)
         }
     }
 
-    this.ramin_flip = vram_size - 64;
+    this.ramin_flip = vram_size - NV20_RAMIN_REVERSE_UNIT;
     this.vram_trace = options.vram_trace !== false;
     this.vram_log_block_size = options.vram_log_block_size || NV20_VRAM_LOG_BLOCK_SIZE;
     this.vram_log_sample_writes = options.vram_log_sample_writes || NV20_VRAM_LOG_SAMPLE_WRITES;
@@ -396,6 +432,9 @@ export function NV20GeForce(cpu, options)
     this.mmio_trace_all = !!options.mmio_trace_all;
     this.mmio_seen_reads = new Set();
     this.mmio_seen_writes = new Set();
+    this.fifo_trace = options.fifo_trace !== false;
+    this.fifo_log_method_limit = options.fifo_log_method_limit || NV20_FIFO_METHOD_LOG_LIMIT;
+    this.fifo_method_log_count = 0;
 
     this.pci = cpu.devices.pci;
     this.pci_config_space = null;
@@ -408,23 +447,35 @@ export function NV20GeForce(cpu, options)
     this.bus_intr = 0;
     this.bus_intr_en = 0;
 
+    this.fifo_cache_error = 0;
     this.fifo_intr = 0;
     this.fifo_intr_en = 0;
+    this.fifo_config = 0;
     this.fifo_ramht = 0;
     this.fifo_ramfc = 0;
     this.fifo_ramro = 0;
+    this.fifo_runout_put = 0;
+    this.fifo_runout_get = 0;
+    this.fifo_caches = 0;
     this.fifo_mode = 0;
     this.fifo_cache1_push0 = 0;
     this.fifo_cache1_push1 = 0;
     this.fifo_cache1_put = 0;
     this.fifo_dma_push = 0;
     this.fifo_dma_instance = 0;
+    this.fifo_dma_dcount = 0;
+    this.fifo_dma_state = 0;
     this.fifo_dma_put = 0;
     this.fifo_dma_get = 0;
     this.fifo_ref_cnt = 0;
     this.fifo_pull0 = 0;
+    this.fifo_pull1 = 0;
     this.fifo_get = 0;
-    this.fifo_grctx_instance = 0;
+    this.fifo_engine = 0;
+    this.fifo_dma_fetch = 0;
+    this.fifo_active_channel = 0;
+    this.fifo_channels = [];
+    this.fifo_subchannels = new Array(8);
     this.fifo_cache_method = new Uint32Array(NV20_FIFO_CACHE_ENTRY_COUNT);
     this.fifo_cache_data = new Uint32Array(NV20_FIFO_CACHE_ENTRY_COUNT);
 
@@ -643,6 +694,587 @@ NV20GeForce.prototype.ramin_write32 = function(offset, value)
     offset = offset & (NV20_PRAMIN_SIZE - 1) & ~3;
 
     this.vram_write32((offset ^ this.ramin_flip) >>> 0, value);
+};
+
+NV20GeForce.prototype.fifo_channel = function(chid)
+{
+    chid &= 0x7F;
+
+    var channel = this.fifo_channels[chid];
+
+    if(channel)
+    {
+        return channel;
+    }
+
+    channel = {
+        id: chid,
+        dma_put: 0,
+        dma_get: 0,
+        dma_put_high: 0,
+        dma_get_high: 0,
+        dma_mget: 0,
+        dma_mget_high: 0,
+        dma_cget: 0,
+        ref: 0,
+        dma_instance: 0,
+        dma_state: 0x80000000,
+        dma_fetch: 0,
+        dma_dcount: 0,
+        dma_subroutine: 0,
+        dma_subroutine_active: false,
+        context_loaded: false,
+        processing: false,
+        pending_method: 0,
+        pending_count: 0,
+        pending_subchannel: 0,
+        pending_non_increasing: false,
+        subchannels: new Array(8),
+    };
+
+    this.fifo_channels[chid] = channel;
+    return channel;
+};
+
+NV20GeForce.prototype.fifo_active_channel_state = function()
+{
+    return this.fifo_channel(this.fifo_active_channel);
+};
+
+NV20GeForce.prototype.fifo_set_active_channel = function(chid)
+{
+    const channel = this.fifo_channel(chid);
+
+    this.fifo_active_channel = channel.id;
+    this.fifo_load_channel_context(channel);
+    this.fifo_sync_cache1_from_channel(channel);
+};
+
+NV20GeForce.prototype.fifo_sync_cache1_from_channel = function(channel)
+{
+    this.fifo_dma_put = channel.dma_put >>> 0;
+    this.fifo_dma_get = channel.dma_get >>> 0;
+    this.fifo_ref_cnt = channel.ref >>> 0;
+    this.fifo_dma_instance = channel.dma_instance >>> 0;
+    this.fifo_dma_dcount = channel.dma_dcount >>> 0;
+    this.fifo_dma_state = channel.dma_state >>> 0;
+    this.fifo_dma_fetch = channel.dma_fetch >>> 0;
+};
+
+NV20GeForce.prototype.fifo_ramht_info = function()
+{
+    var entry_bits = (this.fifo_ramht >>> 16 & 0xFF) + 9;
+
+    if(entry_bits < 9)
+    {
+        entry_bits = 9;
+    }
+    else if(entry_bits > 16)
+    {
+        entry_bits = 16;
+    }
+
+    return {
+        base: (this.fifo_ramht & 0xFFFF) << 8 & (NV20_PRAMIN_SIZE - 1),
+        entry_bits: entry_bits,
+        entries: 1 << entry_bits,
+        search: this.fifo_ramht >>> 24 & 0xFF,
+    };
+};
+
+NV20GeForce.prototype.fifo_ramfc_info = function()
+{
+    return {
+        base: (this.fifo_ramfc & 0xFFFF) << 8 & (NV20_PRAMIN_SIZE - 1),
+        stride: this.fifo_ramfc & 0x10000 ? NV20_RAMFC_NV10_STRIDE : NV20_RAMFC_NV04_STRIDE,
+    };
+};
+
+NV20GeForce.prototype.fifo_ramfc_offset = function(chid)
+{
+    const info = this.fifo_ramfc_info();
+    return info.base + (chid & 0x7F) * info.stride & (NV20_PRAMIN_SIZE - 1);
+};
+
+NV20GeForce.prototype.fifo_load_channel_context = function(channel)
+{
+    if(channel.context_loaded)
+    {
+        return;
+    }
+
+    channel.context_loaded = true;
+
+    if(!this.fifo_ramfc)
+    {
+        return;
+    }
+
+    const info = this.fifo_ramfc_info();
+    const offset = this.fifo_ramfc_offset(channel.id);
+
+    channel.dma_put = this.ramin_read32(offset + 0x00);
+    channel.dma_get = this.ramin_read32(offset + 0x04);
+    channel.ref = this.ramin_read32(offset + 0x08);
+    channel.dma_instance = this.ramin_read32(offset + 0x0C) & 0xFFFF;
+    channel.dma_dcount = this.ramin_read32(offset + 0x10);
+    channel.dma_state = this.ramin_read32(offset + 0x14) || 0x80000000;
+    channel.dma_fetch = this.ramin_read32(offset + 0x18);
+
+    if(info.stride >= NV20_RAMFC_NV10_STRIDE)
+    {
+        this.fifo_engine = this.ramin_read32(offset + 0x20);
+    }
+
+    this.fifo_sync_cache1_from_channel(channel);
+};
+
+NV20GeForce.prototype.fifo_save_channel_context = function(channel)
+{
+    if(!this.fifo_ramfc)
+    {
+        return;
+    }
+
+    const info = this.fifo_ramfc_info();
+    const offset = this.fifo_ramfc_offset(channel.id);
+
+    this.ramin_write32(offset + 0x00, channel.dma_put);
+    this.ramin_write32(offset + 0x04, channel.dma_get);
+    this.ramin_write32(offset + 0x08, channel.ref);
+    this.ramin_write32(offset + 0x0C, channel.dma_instance);
+    this.ramin_write32(offset + 0x10, channel.dma_dcount);
+    this.ramin_write32(offset + 0x14, channel.dma_state);
+    this.ramin_write32(offset + 0x18, channel.dma_fetch);
+
+    if(info.stride >= NV20_RAMFC_NV10_STRIDE)
+    {
+        this.ramin_write32(offset + 0x20, this.fifo_engine);
+    }
+};
+
+NV20GeForce.prototype.fifo_hash_handle = function(handle, chid, entry_bits)
+{
+    const mask = (1 << entry_bits) - 1;
+    var hash = chid & mask;
+    var value = handle >>> 0;
+
+    while(value)
+    {
+        hash ^= value & mask;
+        value >>>= entry_bits;
+    }
+
+    return hash & mask;
+};
+
+NV20GeForce.prototype.fifo_ramht_lookup = function(chid, handle)
+{
+    handle >>>= 0;
+    chid &= 0x7F;
+
+    const info = this.fifo_ramht_info();
+    const start = this.fifo_hash_handle(handle, chid, info.entry_bits);
+    const entries = info.entries;
+
+    for(var pass = 0; pass < entries; pass++)
+    {
+        const index = start + pass & (entries - 1);
+        const offset = info.base + index * NV20_RAMHT_ENTRY_SIZE & (NV20_PRAMIN_SIZE - 1);
+        const entry_handle = this.ramin_read32(offset);
+        const context = this.ramin_read32(offset + 4);
+
+        if(entry_handle === 0 && context === 0)
+        {
+            continue;
+        }
+
+        if(entry_handle !== handle)
+        {
+            continue;
+        }
+
+        const context_channel = context >>> 24 & 0x7F;
+
+        if(context_channel && context_channel !== chid)
+        {
+            continue;
+        }
+
+        const instance = (context & 0xFFFF) << 4 & (NV20_PRAMIN_SIZE - 1);
+        return {
+            handle: handle,
+            context: context >>> 0,
+            instance: instance >>> 0,
+            engine: context >>> 16 & 0x1F,
+            channel: context_channel,
+            class_id: this.ramin_read32(instance) & 0xFFFF,
+            index: index,
+        };
+    }
+
+    return null;
+};
+
+NV20GeForce.prototype.fifo_read_physical32 = function(address)
+{
+    address >>>= 0;
+
+    const mem8 = this.cpu && this.cpu.mem8;
+
+    if(mem8 && address + 3 < mem8.length)
+    {
+        return (mem8[address] |
+                mem8[address + 1] << 8 |
+                mem8[address + 2] << 16 |
+                mem8[address + 3] << 24) >>> 0;
+    }
+
+    if(address + 3 < this.vram_size)
+    {
+        return this.vram_read32(address);
+    }
+
+    return null;
+};
+
+NV20GeForce.prototype.fifo_dma_object = function(channel)
+{
+    const instance = (channel.dma_instance || this.fifo_dma_instance) & 0xFFFF;
+
+    if(!instance)
+    {
+        return null;
+    }
+
+    const offset = instance << 4 & (NV20_PRAMIN_SIZE - 1);
+    const flags = this.ramin_read32(offset);
+    const limit = this.ramin_read32(offset + 4);
+    const base = this.ramin_read32(offset + 8);
+
+    return {
+        instance: instance,
+        offset: offset,
+        flags: flags,
+        limit: limit,
+        base: base >>> 0,
+        adjust: flags & 0xFFF,
+    };
+};
+
+NV20GeForce.prototype.fifo_dma_read32 = function(channel, offset)
+{
+    offset >>>= 0;
+
+    const object = this.fifo_dma_object(channel);
+    var value = null;
+
+    if(object)
+    {
+        if(offset <= object.limit)
+        {
+            value = this.fifo_read_physical32((object.base + object.adjust + offset) >>> 0);
+        }
+    }
+
+    if(value === null)
+    {
+        value = this.fifo_read_physical32(offset);
+    }
+
+    if(value === null)
+    {
+        channel.dma_state = 0x80000000;
+        this.fifo_intr |= NV20_FIFO_INTR_DMA_PTE;
+
+        if(this.fifo_trace)
+        {
+            dbg_log(this.name + " pfifo dma read failed channel=" + channel.id +
+                    " get=" + h(offset, 8) +
+                    (object ? " instance=" + h(object.instance, 4) +
+                              " base=" + h(object.base, 8) +
+                              " limit=" + h(object.limit, 8) : ""), LOG_PCI);
+        }
+    }
+
+    return value;
+};
+
+NV20GeForce.prototype.fifo_log_method = function(channel, subchannel, method, data, source)
+{
+    if(!this.fifo_trace || this.fifo_method_log_count > this.fifo_log_method_limit)
+    {
+        return;
+    }
+
+    if(this.fifo_method_log_count === this.fifo_log_method_limit)
+    {
+        dbg_log(this.name + " pfifo method log suppressed", LOG_PCI);
+        this.fifo_method_log_count++;
+        return;
+    }
+
+    this.fifo_method_log_count++;
+    dbg_log(this.name + " pfifo " + source +
+            " channel=" + channel.id +
+            " subc=" + subchannel +
+            " method=" + h(method >>> 0, 4) +
+            " data=" + h(data >>> 0, 8), LOG_PCI);
+};
+
+NV20GeForce.prototype.fifo_submit_method = function(chid, subchannel, method, data, source)
+{
+    const channel = this.fifo_channel(chid);
+    subchannel &= 7;
+    method = method & 0x1FFC;
+    data >>>= 0;
+
+    const index = this.fifo_cache1_put++ & NV20_FIFO_CACHE_GET_MASK;
+    this.fifo_cache_method[index] = method | subchannel << 13;
+    this.fifo_cache_data[index] = data;
+    this.fifo_get = this.fifo_cache1_put & NV20_FIFO_CACHE_GET_MASK;
+    this.fifo_pull0 &= ~0x100;
+
+    this.graph_trapped_addr = method | subchannel << 13 | channel.id << 24;
+    this.graph_trapped_data = data;
+
+    if(method === 0)
+    {
+        const object = this.fifo_ramht_lookup(channel.id, data);
+
+        channel.subchannels[subchannel] = object || {
+            handle: data,
+            context: 0,
+            instance: 0,
+            engine: NV20_GRAPH_OBJECT_ENGINE,
+            class_id: 0,
+            missing: true,
+        };
+        this.fifo_subchannels[subchannel] = channel.subchannels[subchannel];
+
+        if(this.fifo_trace)
+        {
+            dbg_log(this.name + " pfifo bind object channel=" + channel.id +
+                    " subc=" + subchannel +
+                    " handle=" + h(data, 8) +
+                    (object ? " class=" + h(object.class_id, 4) +
+                              " instance=" + h(object.instance, 5) +
+                              " engine=" + object.engine : " missing-ramht"), LOG_PCI);
+        }
+
+        return;
+    }
+
+    this.fifo_log_method(channel, subchannel, method, data, source || "method");
+};
+
+NV20GeForce.prototype.fifo_dma_kick = function(channel, source)
+{
+    if(channel.processing)
+    {
+        return;
+    }
+
+    if(!channel.context_loaded &&
+        channel.dma_put === 0 &&
+        channel.dma_get === 0 &&
+        channel.dma_instance === 0)
+    {
+        this.fifo_load_channel_context(channel);
+    }
+
+    channel.processing = true;
+
+    var budget = NV20_FIFO_DMA_KICK_LIMIT;
+
+    while(budget-- > 0)
+    {
+        if(channel.pending_count)
+        {
+            if(channel.dma_get === channel.dma_put)
+            {
+                break;
+            }
+
+            const data = this.fifo_dma_read32(channel, channel.dma_get);
+
+            if(data === null)
+            {
+                break;
+            }
+
+            channel.dma_get = channel.dma_get + 4 >>> 0;
+            this.fifo_submit_method(channel.id, channel.pending_subchannel,
+                                    channel.pending_method, data, "dma");
+
+            if(!channel.pending_non_increasing)
+            {
+                channel.pending_method = channel.pending_method + 4 & 0x1FFC;
+            }
+
+            channel.pending_count--;
+            continue;
+        }
+
+        if(channel.dma_get === channel.dma_put)
+        {
+            break;
+        }
+
+        const header = this.fifo_dma_read32(channel, channel.dma_get);
+
+        if(header === null)
+        {
+            break;
+        }
+
+        channel.dma_get = channel.dma_get + 4 >>> 0;
+
+        if(header === 0x00020000)
+        {
+            if(channel.dma_subroutine_active)
+            {
+                channel.dma_get = channel.dma_subroutine >>> 0;
+                channel.dma_subroutine_active = false;
+            }
+            continue;
+        }
+
+        if((header & 0xE0000003) === 0x20000000)
+        {
+            channel.dma_get = header & 0x1FFFFFFC;
+            continue;
+        }
+
+        if((header & 0xE0000003) === 0x00000002)
+        {
+            channel.dma_subroutine = channel.dma_get;
+            channel.dma_subroutine_active = true;
+            channel.dma_get = header & 0x1FFFFFFC;
+            continue;
+        }
+
+        if((header & 0xE0000003) === 0x00000000 ||
+            (header & 0xE0000003) === 0x40000000)
+        {
+            channel.pending_non_increasing = !!(header & 0x40000000);
+            channel.pending_count = header >>> 18 & 0x7FF;
+            channel.pending_subchannel = header >>> 13 & 7;
+            channel.pending_method = header & 0x1FFC;
+            channel.dma_dcount = channel.pending_count;
+            continue;
+        }
+
+        channel.dma_state = 0x80000000;
+        this.fifo_cache_error = header >>> 0;
+        this.fifo_intr |= NV20_FIFO_INTR_CACHE_ERROR | NV20_FIFO_INTR_DMA_PUSHER;
+
+        if(this.fifo_trace)
+        {
+            dbg_log(this.name + " pfifo unsupported dma header channel=" + channel.id +
+                    " header=" + h(header >>> 0, 8) +
+                    " get=" + h(channel.dma_get >>> 0, 8) +
+                    " source=" + source, LOG_PCI);
+        }
+        break;
+    }
+
+    channel.processing = false;
+    channel.dma_dcount = channel.pending_count >>> 0;
+    channel.dma_state = channel.pending_count ? 0 : 0x80000000;
+    this.fifo_sync_cache1_from_channel(channel);
+    this.fifo_save_channel_context(channel);
+};
+
+NV20GeForce.prototype.fifo_dma_user_read32 = function(offset)
+{
+    const rel = offset - NV20_FIFO_DMA_USER_BASE >>> 0;
+    const channel = this.fifo_channel(rel / NV20_FIFO_DMA_USER_CHANNEL_STRIDE | 0);
+    const reg = rel & (NV20_FIFO_DMA_USER_CHANNEL_STRIDE - 1);
+
+    switch(reg)
+    {
+        case NV20_FIFO_DMA_PUT:
+            return channel.dma_put;
+        case NV20_FIFO_DMA_GET:
+            return channel.dma_get;
+        case NV20_FIFO_REF:
+            return channel.ref;
+        case NV20_FIFO_DMA_PUT_HIGH:
+            return channel.dma_put_high;
+        case NV20_FIFO_DMA_CGET:
+            return channel.dma_cget;
+        case NV20_FIFO_DMA_MGET:
+            return channel.dma_mget;
+        case NV20_FIFO_DMA_MGET_HIGH:
+            return channel.dma_mget_high;
+        case NV20_FIFO_DMA_GET_HIGH:
+            return channel.dma_get_high;
+        default:
+            return 0;
+    }
+};
+
+NV20GeForce.prototype.fifo_dma_user_write32 = function(offset, value)
+{
+    const rel = offset - NV20_FIFO_DMA_USER_BASE >>> 0;
+    const channel = this.fifo_channel(rel / NV20_FIFO_DMA_USER_CHANNEL_STRIDE | 0);
+    const reg = rel & (NV20_FIFO_DMA_USER_CHANNEL_STRIDE - 1);
+
+    this.fifo_load_channel_context(channel);
+
+    switch(reg)
+    {
+        case NV20_FIFO_DMA_PUT:
+            channel.dma_put = value >>> 0;
+            this.fifo_set_active_channel(channel.id);
+            this.fifo_dma_kick(channel, "user-put");
+            return true;
+        case NV20_FIFO_DMA_GET:
+            channel.dma_get = value >>> 0;
+            this.fifo_set_active_channel(channel.id);
+            this.fifo_sync_cache1_from_channel(channel);
+            return true;
+        case NV20_FIFO_REF:
+            channel.ref = value >>> 0;
+            this.fifo_sync_cache1_from_channel(channel);
+            return true;
+        case NV20_FIFO_DMA_PUT_HIGH:
+            channel.dma_put_high = value >>> 0;
+            return true;
+        case NV20_FIFO_DMA_CGET:
+            channel.dma_cget = value >>> 0;
+            return true;
+        case NV20_FIFO_DMA_MGET:
+            channel.dma_mget = value >>> 0;
+            return true;
+        case NV20_FIFO_DMA_MGET_HIGH:
+            channel.dma_mget_high = value >>> 0;
+            return true;
+        case NV20_FIFO_DMA_GET_HIGH:
+            channel.dma_get_high = value >>> 0;
+            return true;
+        default:
+            return true;
+    }
+};
+
+NV20GeForce.prototype.fifo_pio_user_read32 = function(offset)
+{
+    return 0xFFFFFFFF;
+};
+
+NV20GeForce.prototype.fifo_pio_user_write32 = function(offset, value)
+{
+    const rel = offset - NV20_FIFO_USER_BASE >>> 0;
+    const chid = rel / NV20_FIFO_USER_CHANNEL_STRIDE | 0;
+    const channel_offset = rel & (NV20_FIFO_USER_CHANNEL_STRIDE - 1);
+    const subchannel = channel_offset / NV20_FIFO_USER_SUBCHANNEL_STRIDE | 0;
+    const method = channel_offset & (NV20_FIFO_USER_SUBCHANNEL_STRIDE - 1) & 0x1FFC;
+
+    this.fifo_set_active_channel(chid);
+    this.fifo_submit_method(chid, subchannel, method, value, "pio");
+    return true;
 };
 
 NV20GeForce.prototype.vram_mark_write = function(offset, width, value)
@@ -1220,6 +1852,14 @@ NV20GeForce.prototype.register_read32 = function(offset)
         const index = offset - 0x3800 >>> 3;
         value = offset & 4 ? this.fifo_cache_data[index] : this.fifo_cache_method[index];
     }
+    else if(offset >= NV20_FIFO_USER_BASE && offset < NV20_FIFO_USER_BASE + NV20_FIFO_USER_SIZE)
+    {
+        value = this.fifo_pio_user_read32(offset);
+    }
+    else if(offset >= NV20_FIFO_DMA_USER_BASE && offset < NV20_FIFO_DMA_USER_BASE + NV20_FIFO_DMA_USER_SIZE)
+    {
+        value = this.fifo_dma_user_read32(offset);
+    }
     else
     {
         switch(offset)
@@ -1248,11 +1888,17 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.bus_intr_en;
                 break;
 
+            case 0x002080:
+                value = this.fifo_cache_error;
+                break;
             case 0x002100:
                 value = this.fifo_intr;
                 break;
             case 0x002140:
                 value = this.fifo_intr_en;
+                break;
+            case 0x002200:
+                value = this.fifo_config;
                 break;
             case 0x002210:
                 value = this.fifo_ramht;
@@ -1264,7 +1910,17 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.fifo_ramro;
                 break;
             case 0x002400:
-                value = this.fifo_get === this.fifo_cache1_put ? 0x10 : 0;
+                value = (this.fifo_get & NV20_FIFO_CACHE_GET_MASK) ===
+                    (this.fifo_cache1_put & NV20_FIFO_CACHE_GET_MASK) ? NV20_FIFO_CACHE_EMPTY : 0;
+                break;
+            case 0x002410:
+                value = this.fifo_runout_put;
+                break;
+            case 0x002420:
+                value = this.fifo_runout_get;
+                break;
+            case 0x002500:
+                value = this.fifo_caches;
                 break;
             case 0x002504:
                 value = this.fifo_mode;
@@ -1279,7 +1935,11 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.fifo_cache1_put;
                 break;
             case 0x003214:
-                value = this.fifo_get === this.fifo_cache1_put ? 0x10 : 0;
+                value = (this.fifo_get & NV20_FIFO_CACHE_GET_MASK) ===
+                    (this.fifo_cache1_put & NV20_FIFO_CACHE_GET_MASK) ? NV20_FIFO_CACHE_EMPTY : 0;
+                break;
+            case 0x003218:
+                value = this.fifo_dma_dcount;
                 break;
             case 0x003220:
                 value = this.fifo_dma_push;
@@ -1288,7 +1948,7 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.fifo_dma_instance;
                 break;
             case 0x003230:
-                value = 0x80000000;
+                value = this.fifo_dma_state || 0x80000000;
                 break;
             case 0x003240:
                 value = this.fifo_dma_put;
@@ -1300,17 +1960,24 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.fifo_ref_cnt;
                 break;
             case 0x003250:
-                if(this.fifo_get !== this.fifo_cache1_put)
+                if((this.fifo_get & NV20_FIFO_CACHE_GET_MASK) !==
+                    (this.fifo_cache1_put & NV20_FIFO_CACHE_GET_MASK))
                 {
                     this.fifo_pull0 |= 0x100;
                 }
                 value = this.fifo_pull0;
                 break;
+            case 0x003254:
+                value = this.fifo_pull1;
+                break;
             case 0x003270:
                 value = this.fifo_get;
                 break;
             case 0x0032E0:
-                value = this.fifo_grctx_instance;
+                value = this.fifo_engine;
+                break;
+            case 0x0032E4:
+                value = this.fifo_dma_fetch;
                 break;
             case 0x003304:
                 value = 1;
@@ -1467,6 +2134,9 @@ NV20GeForce.prototype.register_read32 = function(offset)
 
 NV20GeForce.prototype.register_write32 = function(offset, value)
 {
+    value >>>= 0;
+    var channel;
+
     if(offset >= NV20_PRAMIN_BASE && offset < NV20_PRAMIN_BASE + NV20_PRAMIN_SIZE)
     {
         this.ramin_write32(offset - NV20_PRAMIN_BASE, value);
@@ -1495,6 +2165,16 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
         return true;
     }
 
+    if(offset >= NV20_FIFO_USER_BASE && offset < NV20_FIFO_USER_BASE + NV20_FIFO_USER_SIZE)
+    {
+        return this.fifo_pio_user_write32(offset, value);
+    }
+
+    if(offset >= NV20_FIFO_DMA_USER_BASE && offset < NV20_FIFO_DMA_USER_BASE + NV20_FIFO_DMA_USER_SIZE)
+    {
+        return this.fifo_dma_user_write32(offset, value);
+    }
+
     switch(offset)
     {
         case 0x000100:
@@ -1514,11 +2194,17 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             this.bus_intr_en = value;
             return true;
 
+        case 0x002080:
+            this.fifo_cache_error &= ~value;
+            return true;
         case 0x002100:
             this.fifo_intr &= ~value;
             return true;
         case 0x002140:
             this.fifo_intr_en = value;
+            return true;
+        case 0x002200:
+            this.fifo_config = value;
             return true;
         case 0x002210:
             this.fifo_ramht = value;
@@ -1529,6 +2215,15 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
         case 0x002218:
             this.fifo_ramro = value;
             return true;
+        case 0x002410:
+            this.fifo_runout_put = value;
+            return true;
+        case 0x002420:
+            this.fifo_runout_get = value;
+            return true;
+        case 0x002500:
+            this.fifo_caches = value;
+            return true;
         case 0x002504:
             this.fifo_mode = value;
             return true;
@@ -1537,42 +2232,78 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             return true;
         case 0x003204:
             this.fifo_cache1_push1 = value;
+            this.fifo_set_active_channel(value & 0x7F);
             return true;
         case 0x003210:
             this.fifo_cache1_put = value;
             return true;
+        case 0x003218:
+            this.fifo_dma_dcount = value;
+            channel = this.fifo_active_channel_state();
+            this.fifo_load_channel_context(channel);
+            channel.dma_dcount = value;
+            return true;
         case 0x003220:
             this.fifo_dma_push = value;
+            this.fifo_dma_kick(this.fifo_active_channel_state(), "cache1-dma-push");
             return true;
         case 0x00322C:
             this.fifo_dma_instance = value;
+            channel = this.fifo_active_channel_state();
+            channel.dma_instance = value & 0xFFFF;
+            channel.context_loaded = true;
+            return true;
+        case 0x003230:
+            this.fifo_dma_state = value;
+            channel = this.fifo_active_channel_state();
+            this.fifo_load_channel_context(channel);
+            channel.dma_state = value;
             return true;
         case 0x003240:
             this.fifo_dma_put = value;
+            channel = this.fifo_active_channel_state();
+            this.fifo_load_channel_context(channel);
+            channel.dma_put = value;
+            this.fifo_dma_kick(channel, "cache1-dma-put");
             return true;
         case 0x003244:
             this.fifo_dma_get = value;
+            channel = this.fifo_active_channel_state();
+            this.fifo_load_channel_context(channel);
+            channel.dma_get = value;
             return true;
         case 0x003248:
             this.fifo_ref_cnt = value;
+            channel = this.fifo_active_channel_state();
+            this.fifo_load_channel_context(channel);
+            channel.ref = value;
             return true;
         case 0x003250:
             this.fifo_pull0 = value;
             return true;
+        case 0x003254:
+            this.fifo_pull1 = value;
+            return true;
         case 0x003270:
             this.fifo_get = value & NV20_FIFO_CACHE_GET_MASK;
-            if(this.fifo_get !== this.fifo_cache1_put)
+            if(this.fifo_get !== (this.fifo_cache1_put & NV20_FIFO_CACHE_GET_MASK))
             {
-                this.fifo_intr |= 1;
+                this.fifo_intr |= NV20_FIFO_INTR_CACHE_ERROR;
             }
             else
             {
-                this.fifo_intr &= ~1;
+                this.fifo_intr &= ~NV20_FIFO_INTR_CACHE_ERROR;
                 this.fifo_pull0 &= ~0x100;
             }
             return true;
         case 0x0032E0:
-            this.fifo_grctx_instance = value;
+            this.fifo_engine = value;
+            return true;
+        case 0x0032E4:
+            this.fifo_dma_fetch = value;
+            channel = this.fifo_active_channel_state();
+            this.fifo_load_channel_context(channel);
+            channel.dma_fetch = value;
             return true;
 
         case 0x009100:
