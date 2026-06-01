@@ -946,6 +946,10 @@ CPU.prototype.reboot_internal = function()
     {
         this.devices.virtio_net.reset();
     }
+    if(this.devices.geforce)
+    {
+        this.devices.geforce.reset();
+    }
     if(this.devices.ps2)
     {
         this.devices.ps2.reset();

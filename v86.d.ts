@@ -137,9 +137,9 @@ export type ScreenConfig =
  *
  * This exposes a PCI VGA-compatible device with BAR0 MMIO stubs, BAR1 VRAM
  * backing, an external PCI option ROM BAR, and an experimental framebuffer
- * bridge. It also has a minimal RAMIN/RAMHT/PFIFO path for channel setup and
- * command submission. It does not yet implement full option ROM POST, legacy
- * VGA decode, PGRAPH execution, or acceleration.
+ * bridge. It also has a minimal RAMIN/RAMHT/PFIFO path for channel setup,
+ * command submission, and a small 2D acceleration subset. It does not yet
+ * implement full option ROM POST, legacy VGA decode, or full PGRAPH execution.
  */
 export type GeForceConfig =
     {
