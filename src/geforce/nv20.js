@@ -41,6 +41,7 @@ const NV20_FIFO_CACHE_EMPTY = 0x10;
 const NV20_FIFO_INTR_CACHE_ERROR = 1 << 0;
 const NV20_FIFO_INTR_DMA_PUSHER = 1 << 12;
 const NV20_FIFO_INTR_DMA_PTE = 1 << 16;
+const NV20_GRAPH_DEBUG_RECENT_LIMIT = 96;
 const NV20_FIFO_USER_BASE = 0x800000;
 const NV20_FIFO_USER_SIZE = 0x200000;
 const NV20_FIFO_USER_CHANNEL_STRIDE = 0x10000;
@@ -68,6 +69,7 @@ const NV20_DEFAULT_RENDER_HEIGHT = 768;
 const NV20_DEFAULT_RENDER_BPP = 32;
 const NV20_DEFAULT_RENDER_FORMAT = "xrgb8888";
 const NV20_2D_OPERATION_SRCCOPY = 3;
+const NV20_ROP_SRCCOPY = 0xCC;
 
 const NV20_CLASS_DMA_FROM_MEMORY = 0x0002;
 const NV20_CLASS_DMA_TO_MEMORY = 0x0003;
@@ -120,6 +122,16 @@ const NV20_MIN_RENDER_WIDTH = 320;
 const NV20_MIN_RENDER_HEIGHT = 200;
 const NV20_MAX_RENDER_WIDTH = 4096;
 const NV20_MAX_RENDER_HEIGHT = 4096;
+const NV20_RENDER_COMMON_MODES = [
+    [1920, 1200],
+    [1600, 1200],
+    [1440, 1080],
+    [1280, 1024],
+    [1152, 864],
+    [1024, 768],
+    [800, 600],
+    [640, 480],
+];
 
 const NV20_MMIO_REGISTER_NAMES = new Map([
     [0x000000, "PMC_BOOT_0"],
@@ -174,6 +186,9 @@ const NV20_MMIO_REGISTER_NAMES = new Map([
     [0x100000, "PFB_BOOT_0"],
     [0x100200, "PFB_CFG"],
     [0x10020C, "PFB_CSTATUS"],
+    [0x100240, "PFB_TILE_0"],
+    [0x100244, "PFB_TLIMIT_0"],
+    [0x100248, "PFB_TSIZE_0"],
     [0x100320, "PFB_CFG0"],
     [0x101000, "PEXTDEV_BOOT_0"],
 
@@ -198,6 +213,9 @@ const NV20_MMIO_REGISTER_NAMES = new Map([
     [0x400780, "PGRAPH_CHANNEL_CTX_TABLE"],
     [0x400820, "PGRAPH_OFFSET0"],
     [0x400850, "PGRAPH_PITCH0"],
+    [0x400900, "PGRAPH_TILE_0"],
+    [0x400904, "PGRAPH_TLIMIT_0"],
+    [0x400908, "PGRAPH_TSIZE_0"],
 
     [0x600100, "PCRTC_INTR_0"],
     [0x600140, "PCRTC_INTR_EN_0"],
@@ -434,12 +452,18 @@ function nv20_surface_bpp_from_format(format, fallback_bpp)
     }
 }
 
-function nv20_ifc_bpp_from_format(format, fallback_bpp)
+function nv20_ifc_bpp_from_format(format, fallback_bpp, surface_format)
 {
+    if((surface_format & 0xFF) === 0x1)
+    {
+        return 8;
+    }
+
     switch(format & 0xFF)
     {
+        case 0x0:
+            return 1;
         case 0x1:
-            return 8;
         case 0x2:
         case 0x3:
             return 16;
@@ -539,6 +563,97 @@ function nv20_color_to_bytes(color, src_bpp, src_format, dst_bpp, dst_format)
     }
 
     return [b, g, r, color >>> 24];
+}
+
+function nv20_clamp8(value)
+{
+    value = value + 0.5 | 0;
+
+    if(value < 0)
+    {
+        return 0;
+    }
+
+    if(value > 0xFF)
+    {
+        return 0xFF;
+    }
+
+    return value;
+}
+
+function nv20_pixel_channels(color, bpp, format)
+{
+    color >>>= 0;
+    bpp = bpp || 32;
+    format &= 0xFF;
+
+    if(bpp === 8)
+    {
+        const gray = color & 0xFF;
+        return {
+            r: gray,
+            g: gray,
+            b: gray,
+            a: 0xFF,
+        };
+    }
+
+    if(bpp === 15 || format === 2 || format === 3)
+    {
+        return {
+            r: (color >> 10 & 0x1F) * 0xFF / 0x1F | 0,
+            g: (color >> 5 & 0x1F) * 0xFF / 0x1F | 0,
+            b: (color & 0x1F) * 0xFF / 0x1F | 0,
+            a: 0xFF,
+        };
+    }
+
+    if(bpp === 16)
+    {
+        return {
+            r: (color >> 11 & 0x1F) * 0xFF / 0x1F | 0,
+            g: (color >> 5 & 0x3F) * 0xFF / 0x3F | 0,
+            b: (color & 0x1F) * 0xFF / 0x1F | 0,
+            a: 0xFF,
+        };
+    }
+
+    return {
+        r: color >> 16 & 0xFF,
+        g: color >> 8 & 0xFF,
+        b: color & 0xFF,
+        a: color >>> 24,
+    };
+}
+
+function nv20_rop_byte(rop, src, dst, pat)
+{
+    rop &= 0xFF;
+    src &= 0xFF;
+    dst &= 0xFF;
+    pat &= 0xFF;
+
+    if(rop === NV20_ROP_SRCCOPY)
+    {
+        return src;
+    }
+
+    var value = 0;
+
+    for(var bit = 0; bit < 8; bit++)
+    {
+        const index = ((pat >>> bit & 1) << 2) |
+            ((src >>> bit & 1) << 1) |
+            (dst >>> bit & 1);
+
+        if(rop >>> index & 1)
+        {
+            value |= 1 << bit;
+        }
+    }
+
+    return value;
 }
 
 function nv20_object_class_from_word(word)
@@ -758,6 +873,27 @@ function nv20_option_rom_bar_size(length)
     return Math.max(MMAP_BLOCK_SIZE, nv20_next_power_of_2(length));
 }
 
+function nv20_graph_debug_2d_default()
+{
+    return {
+        "methods": 0,
+        "fill": 0,
+        "blit": 0,
+        "upload_words": 0,
+        "mono_words": 0,
+        "blend": 0,
+        "chroma_skip": 0,
+        "m2mf": 0,
+        "sifm": 0,
+        "gdi_rect": 0,
+        "gdi_image": 0,
+        "accel": 0,
+        "by_class": {},
+        "by_method": {},
+        "recent": [],
+    };
+}
+
 function nv20_normalize_option_rom(rom)
 {
     if(!rom)
@@ -793,7 +929,7 @@ export function NV20GeForce(cpu, options)
     options = options || {};
 
     this.name = "geforce-nv20";
-    this["debug_build_tag"] = "nv20-notify-complete-20260602";
+    this["debug_build_tag"] = "nv20-chroma-bind-20260602";
     this.cpu = cpu;
 
     this.pci_id = options.pci_id || NV20_DEFAULT_PCI_ID;
@@ -852,6 +988,21 @@ export function NV20GeForce(cpu, options)
     this.render_buffer = null;
     this.render_image_data = null;
     this.render_source = "default";
+    this.render_surface_inferred = false;
+    this.render_surface_pitch = 0;
+    this.render_surface_offset = 0;
+    this.render_surface_bpp = 0;
+    this["debug_render_mode"] = {
+        "width": this.render_width,
+        "height": this.render_height,
+        "bpp": this.render_bpp,
+        "stride": this.render_stride,
+        "offset": this.render_offset,
+        "source": this.render_source,
+        "surface": false,
+        "tile": false,
+        "tile_pitch": 0,
+    };
     this.screen = options.screen || cpu.devices.vga && cpu.devices.vga.screen;
     this.bus = options.bus || cpu.devices.vga && cpu.devices.vga.bus;
     this.mmio_registers = new Map();
@@ -940,11 +1091,16 @@ export function NV20GeForce(cpu, options)
     this.graph_channel_ctx_table = 0;
     this.graph_offset0 = 0;
     this.graph_pitch0 = 0;
+    this.fb_tile0_flags = 0;
+    this.fb_tile0_limit = 0;
+    this.fb_tile0_pitch = 0;
     this.graph_object_states = new Map();
     this["graph_accel_count"] = 0;
     this["graph_d3d_method_count"] = 0;
     this["graph_unhandled_method_count"] = 0;
     this["graph_last_unhandled_method"] = null;
+    this["graph_mono_upload_count"] = 0;
+    this["graph_debug_2d"] = nv20_graph_debug_2d_default();
 
     this.crtc_intr = 0;
     this.crtc_intr_en = 0;
@@ -1044,6 +1200,21 @@ NV20GeForce.prototype.reset = function()
     this.render_update_count = 0;
     this.render_buffer = null;
     this.render_image_data = null;
+    this.render_surface_inferred = false;
+    this.render_surface_pitch = 0;
+    this.render_surface_offset = 0;
+    this.render_surface_bpp = 0;
+    this["debug_render_mode"] = {
+        "width": this.render_width,
+        "height": this.render_height,
+        "bpp": this.render_bpp,
+        "stride": this.render_stride,
+        "offset": this.render_offset,
+        "source": this.render_source,
+        "surface": false,
+        "tile": false,
+        "tile_pitch": 0,
+    };
     this.render_dirty_min = this.render_offset + this.render_frame_size;
     this.render_dirty_max = this.render_offset;
 
@@ -1125,11 +1296,16 @@ NV20GeForce.prototype.reset = function()
     this.graph_channel_ctx_table = 0;
     this.graph_offset0 = 0;
     this.graph_pitch0 = 0;
+    this.fb_tile0_flags = 0;
+    this.fb_tile0_limit = 0;
+    this.fb_tile0_pitch = 0;
     this.graph_object_states.clear();
     this["graph_accel_count"] = 0;
     this["graph_d3d_method_count"] = 0;
     this["graph_unhandled_method_count"] = 0;
     this["graph_last_unhandled_method"] = null;
+    this["graph_mono_upload_count"] = 0;
+    this["graph_debug_2d"] = nv20_graph_debug_2d_default();
 
     this.crtc_intr = 0;
     this.crtc_intr_en = 0;
@@ -1986,8 +2162,11 @@ NV20GeForce.prototype.graph_init_object_state = function(channel, object)
         class_name: nv20_class_name(class_id),
         operation: NV20_2D_OPERATION_SRCCOPY,
         color_format: 0,
+        color_format_set: false,
         color: 0,
         format: nv20_surface_format_from_bpp(this.render_bpp),
+        surface_format_set: false,
+        surface_pitch_set: false,
         src_pitch: this.render_stride,
         dst_pitch: this.render_stride,
         src_offset: this.render_offset,
@@ -2000,6 +2179,10 @@ NV20GeForce.prototype.graph_init_object_state = function(channel, object)
         notify_type: 0,
         surface: null,
         clip: null,
+        pattern: null,
+        rop_context: null,
+        chroma: null,
+        beta_context: null,
         clip_point: { x: 0, y: 0 },
         clip_size: { w: 0, h: 0 },
         point: { x: 0, y: 0 },
@@ -2012,6 +2195,16 @@ NV20GeForce.prototype.graph_init_object_state = function(channel, object)
         rect_xy0: { x: 0, y: 0 },
         clip_xy0: { x: 0, y: 0 },
         clip_xy1: { x: 0, y: 0 },
+        gdi_color_format: 0,
+        gdi_mono_format: 0,
+        gdi_bg_color: 0,
+        gdi_fg_color: 0xFFFFFFFF,
+        gdi_image_swh: { w: 0, h: 0 },
+        gdi_image_dwh: { w: 0, h: 0 },
+        gdi_image_xy: { x: 0, y: 0 },
+        gdi_words: [],
+        gdi_words_left: 0,
+        gdi_words_ptr: 0,
         dx_du: 0,
         dy_dv: 0,
         point12d4: { x: 0, y: 0 },
@@ -2035,7 +2228,10 @@ NV20GeForce.prototype.graph_init_object_state = function(channel, object)
         pattern_color: [],
         chroma_color_format: 0,
         chroma_color: 0,
-        beta: 0,
+        beta: 0xFFFFFFFF,
+        mono_format: 0,
+        mono_color0: 0,
+        mono_color1: 0xFFFFFFFF,
         sifm_src_dma: null,
         sifm_surface: null,
         sifm_color_format: 0,
@@ -2048,6 +2244,7 @@ NV20GeForce.prototype.graph_init_object_state = function(channel, object)
         sifm_sfmt: 0,
         sifm_sofs: 0,
         sifm_syx: { x: 0, y: 0 },
+        sifm_syx_raw: 0,
         d3d_a_dma: null,
         d3d_b_dma: null,
         d3d_color_dma: null,
@@ -2145,6 +2342,246 @@ NV20GeForce.prototype.graph_bind_surface_handle = function(channel, state, handl
     }
 
     return true;
+};
+
+NV20GeForce.prototype.graph_bind_context_handle = function(channel, state, handle)
+{
+    const object = this.fifo_ramht_lookup(channel.id, handle);
+
+    if(!object)
+    {
+        return true;
+    }
+
+    const object_state = this.graph_get_object_state(channel, object);
+    const class_id = object.class_id & 0xFFFF;
+
+    if(nv20_is_surface2d_class(class_id) || class_id === NV20_CLASS_CLIP)
+    {
+        return this.graph_bind_surface_handle(channel, state, handle);
+    }
+
+    if(class_id === NV20_CLASS_ROP)
+    {
+        state.rop_context = object_state;
+    }
+    else if(class_id === NV20_CLASS_PATTERN)
+    {
+        state.pattern = object_state;
+    }
+    else if(class_id === NV20_CLASS_CHROMA)
+    {
+        state.chroma = object_state;
+    }
+    else if(class_id === NV20_CLASS_BETA)
+    {
+        state.beta_context = object_state;
+    }
+
+    return true;
+};
+
+NV20GeForce.prototype.graph_effective_rop = function(state, operation)
+{
+    operation = operation === undefined ? state && state.operation : operation;
+
+    if(operation !== undefined && operation !== 1)
+    {
+        return NV20_ROP_SRCCOPY;
+    }
+
+    if(state && state.rop_context && state.rop_context.rop !== undefined)
+    {
+        return state.rop_context.rop & 0xFF;
+    }
+
+    if(state && state.rop !== undefined)
+    {
+        return state.rop & 0xFF;
+    }
+
+    return NV20_ROP_SRCCOPY;
+};
+
+NV20GeForce.prototype.graph_count_2d = function(kind)
+{
+    const stats = this["graph_debug_2d"];
+
+    if(!stats)
+    {
+        return;
+    }
+
+    stats[kind] = (stats[kind] || 0) + 1;
+    stats["accel"] = this["graph_accel_count"] || 0;
+};
+
+NV20GeForce.prototype.graph_beta_value = function(state)
+{
+    if(state && state.beta_context && state.beta_context.beta !== undefined)
+    {
+        return state.beta_context.beta >>> 0;
+    }
+
+    if(state && state.beta !== undefined)
+    {
+        return state.beta >>> 0;
+    }
+
+    return 0xFFFFFFFF;
+};
+
+NV20GeForce.prototype.graph_chroma_matches = function(state, src_color, src_bytes)
+{
+    const chroma = state && state.chroma;
+
+    if(!chroma)
+    {
+        return false;
+    }
+
+    const chroma_color = chroma.chroma_color >>> 0;
+    src_color >>>= 0;
+
+    if(src_bytes >= 4)
+    {
+        return !!(chroma_color & 0xFF000000) &&
+            ((src_color & 0x00FFFFFF) === (chroma_color & 0x00FFFFFF));
+    }
+
+    if(src_bytes === 2)
+    {
+        return !!(chroma_color & 0xFFFF0000) &&
+            ((src_color & 0x0000FFFF) === (chroma_color & 0x0000FFFF));
+    }
+
+    return !!(chroma_color & 0xFFFFFF00) &&
+        ((src_color & 0x000000FF) === (chroma_color & 0x000000FF));
+};
+
+NV20GeForce.prototype.graph_blend_bytes = function(state,
+                                                   src_color,
+                                                   src_bpp,
+                                                   src_format,
+                                                   dst_color,
+                                                   dst_bpp,
+                                                   dst_format)
+{
+    src_color >>>= 0;
+    dst_color >>>= 0;
+
+    const beta = this.graph_beta_value(state);
+    var src = nv20_pixel_channels(src_color, src_bpp, src_format);
+    const dst = nv20_pixel_channels(dst_color, dst_bpp, dst_format);
+    var r;
+    var g;
+    var b;
+
+    if(src_bpp === 32)
+    {
+        // NV4 image blending treats a zero dword as transparent and otherwise
+        // expects premultiplied source color.
+        if(src_color === 0)
+        {
+            return null;
+        }
+
+        if((src_format & 0xFF) === 4)
+        {
+            src.a = 0xFF;
+        }
+
+        if(beta !== 0xFFFFFFFF)
+        {
+            src.b = src.b * (beta & 0xFF) / 0xFF | 0;
+            src.g = src.g * (beta >> 8 & 0xFF) / 0xFF | 0;
+            src.r = src.r * (beta >> 16 & 0xFF) / 0xFF | 0;
+            src.a = src.a * (beta >>> 24) / 0xFF | 0;
+        }
+
+        if(src.a <= 0)
+        {
+            return null;
+        }
+
+        const inverse_alpha = 0xFF - src.a;
+        r = nv20_clamp8(dst.r * inverse_alpha / 0xFF + src.r);
+        g = nv20_clamp8(dst.g * inverse_alpha / 0xFF + src.g);
+        b = nv20_clamp8(dst.b * inverse_alpha / 0xFF + src.b);
+    }
+    else
+    {
+        const inverse_beta = 0xFF - (beta >>> 24);
+        r = nv20_clamp8((dst.r * inverse_beta + src.r * (beta >> 16 & 0xFF)) / 0xFF);
+        g = nv20_clamp8((dst.g * inverse_beta + src.g * (beta >> 8 & 0xFF)) / 0xFF);
+        b = nv20_clamp8((dst.b * inverse_beta + src.b * (beta & 0xFF)) / 0xFF);
+    }
+
+    return nv20_color_to_bytes(0xFF000000 | r << 16 | g << 8 | b,
+                               32,
+                               0,
+                               dst_bpp,
+                               dst_format);
+};
+
+NV20GeForce.prototype.graph_note_2d = function(kind, state, details)
+{
+    const stats = this["graph_debug_2d"];
+
+    if(!stats)
+    {
+        return;
+    }
+
+    stats[kind] = (stats[kind] || 0) + 1;
+    stats["accel"] = this["graph_accel_count"] || 0;
+
+    const entry = details || {};
+    entry["kind"] = kind;
+
+    if(state)
+    {
+        entry["cls"] = state.class_name || nv20_class_name(state.class_id);
+    }
+
+    stats["recent"].push(entry);
+
+    if(stats["recent"].length > NV20_GRAPH_DEBUG_RECENT_LIMIT)
+    {
+        stats["recent"].shift();
+    }
+};
+
+NV20GeForce.prototype.graph_note_method = function(state, method, data, handled)
+{
+    const stats = this["graph_debug_2d"];
+
+    if(!stats || !state)
+    {
+        return;
+    }
+
+    const class_name = state.class_name || nv20_class_name(state.class_id);
+    const method_name = class_name + ":" + h(method >>> 0, 4);
+
+    stats["methods"]++;
+    stats["by_class"][class_name] = (stats["by_class"][class_name] || 0) + 1;
+    stats["by_method"][method_name] = (stats["by_method"][method_name] || 0) + 1;
+
+    if(!handled)
+    {
+        stats["recent"].push({
+            "kind": "unhandled",
+            "cls": class_name,
+            "method": "0x" + h(method >>> 0, 4),
+            "data": "0x" + h(data >>> 0, 8),
+        });
+
+        if(stats["recent"].length > NV20_GRAPH_DEBUG_RECENT_LIMIT)
+        {
+            stats["recent"].shift();
+        }
+    }
 };
 
 NV20GeForce.prototype.graph_decode_dma_address = function(dma, offset, prefer_vram)
@@ -2406,15 +2843,64 @@ NV20GeForce.prototype.graph_clip_rect = function(surface, x, y, w, h, clip)
     };
 };
 
-NV20GeForce.prototype.graph_write_surface_pixel = function(surface, x, y, bytes)
+NV20GeForce.prototype.graph_write_surface_pixel = function(surface, x, y, bytes, rop, pattern_bytes, options)
 {
     const bytes_per_pixel = this.graph_surface_bytes_per_pixel(surface);
     const pitch = this.graph_surface_pitch(surface, true);
+
+    x |= 0;
+    y |= 0;
+
+    const surface_offset = this.graph_surface_offset(surface, true);
+    const max_width = Math.max(this.render_width, pitch / bytes_per_pixel | 0);
+    const max_height = Math.max(this.render_height, (this.vram_size - surface_offset) / Math.max(1, pitch) | 0);
+
+    if(x < 0 || y < 0 || x >= max_width || y >= max_height)
+    {
+        return;
+    }
+
     const location = this.graph_surface_location(surface, true, y * pitch + x * bytes_per_pixel >>> 0);
 
     if(!location)
     {
         return;
+    }
+
+    rop = rop === undefined ? NV20_ROP_SRCCOPY : rop & 0xFF;
+    var write_bytes = bytes;
+
+    if(options && options.operation === 5)
+    {
+        var dst_color = 0;
+
+        for(var k = 0; k < bytes_per_pixel; k++)
+        {
+            const dst_byte = location.kind === "vram" ?
+                this.vram[this.vram_offset(location.offset + k)] :
+                this.cpu.mem8[location.offset + k];
+            dst_color |= dst_byte << (k << 3);
+        }
+
+        const dst_bpp = options.dst_bpp ||
+            nv20_surface_bpp_from_format(surface.format, this.render_bpp);
+        const blended = this.graph_blend_bytes(options.state,
+                                               options.src_color,
+                                               options.src_bpp,
+                                               options.src_format,
+                                               dst_color,
+                                               dst_bpp,
+                                               surface.format);
+
+        if(!blended)
+        {
+            return;
+        }
+
+        write_bytes = blended;
+        rop = NV20_ROP_SRCCOPY;
+        pattern_bytes = null;
+        this.graph_count_2d("blend");
     }
 
     if(location.kind === "vram")
@@ -2423,23 +2909,31 @@ NV20GeForce.prototype.graph_write_surface_pixel = function(surface, x, y, bytes)
 
         for(var i = 0; i < bytes_per_pixel; i++)
         {
-            this.vram[this.vram_offset(offset + i)] = bytes[i] || 0;
+            const dst_offset = this.vram_offset(offset + i);
+            const src = write_bytes[i] || 0;
+            const dst = this.vram[dst_offset];
+            const pat = pattern_bytes ? pattern_bytes[i] || 0 : src;
+            this.vram[dst_offset] = nv20_rop_byte(rop, src, dst, pat);
         }
 
-        this.vram_mark_write(offset, bytes_per_pixel, bytes[0] || 0);
+        this.vram_mark_write(offset, bytes_per_pixel, write_bytes[0] || 0);
     }
     else
     {
         for(var j = 0; j < bytes_per_pixel; j++)
         {
-            this.cpu.mem8[location.offset + j] = bytes[j] || 0;
+            const src = write_bytes[j] || 0;
+            const dst = this.cpu.mem8[location.offset + j];
+            const pat = pattern_bytes ? pattern_bytes[j] || 0 : src;
+            this.cpu.mem8[location.offset + j] = nv20_rop_byte(rop, src, dst, pat);
         }
     }
 };
 
-NV20GeForce.prototype.graph_fill_rect = function(surface, x, y, w, h, color, color_format, clip)
+NV20GeForce.prototype.graph_fill_rect = function(surface, x, y, w, h, color, color_format, clip, rop, state)
 {
     surface = surface || this.graph_default_surface();
+    this.update_render_mode_from_surface(surface, "2d-fill", x + w, y + h);
 
     const rect = this.graph_clip_rect(surface, x, y, w, h, clip);
 
@@ -2455,6 +2949,36 @@ NV20GeForce.prototype.graph_fill_rect = function(surface, x, y, w, h, color, col
     const bytes = nv20_color_to_bytes(color, src_bpp, src_bpp === 16 ? color_format : 0,
                                       dst_bpp, surface.format);
     const row_bytes = rect.w * bytes_per_pixel;
+    const operation = state && state.operation !== undefined ? state.operation >>> 0 : 0;
+    rop = rop === undefined ? NV20_ROP_SRCCOPY : rop & 0xFF;
+
+    if(rop !== NV20_ROP_SRCCOPY || operation === 5)
+    {
+        for(var py = 0; py < rect.h; py++)
+        {
+            for(var px = 0; px < rect.w; px++)
+            {
+                this.graph_write_surface_pixel(surface, rect.x + px, rect.y + py, bytes, rop, null, {
+                    operation: operation,
+                    state: state,
+                    src_color: color >>> 0,
+                    src_bpp: src_bpp,
+                    src_format: color_format >>> 0,
+                    dst_bpp: dst_bpp,
+                });
+            }
+        }
+
+        this["graph_accel_count"]++;
+        this.graph_note_2d("fill", null, {
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+            rop: rop,
+        });
+        return true;
+    }
 
     for(var yy = 0; yy < rect.h; yy++)
     {
@@ -2501,12 +3025,20 @@ NV20GeForce.prototype.graph_fill_rect = function(surface, x, y, w, h, color, col
     }
 
     this["graph_accel_count"]++;
+    this.graph_note_2d("fill", null, {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+        rop: rop,
+    });
     return true;
 };
 
-NV20GeForce.prototype.graph_blit = function(surface, src_x, src_y, dst_x, dst_y, w, h, clip)
+NV20GeForce.prototype.graph_blit = function(surface, src_x, src_y, dst_x, dst_y, w, h, clip, rop, state)
 {
     surface = surface || this.graph_default_surface();
+    this.update_render_mode_from_surface(surface, "2d-blit", dst_x + w, dst_y + h);
 
     const rect = this.graph_clip_rect(surface, dst_x, dst_y, w, h, clip);
 
@@ -2524,6 +3056,8 @@ NV20GeForce.prototype.graph_blit = function(surface, src_x, src_y, dst_x, dst_y,
     const row_bytes = rect.w * bytes_per_pixel;
     const bottom_up = rect.y > src_y;
     const row = new Uint8Array(row_bytes);
+    const use_chroma = !!(state && state.chroma && state.chroma.chroma_color);
+    rop = rop === undefined ? NV20_ROP_SRCCOPY : rop & 0xFF;
 
     for(var row_index = 0; row_index < rect.h; row_index++)
     {
@@ -2538,7 +3072,54 @@ NV20GeForce.prototype.graph_blit = function(surface, src_x, src_y, dst_x, dst_y,
             continue;
         }
 
-        if(src_location.kind === "vram" && dst_location.kind === "vram")
+        if(rop !== NV20_ROP_SRCCOPY || use_chroma)
+        {
+            for(var px = 0; px < rect.w; px++)
+            {
+                var src_color = 0;
+
+                if(use_chroma)
+                {
+                    for(var cb = 0; cb < bytes_per_pixel; cb++)
+                    {
+                        const src_byte = src_location.kind === "vram" ?
+                            this.vram[this.vram_offset(src_location.offset + px * bytes_per_pixel + cb)] :
+                            this.cpu.mem8[src_location.offset + px * bytes_per_pixel + cb];
+                        src_color |= src_byte << (cb << 3);
+                    }
+
+                    if(this.graph_chroma_matches(state, src_color, bytes_per_pixel))
+                    {
+                        this.graph_count_2d("chroma_skip");
+                        continue;
+                    }
+                }
+
+                for(var i = 0; i < bytes_per_pixel; i++)
+                {
+                    const byte_offset = px * bytes_per_pixel + i;
+                    const src_value = src_location.kind === "vram" ?
+                        this.vram[this.vram_offset(src_location.offset + byte_offset)] :
+                        this.cpu.mem8[src_location.offset + byte_offset];
+                    const dst_value = dst_location.kind === "vram" ?
+                        this.vram[this.vram_offset(dst_location.offset + byte_offset)] :
+                        this.cpu.mem8[dst_location.offset + byte_offset];
+                    const value = nv20_rop_byte(rop, src_value, dst_value, src_value);
+
+                    if(dst_location.kind === "vram")
+                    {
+                        const offset = this.vram_offset(dst_location.offset + byte_offset);
+                        this.vram[offset] = value;
+                        this.vram_mark_write(offset, 1, value);
+                    }
+                    else
+                    {
+                        this.cpu.mem8[dst_location.offset + byte_offset] = value;
+                    }
+                }
+            }
+        }
+        else if(src_location.kind === "vram" && dst_location.kind === "vram")
         {
             const src_offset = this.vram_offset(src_location.offset);
             const dst_offset = this.vram_offset(dst_location.offset);
@@ -2570,6 +3151,15 @@ NV20GeForce.prototype.graph_blit = function(surface, src_x, src_y, dst_x, dst_y,
     }
 
     this["graph_accel_count"]++;
+    this.graph_note_2d("blit", null, {
+        sx: src_x,
+        sy: src_y,
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+        rop: rop,
+    });
     return true;
 };
 
@@ -2603,9 +3193,14 @@ NV20GeForce.prototype.graph_begin_image_upload = function(state)
         return null;
     }
 
-    const src_bpp = nv20_ifc_bpp_from_format(state.color_format, this.render_bpp);
-    const src_bytes = nv20_render_bytes_per_pixel(src_bpp);
     const dst_bpp = nv20_surface_bpp_from_format(surface.format, this.render_bpp);
+    const src_bpp = state.color_format_set ?
+        nv20_ifc_bpp_from_format(state.color_format, dst_bpp, surface.format) :
+        dst_bpp;
+    const src_bytes = src_bpp === 1 ? 0 : nv20_render_bytes_per_pixel(src_bpp);
+    const mono_words_per_row = src_bpp === 1 ? Math.max(1, size.w + 31 >>> 5) : 0;
+    this.update_render_mode_from_surface(surface, "2d-upload",
+                                         point.x + dest_w, point.y + dest_h);
 
     state.image_upload = {
         surface: surface,
@@ -2618,14 +3213,76 @@ NV20GeForce.prototype.graph_begin_image_upload = function(state)
         src_bpp: src_bpp,
         src_bytes: src_bytes,
         dst_bpp: dst_bpp,
-        bytes_total: size.w * size.h * src_bytes,
+        bytes_total: src_bpp === 1 ?
+            mono_words_per_row * 4 * size.h :
+            size.w * size.h * src_bytes,
         bytes_done: 0,
         pixel_byte: 0,
         pixel_value: 0,
         pixel_index: 0,
+        mono_words_per_row: mono_words_per_row,
+        mono_lsb_first: !(state.ifc_index_format & 1),
+        rop: this.graph_effective_rop(state, state.operation),
+        operation: state.operation >>> 0,
+        src_format: state.color_format >>> 0,
     };
 
+    if(src_bpp === 1)
+    {
+        this["graph_mono_upload_count"]++;
+    }
+
     return state.image_upload;
+};
+
+NV20GeForce.prototype.graph_upload_mono_word = function(state, data, upload)
+{
+    const surface = upload.surface;
+    const color0 = nv20_color_to_bytes(state.mono_color0,
+                                       upload.dst_bpp,
+                                       surface.format,
+                                       upload.dst_bpp,
+                                       surface.format);
+    const color1 = nv20_color_to_bytes(state.mono_color1,
+                                       upload.dst_bpp,
+                                       surface.format,
+                                       upload.dst_bpp,
+                                       surface.format);
+    const word_index = upload.bytes_done >>> 2;
+    const row = word_index / upload.mono_words_per_row | 0;
+    const word_in_row = word_index - row * upload.mono_words_per_row;
+
+    if(row >= upload.height)
+    {
+        upload.bytes_done = upload.bytes_total;
+        return true;
+    }
+
+    for(var bit_index = 0; bit_index < 32; bit_index++)
+    {
+        const src_x = word_in_row * 32 + bit_index;
+
+        if(src_x >= upload.width)
+        {
+            continue;
+        }
+
+        const bit = upload.mono_lsb_first ? bit_index : 31 - bit_index;
+        const dst_x = upload.x + (src_x * upload.dest_width / upload.width | 0);
+        const dst_y = upload.y + (row * upload.dest_height / upload.height | 0);
+        const bytes = data >>> bit & 1 ? color1 : color0;
+
+        this.graph_write_surface_pixel(surface, dst_x, dst_y, bytes, upload.rop, null, null);
+    }
+
+    upload.bytes_done += 4;
+    this.graph_note_2d("mono_words", state, {
+        x: upload.x,
+        y: upload.y,
+        w: upload.width,
+        h: upload.height,
+    });
+    return true;
 };
 
 NV20GeForce.prototype.graph_upload_data_word = function(state, data)
@@ -2642,6 +3299,22 @@ NV20GeForce.prototype.graph_upload_data_word = function(state, data)
         return false;
     }
 
+    if(upload.src_bpp === 1)
+    {
+        return this.graph_upload_mono_word(state, data, upload);
+    }
+
+    this.graph_note_2d("upload_words", state, {
+        x: upload.x,
+        y: upload.y,
+        w: upload.width,
+        h: upload.height,
+        bpp: upload.src_bpp,
+        fmt: state.color_format >>> 0,
+        total: upload.bytes_total >>> 0,
+        done: upload.bytes_done >>> 0,
+    });
+
     for(var i = 0; i < 4 && upload.bytes_done < upload.bytes_total; i++)
     {
         const byte = data >>> (i << 3) & 0xFF;
@@ -2655,13 +3328,31 @@ NV20GeForce.prototype.graph_upload_data_word = function(state, data)
             const src_y = upload.pixel_index / upload.width | 0;
             const dst_x = upload.x + (src_x * upload.dest_width / upload.width | 0);
             const dst_y = upload.y + (src_y * upload.dest_height / upload.height | 0);
-            const bytes = nv20_color_to_bytes(upload.pixel_value,
+            const src_color = upload.pixel_value >>> 0;
+
+            if(this.graph_chroma_matches(state, src_color, upload.src_bytes))
+            {
+                this.graph_count_2d("chroma_skip");
+                upload.pixel_value = 0;
+                upload.pixel_byte = 0;
+                upload.pixel_index++;
+                continue;
+            }
+
+            const bytes = nv20_color_to_bytes(src_color,
                                               upload.src_bpp,
                                               state.color_format,
                                               upload.dst_bpp,
                                               upload.surface.format);
 
-            this.graph_write_surface_pixel(upload.surface, dst_x, dst_y, bytes);
+            this.graph_write_surface_pixel(upload.surface, dst_x, dst_y, bytes, upload.rop, null, {
+                operation: upload.operation,
+                state: state,
+                src_color: src_color,
+                src_bpp: upload.src_bpp,
+                src_format: upload.src_format,
+                dst_bpp: upload.dst_bpp,
+            });
             upload.pixel_value = 0;
             upload.pixel_byte = 0;
             upload.pixel_index++;
@@ -2736,6 +3427,14 @@ NV20GeForce.prototype.graph_execute_m2mf = function(state)
 
     state.m2mf_executed = true;
     this["graph_accel_count"]++;
+    this.graph_note_2d("m2mf", state, {
+        in: state.m2mf_offset_in >>> 0,
+        out: state.m2mf_offset_out >>> 0,
+        len: line_length,
+        lines: line_count,
+        pitch_in: pitch_in,
+        pitch_out: pitch_out,
+    });
     return true;
 };
 
@@ -2794,16 +3493,22 @@ NV20GeForce.prototype.graph_submit_surface2d = function(channel, state, method, 
             return true;
         case 0x0300:
             state.format = data & 0xFF;
+            state.surface_format_set = true;
+            this.update_render_mode_from_surface(state, "surface2d-format", 0, 0);
             return true;
         case 0x0304:
             state.src_pitch = data & 0xFFFF;
             state.dst_pitch = data >>> 16;
+            state.surface_pitch_set = true;
+            this.update_render_mode_from_surface(state, "surface2d-pitch", 0, 0);
             return true;
         case 0x0308:
             state.src_offset = data >>> 0;
+            this.update_render_mode_from_surface(state, "surface2d-src-offset", 0, 0);
             return true;
         case 0x030C:
             state.dst_offset = data >>> 0;
+            this.update_render_mode_from_surface(state, "surface2d-dst-offset", 0, 0);
             return true;
         default:
             return false;
@@ -2815,12 +3520,10 @@ NV20GeForce.prototype.graph_submit_rect = function(channel, state, method, data)
     switch(method)
     {
         case 0x0184:
-            state.clip = this.graph_lookup_object_state(channel, data);
-            return true;
         case 0x0188:
         case 0x018C:
         case 0x0190:
-            return true;
+            return this.graph_bind_context_handle(channel, state, data);
         case 0x0194:
         case 0x0198:
             return this.graph_bind_surface_handle(channel, state, data);
@@ -2829,6 +3532,7 @@ NV20GeForce.prototype.graph_submit_rect = function(channel, state, method, data)
             return true;
         case 0x0300:
             state.color_format = data;
+            state.color_format_set = true;
             return true;
         case 0x0304:
             state.color = data;
@@ -2844,7 +3548,9 @@ NV20GeForce.prototype.graph_submit_rect = function(channel, state, method, data)
                 {
                     const size = nv20_unpack_wh(data);
                     this.graph_fill_rect(state.surface, state.rect_xy.x, state.rect_xy.y,
-                                         size.w, size.h, state.color, state.color_format, state.clip);
+                                         size.w, size.h, state.color, state.color_format, state.clip,
+                                         this.graph_effective_rop(state, state.operation),
+                                         state);
                 }
 
                 return true;
@@ -2854,23 +3560,170 @@ NV20GeForce.prototype.graph_submit_rect = function(channel, state, method, data)
     }
 };
 
+NV20GeForce.prototype.graph_gdi_color_bytes = function(state, surface, color)
+{
+    const dst_bpp = nv20_surface_bpp_from_format(surface.format, this.render_bpp);
+    var src_bpp = dst_bpp;
+    var src_format = state.gdi_color_format || state.color_format || 0;
+
+    // NV4_GDI treats format 3 as native 32-bit color. Other GDI text colors
+    // are 16-bit source colors even when the destination surface is 32-bit.
+    if(dst_bpp === 32 && src_format !== 3)
+    {
+        src_bpp = 16;
+        src_format = 1;
+    }
+    else if(dst_bpp === 16)
+    {
+        src_bpp = 16;
+    }
+
+    return nv20_color_to_bytes(color, src_bpp, src_format, dst_bpp, surface.format);
+};
+
+NV20GeForce.prototype.graph_gdi_prepare_words = function(state, type)
+{
+    const width = state.gdi_image_swh.w >>> 0;
+    const height = state.gdi_image_swh.h >>> 0;
+
+    if(!width || !height || width > NV20_MAX_RENDER_WIDTH || height > NV20_MAX_RENDER_HEIGHT)
+    {
+        state.gdi_words = [];
+        state.gdi_words_ptr = 0;
+        state.gdi_words_left = 0;
+        return false;
+    }
+
+    const word_count = Math.min(0x100000, Math.max(1, width * height + 31 >>> 5));
+
+    state.gdi_words = new Array(word_count);
+    state.gdi_words_ptr = 0;
+    state.gdi_words_left = word_count;
+    state.gdi_image_type = type >>> 0;
+    return true;
+};
+
+NV20GeForce.prototype.graph_execute_gdi_blit = function(state, type)
+{
+    const surface = state.surface || this.graph_default_surface();
+    const dx = state.gdi_image_xy.x | 0;
+    const dy = state.gdi_image_xy.y | 0;
+    const swidth = state.gdi_image_swh.w >>> 0;
+    const height = state.gdi_image_swh.h >>> 0;
+    const dwidth = type ? (state.gdi_image_dwh.w || swidth) >>> 0 : swidth;
+
+    if(!swidth || !dwidth || !height)
+    {
+        return false;
+    }
+
+    this.update_render_mode_from_surface(surface, "2d-gdi-image",
+                                         dx + dwidth, dy + height);
+
+    const clipx0 = (state.clip_xy0.x | 0) - dx;
+    const clipy0 = (state.clip_xy0.y | 0) - dy;
+    const clipx1 = (state.clip_xy1.x | 0) - dx;
+    const clipy1 = (state.clip_xy1.y | 0) - dy;
+    const bg_bytes = this.graph_gdi_color_bytes(state, surface, state.gdi_bg_color);
+    const fg_bytes = this.graph_gdi_color_bytes(state, surface, state.gdi_fg_color);
+    const rop = this.graph_effective_rop(state, state.operation);
+    var bit_index = 0;
+    var wrote = false;
+
+    for(var y = 0; y < height; y++)
+    {
+        for(var x = 0; x < dwidth; x++)
+        {
+            const word_offset = bit_index >>> 5;
+            var bit_offset = bit_index & 31;
+
+            if(state.gdi_mono_format === 1)
+            {
+                bit_offset ^= 7;
+            }
+
+            const pixel = !!((state.gdi_words[word_offset] || 0) >>> bit_offset & 1);
+
+            if(x >= clipx0 && x < clipx1 && y >= clipy0 && y < clipy1 &&
+                (type || pixel))
+            {
+                this.graph_write_surface_pixel(surface, dx + x, dy + y,
+                    pixel ? fg_bytes : bg_bytes, rop, null, null);
+                wrote = true;
+            }
+
+            bit_index++;
+        }
+
+        bit_index += swidth - dwidth;
+    }
+
+    state.gdi_words = [];
+    state.gdi_words_ptr = 0;
+    state.gdi_words_left = 0;
+
+    if(wrote)
+    {
+        this["graph_accel_count"]++;
+    }
+
+    this.graph_note_2d("gdi_image", state, {
+        x: dx,
+        y: dy,
+        w: dwidth,
+        h: height,
+        sw: swidth,
+        type: type,
+        rop: rop,
+    });
+    return true;
+};
+
+NV20GeForce.prototype.graph_gdi_image_word = function(state, data, type)
+{
+    if(!state.gdi_words_left)
+    {
+        return true;
+    }
+
+    state.gdi_words[state.gdi_words_ptr++] = data >>> 0;
+    state.gdi_words_left--;
+
+    if(!state.gdi_words_left)
+    {
+        this.graph_execute_gdi_blit(state, type);
+    }
+
+    return true;
+};
+
 NV20GeForce.prototype.graph_submit_gdi = function(channel, state, method, data)
 {
     switch(method)
     {
-        case 0x0190:
         case 0x0198:
             return this.graph_bind_surface_handle(channel, state, data);
+        case 0x0184:
+        case 0x0188:
+        case 0x018C:
+        case 0x0190:
+        case 0x0194:
+            return this.graph_bind_context_handle(channel, state, data);
         case 0x02FC:
             state.operation = data;
             return true;
         case 0x0300:
             state.color_format = data;
+            state.gdi_color_format = data >>> 0;
+            state.color_format_set = true;
             return true;
         case 0x0304:
+            state.gdi_mono_format = data >>> 0;
             return true;
         case 0x03FC:
             state.color = data;
+            state.mono_color1 = data >>> 0;
+            state.gdi_fg_color = data >>> 0;
             return true;
         case 0x05F4:
             state.clip_xy0 = nv20_unpack_xy(data);
@@ -2880,6 +3733,53 @@ NV20GeForce.prototype.graph_submit_gdi = function(channel, state, method, data)
             return true;
         case 0x05FC:
             state.color = data;
+            state.mono_color1 = data >>> 0;
+            state.gdi_fg_color = data >>> 0;
+            return true;
+        case 0x07EC:
+            state.clip_xy0 = nv20_unpack_xy(data);
+            return true;
+        case 0x07F0:
+            state.clip_xy1 = nv20_unpack_xy(data);
+            return true;
+        case 0x07F4:
+            state.gdi_fg_color = data >>> 0;
+            return true;
+        case 0x07F8:
+            state.gdi_image_swh = nv20_unpack_wh(data);
+            return true;
+        case 0x07FC:
+            state.gdi_image_xy = nv20_unpack_xy(data);
+            return this.graph_gdi_prepare_words(state, 0);
+        case 0x0BE4:
+            state.clip_xy0 = nv20_unpack_xy(data);
+            return true;
+        case 0x0BE8:
+            state.clip_xy1 = nv20_unpack_xy(data);
+            return true;
+        case 0x0BEC:
+            state.gdi_bg_color = data >>> 0;
+            return true;
+        case 0x0BF0:
+            state.gdi_fg_color = data >>> 0;
+            return true;
+        case 0x0BF4:
+            state.gdi_image_swh = nv20_unpack_wh(data);
+            return true;
+        case 0x0BF8:
+            state.gdi_image_dwh = nv20_unpack_wh(data);
+            return true;
+        case 0x0BFC:
+            state.gdi_image_xy = nv20_unpack_xy(data);
+            return this.graph_gdi_prepare_words(state, 1);
+        case 0x0FF4:
+            state.clip_xy0 = nv20_unpack_xy(data);
+            return true;
+        case 0x0FF8:
+            state.clip_xy1 = nv20_unpack_xy(data);
+            return true;
+        case 0x0FFC:
+            state.gdi_fg_color = data >>> 0;
             return true;
         default:
             if(method >= 0x0400 && method < 0x0500)
@@ -2892,7 +3792,15 @@ NV20GeForce.prototype.graph_submit_gdi = function(channel, state, method, data)
                 {
                     const size = nv20_unpack_hw(data);
                     this.graph_fill_rect(state.surface, state.rect_xy.x, state.rect_xy.y,
-                                         size.w, size.h, state.color, state.color_format, state.clip);
+                                         size.w, size.h, state.color, state.color_format, state.clip,
+                                         this.graph_effective_rop(state, state.operation),
+                                         state);
+                    this.graph_note_2d("gdi_rect", state, {
+                        x: state.rect_xy.x,
+                        y: state.rect_xy.y,
+                        w: size.w,
+                        h: size.h,
+                    });
                 }
 
                 return true;
@@ -2919,10 +3827,28 @@ NV20GeForce.prototype.graph_submit_gdi = function(channel, state, method, data)
                                          state.rect_xy0.x, state.rect_xy0.y,
                                          rect_xy1.x - state.rect_xy0.x,
                                          rect_xy1.y - state.rect_xy0.y,
-                                         state.color, state.color_format, clip);
+                                         state.color, state.color_format, clip,
+                                         this.graph_effective_rop(state, state.operation),
+                                         state);
+                    this.graph_note_2d("gdi_rect", state, {
+                        x: state.rect_xy0.x,
+                        y: state.rect_xy0.y,
+                        w: rect_xy1.x - state.rect_xy0.x,
+                        h: rect_xy1.y - state.rect_xy0.y,
+                    });
                 }
 
                 return true;
+            }
+
+            if(method >= 0x0800 && method < 0x0A00)
+            {
+                return this.graph_gdi_image_word(state, data, 0);
+            }
+
+            if(method >= 0x0C00 && method < 0x0E00)
+            {
+                return this.graph_gdi_image_word(state, data, 1);
             }
 
             return false;
@@ -2934,13 +3860,12 @@ NV20GeForce.prototype.graph_submit_blit = function(channel, state, method, data)
     switch(method)
     {
         case 0x0184:
+            return this.graph_bind_context_handle(channel, state, data);
+        case 0x0188:
         case 0x018C:
         case 0x0190:
         case 0x0194:
-            return true;
-        case 0x0188:
-            state.clip = this.graph_lookup_object_state(channel, data);
-            return true;
+            return this.graph_bind_context_handle(channel, state, data);
         case 0x0198:
         case 0x019C:
             return this.graph_bind_surface_handle(channel, state, data);
@@ -2958,7 +3883,9 @@ NV20GeForce.prototype.graph_submit_blit = function(channel, state, method, data)
             this.graph_blit(state.surface,
                             state.point_in.x, state.point_in.y,
                             state.point_out.x, state.point_out.y,
-                            state.size.w, state.size.h, state.clip);
+                            state.size.w, state.size.h, state.clip,
+                            this.graph_effective_rop(state, state.operation),
+                            state);
             return true;
         default:
             return false;
@@ -2970,23 +3897,23 @@ NV20GeForce.prototype.graph_submit_ifc = function(channel, state, method, data)
     switch(method)
     {
         case 0x0184:
-        case 0x0190:
-        case 0x0194:
-            return true;
+            return this.graph_bind_context_handle(channel, state, data);
         case 0x0188:
         case 0x018C:
-            state.clip = this.graph_lookup_object_state(channel, data);
-            return true;
+        case 0x0190:
+        case 0x0194:
+            return this.graph_bind_context_handle(channel, state, data);
         case 0x0198:
         case 0x019C:
         case 0x01A0:
-            return this.graph_bind_surface_handle(channel, state, data);
+            return this.graph_bind_context_handle(channel, state, data);
         case 0x02F8:
         case 0x02FC:
             state.operation = data;
             return true;
         case 0x0300:
             state.color_format = data;
+            state.color_format_set = true;
             state.image_upload = null;
             return true;
         case 0x0304:
@@ -3009,7 +3936,18 @@ NV20GeForce.prototype.graph_submit_ifc = function(channel, state, method, data)
             return true;
         case 0x03E8:
             state.color_format = data;
+            state.color_format_set = true;
             state.image_upload = null;
+            return true;
+        case 0x03EC:
+            state.mono_color0 = data >>> 0;
+            return true;
+        case 0x03F0:
+        case 0x03F4:
+        case 0x03F8:
+        case 0x03FC:
+            state.mono_color1 = data >>> 0;
+            state.color = data >>> 0;
             return true;
         default:
             if(method >= 0x0400 && method < 0x2000)
@@ -3026,19 +3964,21 @@ NV20GeForce.prototype.graph_submit_sifc = function(channel, state, method, data)
     switch(method)
     {
         case 0x0184:
+            return true;
         case 0x0188:
         case 0x018C:
         case 0x0190:
-            return true;
+            return this.graph_bind_context_handle(channel, state, data);
         case 0x0194:
         case 0x0198:
-            return this.graph_bind_surface_handle(channel, state, data);
+            return this.graph_bind_context_handle(channel, state, data);
         case 0x02F8:
         case 0x02FC:
             state.operation = data;
             return true;
         case 0x0300:
             state.color_format = data;
+            state.color_format_set = true;
             state.image_upload = null;
             return true;
         case 0x0304:
@@ -3063,6 +4003,16 @@ NV20GeForce.prototype.graph_submit_sifc = function(channel, state, method, data)
             state.point12d4 = nv20_unpack_xy12d4(data);
             state.image_upload = null;
             return true;
+        case 0x03EC:
+            state.mono_color0 = data >>> 0;
+            return true;
+        case 0x03F0:
+        case 0x03F4:
+        case 0x03F8:
+        case 0x03FC:
+            state.mono_color1 = data >>> 0;
+            state.color = data >>> 0;
+            return true;
         default:
             if(method >= 0x0400 && method < 0x2000)
             {
@@ -3081,6 +4031,7 @@ NV20GeForce.prototype.graph_submit_texupload = function(channel, state, method, 
             return this.graph_bind_surface_handle(channel, state, data);
         case 0x0300:
             state.color_format = data;
+            state.color_format_set = true;
             state.image_upload = null;
             return true;
         case 0x0304:
@@ -3281,30 +4232,69 @@ NV20GeForce.prototype.graph_execute_sifm = function(state)
     const src_bpp = nv20_sifm_bpp_from_format(state.sifm_color_format, this.render_bpp);
     const src_bytes = nv20_render_bytes_per_pixel(src_bpp);
     const dst_bpp = nv20_surface_bpp_from_format(surface.format, this.render_bpp);
-    const src_pitch = (state.sifm_sfmt & 0xFFFF) || width * src_bytes;
+    this.update_render_mode_from_surface(surface, "2d-scaled-image",
+                                         state.sifm_dyx.x + width,
+                                         state.sifm_dyx.y + height);
+    const src_pitch = (state.sifm_sfmt & 0xFFFF) || (state.sifm_shw.w || width) * src_bytes;
     const dudx = state.sifm_dudx || 0x00100000;
     const dvdy = state.sifm_dvdy || 0x00100000;
+    const rop = this.graph_effective_rop(state, state.sifm_operation);
+    const syx_raw = state.sifm_syx_raw >>> 0;
 
     for(var y = 0; y < height; y++)
     {
-        const src_y = state.sifm_syx.y + Math.floor(y * dvdy / 0x100000);
+        const src_y = dudx === 0x00100000 && dvdy === 0x00100000 ?
+            ((syx_raw >>> 16) & 0xFFFF) >>> 4 :
+            (((syx_raw & 0xFFFF0000) | 0) - 0x80000 + y * dvdy >> 20);
 
         for(var x = 0; x < width; x++)
         {
-            const src_x = state.sifm_syx.x + Math.floor(x * dudx / 0x100000);
+            const src_x = dudx === 0x00100000 && dvdy === 0x00100000 ?
+                (syx_raw & 0xFFFF) >>> 4 :
+                (((syx_raw & 0xFFFF) << 16) - 0x80000 + x * dudx >> 20);
             const src_offset = state.sifm_sofs + src_y * src_pitch + src_x * src_bytes >>> 0;
-            const color = this.graph_read_dma_pixel(state.sifm_src_dma, src_offset, src_bytes, false);
-            const bytes = nv20_color_to_bytes(color,
+            var color = this.graph_read_dma_pixel(state.sifm_src_dma, src_offset, src_bytes, false);
+
+            if((state.sifm_color_format & 0xFF) === 4)
+            {
+                color = color | 0xFF000000;
+            }
+
+            const src_color = color >>> 0;
+            const bytes = nv20_color_to_bytes(src_color,
                                               src_bpp,
                                               state.sifm_color_format,
                                               dst_bpp,
                                               surface.format);
 
-            this.graph_write_surface_pixel(surface, state.sifm_dyx.x + x, state.sifm_dyx.y + y, bytes);
+            this.graph_write_surface_pixel(surface,
+                                           state.sifm_dyx.x + x,
+                                           state.sifm_dyx.y + y,
+                                           bytes,
+                                           rop,
+                                           null,
+                                           {
+                                               operation: state.sifm_operation >>> 0,
+                                               state: state,
+                                               src_color: src_color,
+                                               src_bpp: src_bpp,
+                                               src_format: state.sifm_color_format >>> 0,
+                                               dst_bpp: dst_bpp,
+                                           });
         }
     }
 
     this["graph_accel_count"]++;
+    this.graph_note_2d("sifm", state, {
+        x: state.sifm_dyx.x,
+        y: state.sifm_dyx.y,
+        w: width,
+        h: height,
+        src_bpp: src_bpp,
+        pitch: src_pitch,
+        op: state.sifm_operation >>> 0,
+        rop: rop,
+    });
     return true;
 };
 
@@ -3318,11 +4308,11 @@ NV20GeForce.prototype.graph_submit_sifm = function(channel, state, method, data)
         case 0x0188:
         case 0x018C:
         case 0x0190:
-            return true;
+            return this.graph_bind_context_handle(channel, state, data);
         case 0x0194:
         case 0x0198:
         case 0x019C:
-            return this.graph_bind_surface_handle(channel, state, data);
+            return this.graph_bind_context_handle(channel, state, data);
         case 0x0300:
             state.sifm_color_format = data >>> 0;
             return true;
@@ -3352,6 +4342,7 @@ NV20GeForce.prototype.graph_submit_sifm = function(channel, state, method, data)
             return true;
         case 0x040C:
             state.sifm_syx = nv20_unpack_xy12d4(data);
+            state.sifm_syx_raw = data >>> 0;
             this.graph_execute_sifm(state);
             return true;
         default:
@@ -3533,6 +4524,8 @@ NV20GeForce.prototype.graph_submit_method = function(channel, subchannel, method
     {
         handled = this.graph_submit_d3d(channel, state, method, data);
     }
+
+    this.graph_note_method(state, method, data, handled);
 
     if(handled)
     {
@@ -3947,6 +4940,17 @@ NV20GeForce.prototype.set_render_mode = function(width, height, bpp, stride, off
     this.render_buffer = null;
     this.render_image_data = null;
     this.render_source = source || "registers";
+    this["debug_render_mode"] = {
+        "width": width,
+        "height": height,
+        "bpp": bpp,
+        "stride": stride,
+        "offset": offset,
+        "source": this.render_source,
+        "surface": this.render_surface_inferred,
+        "tile": !!(this.fb_tile0_flags & 1),
+        "tile_pitch": this.fb_tile0_pitch,
+    };
 
     if(this.render_active)
     {
@@ -3966,6 +4970,112 @@ NV20GeForce.prototype.set_render_mode = function(width, height, bpp, stride, off
             " offset=" + h(offset >>> 0, 8) +
             " source=" + this.render_source, LOG_PCI);
     return true;
+};
+
+NV20GeForce.prototype.update_render_mode_from_surface = function(surface, source, width_hint, height_hint)
+{
+    if(!this.render_auto_detect || !surface)
+    {
+        return false;
+    }
+
+    const format = surface.format & 0xFF;
+
+    if(format < 1 || format > 0x0B)
+    {
+        return false;
+    }
+
+    if(!surface.surface_format_set && format === nv20_surface_format_from_bpp(this.render_bpp))
+    {
+        return false;
+    }
+
+    const bpp = nv20_surface_bpp_from_format(format, 0);
+    const bytes_per_pixel = nv20_render_bytes_per_pixel(bpp);
+
+    if(!nv20_sane_render_bpp(bpp) || !bytes_per_pixel)
+    {
+        return false;
+    }
+
+    var offset = (surface.dst_offset || surface.src_offset ||
+                  this.graph_offset0 || this.crtc_start || 0) >>> 0;
+    const tile_active = !!((this.fb_tile0_flags & 1) &&
+        this.fb_tile0_pitch &&
+        offset === 0);
+    var stride = tile_active ? this.fb_tile0_pitch :
+        (surface.surface_pitch_set && (surface.dst_pitch || surface.src_pitch) ||
+         this.graph_pitch0 || this.fb_tile0_pitch || 0) >>> 0;
+
+    if(!stride || offset >= this.vram_size)
+    {
+        return false;
+    }
+
+    if(stride & 3)
+    {
+        stride = stride + 3 & ~3;
+    }
+
+    const max_width = stride / bytes_per_pixel | 0;
+
+    if(max_width < NV20_MIN_RENDER_WIDTH)
+    {
+        return false;
+    }
+
+    // Keep automatic surface scanout on the front buffer. Offscreen surfaces
+    // are common during XP startup and should not move the visible display.
+    if(offset && offset !== this.render_offset && offset !== this.crtc_start)
+    {
+        return false;
+    }
+
+    const tile_limit = this.fb_tile0_limit >>> 0;
+    const tile_height = tile_limit > offset && this.fb_tile0_pitch === stride ?
+        ((tile_limit - offset + 1) / stride | 0) : 0;
+    const vram_height = (this.vram_size - offset) / stride | 0;
+    const max_height = Math.max(1, tile_height || vram_height);
+    var width = 0;
+    var height = 0;
+
+    width_hint = width_hint >>> 0;
+    height_hint = height_hint >>> 0;
+
+    for(var i = 0; i < NV20_RENDER_COMMON_MODES.length; i++)
+    {
+        const mode = NV20_RENDER_COMMON_MODES[i];
+
+        if(mode[0] <= max_width && mode[1] <= max_height)
+        {
+            width = mode[0];
+            height = mode[1];
+            break;
+        }
+    }
+
+    if(!width &&
+        width_hint >= NV20_MIN_RENDER_WIDTH &&
+        width_hint <= max_width &&
+        height_hint >= NV20_MIN_RENDER_HEIGHT &&
+        height_hint <= max_height)
+    {
+        width = width_hint;
+        height = height_hint;
+    }
+
+    if(!width || !height)
+    {
+        width = Math.min(max_width, Math.max(this.render_width, NV20_MIN_RENDER_WIDTH));
+        height = Math.min(max_height, Math.max(this.render_height, NV20_MIN_RENDER_HEIGHT));
+    }
+
+    this.render_surface_inferred = true;
+    this.render_surface_pitch = stride;
+    this.render_surface_offset = offset;
+    this.render_surface_bpp = bpp;
+    return this.set_render_mode(width, height, bpp, stride, offset, source || "surface2d");
 };
 
 NV20GeForce.prototype.update_render_mode_from_crtc = function(source)
@@ -3997,6 +5107,11 @@ NV20GeForce.prototype.update_render_mode_from_crtc = function(source)
     const bpp = pixel_mode === 1 ? 8 : pixel_mode === 2 ? 16 : pixel_mode === 3 ? 32 : this.render_bpp;
     const bytes_per_pixel = nv20_render_bytes_per_pixel(bpp);
     var stride = row_offset * 8;
+
+    if(this.render_surface_inferred && bpp === 8 && this.render_bpp !== 8)
+    {
+        return;
+    }
 
     if(stride < width * bytes_per_pixel)
     {
@@ -4549,6 +5664,18 @@ NV20GeForce.prototype.register_read32 = function(offset)
             case 0x10020C:
                 value = this.vram_size;
                 break;
+            case 0x100240:
+            case 0x400900:
+                value = this.fb_tile0_flags;
+                break;
+            case 0x100244:
+            case 0x400904:
+                value = this.fb_tile0_limit;
+                break;
+            case 0x100248:
+            case 0x400908:
+                value = this.fb_tile0_pitch;
+                break;
             case 0x100320:
                 value = NV20_PFB_CFG0;
                 break;
@@ -4906,6 +6033,19 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             return true;
         case 0x009420:
             this.timer_alarm = value;
+            return true;
+
+        case 0x100240:
+        case 0x400900:
+            this.fb_tile0_flags = value;
+            return true;
+        case 0x100244:
+        case 0x400904:
+            this.fb_tile0_limit = value;
+            return true;
+        case 0x100248:
+        case 0x400908:
+            this.fb_tile0_pitch = value & 0xFFFF;
             return true;
 
         case 0x101000:
