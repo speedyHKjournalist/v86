@@ -8,21 +8,31 @@
 // For Types Only
 import { CPU } from "../cpu.js";
 
-import { LOG_PCI, MMAP_BLOCK_SIZE } from "../const.js";
+import { CR0_PG, LOG_PCI, MMAP_BLOCK_SIZE } from "../const.js";
 import { h } from "../lib.js";
 import { dbg_log } from "../log.js";
 
 const NV20_VENDOR_ID = 0x10DE;
 const NV20_DEVICE_ID_GEFORCE3_TI_500 = 0x0202;
+const NV20_SUBSYSTEM_VENDOR_ID = 0x107D;
+const NV20_SUBSYSTEM_ID_GEFORCE3_TI_500 = 0x2863;
 
 const NV20_DEFAULT_PCI_ID = 0x13 << 3;
 const NV20_DEFAULT_MMIO_BASE = 0xF1000000;
 const NV20_MMIO_SIZE = 16 * 1024 * 1024;
 const NV20_DEFAULT_VRAM_BASE = 0xD0000000;
 const NV20_DEFAULT_VRAM_SIZE = 64 * 1024 * 1024;
+const NV20_FAST_LFB_BASE = 0xD0000000;
 const NV20_DEFAULT_ROM_BASE = 0xFE000000;
 const NV20_PRAMIN_BASE = 0x00700000;
 const NV20_PRAMIN_SIZE = 1024 * 1024;
+const NV20_PVIDEO_BASE = 0x00008000;
+const NV20_PVIDEO_SIZE = 0x00001000;
+const NV20_UNK010000_BASE = 0x00010000;
+const NV20_UNK010000_SIZE = 0x00000100;
+const NV20_PVIDEO_OVERLAY_BASE = 0x00200000;
+const NV20_PVIDEO_OVERLAY_SIZE = 0x00001000;
+const NV20_BAR2_SIZE = 0x00080000;
 const NV20_MMIO_ROM_BASE = 0x00300000;
 const NV20_MMIO_ROM_SIZE = 0x00010000;
 const NV20_RAMIN_REVERSE_UNIT = 64;
@@ -36,11 +46,19 @@ const NV20_PMC_INTR_PCRTC = 1 << 24;
 const NV20_PMC_INTR_PBUS = 1 << 28;
 
 const NV20_FIFO_CACHE_ENTRY_COUNT = 0x100;
-const NV20_FIFO_CACHE_GET_MASK = 0xFF;
+const NV20_FIFO_CACHE_RING_ENTRY_COUNT = 0x40;
+const NV20_FIFO_CACHE_GET_MASK = NV20_FIFO_CACHE_RING_ENTRY_COUNT * 4 - 1;
 const NV20_FIFO_CACHE_EMPTY = 0x10;
 const NV20_FIFO_INTR_CACHE_ERROR = 1 << 0;
 const NV20_FIFO_INTR_DMA_PUSHER = 1 << 12;
 const NV20_FIFO_INTR_DMA_PTE = 1 << 16;
+const NV20_FIFO_DMA_PUSH_ACCESS = 1 << 0;
+const NV20_FIFO_DMA_PUSH_STATE_BUSY = 1 << 4;
+const NV20_FIFO_DMA_PUSH_BUFFER_EMPTY = 1 << 8;
+const NV20_FIFO_DMA_PUSH_STATUS_SUSPENDED = 1 << 12;
+const NV20_FIFO_DMA_PUSH_CONTROL_MASK =
+    NV20_FIFO_DMA_PUSH_ACCESS |
+    NV20_FIFO_DMA_PUSH_STATUS_SUSPENDED;
 const NV20_GRAPH_DEBUG_RECENT_LIMIT = 96;
 const NV20_FIFO_USER_BASE = 0x800000;
 const NV20_FIFO_USER_SIZE = 0x200000;
@@ -64,10 +82,16 @@ const NV20_RAMFC_NV10_STRIDE = 64;
 const NV20_GRAPH_OBJECT_ENGINE = 1;
 const NV20_VRAM_LOG_BLOCK_SIZE = 1024 * 1024;
 const NV20_VRAM_LOG_SAMPLE_WRITES = 0x10000;
+const NV20_MMIO_HOT_POLL_LOG_LIMIT = 64;
 const NV20_DEFAULT_RENDER_WIDTH = 1024;
 const NV20_DEFAULT_RENDER_HEIGHT = 768;
 const NV20_DEFAULT_RENDER_BPP = 32;
 const NV20_DEFAULT_RENDER_FORMAT = "xrgb8888";
+const NV20_RENDER_DIRTY_LAYER_LIMIT = 32;
+const NV20_DISPI_VERSION = 0xB0C5;
+const NV20_DISPI_MAX_XRES = 2560;
+const NV20_DISPI_MAX_YRES = 1600;
+const NV20_DISPI_MAX_BPP = 32;
 const NV20_2D_OPERATION_SRCCOPY = 3;
 const NV20_ROP_SRCCOPY = 0xCC;
 
@@ -82,7 +106,7 @@ const NV20_CLASS_BLIT_NV4 = 0x005F;
 const NV20_CLASS_BLIT_NV15 = 0x009F;
 const NV20_CLASS_IFC_NV1 = 0x0021;
 const NV20_CLASS_IFC_NV4 = 0x0061;
-const NV20_CLASS_IFC_NV4_ALIAS = 0x0064;
+const NV20_CLASS_IIFC_NV4 = 0x0064;
 const NV20_CLASS_IFC_NV5 = 0x0065;
 const NV20_CLASS_IFC_NV10 = 0x008A;
 const NV20_CLASS_IFC_NV30 = 0x038A;
@@ -117,6 +141,16 @@ const NV20_PRMCIO_CRTC_INDEX_COLOR = 0x6013D4;
 const NV20_PRMCIO_CRTC_DATA_COLOR = 0x6013D5;
 const NV20_PRMCIO_CRTC_INDEX_MONO = 0x6013B4;
 const NV20_PRMCIO_CRTC_DATA_MONO = 0x6013B5;
+const NV20_VGA_CRTC_MAX = 0x18;
+const NV20_CRTC_DDC0_STATUS = 0x36;
+const NV20_CRTC_DDC0_WRITE = 0x37;
+const NV20_CRTC_I2C_READ = 0x3E;
+const NV20_CRTC_I2C_WRITE = 0x3F;
+const NV20_CRTC_DDC_LINES_HIGH = 0x0C;
+const NV20_CRTC_DDC_WRITE_LINES_HIGH = 0x30;
+const NV20_CRTC_RASTER_POLL_PHASES = 8;
+const NV20_LEGACY_VGA_MEM_BASE = 0xA0000;
+const NV20_LEGACY_VGA_MEM_SIZE = 0x20000;
 
 const NV20_MIN_RENDER_WIDTH = 320;
 const NV20_MIN_RENDER_HEIGHT = 200;
@@ -251,6 +285,13 @@ function nv20_mmio_register_name(offset)
         return name;
     }
 
+    const pvideo_name = nv20_pvideo_register_name(offset);
+
+    if(pvideo_name)
+    {
+        return pvideo_name;
+    }
+
     if(offset >= 0x1800 && offset < 0x1900)
     {
         return "PBUS_PCI_CONFIG[" + h(offset - 0x1800, 2) + "]";
@@ -320,6 +361,11 @@ function nv20_mmio_register_name(offset)
         return "PTIMER[" + h(offset - 0x9000, 4) + "]";
     }
 
+    if(offset >= NV20_UNK010000_BASE && offset < NV20_UNK010000_BASE + NV20_UNK010000_SIZE)
+    {
+        return "UNK010000[" + h(offset - NV20_UNK010000_BASE, 4) + "]";
+    }
+
     if(offset >= 0x100000 && offset < 0x102000)
     {
         return "PFB[" + h(offset - 0x100000, 4) + "]";
@@ -343,6 +389,135 @@ function nv20_mmio_register_name(offset)
     return "";
 }
 
+function nv20_pvideo_register_name(offset)
+{
+    offset >>>= 0;
+
+    if(offset >= NV20_PVIDEO_BASE && offset < NV20_PVIDEO_BASE + NV20_PVIDEO_SIZE)
+    {
+        switch(offset)
+        {
+            case 0x008100: return "PVIDEO_INTR";
+            case 0x008140: return "PVIDEO_INTR_EN";
+            case 0x008700: return "PVIDEO_BUFFER";
+            case 0x008704: return "PVIDEO_STOP";
+            case 0x008910: return "PVIDEO_OFFSET[0]";
+            case 0x008914: return "PVIDEO_OFFSET[1]";
+            case 0x008918: return "PVIDEO_SIZE_IN[0]";
+            case 0x00891C: return "PVIDEO_SIZE_IN[1]";
+            case 0x008928: return "PVIDEO_LIMIT[0]";
+            case 0x00892C: return "PVIDEO_LIMIT[1]";
+            case 0x008930: return "PVIDEO_POINT_IN[0]";
+            case 0x008934: return "PVIDEO_POINT_IN[1]";
+            case 0x008938: return "PVIDEO_DS_DX[0]";
+            case 0x00893C: return "PVIDEO_DS_DX[1]";
+            case 0x008940: return "PVIDEO_DT_DY[0]";
+            case 0x008944: return "PVIDEO_DT_DY[1]";
+            default: return "PVIDEO[" + h(offset - NV20_PVIDEO_BASE, 4) + "]";
+        }
+    }
+
+    if(offset >= NV20_PVIDEO_OVERLAY_BASE &&
+        offset < NV20_PVIDEO_OVERLAY_BASE + NV20_PVIDEO_OVERLAY_SIZE)
+    {
+        switch(offset)
+        {
+            case 0x200140: return "PVIDEO_OVERLAY_INTR_EN";
+            case 0x200200: return "PVIDEO_OVERLAY_CONTROL";
+            case 0x200204: return "PVIDEO_OVERLAY_POINT_IN";
+            case 0x200208: return "PVIDEO_OVERLAY_SIZE_IN";
+            default: return "PVIDEO_OVERLAY[" + h(offset - NV20_PVIDEO_OVERLAY_BASE, 4) + "]";
+        }
+    }
+
+    return "";
+}
+
+function nv20_mmio_hot_poll_read_offset(offset)
+{
+    offset >>>= 0;
+
+    switch(offset)
+    {
+        case 0x000100: // PMC_INTR_0
+        case 0x000140: // PMC_INTR_EN_0
+        case 0x001100: // PBUS_INTR_0
+        case 0x001140: // PBUS_INTR_EN_0
+        case 0x002080: // PFIFO_CACHE_ERROR
+        case 0x002100: // PFIFO_INTR_0
+        case 0x002140: // PFIFO_INTR_EN_0
+        case 0x002400: // PFIFO_RUNOUT_STATUS
+        case 0x003214: // PFIFO_CACHE1_STATUS
+        case 0x003220: // PFIFO_CACHE1_DMA_PUSH
+        case 0x003230: // PFIFO_CACHE1_DMA_STATE
+        case 0x003240: // PFIFO_CACHE1_DMA_PUT
+        case 0x003244: // PFIFO_CACHE1_DMA_GET
+        case 0x003250: // PFIFO_CACHE1_PULL0
+        case 0x003270: // PFIFO_CACHE1_GET
+        case 0x008100: // PVIDEO_INTR
+        case 0x008140: // PVIDEO_INTR_EN
+        case 0x008704: // PVIDEO_STOP
+        case 0x009100: // PTIMER_INTR_0
+        case 0x009140: // PTIMER_INTR_EN_0
+        case 0x400100: // PGRAPH_INTR
+        case 0x400108: // PGRAPH_NSOURCE
+        case 0x400140: // PGRAPH_INTR_EN
+        case 0x400144: // PGRAPH_CTX_CONTROL
+        case 0x400148: // PGRAPH_CTX_USER
+        case 0x400700: // PGRAPH_STATUS
+        case 0x400718: // PGRAPH_NOTIFY
+        case 0x40071C: // PGRAPH_NOTIFY_INSTANCE
+        case 0x400720: // PGRAPH_FIFO
+        case 0x600100: // PCRTC_INTR
+        case 0x600140: // PCRTC_INTR_EN
+        case 0x600808: // PCRTC_RASTER
+        case 0x680300: // PRAMDAC_CURSOR_START
+        case 0x200140: // PVIDEO_OVERLAY_INTR_EN
+        case 0x200200: // PVIDEO_OVERLAY_CONTROL
+            return true;
+    }
+
+    if((offset >= 0x601300 && offset < 0x601400) ||
+        (offset >= 0x603300 && offset < 0x603400) ||
+        (offset >= 0x681300 && offset < 0x681400) ||
+        (offset >= 0x683300 && offset < 0x683400))
+    {
+        const port = offset & 0xFF;
+        return port === 0xB4 || port === 0xB5 || port === 0xD4 ||
+            port === 0xD5 || port === 0xDA;
+    }
+
+    return false;
+}
+
+function nv20_mmio_hot_poll_log_count(count)
+{
+    return count === 128 || count === 1024 ||
+        count >= 8192 && (count & count - 1) === 0;
+}
+
+function nv20_mmio_vga_alias_port(offset)
+{
+    offset >>>= 0;
+
+    if((offset >= 0x0C0300 && offset < 0x0C0400) ||
+        (offset >= 0x0C2300 && offset < 0x0C2400) ||
+        (offset >= 0x601300 && offset < 0x601400) ||
+        (offset >= 0x603300 && offset < 0x603400) ||
+        (offset >= 0x681300 && offset < 0x681400) ||
+        (offset >= 0x683300 && offset < 0x683400))
+    {
+        return offset & 0xFFF;
+    }
+
+    return -1;
+}
+
+function nv20_mmio_vga_alias_head(offset)
+{
+    return offset >>> 13 & 1;
+}
+
 function nv20_render_bytes_per_pixel(bpp)
 {
     switch(bpp)
@@ -358,6 +533,26 @@ function nv20_render_bytes_per_pixel(bpp)
             return 4;
         default:
             return Math.max(1, bpp + 7 >>> 3);
+    }
+}
+
+function nv20_render_format_from_bpp(bpp, fallback_format)
+{
+    switch(bpp)
+    {
+        case 8:
+            return "indexed8";
+        case 15:
+            return "xrgb1555";
+        case 16:
+            return "rgb565";
+        case 24:
+            return "rgb888";
+        case 32:
+            return fallback_format === "rgba8888" || fallback_format === "xbgr8888" ?
+                fallback_format : NV20_DEFAULT_RENDER_FORMAT;
+        default:
+            return fallback_format || NV20_DEFAULT_RENDER_FORMAT;
     }
 }
 
@@ -452,7 +647,7 @@ function nv20_surface_bpp_from_format(format, fallback_bpp)
     }
 }
 
-function nv20_ifc_bpp_from_format(format, fallback_bpp, surface_format)
+function nv20_source_color_bpp_from_format(format, fallback_bpp, surface_format, allow_mono)
 {
     if((surface_format & 0xFF) === 0x1)
     {
@@ -462,7 +657,7 @@ function nv20_ifc_bpp_from_format(format, fallback_bpp, surface_format)
     switch(format & 0xFF)
     {
         case 0x0:
-            return 1;
+            return allow_mono ? 1 : fallback_bpp || NV20_DEFAULT_RENDER_BPP;
         case 0x1:
         case 0x2:
         case 0x3:
@@ -475,18 +670,66 @@ function nv20_ifc_bpp_from_format(format, fallback_bpp, surface_format)
     }
 }
 
-function nv20_solid_bpp_from_format(format, fallback_bpp)
+function nv20_ifc_bpp_from_format(format, fallback_bpp, surface_format, allow_mono)
 {
-    switch(format & 0xFF)
+    return nv20_source_color_bpp_from_format(format, fallback_bpp, surface_format, allow_mono);
+}
+
+function nv20_iifc_bpp_from_format(format)
+{
+    return nv20_ifc_bpp_from_format(format || 1, 16, 0, false);
+}
+
+function nv20_solid_bpp_from_format(format, fallback_bpp, state)
+{
+    const format8 = format & 0xFF;
+
+    if(state && nv20_is_gdi_class(state.class_id) && fallback_bpp === 32 && format8 === 3)
     {
-        case 0x1:
-        case 0x2:
-            return 16;
+        return 32;
+    }
+
+    return nv20_source_color_bpp_from_format(format8, fallback_bpp, 0, false);
+}
+
+function nv20_d3d_color_format(class_id, format)
+{
+    class_id &= 0xFFFF;
+    return class_id <= NV20_CLASS_D3D_NV10_TCL ? format & 0xF : format & 0x1F;
+}
+
+function nv20_d3d_bpp_from_format(class_id, format, fallback_bpp)
+{
+    switch(nv20_d3d_color_format(class_id, format))
+    {
+        case 0x9:
+            return 8;
         case 0x3:
+            return 16;
         case 0x4:
+        case 0x5:
+        case 0x8:
             return 32;
         default:
             return fallback_bpp || NV20_DEFAULT_RENDER_BPP;
+    }
+}
+
+function nv20_surface_format_from_d3d_format(class_id, format)
+{
+    switch(nv20_d3d_color_format(class_id, format))
+    {
+        case 0x9:
+            return 0x1;
+        case 0x3:
+            return 0x4;
+        case 0x8:
+            return 0xA;
+        case 0x4:
+        case 0x5:
+            return 0x7;
+        default:
+            return 0;
     }
 }
 
@@ -522,7 +765,8 @@ function nv20_color_to_bytes(color, src_bpp, src_format, dst_bpp, dst_format)
     {
         r = g = b = color & 0xFF;
     }
-    else if(src_bpp === 15 || src_format === 2 || src_format === 3)
+    else if(src_bpp === 15 ||
+        (src_bpp === 16 && (src_format === 2 || src_format === 3)))
     {
         r = (color >> 10 & 0x1F) * 0xFF / 0x1F | 0;
         g = (color >> 5 & 0x1F) * 0xFF / 0x1F | 0;
@@ -582,6 +826,12 @@ function nv20_clamp8(value)
     return value;
 }
 
+function nv20_sign_extend(value, bits)
+{
+    const shift = 32 - bits;
+    return value << shift >> shift;
+}
+
 function nv20_pixel_channels(color, bpp, format)
 {
     color >>>= 0;
@@ -599,7 +849,7 @@ function nv20_pixel_channels(color, bpp, format)
         };
     }
 
-    if(bpp === 15 || format === 2 || format === 3)
+    if(bpp === 15 || (bpp === 16 && (format === 2 || format === 3)))
     {
         return {
             r: (color >> 10 & 0x1F) * 0xFF / 0x1F | 0,
@@ -689,8 +939,8 @@ function nv20_class_name(class_id)
             return "NV1_IFC";
         case NV20_CLASS_IFC_NV4:
             return "NV4_IFC";
-        case NV20_CLASS_IFC_NV4_ALIAS:
-            return "NV4_IFC_ALIAS";
+        case NV20_CLASS_IIFC_NV4:
+            return "NV4_IIFC";
         case NV20_CLASS_IFC_NV5:
             return "NV5_IFC";
         case NV20_CLASS_IFC_NV10:
@@ -773,11 +1023,15 @@ function nv20_is_ifc_class(class_id)
     class_id &= 0xFFFF;
     return class_id === NV20_CLASS_IFC_NV1 ||
         class_id === NV20_CLASS_IFC_NV4 ||
-        class_id === NV20_CLASS_IFC_NV4_ALIAS ||
         class_id === NV20_CLASS_IFC_NV5 ||
         class_id === NV20_CLASS_IFC_NV10 ||
         class_id === NV20_CLASS_IFC_NV30 ||
         class_id === NV20_CLASS_IFC_NV40;
+}
+
+function nv20_is_iifc_class(class_id)
+{
+    return (class_id & 0xFFFF) === NV20_CLASS_IIFC_NV4;
 }
 
 function nv20_is_sifc_class(class_id)
@@ -829,7 +1083,8 @@ function nv20_is_d3d_like_method(method)
 {
     method &= 0x1FFC;
 
-    return method >= 0x0184 && method <= 0x01A8 ||
+    return method >= 0x0120 && method <= 0x0130 ||
+        method >= 0x0184 && method <= 0x01A8 ||
         method >= 0x0200 && method < 0x2000;
 }
 
@@ -843,6 +1098,10 @@ function nv20_init_default_crtc_regs(regs)
     regs[0x12] = 0xDF; // vertical display low: 0x1df + 1 = 480
     regs[0x13] = 0x50; // CRTC offset: 0x50 * 8 = 640 bytes/line
     regs[0x28] = 0x01; // pixel depth: 8 bpp
+    regs[NV20_CRTC_DDC0_STATUS] = NV20_CRTC_DDC_LINES_HIGH;
+    regs[NV20_CRTC_DDC0_WRITE] = NV20_CRTC_DDC_WRITE_LINES_HIGH;
+    regs[NV20_CRTC_I2C_READ] = NV20_CRTC_DDC_LINES_HIGH;
+    regs[NV20_CRTC_I2C_WRITE] = NV20_CRTC_DDC_WRITE_LINES_HIGH;
 }
 
 function nv20_now_ms()
@@ -877,17 +1136,23 @@ function nv20_graph_debug_2d_default()
 {
     return {
         "methods": 0,
+        "data_methods": 0,
         "fill": 0,
         "blit": 0,
         "upload_words": 0,
+        "upload": 0,
         "mono_words": 0,
+        "iifc": 0,
         "blend": 0,
+        "blend_copy": 0,
+        "blend_skip": 0,
         "chroma_skip": 0,
         "m2mf": 0,
         "sifm": 0,
         "gdi_rect": 0,
         "gdi_image": 0,
         "accel": 0,
+        "last": null,
         "by_class": {},
         "by_method": {},
         "recent": [],
@@ -929,7 +1194,7 @@ export function NV20GeForce(cpu, options)
     options = options || {};
 
     this.name = "geforce-nv20";
-    this["debug_build_tag"] = "nv20-chroma-bind-20260602";
+    this["debug_build_tag"] = "nv20-fast-lfb-20260607";
     this.cpu = cpu;
 
     this.pci_id = options.pci_id || NV20_DEFAULT_PCI_ID;
@@ -943,6 +1208,12 @@ export function NV20GeForce(cpu, options)
     this.vram_base = vram_base;
     this.vram_size = vram_size;
     this.vram = new Uint8Array(vram_size);
+    this.vram_fast_memory = options["fast_lfb"] !== false &&
+        cpu.devices && cpu.devices.vga && cpu.devices.vga.svga_memory || null;
+    this.vram_fast_size = this.vram_fast_memory ?
+        Math.min(vram_size, this.vram_fast_memory.length) : 0;
+    this.vram_fast_dirty = false;
+    this.vram_fast_sync_key = "";
     this.option_rom = option_rom;
 
     dbg_log(this.name + " build tag " + this["debug_build_tag"], LOG_PCI);
@@ -964,7 +1235,7 @@ export function NV20GeForce(cpu, options)
     }
 
     this.ramin_flip = vram_size - NV20_RAMIN_REVERSE_UNIT;
-    this.vram_trace = options.vram_trace !== false;
+    this.vram_trace = options.vram_trace === true;
     this.vram_log_block_size = options.vram_log_block_size || NV20_VRAM_LOG_BLOCK_SIZE;
     this.vram_log_sample_writes = options.vram_log_sample_writes || NV20_VRAM_LOG_SAMPLE_WRITES;
     this.vram_logged_write_blocks = new Set();
@@ -977,10 +1248,14 @@ export function NV20GeForce(cpu, options)
     this.render_bpp = options.render_bpp || NV20_DEFAULT_RENDER_BPP;
     this.render_stride = options.render_stride || this.render_width * nv20_render_bytes_per_pixel(this.render_bpp);
     this.render_offset = options.render_offset || 0;
-    this.render_format = options.render_format || NV20_DEFAULT_RENDER_FORMAT;
+    this.render_format = options.render_format ||
+        nv20_render_format_from_bpp(this.render_bpp, NV20_DEFAULT_RENDER_FORMAT);
     this.render_frame_size = Math.min(this.vram_size - this.render_offset, this.render_stride * this.render_height);
     this.render_dirty_min = this.render_offset + this.render_frame_size;
     this.render_dirty_max = this.render_offset;
+    this.render_dirty_rows = null;
+    this.render_dirty_row_min = this.render_height;
+    this.render_dirty_row_max = 0;
     this.render_active = false;
     this.render_initialized = false;
     this.render_pending = false;
@@ -1006,21 +1281,39 @@ export function NV20GeForce(cpu, options)
     this.screen = options.screen || cpu.devices.vga && cpu.devices.vga.screen;
     this.bus = options.bus || cpu.devices.vga && cpu.devices.vga.bus;
     this.mmio_registers = new Map();
-    this.mmio_trace = options.mmio_trace !== false;
+    this.mmio_trace = options.mmio_trace === true || options.mmio_trace_all === true;
     this.mmio_trace_all = !!options.mmio_trace_all;
     this.mmio_seen_reads = new Set();
     this.mmio_seen_writes = new Set();
-    this.fifo_trace = options.fifo_trace !== false;
+    this.mmio_hot_poll_counts = new Map();
+    this.mmio_hot_poll_log_count = 0;
+    this.mmio_hot_poll_log_limit = options.mmio_hot_poll_log_limit || NV20_MMIO_HOT_POLL_LOG_LIMIT;
+    this.mmio_hot_poll_suppressed = false;
+    this["debug_mmio_hot_poll"] = null;
+    this.fifo_trace = options.fifo_trace === true;
     this.fifo_log_method_limit = options.fifo_log_method_limit || NV20_FIFO_METHOD_LOG_LIMIT;
     this.fifo_method_log_count = 0;
+    this.missing_trace = options.missing_trace !== false;
+    this.missing_log_limit = options.missing_log_limit || 256;
+    this.missing_log_count = 0;
+    this.missing_log_suppressed = false;
+    this.missing_commands = new Map();
+    this["debug_missing_commands"] = {
+        total: 0,
+        unique: 0,
+        last: null,
+    };
 
     this.pci = cpu.devices.pci;
+    this.hide_default_vga_pci = options.hide_default_vga_pci !== false;
+    this.default_vga_pci_hidden_logged = false;
     this.pci_config_space = null;
     this.pci_config_space8 = null;
 
     this.mc_soft_intr = false;
     this.mc_intr_en = 0;
     this.mc_enable = 0;
+    this.irq_level = false;
 
     this.bus_intr = 0;
     this.bus_intr_en = 0;
@@ -1028,6 +1321,11 @@ export function NV20GeForce(cpu, options)
     this.fifo_cache_error = 0;
     this.fifo_intr = 0;
     this.fifo_intr_en = 0;
+    this.fifo_wait_notify = false;
+    this.fifo_wait_flip = false;
+    this.fifo_wait_soft = false;
+    this.fifo_wait_acquire = false;
+    this.fifo_wait_log_count = 0;
     this.fifo_config = 0;
     this.fifo_ramht = 0;
     this.fifo_ramfc = 0;
@@ -1067,8 +1365,16 @@ export function NV20GeForce(cpu, options)
     this.timer_base_high = 0;
     this.timer_epoch_ms = nv20_now_ms();
 
+    this.video_intr = 0;
+    this.video_intr_en = 0;
+    this.video_stop = 0;
+    this.pvideo_regs = new Map();
+
     this.straps0_primary_original = options.straps0_primary || 0;
     this.straps0_primary = this.straps0_primary_original;
+    this.fb_boot_0 = NV20_PMC_BOOT_0;
+    this.fb_cfg = NV20_PFB_CFG0;
+    this.fb_cfg0 = NV20_PFB_CFG0;
 
     this.graph_intr = 0;
     this.graph_intr_en = 0;
@@ -1084,6 +1390,9 @@ export function NV20GeForce(cpu, options)
     this.graph_trapped_addr = 0;
     this.graph_trapped_data = 0;
     this.graph_trapped_data_high = 0;
+    this.graph_flip_read = 0;
+    this.graph_flip_write = 0;
+    this.graph_flip_modulo = 0;
     this.graph_notify = 0;
     this.graph_notify_instance = 0;
     this.graph_fifo = 0;
@@ -1099,35 +1408,65 @@ export function NV20GeForce(cpu, options)
     this["graph_d3d_method_count"] = 0;
     this["graph_unhandled_method_count"] = 0;
     this["graph_last_unhandled_method"] = null;
+    this["graph_unhandled_log_count"] = 0;
     this["graph_mono_upload_count"] = 0;
     this["graph_debug_2d"] = nv20_graph_debug_2d_default();
+    this.missing_log_count = 0;
+    this.missing_log_suppressed = false;
+    this.missing_commands.clear();
+    this["debug_missing_commands"] = {
+        total: 0,
+        unique: 0,
+        last: null,
+    };
 
     this.crtc_intr = 0;
     this.crtc_intr_en = 0;
     this.crtc_start = 0;
     this.crtc_config = 0;
     this.crtc_raster_pos = 0;
+    this.crtc_raster_counter = 0;
     this.crtc_cursor_offset = 0;
     this.crtc_cursor_config = 0;
     this.crtc_gpio_ext = 0;
+    this.crtc_engine_ctrl = 0;
+    this.crtc_status_read_count = 0;
     this.prmcio_crtc_index = 0;
     this.prmcio_crtc_regs = new Uint8Array(0x100);
     nv20_init_default_crtc_regs(this.prmcio_crtc_regs);
+    this.rma_addr = 0;
+    this.legacy_vga_memory = new Uint8Array(NV20_LEGACY_VGA_MEM_SIZE);
+    this.legacy_vga_attr_regs = new Uint8Array(0x20);
+    this.legacy_vga_seq_regs = new Uint8Array(0x100);
+    this.legacy_vga_graphics_regs = new Uint8Array(0x100);
+    this.legacy_vga_dac_data = new Uint8Array(0x300);
+    this.reset_legacy_vga_shadow();
+    this.reset_dispi_shadow();
 
     this.ramdac_cursor_start = 0;
+    this.hw_cursor_enabled = false;
+    this.hw_cursor_vram = true;
+    this.hw_cursor_bpp32 = false;
+    this.hw_cursor_size = 32;
+    this.hw_cursor_offset = 0;
+    this.hw_cursor_x = 0;
+    this.hw_cursor_y = 0;
+    this["debug_hw_cursor"] = null;
     this.ramdac_vpll = 0;
     this.ramdac_pll_select = 0;
     this.ramdac_vpll_b = 0;
     this.ramdac_general_control = 0;
+    this.ramdac_fp_tg_control = 0;
+    this.ramdac_dacclk = 0;
 
     this.pci_space = [
         // 00: vendor/device
         NV20_VENDOR_ID & 0xFF, NV20_VENDOR_ID >> 8,
         NV20_DEVICE_ID_GEFORCE3_TI_500 & 0xFF, NV20_DEVICE_ID_GEFORCE3_TI_500 >> 8,
 
-        // 04: command/status. Keep memory and bus mastering enabled for now,
-        // matching v86's existing simple PCI-device convention.
-        0x06, 0x00, 0x00, 0x00,
+        // 04: command/status. The status bits mirror Bochs' GeForce3 PCI
+        // config: capability list, fast back-to-back, and medium DEVSEL.
+        0x06, 0x00, 0xB0, 0x02,
 
         // 08: revision, prog-if, subclass, class (VGA compatible controller)
         0xA3, 0x00, 0x00, 0x03,
@@ -1138,25 +1477,44 @@ export function NV20GeForce(cpu, options)
         mmio_base & 0xFF, mmio_base >> 8 & 0xFF, mmio_base >> 16 & 0xFF, mmio_base >>> 24,
         // 14: BAR1, framebuffer aperture. Bit 3 marks prefetchable memory.
         vram_base & 0xFF | 0x08, vram_base >> 8 & 0xFF, vram_base >> 16 & 0xFF, vram_base >>> 24,
-        // 18..27: unused BARs
-        0x00, 0x00, 0x00, 0x00,
+        // 18: BAR2, small prefetchable RAMIN/PRAMIN aperture
+        0x08, 0x00, 0x00, 0x00,
+        // 1C..27: unused BARs
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00,
 
         // 28: CardBus CIS pointer
         0x00, 0x00, 0x00, 0x00,
-        // 2C: subsystem vendor/device, unknown for the generic shell
-        0x00, 0x00, 0x00, 0x00,
+        // 2C: subsystem vendor/device
+        NV20_SUBSYSTEM_VENDOR_ID & 0xFF, NV20_SUBSYSTEM_VENDOR_ID >> 8,
+        NV20_SUBSYSTEM_ID_GEFORCE3_TI_500 & 0xFF, NV20_SUBSYSTEM_ID_GEFORCE3_TI_500 >> 8,
         // 30: expansion ROM base, disabled by bit 0 until the guest enables it
         this.pci_rom_address & 0xFF, this.pci_rom_address >> 8 & 0xFF,
         this.pci_rom_address >> 16 & 0xFF, this.pci_rom_address >>> 24,
         // 34: capabilities pointer
-        0x00, 0x00, 0x00, 0x00,
+        0x60, 0x00, 0x00, 0x00,
         // 38: reserved
         0x00, 0x00, 0x00, 0x00,
         // 3C: interrupt line, interrupt pin, min grant, max latency
         0x00, 0x01, 0x00, 0x00,
+        // 40: subsystem mirror used by NVIDIA drivers
+        NV20_SUBSYSTEM_VENDOR_ID & 0xFF, NV20_SUBSYSTEM_VENDOR_ID >> 8,
+        NV20_SUBSYSTEM_ID_GEFORCE3_TI_500 & 0xFF, NV20_SUBSYSTEM_ID_GEFORCE3_TI_500 >> 8,
+        // 44: AGP capability, version 2.0, terminal capability
+        0x02, 0x00, 0x20, 0x00,
+        // 48: AGP status, 1x/2x/4x supported, request queue depth 0x1F
+        0x07, 0x00, 0x00, 0x1F,
+        // 4C: AGP command, written by the guest
+        0x00, 0x00, 0x00, 0x00,
+        // 50: ROM shadow control, 54: NVIDIA private config byte
+        0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+        // 58..5F: reserved
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        // 60: power-management capability, next points to AGP at 0x44
+        0x01, 0x44, 0x02, 0x00,
     ];
 
     this.pci_bars = [
@@ -1177,17 +1535,80 @@ export function NV20GeForce(cpu, options)
             write32: this.vram_write32,
             on_remap: function(from, to) { this.vram_base = to; },
         },
+        {
+            size: NV20_BAR2_SIZE,
+            remappable: true,
+            read8: this.bar2_read8,
+            write8: this.bar2_write8,
+            read32: this.bar2_read32,
+            write32: this.bar2_write32,
+            on_remap: function(from, to) { this.bar2_base = to; },
+        },
     ];
 
     this.pci_config_space = this.pci.register_device(this);
     this.pci_config_space8 = new Uint8Array(this.pci_config_space.buffer);
+    this.restore_pci_readonly_config();
+    this.hide_default_vga_pci_device();
+
+    this.register_rma_io();
+    this.register_legacy_vga_io();
+    this.register_legacy_vga_memory();
 }
+
+NV20GeForce.prototype.hide_default_vga_pci_device = function()
+{
+    if(!this.hide_default_vga_pci)
+    {
+        return;
+    }
+
+    const vga = this.cpu && this.cpu.devices && this.cpu.devices.vga;
+
+    if(!vga || vga === this || vga.pci_hidden_by_geforce === this)
+    {
+        return;
+    }
+
+    const previous_hidden = vga.pci_hidden;
+    const geforce = this;
+
+    vga.pci_hidden_by_geforce = this;
+    vga.pci_hidden = function()
+    {
+        const inherited = typeof previous_hidden === "function" ? previous_hidden.call(vga) : !!previous_hidden;
+        return inherited || geforce.should_hide_default_vga_pci_device();
+    };
+
+    dbg_log("geforce-nv20 will hide default vga pci function after guest paging bdf=" +
+            h(vga.pci_id || 0, 4), LOG_PCI);
+};
+
+NV20GeForce.prototype.should_hide_default_vga_pci_device = function()
+{
+    const cpu = this.cpu;
+    const hide = !!(this.hide_default_vga_pci &&
+        cpu && cpu.protected_mode && cpu.protected_mode[0] &&
+        cpu.cr && (cpu.cr[0] & CR0_PG));
+
+    if(hide && !this.default_vga_pci_hidden_logged)
+    {
+        this.default_vga_pci_hidden_logged = true;
+        dbg_log("geforce-nv20 hiding default vga pci function in paged protected mode", LOG_PCI);
+    }
+
+    return hide;
+};
 
 NV20GeForce.prototype.reset = function()
 {
     dbg_log(this.name + " reset", LOG_PCI);
 
     this.mmio_registers.clear();
+    this.mmio_hot_poll_counts.clear();
+    this.mmio_hot_poll_log_count = 0;
+    this.mmio_hot_poll_suppressed = false;
+    this["debug_mmio_hot_poll"] = null;
 
     this.vram_logged_write_blocks.clear();
     this.vram_write_count = 0;
@@ -1197,6 +1618,7 @@ NV20GeForce.prototype.reset = function()
     this.render_active = false;
     this.render_initialized = false;
     this.render_pending = false;
+    this.default_vga_pci_hidden_logged = false;
     this.render_update_count = 0;
     this.render_buffer = null;
     this.render_image_data = null;
@@ -1217,6 +1639,9 @@ NV20GeForce.prototype.reset = function()
     };
     this.render_dirty_min = this.render_offset + this.render_frame_size;
     this.render_dirty_max = this.render_offset;
+    this.render_dirty_rows = null;
+    this.render_dirty_row_min = this.render_height;
+    this.render_dirty_row_max = 0;
 
     if(this.screen && this.screen.set_mode)
     {
@@ -1226,6 +1651,7 @@ NV20GeForce.prototype.reset = function()
     this.mc_soft_intr = false;
     this.mc_intr_en = 0;
     this.mc_enable = 0;
+    this.update_irq_level();
 
     this.bus_intr = 0;
     this.bus_intr_en = 0;
@@ -1233,6 +1659,11 @@ NV20GeForce.prototype.reset = function()
     this.fifo_cache_error = 0;
     this.fifo_intr = 0;
     this.fifo_intr_en = 0;
+    this.fifo_wait_notify = false;
+    this.fifo_wait_flip = false;
+    this.fifo_wait_soft = false;
+    this.fifo_wait_acquire = false;
+    this.fifo_wait_log_count = 0;
     this.fifo_config = 0;
     this.fifo_ramht = 0;
     this.fifo_ramfc = 0;
@@ -1273,7 +1704,15 @@ NV20GeForce.prototype.reset = function()
     this.timer_base_high = 0;
     this.timer_epoch_ms = nv20_now_ms();
 
+    this.video_intr = 0;
+    this.video_intr_en = 0;
+    this.video_stop = 0;
+    this.pvideo_regs.clear();
+
     this.straps0_primary = this.straps0_primary_original;
+    this.fb_boot_0 = NV20_PMC_BOOT_0;
+    this.fb_cfg = NV20_PFB_CFG0;
+    this.fb_cfg0 = NV20_PFB_CFG0;
 
     this.graph_intr = 0;
     this.graph_intr_en = 0;
@@ -1289,6 +1728,9 @@ NV20GeForce.prototype.reset = function()
     this.graph_trapped_addr = 0;
     this.graph_trapped_data = 0;
     this.graph_trapped_data_high = 0;
+    this.graph_flip_read = 0;
+    this.graph_flip_write = 0;
+    this.graph_flip_modulo = 0;
     this.graph_notify = 0;
     this.graph_notify_instance = 0;
     this.graph_fifo = 0;
@@ -1304,6 +1746,7 @@ NV20GeForce.prototype.reset = function()
     this["graph_d3d_method_count"] = 0;
     this["graph_unhandled_method_count"] = 0;
     this["graph_last_unhandled_method"] = null;
+    this["graph_unhandled_log_count"] = 0;
     this["graph_mono_upload_count"] = 0;
     this["graph_debug_2d"] = nv20_graph_debug_2d_default();
 
@@ -1312,18 +1755,34 @@ NV20GeForce.prototype.reset = function()
     this.crtc_start = 0;
     this.crtc_config = 0;
     this.crtc_raster_pos = 0;
+    this.crtc_raster_counter = 0;
     this.crtc_cursor_offset = 0;
     this.crtc_cursor_config = 0;
     this.crtc_gpio_ext = 0;
+    this.crtc_engine_ctrl = 0;
+    this.crtc_status_read_count = 0;
     this.prmcio_crtc_index = 0;
     this.prmcio_crtc_regs.fill(0);
     nv20_init_default_crtc_regs(this.prmcio_crtc_regs);
+    this.rma_addr = 0;
+    this.reset_legacy_vga_shadow();
+    this.reset_dispi_shadow();
 
     this.ramdac_cursor_start = 0;
+    this.hw_cursor_enabled = false;
+    this.hw_cursor_vram = true;
+    this.hw_cursor_bpp32 = false;
+    this.hw_cursor_size = 32;
+    this.hw_cursor_offset = 0;
+    this.hw_cursor_x = 0;
+    this.hw_cursor_y = 0;
+    this["debug_hw_cursor"] = null;
     this.ramdac_vpll = 0;
     this.ramdac_pll_select = 0;
     this.ramdac_vpll_b = 0;
     this.ramdac_general_control = 0;
+    this.ramdac_fp_tg_control = 0;
+    this.ramdac_dacclk = 0;
 
     if(this.option_rom)
     {
@@ -1369,9 +1828,25 @@ NV20GeForce.prototype.vram_offset = function(offset)
     return offset;
 };
 
+NV20GeForce.prototype.vram_fast_array = function(offset, width)
+{
+    offset >>>= 0;
+    width >>>= 0;
+
+    if(this.vram_fast_memory &&
+        this.vram_base === NV20_FAST_LFB_BASE &&
+        offset + width <= this.vram_fast_size)
+    {
+        return this.vram_fast_memory;
+    }
+
+    return this.vram;
+};
+
 NV20GeForce.prototype.vram_read8 = function(offset)
 {
-    return this.vram[this.vram_offset(offset)];
+    offset = this.vram_offset(offset);
+    return this.vram_fast_array(offset, 1)[offset];
 };
 
 NV20GeForce.prototype.vram_write8 = function(offset, value)
@@ -1379,7 +1854,9 @@ NV20GeForce.prototype.vram_write8 = function(offset, value)
     offset = this.vram_offset(offset);
     value &= 0xFF;
 
-    this.vram[offset] = value;
+    const vram = this.vram_fast_array(offset, 1);
+    vram[offset] = value;
+    this.vram_fast_dirty = this.vram_fast_dirty || vram === this.vram_fast_memory;
     this.vram_mark_write(offset, 1, value);
 };
 
@@ -1387,12 +1864,14 @@ NV20GeForce.prototype.vram_read32 = function(offset)
 {
     offset = this.vram_offset(offset);
 
-    if(offset + 3 < this.vram_size)
+    const vram = this.vram_fast_array(offset, 4);
+
+    if(offset + 3 < vram.length)
     {
-        return (this.vram[offset] |
-                this.vram[offset + 1] << 8 |
-                this.vram[offset + 2] << 16 |
-                this.vram[offset + 3] << 24) >>> 0;
+        return (vram[offset] |
+                vram[offset + 1] << 8 |
+                vram[offset + 2] << 16 |
+                vram[offset + 3] << 24) >>> 0;
     }
 
     return (this.vram[offset] |
@@ -1405,13 +1884,15 @@ NV20GeForce.prototype.vram_write32 = function(offset, value)
 {
     offset = this.vram_offset(offset);
     value = value >>> 0;
+    const vram = this.vram_fast_array(offset, 4);
 
-    if(offset + 3 < this.vram_size)
+    if(offset + 3 < vram.length)
     {
-        this.vram[offset] = value & 0xFF;
-        this.vram[offset + 1] = value >> 8 & 0xFF;
-        this.vram[offset + 2] = value >> 16 & 0xFF;
-        this.vram[offset + 3] = value >>> 24;
+        vram[offset] = value & 0xFF;
+        vram[offset + 1] = value >> 8 & 0xFF;
+        vram[offset + 2] = value >> 16 & 0xFF;
+        vram[offset + 3] = value >>> 24;
+        this.vram_fast_dirty = this.vram_fast_dirty || vram === this.vram_fast_memory;
     }
     else
     {
@@ -1422,6 +1903,261 @@ NV20GeForce.prototype.vram_write32 = function(offset, value)
     }
 
     this.vram_mark_write(offset, 4, value);
+};
+
+NV20GeForce.prototype.render_clear_dirty = function()
+{
+    this.render_dirty_min = this.render_offset + this.render_frame_size;
+    this.render_dirty_max = this.render_offset;
+    this.render_dirty_row_min = this.render_height;
+    this.render_dirty_row_max = 0;
+
+    if(this.render_dirty_rows)
+    {
+        this.render_dirty_rows.fill(0);
+    }
+};
+
+NV20GeForce.prototype.render_mark_dirty_rows = function(dirty_start, dirty_end)
+{
+    if(dirty_start >= dirty_end || !this.render_stride)
+    {
+        return;
+    }
+
+    const dirty_min = Math.max(0, dirty_start - this.render_offset);
+    const dirty_max = Math.min(this.render_frame_size, dirty_end - this.render_offset);
+
+    if(dirty_min >= dirty_max)
+    {
+        return;
+    }
+
+    const min_y = Math.max(0, Math.min(this.render_height, dirty_min / this.render_stride | 0));
+    const max_y = Math.max(min_y, Math.min(this.render_height,
+        (dirty_max + this.render_stride - 1) / this.render_stride | 0));
+
+    if(min_y >= max_y)
+    {
+        return;
+    }
+
+    if(!this.render_dirty_rows || this.render_dirty_rows.length !== this.render_height)
+    {
+        this.render_dirty_rows = new Uint8Array(this.render_height);
+    }
+
+    for(var y = min_y; y < max_y; y++)
+    {
+        this.render_dirty_rows[y] = 1;
+    }
+
+    if(min_y < this.render_dirty_row_min)
+    {
+        this.render_dirty_row_min = min_y;
+    }
+
+    if(max_y > this.render_dirty_row_max)
+    {
+        this.render_dirty_row_max = max_y;
+    }
+};
+
+NV20GeForce.prototype.render_mark_dirty_rect = function(x, y, width, height)
+{
+    if(!this.render_stride || !this.render_frame_size)
+    {
+        return;
+    }
+
+    x |= 0;
+    y |= 0;
+    width = width >>> 0;
+    height = height >>> 0;
+
+    const x0 = Math.max(0, x);
+    const y0 = Math.max(0, y);
+    const x1 = Math.min(this.render_width, x + width);
+    const y1 = Math.min(this.render_height, y + height);
+
+    if(x0 >= x1 || y0 >= y1)
+    {
+        return;
+    }
+
+    const bytes_per_pixel = nv20_render_bytes_per_pixel(this.render_bpp);
+    const dirty_start = this.render_offset + y0 * this.render_stride + x0 * bytes_per_pixel;
+    const dirty_end = this.render_offset + (y1 - 1) * this.render_stride + x1 * bytes_per_pixel;
+
+    if(dirty_start < this.render_dirty_min)
+    {
+        this.render_dirty_min = dirty_start;
+    }
+
+    if(dirty_end > this.render_dirty_max)
+    {
+        this.render_dirty_max = dirty_end;
+    }
+
+    this.render_mark_dirty_rows(dirty_start, dirty_end);
+    this.activate_rendering();
+    this.schedule_render();
+};
+
+NV20GeForce.prototype.hw_cursor_mark_dirty = function(x, y, size)
+{
+    this.render_mark_dirty_rect(x, y, size, size);
+};
+
+NV20GeForce.prototype.hw_cursor_read16 = function(offset)
+{
+    offset >>>= 0;
+
+    if(this.hw_cursor_vram)
+    {
+        return this.vram_read8(offset) | this.vram_read8(offset + 1) << 8;
+    }
+
+    const word = this.ramin_read32(offset & ~3);
+    return word >>> ((offset & 2) << 3) & 0xFFFF;
+};
+
+NV20GeForce.prototype.hw_cursor_read32 = function(offset)
+{
+    offset >>>= 0;
+
+    if(this.hw_cursor_vram)
+    {
+        return this.vram_read32(offset);
+    }
+
+    return this.ramin_read32(offset);
+};
+
+NV20GeForce.prototype.hw_cursor_update = function(mark_dirty)
+{
+    const old_enabled = this.hw_cursor_enabled;
+    const old_x = this.hw_cursor_x;
+    const old_y = this.hw_cursor_y;
+    const old_size = this.hw_cursor_size;
+    const crtc = this.prmcio_crtc_regs;
+
+    this.hw_cursor_enabled = !!((crtc[0x31] & 1) || (this.crtc_cursor_config & 1));
+    this.hw_cursor_vram = !!((crtc[0x30] & 0x80) || (this.crtc_cursor_config & 0x00000100));
+    this.hw_cursor_bpp32 = !!(this.crtc_cursor_config & 0x00001000);
+    this.hw_cursor_size = this.crtc_cursor_config & 0x00010000 ? 64 : 32;
+    this.hw_cursor_offset = (
+        (crtc[0x31] >>> 2 << 11) |
+        (crtc[0x30] & 0x7F) << 17 |
+        crtc[0x2F] << 24
+    ) + this.crtc_cursor_offset >>> 0;
+    this.hw_cursor_x = nv20_sign_extend(this.ramdac_cursor_start & 0x0FFF, 12);
+    this.hw_cursor_y = nv20_sign_extend(this.ramdac_cursor_start >>> 16 & 0x0FFF, 12);
+    this["debug_hw_cursor"] = {
+        "enabled": this.hw_cursor_enabled,
+        "vram": this.hw_cursor_vram,
+        "bpp32": this.hw_cursor_bpp32,
+        "size": this.hw_cursor_size,
+        "offset": this.hw_cursor_offset >>> 0,
+        "x": this.hw_cursor_x,
+        "y": this.hw_cursor_y,
+        "config": this.crtc_cursor_config >>> 0,
+        "pos": this.ramdac_cursor_start >>> 0,
+        "crtc2f": crtc[0x2F],
+        "crtc30": crtc[0x30],
+        "crtc31": crtc[0x31],
+    };
+
+    if(!mark_dirty)
+    {
+        return;
+    }
+
+    if(old_enabled)
+    {
+        this.hw_cursor_mark_dirty(old_x, old_y, old_size);
+    }
+
+    if(this.hw_cursor_enabled)
+    {
+        this.hw_cursor_mark_dirty(this.hw_cursor_x, this.hw_cursor_y, this.hw_cursor_size);
+    }
+};
+
+NV20GeForce.prototype.render_overlay_hw_cursor = function(min_y, max_y)
+{
+    if(!this.hw_cursor_enabled || !this.render_buffer)
+    {
+        return;
+    }
+
+    const size = this.hw_cursor_size | 0;
+    const cursor_x = this.hw_cursor_x | 0;
+    const cursor_y = this.hw_cursor_y | 0;
+    const x0 = Math.max(0, cursor_x);
+    const y0 = Math.max(min_y, Math.max(0, cursor_y));
+    const x1 = Math.min(this.render_width, cursor_x + size);
+    const y1 = Math.min(max_y, Math.min(this.render_height, cursor_y + size));
+
+    if(x0 >= x1 || y0 >= y1)
+    {
+        return;
+    }
+
+    const dst = this.render_buffer;
+    const cursor_bytes = this.hw_cursor_bpp32 ? 4 : 2;
+    const cursor_pitch = size * cursor_bytes;
+
+    for(var y = y0; y < y1; y++)
+    {
+        var cursor_i = this.hw_cursor_offset +
+            (y - cursor_y) * cursor_pitch +
+            (x0 - cursor_x) * cursor_bytes >>> 0;
+        var dst_i = (y * this.render_width + x0) * 4;
+
+        for(var x = x0; x < x1; x++, cursor_i += cursor_bytes, dst_i += 4)
+        {
+            if(this.hw_cursor_bpp32)
+            {
+                const color = this.hw_cursor_read32(cursor_i);
+                const alpha = color >>> 24;
+
+                if(alpha)
+                {
+                    const inverse_alpha = 0xFF - alpha;
+                    dst[dst_i] = nv20_clamp8((dst[dst_i] * inverse_alpha + (color >> 16 & 0xFF) * alpha) / 0xFF);
+                    dst[dst_i + 1] = nv20_clamp8((dst[dst_i + 1] * inverse_alpha + (color >> 8 & 0xFF) * alpha) / 0xFF);
+                    dst[dst_i + 2] = nv20_clamp8((dst[dst_i + 2] * inverse_alpha + (color & 0xFF) * alpha) / 0xFF);
+                    dst[dst_i + 3] = 0xFF;
+                }
+            }
+            else
+            {
+                const color = this.hw_cursor_read16(cursor_i);
+
+                if(color & 0x8000)
+                {
+                    const r = (color >> 10 & 0x1F) * 0xFF / 0x1F | 0;
+                    const g = (color >> 5 & 0x1F) * 0xFF / 0x1F | 0;
+                    const b = (color & 0x1F) * 0xFF / 0x1F | 0;
+                    dst[dst_i] = r;
+                    dst[dst_i + 1] = g;
+                    dst[dst_i + 2] = b;
+                    dst[dst_i + 3] = 0xFF;
+                }
+            }
+        }
+    }
+};
+
+NV20GeForce.prototype.on_vga_palette_change = function()
+{
+    if(this.render_bpp !== 8 || !this.render_active)
+    {
+        return;
+    }
+
+    this.render_mark_dirty_rect(0, 0, this.render_width, this.render_height);
 };
 
 NV20GeForce.prototype.ramin_read32 = function(offset)
@@ -1436,6 +2172,33 @@ NV20GeForce.prototype.ramin_write32 = function(offset, value)
     offset = offset & (NV20_PRAMIN_SIZE - 1) & ~3;
 
     this.vram_write32((offset ^ this.ramin_flip) >>> 0, value);
+};
+
+NV20GeForce.prototype.bar2_read32 = function(offset)
+{
+    return this.ramin_read32(offset & (NV20_BAR2_SIZE - 1));
+};
+
+NV20GeForce.prototype.bar2_write32 = function(offset, value)
+{
+    offset = offset & (NV20_BAR2_SIZE - 1) & ~3;
+    this.ramin_write32(offset, value);
+    this.fifo_note_pramin_write(offset);
+};
+
+NV20GeForce.prototype.bar2_read8 = function(offset)
+{
+    const aligned_offset = offset & ~3;
+    return this.bar2_read32(aligned_offset) >>> ((offset & 3) << 3) & 0xFF;
+};
+
+NV20GeForce.prototype.bar2_write8 = function(offset, value)
+{
+    const aligned_offset = offset & ~3;
+    const shift = (offset & 3) << 3;
+    const mask = 0xFF << shift;
+    const old_value = this.bar2_read32(aligned_offset);
+    this.bar2_write32(aligned_offset, old_value & ~mask | (value & 0xFF) << shift);
 };
 
 NV20GeForce.prototype.fifo_channel = function(chid)
@@ -1538,6 +2301,7 @@ NV20GeForce.prototype.fifo_reset_all_channel_state = function(clear_objects)
     this.fifo_dma_dcount = 0;
     this.fifo_dma_state = 0x80000000;
     this.fifo_dma_fetch = 0;
+    this.fifo_dma_push = 0;
     this.fifo_ref_cnt = 0;
 };
 
@@ -1595,6 +2359,49 @@ NV20GeForce.prototype.fifo_sync_cache1_from_channel = function(channel)
     this.fifo_dma_dcount = channel.dma_dcount >>> 0;
     this.fifo_dma_state = channel.dma_state >>> 0;
     this.fifo_dma_fetch = channel.dma_fetch >>> 0;
+};
+
+NV20GeForce.prototype.fifo_has_dma_push_work = function()
+{
+    if(this.fifo_should_wait())
+    {
+        return true;
+    }
+
+    for(var i = 0; i < this.fifo_channels.length; i++)
+    {
+        const channel = this.fifo_channels[i];
+
+        if(!channel || !this.fifo_is_dma_channel(channel.id))
+        {
+            continue;
+        }
+
+        if(channel.processing ||
+           channel.pending_count ||
+           channel.dma_get !== channel.dma_put)
+        {
+            return true;
+        }
+    }
+
+    return false;
+};
+
+NV20GeForce.prototype.fifo_update_dma_push_state = function()
+{
+    if(!this.fifo_has_dma_push_work())
+    {
+        this.fifo_intr &= ~NV20_FIFO_INTR_DMA_PUSHER;
+        this.update_irq_level();
+    }
+};
+
+NV20GeForce.prototype.fifo_dma_push_read = function()
+{
+    const work = this.fifo_has_dma_push_work();
+    return (this.fifo_dma_push & NV20_FIFO_DMA_PUSH_CONTROL_MASK) |
+        (work ? NV20_FIFO_DMA_PUSH_STATE_BUSY : NV20_FIFO_DMA_PUSH_BUFFER_EMPTY);
 };
 
 NV20GeForce.prototype.fifo_ramht_info = function()
@@ -1974,6 +2781,7 @@ NV20GeForce.prototype.fifo_dma_read32 = function(channel, offset, source)
         {
             channel.dma_state = 0x80000000;
             this.fifo_intr |= NV20_FIFO_INTR_DMA_PTE;
+            this.update_irq_level();
         }
 
         if(this.fifo_trace)
@@ -2065,8 +2873,14 @@ NV20GeForce.prototype.fifo_dma_reg_write32 = function(channel, reg, value)
 
 NV20GeForce.prototype.fifo_kick_enabled_dma_channels = function(source)
 {
+    if(this.fifo_should_wait())
+    {
+        return;
+    }
+
     if((this.fifo_cache1_push0 & 1) === 0 || (this.fifo_pull0 & 1) === 0)
     {
+        this.fifo_update_dma_push_state();
         return;
     }
 
@@ -2088,6 +2902,8 @@ NV20GeForce.prototype.fifo_kick_enabled_dma_channels = function(source)
             }
         }
     }
+
+    this.fifo_update_dma_push_state();
 };
 
 NV20GeForce.prototype.fifo_log_method = function(channel, subchannel, method, data, source)
@@ -2112,6 +2928,124 @@ NV20GeForce.prototype.fifo_log_method = function(channel, subchannel, method, da
             " data=" + h(data >>> 0, 8), LOG_PCI);
 };
 
+NV20GeForce.prototype.fifo_should_wait = function()
+{
+    return this.fifo_wait_notify ||
+        this.fifo_wait_flip ||
+        this.fifo_wait_soft ||
+        this.fifo_wait_acquire;
+};
+
+NV20GeForce.prototype.fifo_note_wait = function(reason)
+{
+    if(this.fifo_wait_log_count++ < 16)
+    {
+        dbg_log(this.name + " pfifo wait " + reason +
+                " notify=" + (this.fifo_wait_notify ? 1 : 0) +
+                " flip=" + (this.fifo_wait_flip ? 1 : 0) +
+                " acquire=" + (this.fifo_wait_acquire ? 1 : 0) +
+                " read=" + h(this.graph_flip_read >>> 0, 8) +
+                " write=" + h(this.graph_flip_write >>> 0, 8) +
+                " modulo=" + h(this.graph_flip_modulo >>> 0, 8), LOG_PCI);
+    }
+};
+
+NV20GeForce.prototype.fifo_resume_wait = function(reason)
+{
+    if(this.fifo_wait_log_count++ < 16)
+    {
+        dbg_log(this.name + " pfifo resume " + reason +
+                " read=" + h(this.graph_flip_read >>> 0, 8) +
+                " write=" + h(this.graph_flip_write >>> 0, 8), LOG_PCI);
+    }
+
+    this.fifo_kick_enabled_dma_channels("wait-" + reason);
+};
+
+NV20GeForce.prototype.log_missing_command = function(kind, key, detail)
+{
+    if(!this.missing_trace)
+    {
+        return;
+    }
+
+    key = kind + ":" + key;
+
+    var entry = this.missing_commands.get(key);
+
+    if(entry)
+    {
+        entry.count++;
+        entry.last = detail;
+    }
+    else
+    {
+        entry = {
+            count: 1,
+            kind: kind,
+            first: detail,
+            last: detail,
+        };
+        this.missing_commands.set(key, entry);
+    }
+
+    const debug = this["debug_missing_commands"];
+    debug.total++;
+    debug.unique = this.missing_commands.size;
+    debug.last = {
+        kind: kind,
+        key: key,
+        count: entry.count,
+        detail: detail,
+    };
+
+    if(entry.count > 4 && (entry.count & entry.count - 1) !== 0)
+    {
+        return;
+    }
+
+    if(this.missing_log_count >= this.missing_log_limit)
+    {
+        if(!this.missing_log_suppressed)
+        {
+            this.missing_log_suppressed = true;
+            dbg_log(this.name + " missing command log suppressed" +
+                    " unique=" + this.missing_commands.size +
+                    " total=" + debug.total, LOG_PCI);
+        }
+
+        return;
+    }
+
+    this.missing_log_count++;
+    dbg_log(this.name + " missing command kind=" + kind +
+            " count=" + entry.count + " " + detail, LOG_PCI);
+};
+
+NV20GeForce.prototype.graph_log_unhandled_method = function(channel, subchannel, method, data, source)
+{
+    const object = channel.subchannels[subchannel] || this.fifo_subchannels[subchannel];
+    const state = object && object.state;
+    const class_id = state ? state.class_id : object ? object.class_id : 0;
+    const handle = object ? object.handle : 0;
+    const class_name = nv20_class_name(class_id);
+    const key = "ch" + channel.id +
+        ":subc" + subchannel +
+        ":class" + h(class_id >>> 0, 4) +
+        ":method" + h(method >>> 0, 4);
+
+    this["graph_unhandled_log_count"]++;
+    this.log_missing_command("pfifo-method", key,
+        "channel=" + channel.id +
+        " subc=" + subchannel +
+        " class=" + h(class_id >>> 0, 4) +
+        (class_name ? " (" + class_name + ")" : "") +
+        " handle=" + h(handle >>> 0, 8) +
+        " method=" + h(method >>> 0, 4) +
+        " data=" + h(data >>> 0, 8) +
+        " source=" + (source || "method"));
+};
+
 NV20GeForce.prototype.graph_object_key = function(channel, object)
 {
     if(object && object.instance)
@@ -2132,6 +3066,8 @@ NV20GeForce.prototype.graph_default_surface = function()
         dst_pitch: this.render_stride,
         src_offset: this.render_offset,
         dst_offset: this.render_offset,
+        surface_src_offset_set: true,
+        surface_dst_offset_set: true,
         src_dma: null,
         dst_dma: null,
     };
@@ -2163,10 +3099,13 @@ NV20GeForce.prototype.graph_init_object_state = function(channel, object)
         operation: NV20_2D_OPERATION_SRCCOPY,
         color_format: 0,
         color_format_set: false,
+        ifc_indexed_format: false,
         color: 0,
         format: nv20_surface_format_from_bpp(this.render_bpp),
         surface_format_set: false,
         surface_pitch_set: false,
+        surface_src_offset_set: false,
+        surface_dst_offset_set: false,
         src_pitch: this.render_stride,
         dst_pitch: this.render_stride,
         src_offset: this.render_offset,
@@ -2209,6 +3148,18 @@ NV20GeForce.prototype.graph_init_object_state = function(channel, object)
         dy_dv: 0,
         point12d4: { x: 0, y: 0 },
         image_upload: null,
+        iifc_palette_handle: 0,
+        iifc_palette_dma: null,
+        iifc_palette_offset: 0,
+        iifc_operation: NV20_2D_OPERATION_SRCCOPY,
+        iifc_color_format: 1,
+        iifc_bpp4: false,
+        iifc_yx: { x: 0, y: 0 },
+        iifc_dhw: { w: 0, h: 0 },
+        iifc_shw: { w: 0, h: 0 },
+        iifc_words: null,
+        iifc_words_ptr: 0,
+        iifc_words_left: 0,
         m2mf_offset_in: 0,
         m2mf_offset_out: 0,
         m2mf_pitch_in: 0,
@@ -2228,6 +3179,7 @@ NV20GeForce.prototype.graph_init_object_state = function(channel, object)
         pattern_color: [],
         chroma_color_format: 0,
         chroma_color: 0,
+        chroma_color_set: false,
         beta: 0xFFFFFFFF,
         mono_format: 0,
         mono_color0: 0,
@@ -2416,6 +3368,157 @@ NV20GeForce.prototype.graph_count_2d = function(kind)
     stats["accel"] = this["graph_accel_count"] || 0;
 };
 
+NV20GeForce.prototype.graph_defer_vram_mark = function(bucket, offset, width)
+{
+    if(!bucket)
+    {
+        return;
+    }
+
+    offset >>>= 0;
+    width >>>= 0;
+    const end = Math.min(this.vram_size, offset + width);
+
+    if(offset >= end)
+    {
+        return;
+    }
+
+    if(offset < bucket.dirty_min)
+    {
+        bucket.dirty_min = offset;
+    }
+
+    if(end > bucket.dirty_max)
+    {
+        bucket.dirty_max = end;
+    }
+
+    if(!this.render_frame_size || !this.render_stride)
+    {
+        return;
+    }
+
+    const render_start = this.render_offset;
+    const render_end = render_start + this.render_frame_size;
+
+    if(end <= render_start || offset >= render_end)
+    {
+        return;
+    }
+
+    const dirty_start = Math.max(offset, render_start);
+    const dirty_end = Math.min(end, render_end);
+    const dirty_min = dirty_start - render_start;
+    const dirty_max = dirty_end - render_start;
+    const min_y = Math.max(0, Math.min(this.render_height, dirty_min / this.render_stride | 0));
+    const max_y = Math.max(min_y, Math.min(this.render_height,
+        (dirty_max + this.render_stride - 1) / this.render_stride | 0));
+
+    if(min_y >= max_y)
+    {
+        return;
+    }
+
+    if(!bucket.render_dirty_rows || bucket.render_dirty_rows.length !== this.render_height)
+    {
+        bucket.render_dirty_rows = new Uint8Array(this.render_height);
+        bucket.render_dirty_row_min = this.render_height;
+        bucket.render_dirty_row_max = 0;
+    }
+
+    for(var y = min_y; y < max_y; y++)
+    {
+        bucket.render_dirty_rows[y] = 1;
+    }
+
+    if(min_y < bucket.render_dirty_row_min)
+    {
+        bucket.render_dirty_row_min = min_y;
+    }
+
+    if(max_y > bucket.render_dirty_row_max)
+    {
+        bucket.render_dirty_row_max = max_y;
+    }
+};
+
+NV20GeForce.prototype.graph_flush_vram_mark = function(bucket)
+{
+    if(!bucket || bucket.dirty_min >= bucket.dirty_max)
+    {
+        return;
+    }
+
+    if(bucket.dirty_min < this.vram_dirty_min)
+    {
+        this.vram_dirty_min = bucket.dirty_min;
+    }
+
+    if(bucket.dirty_max > this.vram_dirty_max)
+    {
+        this.vram_dirty_max = bucket.dirty_max;
+    }
+
+    if(bucket.render_dirty_rows &&
+       bucket.render_dirty_row_min < bucket.render_dirty_row_max)
+    {
+        if(!this.render_dirty_rows || this.render_dirty_rows.length !== this.render_height)
+        {
+            this.render_dirty_rows = new Uint8Array(this.render_height);
+        }
+
+        const min_y = bucket.render_dirty_row_min;
+        const max_y = bucket.render_dirty_row_max;
+
+        for(var y = min_y; y < max_y; y++)
+        {
+            if(bucket.render_dirty_rows[y])
+            {
+                this.render_dirty_rows[y] = 1;
+            }
+        }
+
+        if(min_y < this.render_dirty_row_min)
+        {
+            this.render_dirty_row_min = min_y;
+        }
+
+        if(max_y > this.render_dirty_row_max)
+        {
+            this.render_dirty_row_max = max_y;
+        }
+
+        const render_start = this.render_offset + min_y * this.render_stride;
+        const render_end = this.render_offset + max_y * this.render_stride;
+
+        if(render_start < this.render_dirty_min)
+        {
+            this.render_dirty_min = render_start;
+        }
+
+        if(render_end > this.render_dirty_max)
+        {
+            this.render_dirty_max = render_end;
+        }
+
+        this.activate_rendering();
+        this.schedule_render();
+    }
+    else
+    {
+        this.vram_mark_write(bucket.dirty_min,
+                             bucket.dirty_max - bucket.dirty_min,
+                             0);
+    }
+
+    bucket.dirty_min = this.vram_size;
+    bucket.dirty_max = 0;
+    bucket.render_dirty_rows = null;
+    bucket.render_dirty_row_min = this.render_height;
+    bucket.render_dirty_row_max = 0;
+};
+
 NV20GeForce.prototype.graph_beta_value = function(state)
 {
     if(state && state.beta_context && state.beta_context.beta !== undefined)
@@ -2435,7 +3538,7 @@ NV20GeForce.prototype.graph_chroma_matches = function(state, src_color, src_byte
 {
     const chroma = state && state.chroma;
 
-    if(!chroma)
+    if(!chroma || !chroma.chroma_color_set)
     {
         return false;
     }
@@ -2445,18 +3548,15 @@ NV20GeForce.prototype.graph_chroma_matches = function(state, src_color, src_byte
 
     if(src_bytes >= 4)
     {
-        return !!(chroma_color & 0xFF000000) &&
-            ((src_color & 0x00FFFFFF) === (chroma_color & 0x00FFFFFF));
+        return (src_color & 0x00FFFFFF) === (chroma_color & 0x00FFFFFF);
     }
 
     if(src_bytes === 2)
     {
-        return !!(chroma_color & 0xFFFF0000) &&
-            ((src_color & 0x0000FFFF) === (chroma_color & 0x0000FFFF));
+        return (src_color & 0x0000FFFF) === (chroma_color & 0x0000FFFF);
     }
 
-    return !!(chroma_color & 0xFFFFFF00) &&
-        ((src_color & 0x000000FF) === (chroma_color & 0x000000FF));
+    return (src_color & 0x000000FF) === (chroma_color & 0x000000FF);
 };
 
 NV20GeForce.prototype.graph_blend_bytes = function(state,
@@ -2486,7 +3586,11 @@ NV20GeForce.prototype.graph_blend_bytes = function(state,
             return null;
         }
 
-        if((src_format & 0xFF) === 4)
+        const src_format8 = src_format & 0xFF;
+        const class_id = state && state.class_id || 0;
+        const xrgb32 = nv20_is_sifm_class(class_id) ? src_format8 === 4 : src_format8 === 5;
+
+        if(xrgb32)
         {
             src.a = 0xFF;
         }
@@ -2524,6 +3628,42 @@ NV20GeForce.prototype.graph_blend_bytes = function(state,
                                dst_format);
 };
 
+NV20GeForce.prototype.graph_blend_fast_path = function(state, src_color, src_bpp, src_format)
+{
+    src_color >>>= 0;
+
+    if(this.graph_beta_value(state) !== 0xFFFFFFFF)
+    {
+        return 0;
+    }
+
+    if(src_bpp !== 32)
+    {
+        return 1;
+    }
+
+    const src_format8 = src_format & 0xFF;
+    const class_id = state && state.class_id || 0;
+    const xrgb32 = nv20_is_sifm_class(class_id) ? src_format8 === 4 : src_format8 === 5;
+
+    if(src_color === 0)
+    {
+        return -1;
+    }
+
+    if(xrgb32 || (src_color >>> 24) === 0xFF)
+    {
+        return 1;
+    }
+
+    if((src_color >>> 24) === 0)
+    {
+        return -1;
+    }
+
+    return 0;
+};
+
 NV20GeForce.prototype.graph_note_2d = function(kind, state, details)
 {
     const stats = this["graph_debug_2d"];
@@ -2544,6 +3684,12 @@ NV20GeForce.prototype.graph_note_2d = function(kind, state, details)
         entry["cls"] = state.class_name || nv20_class_name(state.class_id);
     }
 
+    if(entry["ms"] !== undefined)
+    {
+        stats[kind + "_ms"] = (stats[kind + "_ms"] || 0) + entry["ms"];
+    }
+
+    stats["last"] = entry;
     stats["recent"].push(entry);
 
     if(stats["recent"].length > NV20_GRAPH_DEBUG_RECENT_LIMIT)
@@ -2562,6 +3708,15 @@ NV20GeForce.prototype.graph_note_method = function(state, method, data, handled)
     }
 
     const class_name = state.class_name || nv20_class_name(state.class_id);
+    const data_method = method >= 0x0400 && method < 0x2000;
+
+    if(handled && data_method)
+    {
+        stats["methods"]++;
+        stats["data_methods"] = (stats["data_methods"] || 0) + 1;
+        return;
+    }
+
     const method_name = class_name + ":" + h(method >>> 0, 4);
 
     stats["methods"]++;
@@ -2705,6 +3860,62 @@ NV20GeForce.prototype.graph_read_dma_pixel = function(dma, offset, bytes, prefer
     for(var i = 0; i < bytes; i++)
     {
         value |= this.graph_read_dma_byte(dma, offset + i >>> 0, prefer_vram) << (i << 3);
+    }
+
+    return value >>> 0;
+};
+
+NV20GeForce.prototype.graph_read_dma32 = function(dma, offset, prefer_vram)
+{
+    return this.graph_read_dma_pixel(dma, offset, 4, prefer_vram);
+};
+
+NV20GeForce.prototype.graph_dma_linear_location = function(dma, offset, prefer_vram)
+{
+    if(dma && !dma.linear)
+    {
+        return null;
+    }
+
+    return this.graph_decode_dma_address(dma, offset, prefer_vram);
+};
+
+NV20GeForce.prototype.graph_read_linear_pixel = function(location, byte_offset, bytes)
+{
+    var value = 0;
+
+    if(!location)
+    {
+        return 0;
+    }
+
+    byte_offset >>>= 0;
+
+    if(location.kind === "vram")
+    {
+        const base = location.offset + byte_offset >>> 0;
+
+        for(var i = 0; i < bytes; i++)
+        {
+            value |= this.vram[this.vram_offset(base + i)] << (i << 3);
+        }
+    }
+    else
+    {
+        const mem8 = this.cpu && this.cpu.mem8;
+        const base = location.offset + byte_offset >>> 0;
+
+        if(!mem8 || base >= mem8.length)
+        {
+            return 0;
+        }
+
+        const available = Math.min(bytes, mem8.length - base);
+
+        for(var i = 0; i < available; i++)
+        {
+            value |= mem8[base + i] << (i << 3);
+        }
     }
 
     return value >>> 0;
@@ -2872,35 +4083,56 @@ NV20GeForce.prototype.graph_write_surface_pixel = function(surface, x, y, bytes,
 
     if(options && options.operation === 5)
     {
-        var dst_color = 0;
+        const fast_path = this.graph_blend_fast_path(options.state,
+                                                     options.src_color,
+                                                     options.src_bpp,
+                                                     options.src_format);
 
-        for(var k = 0; k < bytes_per_pixel; k++)
+        if(fast_path < 0)
         {
-            const dst_byte = location.kind === "vram" ?
-                this.vram[this.vram_offset(location.offset + k)] :
-                this.cpu.mem8[location.offset + k];
-            dst_color |= dst_byte << (k << 3);
-        }
-
-        const dst_bpp = options.dst_bpp ||
-            nv20_surface_bpp_from_format(surface.format, this.render_bpp);
-        const blended = this.graph_blend_bytes(options.state,
-                                               options.src_color,
-                                               options.src_bpp,
-                                               options.src_format,
-                                               dst_color,
-                                               dst_bpp,
-                                               surface.format);
-
-        if(!blended)
-        {
+            this.graph_count_2d("blend_skip");
             return;
         }
 
-        write_bytes = blended;
-        rop = NV20_ROP_SRCCOPY;
-        pattern_bytes = null;
-        this.graph_count_2d("blend");
+        if(fast_path > 0)
+        {
+            rop = NV20_ROP_SRCCOPY;
+            pattern_bytes = null;
+            this.graph_count_2d("blend_copy");
+        }
+        else
+        {
+            var dst_color = 0;
+
+            for(var k = 0; k < bytes_per_pixel; k++)
+            {
+                const dst_byte = location.kind === "vram" ?
+                    this.vram[this.vram_offset(location.offset + k)] :
+                    this.cpu.mem8[location.offset + k];
+                dst_color |= dst_byte << (k << 3);
+            }
+
+            const dst_bpp = options.dst_bpp ||
+                nv20_surface_bpp_from_format(surface.format, this.render_bpp);
+            const blended = this.graph_blend_bytes(options.state,
+                                                   options.src_color,
+                                                   options.src_bpp,
+                                                   options.src_format,
+                                                   dst_color,
+                                                   dst_bpp,
+                                                   surface.format);
+
+            if(!blended)
+            {
+                this.graph_count_2d("blend_skip");
+                return;
+            }
+
+            write_bytes = blended;
+            rop = NV20_ROP_SRCCOPY;
+            pattern_bytes = null;
+            this.graph_count_2d("blend");
+        }
     }
 
     if(location.kind === "vram")
@@ -2916,7 +4148,14 @@ NV20GeForce.prototype.graph_write_surface_pixel = function(surface, x, y, bytes,
             this.vram[dst_offset] = nv20_rop_byte(rop, src, dst, pat);
         }
 
-        this.vram_mark_write(offset, bytes_per_pixel, write_bytes[0] || 0);
+        if(options && options.defer_mark)
+        {
+            this.graph_defer_vram_mark(options.defer_mark, offset, bytes_per_pixel);
+        }
+        else
+        {
+            this.vram_mark_write(offset, bytes_per_pixel, write_bytes[0] || 0);
+        }
     }
     else
     {
@@ -2942,10 +4181,11 @@ NV20GeForce.prototype.graph_fill_rect = function(surface, x, y, w, h, color, col
         return false;
     }
 
+    const start_ms = nv20_now_ms();
     const bytes_per_pixel = this.graph_surface_bytes_per_pixel(surface);
     const pitch = this.graph_surface_pitch(surface, true);
     const dst_bpp = nv20_surface_bpp_from_format(surface.format, this.render_bpp);
-    const src_bpp = nv20_solid_bpp_from_format(color_format, dst_bpp);
+    const src_bpp = nv20_solid_bpp_from_format(color_format, dst_bpp, state);
     const bytes = nv20_color_to_bytes(color, src_bpp, src_bpp === 16 ? color_format : 0,
                                       dst_bpp, surface.format);
     const row_bytes = rect.w * bytes_per_pixel;
@@ -2954,6 +4194,11 @@ NV20GeForce.prototype.graph_fill_rect = function(surface, x, y, w, h, color, col
 
     if(rop !== NV20_ROP_SRCCOPY || operation === 5)
     {
+        const dirty = {
+            dirty_min: this.vram_size,
+            dirty_max: 0,
+        };
+
         for(var py = 0; py < rect.h; py++)
         {
             for(var px = 0; px < rect.w; px++)
@@ -2965,10 +4210,12 @@ NV20GeForce.prototype.graph_fill_rect = function(surface, x, y, w, h, color, col
                     src_bpp: src_bpp,
                     src_format: color_format >>> 0,
                     dst_bpp: dst_bpp,
+                    defer_mark: dirty,
                 });
             }
         }
 
+        this.graph_flush_vram_mark(dirty);
         this["graph_accel_count"]++;
         this.graph_note_2d("fill", null, {
             x: rect.x,
@@ -2976,6 +4223,9 @@ NV20GeForce.prototype.graph_fill_rect = function(surface, x, y, w, h, color, col
             w: rect.w,
             h: rect.h,
             rop: rop,
+            op: operation,
+            fmt: color_format >>> 0,
+            ms: nv20_now_ms() - start_ms,
         });
         return true;
     }
@@ -3031,6 +4281,9 @@ NV20GeForce.prototype.graph_fill_rect = function(surface, x, y, w, h, color, col
         w: rect.w,
         h: rect.h,
         rop: rop,
+        op: operation,
+        fmt: color_format >>> 0,
+        ms: nv20_now_ms() - start_ms,
     });
     return true;
 };
@@ -3047,6 +4300,7 @@ NV20GeForce.prototype.graph_blit = function(surface, src_x, src_y, dst_x, dst_y,
         return false;
     }
 
+    const start_ms = nv20_now_ms();
     src_x += rect.x - dst_x;
     src_y += rect.y - dst_y;
 
@@ -3056,7 +4310,11 @@ NV20GeForce.prototype.graph_blit = function(surface, src_x, src_y, dst_x, dst_y,
     const row_bytes = rect.w * bytes_per_pixel;
     const bottom_up = rect.y > src_y;
     const row = new Uint8Array(row_bytes);
-    const use_chroma = !!(state && state.chroma && state.chroma.chroma_color);
+    const use_chroma = !!(state && state.chroma && state.chroma.chroma_color_set);
+    const dirty = {
+        dirty_min: this.vram_size,
+        dirty_max: 0,
+    };
     rop = rop === undefined ? NV20_ROP_SRCCOPY : rop & 0xFF;
 
     for(var row_index = 0; row_index < rect.h; row_index++)
@@ -3110,7 +4368,7 @@ NV20GeForce.prototype.graph_blit = function(surface, src_x, src_y, dst_x, dst_y,
                     {
                         const offset = this.vram_offset(dst_location.offset + byte_offset);
                         this.vram[offset] = value;
-                        this.vram_mark_write(offset, 1, value);
+                        this.graph_defer_vram_mark(dirty, offset, 1);
                     }
                     else
                     {
@@ -3140,7 +4398,7 @@ NV20GeForce.prototype.graph_blit = function(surface, src_x, src_y, dst_x, dst_y,
                 {
                     const offset = this.vram_offset(dst_location.offset + i);
                     this.vram[offset] = value;
-                    this.vram_mark_write(offset, 1, value);
+                    this.graph_defer_vram_mark(dirty, offset, 1);
                 }
                 else
                 {
@@ -3150,6 +4408,7 @@ NV20GeForce.prototype.graph_blit = function(surface, src_x, src_y, dst_x, dst_y,
         }
     }
 
+    this.graph_flush_vram_mark(dirty);
     this["graph_accel_count"]++;
     this.graph_note_2d("blit", null, {
         sx: src_x,
@@ -3159,6 +4418,8 @@ NV20GeForce.prototype.graph_blit = function(surface, src_x, src_y, dst_x, dst_y,
         w: rect.w,
         h: rect.h,
         rop: rop,
+        op: state && state.operation !== undefined ? state.operation >>> 0 : 0,
+        ms: nv20_now_ms() - start_ms,
     });
     return true;
 };
@@ -3194,8 +4455,11 @@ NV20GeForce.prototype.graph_begin_image_upload = function(state)
     }
 
     const dst_bpp = nv20_surface_bpp_from_format(surface.format, this.render_bpp);
+    const allow_mono = nv20_is_ifc_class(state.class_id) ?
+        state.ifc_indexed_format :
+        (is_sifc && (state.color_format & 0xFF) === 0);
     const src_bpp = state.color_format_set ?
-        nv20_ifc_bpp_from_format(state.color_format, dst_bpp, surface.format) :
+        nv20_ifc_bpp_from_format(state.color_format, dst_bpp, surface.format, allow_mono) :
         dst_bpp;
     const src_bytes = src_bpp === 1 ? 0 : nv20_render_bytes_per_pixel(src_bpp);
     const mono_words_per_row = src_bpp === 1 ? Math.max(1, size.w + 31 >>> 5) : 0;
@@ -3225,6 +4489,9 @@ NV20GeForce.prototype.graph_begin_image_upload = function(state)
         rop: this.graph_effective_rop(state, state.operation),
         operation: state.operation >>> 0,
         src_format: state.color_format >>> 0,
+        start_ms: nv20_now_ms(),
+        dirty_min: this.vram_size,
+        dirty_max: 0,
     };
 
     if(src_bpp === 1)
@@ -3272,16 +4539,34 @@ NV20GeForce.prototype.graph_upload_mono_word = function(state, data, upload)
         const dst_y = upload.y + (row * upload.dest_height / upload.height | 0);
         const bytes = data >>> bit & 1 ? color1 : color0;
 
-        this.graph_write_surface_pixel(surface, dst_x, dst_y, bytes, upload.rop, null, null);
+        this.graph_write_surface_pixel(surface, dst_x, dst_y, bytes, upload.rop, null, {
+            defer_mark: upload,
+        });
     }
 
     upload.bytes_done += 4;
-    this.graph_note_2d("mono_words", state, {
-        x: upload.x,
-        y: upload.y,
-        w: upload.width,
-        h: upload.height,
-    });
+
+    if(upload.bytes_done >= upload.bytes_total)
+    {
+        this.graph_flush_vram_mark(upload);
+        this.graph_note_2d("upload", state, {
+            x: upload.x,
+            y: upload.y,
+            w: upload.dest_width,
+            h: upload.dest_height,
+            src_w: upload.width,
+            src_h: upload.height,
+            src_bpp: upload.src_bpp,
+            dst_bpp: upload.dst_bpp,
+            fmt: upload.src_format >>> 0,
+            op: upload.operation >>> 0,
+            rop: upload.rop,
+            mono: true,
+            ms: nv20_now_ms() - upload.start_ms,
+        });
+    }
+
+    this.graph_count_2d("mono_words");
     return true;
 };
 
@@ -3304,16 +4589,7 @@ NV20GeForce.prototype.graph_upload_data_word = function(state, data)
         return this.graph_upload_mono_word(state, data, upload);
     }
 
-    this.graph_note_2d("upload_words", state, {
-        x: upload.x,
-        y: upload.y,
-        w: upload.width,
-        h: upload.height,
-        bpp: upload.src_bpp,
-        fmt: state.color_format >>> 0,
-        total: upload.bytes_total >>> 0,
-        done: upload.bytes_done >>> 0,
-    });
+    this.graph_count_2d("upload_words");
 
     for(var i = 0; i < 4 && upload.bytes_done < upload.bytes_total; i++)
     {
@@ -3352,12 +4628,160 @@ NV20GeForce.prototype.graph_upload_data_word = function(state, data)
                 src_bpp: upload.src_bpp,
                 src_format: upload.src_format,
                 dst_bpp: upload.dst_bpp,
+                defer_mark: upload,
             });
             upload.pixel_value = 0;
             upload.pixel_byte = 0;
             upload.pixel_index++;
         }
     }
+
+    if(upload.bytes_done >= upload.bytes_total)
+    {
+        this.graph_flush_vram_mark(upload);
+        this.graph_note_2d("upload", state, {
+            x: upload.x,
+            y: upload.y,
+            w: upload.dest_width,
+            h: upload.dest_height,
+            src_w: upload.width,
+            src_h: upload.height,
+            src_bpp: upload.src_bpp,
+            dst_bpp: upload.dst_bpp,
+            fmt: upload.src_format >>> 0,
+            op: upload.operation >>> 0,
+            rop: upload.rop,
+            mono: false,
+            ms: nv20_now_ms() - upload.start_ms,
+        });
+    }
+
+    return true;
+};
+
+NV20GeForce.prototype.graph_begin_iifc_upload = function(state)
+{
+    const width = state.iifc_shw.w >>> 0;
+    const height = state.iifc_shw.h >>> 0;
+    const bits_per_symbol = state.iifc_bpp4 ? 4 : 8;
+    const word_count = width && height ?
+        (width * height * bits_per_symbol + 31 >>> 5) :
+        0;
+
+    state.iifc_words = word_count ? new Uint32Array(word_count) : null;
+    state.iifc_words_ptr = 0;
+    state.iifc_words_left = word_count;
+};
+
+NV20GeForce.prototype.graph_execute_iifc = function(state)
+{
+    const surface = state.surface || this.graph_default_surface();
+    const dx = state.iifc_yx.x | 0;
+    const dy = state.iifc_yx.y | 0;
+    const swidth = state.iifc_shw.w >>> 0;
+    const dwidth = state.iifc_dhw.w >>> 0;
+    const height = state.iifc_dhw.h >>> 0;
+    const words = state.iifc_words;
+
+    if(!words || !swidth || !dwidth || !height)
+    {
+        return false;
+    }
+
+    const start_ms = nv20_now_ms();
+    const src_bpp = nv20_iifc_bpp_from_format(state.iifc_color_format);
+    const src_bytes = nv20_render_bytes_per_pixel(src_bpp);
+    const dst_bpp = nv20_surface_bpp_from_format(surface.format, this.render_bpp);
+    const operation = state.iifc_operation >>> 0;
+    const rop = this.graph_effective_rop(state, operation);
+    const clip = state.clip;
+    const use_clip = !!(clip && clip.clip_size && clip.clip_size.w && clip.clip_size.h);
+    const clip_x0 = use_clip ? clip.clip_point.x | 0 : 0;
+    const clip_y0 = use_clip ? clip.clip_point.y | 0 : 0;
+    const clip_x1 = use_clip ? clip_x0 + (clip.clip_size.w | 0) : 0;
+    const clip_y1 = use_clip ? clip_y0 + (clip.clip_size.h | 0) : 0;
+    const dirty = {
+        dirty_min: this.vram_size,
+        dirty_max: 0,
+    };
+    var symbol_index = 0;
+
+    this.update_render_mode_from_surface(surface, "2d-iifc", dx + dwidth, dy + height);
+
+    for(var y = 0; y < height; y++)
+    {
+        for(var x = 0; x < dwidth; x++)
+        {
+            const dst_x = dx + x;
+            const dst_y = dy + y;
+
+            if(!use_clip ||
+                dst_x >= clip_x0 && dst_x < clip_x1 &&
+                dst_y >= clip_y0 && dst_y < clip_y1)
+            {
+                var symbol;
+
+                if(state.iifc_bpp4)
+                {
+                    const word_offset = symbol_index >>> 3;
+                    const symbol_offset = (symbol_index & 7 ^ 1) << 2;
+                    symbol = word_offset < words.length ?
+                        words[word_offset] >>> symbol_offset & 0xF :
+                        0;
+                }
+                else
+                {
+                    const word_offset = symbol_index >>> 2;
+                    const symbol_offset = (symbol_index & 3) << 3;
+                    symbol = word_offset < words.length ?
+                        words[word_offset] >>> symbol_offset & 0xFF :
+                        0;
+                }
+
+                const src_color = this.graph_read_dma_pixel(
+                    state.iifc_palette_dma,
+                    state.iifc_palette_offset + symbol * src_bytes >>> 0,
+                    src_bytes,
+                    false);
+                const bytes = nv20_color_to_bytes(src_color,
+                                                  src_bpp,
+                                                  state.iifc_color_format,
+                                                  dst_bpp,
+                                                  surface.format);
+
+                this.graph_write_surface_pixel(surface, dst_x, dst_y, bytes, rop, null, {
+                    operation: operation,
+                    state: state,
+                    src_color: src_color,
+                    src_bpp: src_bpp,
+                    src_format: state.iifc_color_format,
+                    dst_bpp: dst_bpp,
+                    defer_mark: dirty,
+                });
+            }
+
+            symbol_index++;
+        }
+
+        symbol_index += Math.max(0, swidth - dwidth);
+    }
+
+    this.graph_flush_vram_mark(dirty);
+    this["graph_accel_count"]++;
+    this.graph_note_2d("iifc", state, {
+        x: dx,
+        y: dy,
+        w: dwidth,
+        h: height,
+        sw: swidth,
+        bpp4: !!state.iifc_bpp4,
+        fmt: state.iifc_color_format >>> 0,
+        op: operation,
+        rop: rop,
+        src_bpp: src_bpp,
+        dst_bpp: dst_bpp,
+        ms: nv20_now_ms() - start_ms,
+    });
 
     return true;
 };
@@ -3381,6 +4805,12 @@ NV20GeForce.prototype.graph_execute_m2mf = function(state)
     const pitch_in = state.m2mf_pitch_in || line_length;
     const pitch_out = state.m2mf_pitch_out || line_length;
     const row = new Uint8Array(line_length);
+    const dirty = {
+        dirty_min: this.vram_size,
+        dirty_max: 0,
+    };
+    const start_ms = nv20_now_ms();
+    var copied = 0;
 
     for(var y = 0; y < line_count; y++)
     {
@@ -3394,37 +4824,69 @@ NV20GeForce.prototype.graph_execute_m2mf = function(state)
             continue;
         }
 
-        if(src_location.kind === "vram" && dst_location.kind === "vram")
+        row.fill(0);
+
+        if(src_location.kind === "vram")
         {
             const src = this.vram_offset(src_location.offset);
-            const dst = this.vram_offset(dst_location.offset);
-            row.fill(0);
-            row.set(this.vram.subarray(src, Math.min(this.vram_size, src + line_length)));
-            this.vram.set(row.subarray(0, Math.min(line_length, this.vram_size - dst)), dst);
-            this.vram_mark_write(dst, Math.min(line_length, this.vram_size - dst), 0);
-        }
-        else
-        {
-            for(var x = 0; x < line_length; x++)
-            {
-                const value = src_location.kind === "vram" ?
-                    this.vram[this.vram_offset(src_location.offset + x)] :
-                    this.cpu.mem8[src_location.offset + x];
 
-                if(dst_location.kind === "vram")
+            if(src + line_length <= this.vram_size)
+            {
+                row.set(this.vram.subarray(src, src + line_length));
+            }
+            else
+            {
+                for(var sx = 0; sx < line_length; sx++)
                 {
-                    const offset = this.vram_offset(dst_location.offset + x);
-                    this.vram[offset] = value;
-                    this.vram_mark_write(offset, 1, value);
-                }
-                else
-                {
-                    this.cpu.mem8[dst_location.offset + x] = value;
+                    row[sx] = this.vram[this.vram_offset(src + sx)];
                 }
             }
         }
+        else
+        {
+            const src = src_location.offset >>> 0;
+            const src_end = Math.min(this.cpu.mem8.length, src + line_length);
+
+            if(src < src_end)
+            {
+                row.set(this.cpu.mem8.subarray(src, src_end));
+            }
+        }
+
+        if(dst_location.kind === "vram")
+        {
+            const dst = this.vram_offset(dst_location.offset);
+
+            if(dst + line_length <= this.vram_size)
+            {
+                this.vram.set(row, dst);
+                this.graph_defer_vram_mark(dirty, dst, line_length);
+            }
+            else
+            {
+                for(var dx = 0; dx < line_length; dx++)
+                {
+                    const offset = this.vram_offset(dst + dx);
+                    this.vram[offset] = row[dx];
+                    this.graph_defer_vram_mark(dirty, offset, 1);
+                }
+            }
+        }
+        else
+        {
+            const dst = dst_location.offset >>> 0;
+            const dst_end = Math.min(this.cpu.mem8.length, dst + line_length);
+
+            if(dst < dst_end)
+            {
+                this.cpu.mem8.set(row.subarray(0, dst_end - dst), dst);
+            }
+        }
+
+        copied += line_length;
     }
 
+    this.graph_flush_vram_mark(dirty);
     state.m2mf_executed = true;
     this["graph_accel_count"]++;
     this.graph_note_2d("m2mf", state, {
@@ -3434,6 +4896,8 @@ NV20GeForce.prototype.graph_execute_m2mf = function(state)
         lines: line_count,
         pitch_in: pitch_in,
         pitch_out: pitch_out,
+        bytes: copied,
+        ms: nv20_now_ms() - start_ms,
     });
     return true;
 };
@@ -3479,6 +4943,9 @@ NV20GeForce.prototype.graph_complete_notify = function(channel, subchannel, stat
     this.graph_ctx_switch4 = state.instance >>> 4;
     this.graph_trapped_addr = method | subchannel << 16 | channel.id << 20;
     this.graph_trapped_data = data >>> 0;
+    this.fifo_wait_notify = true;
+    this.fifo_note_wait("notify");
+    this.update_irq_level();
 };
 
 NV20GeForce.prototype.graph_submit_surface2d = function(channel, state, method, data)
@@ -3504,10 +4971,11 @@ NV20GeForce.prototype.graph_submit_surface2d = function(channel, state, method, 
             return true;
         case 0x0308:
             state.src_offset = data >>> 0;
-            this.update_render_mode_from_surface(state, "surface2d-src-offset", 0, 0);
+            state.surface_src_offset_set = true;
             return true;
         case 0x030C:
             state.dst_offset = data >>> 0;
+            state.surface_dst_offset_set = true;
             this.update_render_mode_from_surface(state, "surface2d-dst-offset", 0, 0);
             return true;
         default:
@@ -3576,6 +5044,7 @@ NV20GeForce.prototype.graph_gdi_color_bytes = function(state, surface, color)
     else if(dst_bpp === 16)
     {
         src_bpp = 16;
+        src_format = surface.format || src_format;
     }
 
     return nv20_color_to_bytes(color, src_bpp, src_format, dst_bpp, surface.format);
@@ -3617,6 +5086,7 @@ NV20GeForce.prototype.graph_execute_gdi_blit = function(state, type)
         return false;
     }
 
+    const start_ms = nv20_now_ms();
     this.update_render_mode_from_surface(surface, "2d-gdi-image",
                                          dx + dwidth, dy + height);
 
@@ -3627,6 +5097,25 @@ NV20GeForce.prototype.graph_execute_gdi_blit = function(state, type)
     const bg_bytes = this.graph_gdi_color_bytes(state, surface, state.gdi_bg_color);
     const fg_bytes = this.graph_gdi_color_bytes(state, surface, state.gdi_fg_color);
     const rop = this.graph_effective_rop(state, state.operation);
+    const dst_bpp = nv20_surface_bpp_from_format(surface.format, this.render_bpp);
+    var src_bpp = dst_bpp;
+    var src_format = state.gdi_color_format || state.color_format || 0;
+    const dirty = {
+        dirty_min: this.vram_size,
+        dirty_max: 0,
+    };
+
+    if(dst_bpp === 32 && src_format !== 3)
+    {
+        src_bpp = 16;
+        src_format = 1;
+    }
+    else if(dst_bpp === 16)
+    {
+        src_bpp = 16;
+        src_format = surface.format || src_format;
+    }
+
     var bit_index = 0;
     var wrote = false;
 
@@ -3647,8 +5136,18 @@ NV20GeForce.prototype.graph_execute_gdi_blit = function(state, type)
             if(x >= clipx0 && x < clipx1 && y >= clipy0 && y < clipy1 &&
                 (type || pixel))
             {
+                const src_color = pixel ? state.gdi_fg_color >>> 0 : state.gdi_bg_color >>> 0;
+
                 this.graph_write_surface_pixel(surface, dx + x, dy + y,
-                    pixel ? fg_bytes : bg_bytes, rop, null, null);
+                    pixel ? fg_bytes : bg_bytes, rop, null, {
+                        operation: state.operation >>> 0,
+                        state: state,
+                        src_color: src_color,
+                        src_bpp: src_bpp,
+                        src_format: src_format,
+                        dst_bpp: dst_bpp,
+                        defer_mark: dirty,
+                    });
                 wrote = true;
             }
 
@@ -3664,6 +5163,7 @@ NV20GeForce.prototype.graph_execute_gdi_blit = function(state, type)
 
     if(wrote)
     {
+        this.graph_flush_vram_mark(dirty);
         this["graph_accel_count"]++;
     }
 
@@ -3675,6 +5175,11 @@ NV20GeForce.prototype.graph_execute_gdi_blit = function(state, type)
         sw: swidth,
         type: type,
         rop: rop,
+        op: state.operation >>> 0,
+        src_bpp: src_bpp,
+        src_fmt: src_format >>> 0,
+        dst_bpp: dst_bpp,
+        ms: nv20_now_ms() - start_ms,
     });
     return true;
 };
@@ -3699,6 +5204,10 @@ NV20GeForce.prototype.graph_gdi_image_word = function(state, data, type)
 
 NV20GeForce.prototype.graph_submit_gdi = function(channel, state, method, data)
 {
+    const class_id = state.class_id & 0xFFFF;
+    const is_nv4_gdi = class_id === NV20_CLASS_GDI_NV4;
+    const is_nv3_gdi = class_id === NV20_CLASS_GDI_NV3;
+
     switch(method)
     {
         case 0x0198:
@@ -3737,39 +5246,144 @@ NV20GeForce.prototype.graph_submit_gdi = function(channel, state, method, data)
             state.gdi_fg_color = data >>> 0;
             return true;
         case 0x07EC:
+            if(!is_nv4_gdi)
+            {
+                return false;
+            }
             state.clip_xy0 = nv20_unpack_xy(data);
             return true;
         case 0x07F0:
+            if(!is_nv4_gdi)
+            {
+                return false;
+            }
             state.clip_xy1 = nv20_unpack_xy(data);
             return true;
         case 0x07F4:
+            if(!is_nv4_gdi)
+            {
+                return false;
+            }
             state.gdi_fg_color = data >>> 0;
             return true;
         case 0x07F8:
+            if(!is_nv4_gdi)
+            {
+                return false;
+            }
             state.gdi_image_swh = nv20_unpack_wh(data);
             return true;
         case 0x07FC:
+            if(!is_nv4_gdi)
+            {
+                return false;
+            }
             state.gdi_image_xy = nv20_unpack_xy(data);
             return this.graph_gdi_prepare_words(state, 0);
         case 0x0BE4:
+            if(!is_nv4_gdi)
+            {
+                return false;
+            }
             state.clip_xy0 = nv20_unpack_xy(data);
             return true;
         case 0x0BE8:
+            if(!is_nv4_gdi)
+            {
+                return false;
+            }
             state.clip_xy1 = nv20_unpack_xy(data);
             return true;
         case 0x0BEC:
-            state.gdi_bg_color = data >>> 0;
+            if(is_nv3_gdi)
+            {
+                state.clip_xy0 = nv20_unpack_xy(data);
+            }
+            else
+            {
+                state.gdi_bg_color = data >>> 0;
+            }
             return true;
         case 0x0BF0:
-            state.gdi_fg_color = data >>> 0;
+            if(is_nv3_gdi)
+            {
+                state.clip_xy1 = nv20_unpack_xy(data);
+            }
+            else
+            {
+                state.gdi_fg_color = data >>> 0;
+            }
             return true;
         case 0x0BF4:
-            state.gdi_image_swh = nv20_unpack_wh(data);
+            if(is_nv3_gdi)
+            {
+                state.gdi_fg_color = data >>> 0;
+            }
+            else
+            {
+                state.gdi_image_swh = nv20_unpack_wh(data);
+            }
             return true;
         case 0x0BF8:
-            state.gdi_image_dwh = nv20_unpack_wh(data);
+            if(is_nv3_gdi)
+            {
+                state.gdi_image_swh = nv20_unpack_wh(data);
+            }
+            else
+            {
+                state.gdi_image_dwh = nv20_unpack_wh(data);
+            }
             return true;
         case 0x0BFC:
+            state.gdi_image_xy = nv20_unpack_xy(data);
+            return this.graph_gdi_prepare_words(state, is_nv3_gdi ? 0 : 1);
+        case 0x13E4:
+            if(!is_nv3_gdi)
+            {
+                return false;
+            }
+            state.clip_xy0 = nv20_unpack_xy(data);
+            return true;
+        case 0x13E8:
+            if(!is_nv3_gdi)
+            {
+                return false;
+            }
+            state.clip_xy1 = nv20_unpack_xy(data);
+            return true;
+        case 0x13EC:
+            if(!is_nv3_gdi)
+            {
+                return false;
+            }
+            state.gdi_bg_color = data >>> 0;
+            return true;
+        case 0x13F0:
+            if(!is_nv3_gdi)
+            {
+                return false;
+            }
+            state.gdi_fg_color = data >>> 0;
+            return true;
+        case 0x13F4:
+            if(!is_nv3_gdi)
+            {
+                return false;
+            }
+            state.gdi_image_swh = nv20_unpack_wh(data);
+            return true;
+        case 0x13F8:
+            if(!is_nv3_gdi)
+            {
+                return false;
+            }
+            state.gdi_image_dwh = nv20_unpack_wh(data);
+            return true;
+        case 0x13FC:
+            if(!is_nv3_gdi)
+            {
+                return false;
+            }
             state.gdi_image_xy = nv20_unpack_xy(data);
             return this.graph_gdi_prepare_words(state, 1);
         case 0x0FF4:
@@ -3800,6 +5414,8 @@ NV20GeForce.prototype.graph_submit_gdi = function(channel, state, method, data)
                         y: state.rect_xy.y,
                         w: size.w,
                         h: size.h,
+                        op: state.operation >>> 0,
+                        rop: this.graph_effective_rop(state, state.operation),
                     });
                 }
 
@@ -3835,6 +5451,8 @@ NV20GeForce.prototype.graph_submit_gdi = function(channel, state, method, data)
                         y: state.rect_xy0.y,
                         w: rect_xy1.x - state.rect_xy0.x,
                         h: rect_xy1.y - state.rect_xy0.y,
+                        op: state.operation >>> 0,
+                        rop: this.graph_effective_rop(state, state.operation),
                     });
                 }
 
@@ -3843,11 +5461,24 @@ NV20GeForce.prototype.graph_submit_gdi = function(channel, state, method, data)
 
             if(method >= 0x0800 && method < 0x0A00)
             {
+                if(!is_nv4_gdi)
+                {
+                    return false;
+                }
                 return this.graph_gdi_image_word(state, data, 0);
             }
 
             if(method >= 0x0C00 && method < 0x0E00)
             {
+                return this.graph_gdi_image_word(state, data, is_nv3_gdi ? 0 : 1);
+            }
+
+            if(method >= 0x1400 && method < 0x1600)
+            {
+                if(!is_nv3_gdi)
+                {
+                    return false;
+                }
                 return this.graph_gdi_image_word(state, data, 1);
             }
 
@@ -3914,6 +5545,7 @@ NV20GeForce.prototype.graph_submit_ifc = function(channel, state, method, data)
         case 0x0300:
             state.color_format = data;
             state.color_format_set = true;
+            state.ifc_indexed_format = false;
             state.image_upload = null;
             return true;
         case 0x0304:
@@ -3937,6 +5569,7 @@ NV20GeForce.prototype.graph_submit_ifc = function(channel, state, method, data)
         case 0x03E8:
             state.color_format = data;
             state.color_format_set = true;
+            state.ifc_indexed_format = true;
             state.image_upload = null;
             return true;
         case 0x03EC:
@@ -3953,6 +5586,76 @@ NV20GeForce.prototype.graph_submit_ifc = function(channel, state, method, data)
             if(method >= 0x0400 && method < 0x2000)
             {
                 return this.graph_upload_data_word(state, data);
+            }
+
+            return false;
+    }
+};
+
+NV20GeForce.prototype.graph_submit_iifc = function(channel, state, method, data)
+{
+    switch(method)
+    {
+        case 0x0184:
+            state.iifc_palette_handle = data >>> 0;
+            state.iifc_palette_dma = this.graph_dma_object_from_handle(channel, data);
+            return true;
+        case 0x0188:
+        case 0x018C:
+        case 0x0190:
+        case 0x0194:
+        case 0x0198:
+        case 0x019C:
+        case 0x01A0:
+            return this.graph_bind_context_handle(channel, state, data);
+        case 0x02F8:
+        case 0x02FC:
+        case 0x03E0:
+        case 0x03E4:
+            state.iifc_operation = data >>> 0;
+            state.operation = data >>> 0;
+            return true;
+        case 0x03E8:
+            state.iifc_color_format = data >>> 0;
+            state.color_format = data >>> 0;
+            state.color_format_set = true;
+            return true;
+        case 0x03EC:
+            state.iifc_bpp4 = !!data;
+            return true;
+        case 0x03F0:
+            state.iifc_palette_offset = data >>> 0;
+            return true;
+        case 0x03F4:
+            state.iifc_yx = nv20_unpack_xy(data);
+            return true;
+        case 0x03F8:
+            state.iifc_dhw = nv20_unpack_wh(data);
+            return true;
+        case 0x03FC:
+            state.iifc_shw = nv20_unpack_wh(data);
+            this.graph_begin_iifc_upload(state);
+            return true;
+        default:
+            if(method >= 0x0400 && method < 0x2000)
+            {
+                if(!state.iifc_words || !state.iifc_words_left)
+                {
+                    return false;
+                }
+
+                state.iifc_words[state.iifc_words_ptr++] = data >>> 0;
+                state.iifc_words_left--;
+
+                if(!state.iifc_words_left)
+                {
+                    const handled = this.graph_execute_iifc(state);
+                    state.iifc_words = null;
+                    state.iifc_words_ptr = 0;
+                    return handled;
+                }
+
+                return true;
             }
 
             return false;
@@ -4201,6 +5904,7 @@ NV20GeForce.prototype.graph_submit_chroma = function(state, method, data)
     if(method === 0x0304)
     {
         state.chroma_color = data >>> 0;
+        state.chroma_color_set = true;
         return true;
     }
 
@@ -4229,6 +5933,7 @@ NV20GeForce.prototype.graph_execute_sifm = function(state)
         return false;
     }
 
+    const start_ms = nv20_now_ms();
     const src_bpp = nv20_sifm_bpp_from_format(state.sifm_color_format, this.render_bpp);
     const src_bytes = nv20_render_bytes_per_pixel(src_bpp);
     const dst_bpp = nv20_surface_bpp_from_format(surface.format, this.render_bpp);
@@ -4236,24 +5941,50 @@ NV20GeForce.prototype.graph_execute_sifm = function(state)
                                          state.sifm_dyx.x + width,
                                          state.sifm_dyx.y + height);
     const src_pitch = (state.sifm_sfmt & 0xFFFF) || (state.sifm_shw.w || width) * src_bytes;
-    const dudx = state.sifm_dudx || 0x00100000;
-    const dvdy = state.sifm_dvdy || 0x00100000;
+    const dudx = state.sifm_dudx ? state.sifm_dudx | 0 : 0x00100000;
+    const dvdy = state.sifm_dvdy ? state.sifm_dvdy | 0 : 0x00100000;
+    const unscaled = dudx === 0x00100000 && dvdy === 0x00100000;
     const rop = this.graph_effective_rop(state, state.sifm_operation);
     const syx_raw = state.sifm_syx_raw >>> 0;
+    const unscaled_src_x0 = (syx_raw & 0xFFFF) >>> 4;
+    const unscaled_src_y0 = ((syx_raw >>> 16) & 0xFFFF) >>> 4;
+    var scaled_src_x0 = ((syx_raw & 0xFFFF) << 16) - 0x80000;
+    var scaled_src_y = ((syx_raw & 0xFFFF0000) | 0) - 0x80000;
+
+    if(scaled_src_x0 < 0)
+    {
+        scaled_src_x0 = 0;
+    }
+
+    if(scaled_src_y < 0)
+    {
+        scaled_src_y = 0;
+    }
+
+    const dirty = {
+        dirty_min: this.vram_size,
+        dirty_max: 0,
+    };
 
     for(var y = 0; y < height; y++)
     {
-        const src_y = dudx === 0x00100000 && dvdy === 0x00100000 ?
-            ((syx_raw >>> 16) & 0xFFFF) >>> 4 :
-            (((syx_raw & 0xFFFF0000) | 0) - 0x80000 + y * dvdy >> 20);
+        const src_y = unscaled ?
+            unscaled_src_y0 + y :
+            scaled_src_y >> 20;
+        var scaled_src_x = scaled_src_x0;
+        const row_offset = state.sifm_sofs + src_y * src_pitch >>> 0;
+        const row_location = this.graph_dma_linear_location(state.sifm_src_dma, row_offset, false);
 
         for(var x = 0; x < width; x++)
         {
-            const src_x = dudx === 0x00100000 && dvdy === 0x00100000 ?
-                (syx_raw & 0xFFFF) >>> 4 :
-                (((syx_raw & 0xFFFF) << 16) - 0x80000 + x * dudx >> 20);
-            const src_offset = state.sifm_sofs + src_y * src_pitch + src_x * src_bytes >>> 0;
-            var color = this.graph_read_dma_pixel(state.sifm_src_dma, src_offset, src_bytes, false);
+            const src_x = unscaled ?
+                unscaled_src_x0 + x :
+                scaled_src_x >> 20;
+            const src_row_offset = src_x * src_bytes >>> 0;
+            const src_offset = row_offset + src_row_offset >>> 0;
+            var color = row_location ?
+                this.graph_read_linear_pixel(row_location, src_row_offset, src_bytes) :
+                this.graph_read_dma_pixel(state.sifm_src_dma, src_offset, src_bytes, false);
 
             if((state.sifm_color_format & 0xFF) === 4)
             {
@@ -4280,10 +6011,22 @@ NV20GeForce.prototype.graph_execute_sifm = function(state)
                                                src_bpp: src_bpp,
                                                src_format: state.sifm_color_format >>> 0,
                                                dst_bpp: dst_bpp,
+                                               defer_mark: dirty,
                                            });
+
+            if(!unscaled)
+            {
+                scaled_src_x += dudx;
+            }
+        }
+
+        if(!unscaled)
+        {
+            scaled_src_y += dvdy;
         }
     }
 
+    this.graph_flush_vram_mark(dirty);
     this["graph_accel_count"]++;
     this.graph_note_2d("sifm", state, {
         x: state.sifm_dyx.x,
@@ -4291,9 +6034,12 @@ NV20GeForce.prototype.graph_execute_sifm = function(state)
         w: width,
         h: height,
         src_bpp: src_bpp,
+        dst_bpp: dst_bpp,
+        fmt: state.sifm_color_format >>> 0,
         pitch: src_pitch,
         op: state.sifm_operation >>> 0,
         rop: rop,
+        ms: nv20_now_ms() - start_ms,
     });
     return true;
 };
@@ -4326,10 +6072,10 @@ NV20GeForce.prototype.graph_submit_sifm = function(channel, state, method, data)
             state.sifm_dhw = nv20_unpack_wh(data);
             return true;
         case 0x0318:
-            state.sifm_dudx = data >>> 0;
+            state.sifm_dudx = data | 0;
             return true;
         case 0x031C:
-            state.sifm_dvdy = data >>> 0;
+            state.sifm_dvdy = data | 0;
             return true;
         case 0x0400:
             state.sifm_shw = nv20_unpack_wh(data);
@@ -4356,6 +6102,29 @@ NV20GeForce.prototype.graph_submit_d3d = function(channel, state, method, data)
 
     switch(method)
     {
+        case 0x0120:
+            this.graph_flip_read = data >>> 0;
+            return true;
+        case 0x0124:
+            this.graph_flip_write = data >>> 0;
+            return true;
+        case 0x0128:
+            this.graph_flip_modulo = data >>> 0 || 1;
+            this.graph_flip_read %= this.graph_flip_modulo;
+            this.graph_flip_write %= this.graph_flip_modulo;
+            return true;
+        case 0x012C:
+            this.graph_flip_modulo = this.graph_flip_modulo || 2;
+            this.graph_flip_write = (this.graph_flip_write + 1) % this.graph_flip_modulo;
+            return true;
+        case 0x0130:
+            this.graph_flip_modulo = this.graph_flip_modulo || 2;
+            if(this.graph_flip_read === this.graph_flip_write)
+            {
+                this.fifo_wait_flip = true;
+                this.fifo_note_wait("flip");
+            }
+            return true;
         case 0x0184:
             state.d3d_a_dma = this.graph_dma_object_from_handle(channel, data);
             return true;
@@ -4389,12 +6158,15 @@ NV20GeForce.prototype.graph_submit_d3d = function(channel, state, method, data)
             return true;
         case 0x0208:
             state.d3d_surface_format = data >>> 0;
+            this.update_render_mode_from_d3d_surface(state, "d3d-surface-format");
             return true;
         case 0x020C:
             state.d3d_surface_pitch = data >>> 0;
+            this.update_render_mode_from_d3d_surface(state, "d3d-surface-pitch");
             return true;
         case 0x0210:
             state.d3d_surface_color_offset = data >>> 0;
+            this.update_render_mode_from_d3d_surface(state, "d3d-surface-color-offset");
             return true;
         case 0x0214:
             state.d3d_surface_zeta_offset = data >>> 0;
@@ -4407,8 +6179,72 @@ NV20GeForce.prototype.graph_submit_d3d = function(channel, state, method, data)
     }
 };
 
+NV20GeForce.prototype.graph_submit_global_method = function(channel, method, data)
+{
+    switch(method)
+    {
+        case 0x0050:
+            channel.ref = data >>> 0;
+            this.fifo_ref_cnt = channel.ref;
+            return true;
+        case 0x0060:
+        {
+            const object = this.fifo_ramht_lookup(channel.id, data);
+            channel.semaphore_handle = data >>> 0;
+            channel.semaphore_dma = object && nv20_is_dma_class(object.class_id) ?
+                this.graph_dma_object_from_instance(object.instance, data, object.class_id) : null;
+            return true;
+        }
+        case 0x0064:
+            channel.semaphore_offset = data >>> 0;
+            return true;
+        case 0x0068:
+        {
+            if(!channel.semaphore_dma)
+            {
+                return true;
+            }
+
+            const current = this.graph_read_dma32(channel.semaphore_dma,
+                                                  channel.semaphore_offset || 0,
+                                                  false);
+
+            if(current !== (data >>> 0))
+            {
+                // Bochs waits here until software releases the semaphore. The
+                // JS bridge has no asynchronous FIFO wait path yet, so complete
+                // the acquire by publishing the expected value.
+                this.graph_write_dma32(channel.semaphore_dma,
+                                       channel.semaphore_offset || 0,
+                                       data >>> 0,
+                                       false);
+            }
+
+            return true;
+        }
+        case 0x006C:
+            if(!channel.semaphore_dma)
+            {
+                return true;
+            }
+
+            this.graph_write_dma32(channel.semaphore_dma,
+                                   channel.semaphore_offset || 0,
+                                   data >>> 0,
+                                   false);
+            return true;
+        default:
+            return false;
+    }
+};
+
 NV20GeForce.prototype.graph_submit_method = function(channel, subchannel, method, data)
 {
+    if(this.graph_submit_global_method(channel, method, data))
+    {
+        return true;
+    }
+
     var object = channel.subchannels[subchannel] || this.fifo_subchannels[subchannel];
 
     if(!object)
@@ -4483,6 +6319,10 @@ NV20GeForce.prototype.graph_submit_method = function(channel, subchannel, method
     {
         handled = this.graph_submit_ifc(channel, state, method, data);
     }
+    else if(nv20_is_iifc_class(class_id))
+    {
+        handled = this.graph_submit_iifc(channel, state, method, data);
+    }
     else if(nv20_is_sifc_class(class_id))
     {
         handled = this.graph_submit_sifc(channel, state, method, data);
@@ -4549,10 +6389,11 @@ NV20GeForce.prototype.fifo_submit_method = function(chid, subchannel, method, da
     this.graph_ctx_control &= ~0x00000100;
     this.graph_status = 0;
 
-    const index = this.fifo_cache1_put++ & NV20_FIFO_CACHE_GET_MASK;
+    const index = this.fifo_cache1_put >>> 2 & (NV20_FIFO_CACHE_RING_ENTRY_COUNT - 1);
     this.fifo_cache_method[index] = method | subchannel << 13;
     this.fifo_cache_data[index] = data;
-    this.fifo_get = this.fifo_cache1_put & NV20_FIFO_CACHE_GET_MASK;
+    this.fifo_cache1_put = this.fifo_cache1_put + 4 & NV20_FIFO_CACHE_GET_MASK;
+    this.fifo_get = this.fifo_cache1_put;
     this.fifo_pull0 &= ~0x100;
 
     if(method === 0)
@@ -4580,12 +6421,12 @@ NV20GeForce.prototype.fifo_submit_method = function(chid, subchannel, method, da
                               " engine=" + object.engine : " missing-ramht"), LOG_PCI);
         }
 
-        return;
+        return true;
     }
 
     if(this.graph_submit_method(channel, subchannel, method, data))
     {
-        return;
+        return true;
     }
 
     this["graph_unhandled_method_count"]++;
@@ -4596,7 +6437,9 @@ NV20GeForce.prototype.fifo_submit_method = function(chid, subchannel, method, da
         "data": data >>> 0,
         "source": source || "method",
     };
+    this.graph_log_unhandled_method(channel, subchannel, method, data, source || "method");
     this.fifo_log_method(channel, subchannel, method, data, source || "method");
+    return false;
 };
 
 NV20GeForce.prototype.fifo_dma_kick = function(channel, source)
@@ -4617,6 +6460,11 @@ NV20GeForce.prototype.fifo_dma_kick = function(channel, source)
 
     while(budget-- > 0)
     {
+        if(this.fifo_should_wait())
+        {
+            break;
+        }
+
         if(!this.fifo_dma_object(channel))
         {
             if(this.fifo_recover_dma_instance(channel, source))
@@ -4667,6 +6515,12 @@ NV20GeForce.prototype.fifo_dma_kick = function(channel, source)
             }
 
             channel.pending_count--;
+
+            if(this.fifo_should_wait())
+            {
+                break;
+            }
+
             continue;
         }
 
@@ -4724,18 +6578,24 @@ NV20GeForce.prototype.fifo_dma_kick = function(channel, source)
             continue;
         }
 
-        channel.dma_state = 0x80000000;
         this.fifo_cache_error = header >>> 0;
-        this.fifo_intr |= NV20_FIFO_INTR_CACHE_ERROR | NV20_FIFO_INTR_DMA_PUSHER;
+        this.log_missing_command("pfifo-dma-header",
+            "ch" + channel.id + ":header" + h(header >>> 0, 8),
+            "channel=" + channel.id +
+            " header=" + h(header >>> 0, 8) +
+            " get=" + h(channel.dma_get >>> 0, 8) +
+            " source=" + (source || "dma") +
+            " skipped=1");
 
         if(this.fifo_trace)
         {
-            dbg_log(this.name + " pfifo unsupported dma header channel=" + channel.id +
+            dbg_log(this.name + " pfifo skipped unsupported dma header channel=" + channel.id +
                     " header=" + h(header >>> 0, 8) +
                     " get=" + h(channel.dma_get >>> 0, 8) +
                     " source=" + source, LOG_PCI);
         }
-        break;
+
+        continue;
     }
 
     channel.processing = false;
@@ -4743,6 +6603,7 @@ NV20GeForce.prototype.fifo_dma_kick = function(channel, source)
     channel.dma_state = channel.pending_count ? 0 : 0x80000000;
     this.fifo_sync_cache1_from_channel(channel);
     this.fifo_save_channel_context(channel);
+    this.fifo_update_dma_push_state();
 };
 
 NV20GeForce.prototype.fifo_dma_user_read32 = function(offset)
@@ -4842,8 +6703,24 @@ NV20GeForce.prototype.vram_mark_write = function(offset, width, value)
             this.render_dirty_max = dirty_end;
         }
 
+        this.render_mark_dirty_rows(dirty_start, dirty_end);
         this.activate_rendering();
         this.schedule_render();
+    }
+
+    if(this.hw_cursor_enabled && this.hw_cursor_vram)
+    {
+        const cursor_bytes = this.hw_cursor_size * this.hw_cursor_size *
+            (this.hw_cursor_bpp32 ? 4 : 2);
+        const cursor_start = this.hw_cursor_offset >>> 0;
+        const cursor_end = cursor_start + cursor_bytes >>> 0;
+
+        if(cursor_start < this.vram_size &&
+            end > cursor_start &&
+            offset < Math.min(this.vram_size, cursor_end))
+        {
+            this.hw_cursor_mark_dirty(this.hw_cursor_x, this.hw_cursor_y, this.hw_cursor_size);
+        }
     }
 };
 
@@ -4895,6 +6772,7 @@ NV20GeForce.prototype.set_render_mode = function(width, height, bpp, stride, off
     }
 
     const bytes_per_pixel = nv20_render_bytes_per_pixel(bpp);
+    const render_format = nv20_render_format_from_bpp(bpp, this.render_format);
     const min_stride = width * bytes_per_pixel;
     stride = (stride >>> 0) || min_stride;
 
@@ -4920,6 +6798,7 @@ NV20GeForce.prototype.set_render_mode = function(width, height, bpp, stride, off
         this.render_width !== width ||
         this.render_height !== height ||
         this.render_bpp !== bpp ||
+        this.render_format !== render_format ||
         this.render_stride !== stride ||
         this.render_offset !== offset;
 
@@ -4931,11 +6810,15 @@ NV20GeForce.prototype.set_render_mode = function(width, height, bpp, stride, off
     this.render_width = width;
     this.render_height = height;
     this.render_bpp = bpp;
+    this.render_format = render_format;
     this.render_stride = stride;
     this.render_offset = offset;
     this.render_frame_size = frame_size;
     this.render_dirty_min = offset;
     this.render_dirty_max = offset + frame_size;
+    this.render_dirty_row_min = this.render_height;
+    this.render_dirty_row_max = 0;
+    this.render_dirty_rows = null;
     this.render_initialized = false;
     this.render_buffer = null;
     this.render_image_data = null;
@@ -4999,13 +6882,17 @@ NV20GeForce.prototype.update_render_mode_from_surface = function(surface, source
         return false;
     }
 
-    var offset = (surface.dst_offset || surface.src_offset ||
-                  this.graph_offset0 || this.crtc_start || 0) >>> 0;
+    if(surface.surface_dst_offset_set === false)
+    {
+        return false;
+    }
+
+    var offset = surface.dst_offset >>> 0;
     const tile_active = !!((this.fb_tile0_flags & 1) &&
         this.fb_tile0_pitch &&
         offset === 0);
     var stride = tile_active ? this.fb_tile0_pitch :
-        (surface.surface_pitch_set && (surface.dst_pitch || surface.src_pitch) ||
+        (surface.surface_pitch_set && surface.dst_pitch ||
          this.graph_pitch0 || this.fb_tile0_pitch || 0) >>> 0;
 
     if(!stride || offset >= this.vram_size)
@@ -5067,8 +6954,13 @@ NV20GeForce.prototype.update_render_mode_from_surface = function(surface, source
 
     if(!width || !height)
     {
-        width = Math.min(max_width, Math.max(this.render_width, NV20_MIN_RENDER_WIDTH));
-        height = Math.min(max_height, Math.max(this.render_height, NV20_MIN_RENDER_HEIGHT));
+        if(this.render_width > max_width || this.render_height > max_height)
+        {
+            return false;
+        }
+
+        width = this.render_width;
+        height = this.render_height;
     }
 
     this.render_surface_inferred = true;
@@ -5076,6 +6968,39 @@ NV20GeForce.prototype.update_render_mode_from_surface = function(surface, source
     this.render_surface_offset = offset;
     this.render_surface_bpp = bpp;
     return this.set_render_mode(width, height, bpp, stride, offset, source || "surface2d");
+};
+
+NV20GeForce.prototype.update_render_mode_from_d3d_surface = function(state, source)
+{
+    if(!this.render_auto_detect || !state)
+    {
+        return false;
+    }
+
+    const surface_format = nv20_surface_format_from_d3d_format(state.class_id, state.d3d_surface_format);
+    const bpp = nv20_d3d_bpp_from_format(state.class_id, state.d3d_surface_format, 0);
+    const pitch = (state.d3d_surface_pitch & 0xFFFF) || state.d3d_surface_pitch;
+
+    if(!surface_format || !nv20_sane_render_bpp(bpp) || !pitch)
+    {
+        return false;
+    }
+
+    return this.update_render_mode_from_surface({
+        class_id: state.class_id,
+        class_name: (state.class_name || "d3d") + "-surface",
+        format: surface_format,
+        src_pitch: pitch,
+        dst_pitch: pitch,
+        src_offset: state.d3d_surface_color_offset >>> 0,
+        dst_offset: state.d3d_surface_color_offset >>> 0,
+        surface_format_set: true,
+        surface_pitch_set: true,
+        surface_src_offset_set: true,
+        surface_dst_offset_set: true,
+        src_dma: state.d3d_color_dma || null,
+        dst_dma: state.d3d_color_dma || null,
+    }, source || "d3d-surface", this.render_width, this.render_height);
 };
 
 NV20GeForce.prototype.update_render_mode_from_crtc = function(source)
@@ -5108,7 +7033,7 @@ NV20GeForce.prototype.update_render_mode_from_crtc = function(source)
     const bytes_per_pixel = nv20_render_bytes_per_pixel(bpp);
     var stride = row_offset * 8;
 
-    if(this.render_surface_inferred && bpp === 8 && this.render_bpp !== 8)
+    if(this.render_surface_inferred && bpp === 8 && this.render_bpp >= 16)
     {
         return;
     }
@@ -5197,11 +7122,69 @@ NV20GeForce.prototype.ensure_render_buffer = function()
     return true;
 };
 
+NV20GeForce.prototype.sync_fast_lfb_vga = function()
+{
+    const vga = this.cpu && this.cpu.devices && this.cpu.devices.vga;
+
+    if(!this.vram_fast_memory ||
+        !vga ||
+        this.vram_base !== NV20_FAST_LFB_BASE ||
+        this.render_offset + this.render_frame_size > this.vram_fast_size ||
+        !vga.set_size_graphical ||
+        !vga.screen_fill_buffer)
+    {
+        return false;
+    }
+
+    const bytes_per_pixel = nv20_render_bytes_per_pixel(this.render_bpp);
+
+    if(!bytes_per_pixel)
+    {
+        return false;
+    }
+
+    const offset_pixels = this.render_offset / bytes_per_pixel | 0;
+    const key = this.render_width + "x" + this.render_height + "x" +
+        this.render_bpp + "@" + offset_pixels;
+
+    vga.graphical_mode = true;
+    vga.svga_enabled = true;
+    vga.svga_width = this.render_width;
+    vga.svga_height = this.render_height;
+    vga.svga_bpp = this.render_bpp;
+    vga.svga_offset = offset_pixels;
+    vga.svga_offset_x = 0;
+    vga.svga_offset_y = offset_pixels / Math.max(1, this.render_width) | 0;
+
+    if(this.vram_fast_sync_key !== key)
+    {
+        this.vram_fast_sync_key = key;
+        vga.set_size_graphical(this.render_width, this.render_height,
+                               this.render_width, this.render_height,
+                               this.render_bpp);
+        this.cpu.svga_mark_dirty();
+    }
+
+    return true;
+};
+
 NV20GeForce.prototype.screen_fill_buffer = function()
 {
     if(!this.render_active)
     {
         return false;
+    }
+
+    if(this.sync_fast_lfb_vga())
+    {
+        if(this.vram_fast_dirty)
+        {
+            this.vram_fast_dirty = false;
+            this.cpu.svga_mark_dirty();
+        }
+
+        this.cpu.devices.vga.screen_fill_buffer();
+        return true;
     }
 
     if(this.render_dirty_min >= this.render_dirty_max)
@@ -5211,40 +7194,136 @@ NV20GeForce.prototype.screen_fill_buffer = function()
 
     if(!this.ensure_render_buffer())
     {
-        this.render_dirty_min = this.render_offset + this.render_frame_size;
-        this.render_dirty_max = this.render_offset;
+        this.render_clear_dirty();
         return true;
     }
 
     const stride = this.render_stride;
-    const dirty_min = Math.max(0, this.render_dirty_min - this.render_offset);
-    const dirty_max = Math.min(this.render_frame_size, this.render_dirty_max - this.render_offset);
-    const min_y = Math.max(0, Math.min(this.render_height, dirty_min / stride | 0));
-    const max_y = Math.max(min_y, Math.min(this.render_height, (dirty_max + stride - 1) / stride | 0));
+    var layers = [];
+    var min_y;
+    var max_y;
 
-    if(min_y < max_y)
+    if(this.render_dirty_rows && this.render_dirty_row_min < this.render_dirty_row_max)
     {
-        this.render_rows(min_y, max_y);
-        this.screen.update_buffer([{
-            image_data: this.render_image_data,
-            screen_x: 0,
-            screen_y: min_y,
-            buffer_x: 0,
-            buffer_y: min_y,
-            buffer_width: this.render_width,
-            buffer_height: max_y - min_y,
-        }]);
+        const dirty_row_min = this.render_dirty_row_min;
+        const dirty_row_max = Math.min(this.render_height, this.render_dirty_row_max);
+        var y = dirty_row_min;
+        var dirty_rows = 0;
+        var dirty_layers = 0;
+        var in_dirty_layer = false;
+
+        while(y < dirty_row_max)
+        {
+            if(this.render_dirty_rows[y])
+            {
+                dirty_rows++;
+
+                if(!in_dirty_layer)
+                {
+                    dirty_layers++;
+                    in_dirty_layer = true;
+                }
+            }
+            else
+            {
+                in_dirty_layer = false;
+            }
+
+            y++;
+        }
+
+        if(dirty_layers > NV20_RENDER_DIRTY_LAYER_LIMIT)
+        {
+            min_y = dirty_row_min;
+            max_y = dirty_row_max;
+
+            if(dirty_rows && min_y < max_y)
+            {
+                this.render_rows(min_y, max_y);
+                layers.push({
+                    image_data: this.render_image_data,
+                    screen_x: 0,
+                    screen_y: min_y,
+                    buffer_x: 0,
+                    buffer_y: min_y,
+                    buffer_width: this.render_width,
+                    buffer_height: max_y - min_y,
+                });
+            }
+        }
+        else
+        {
+            y = dirty_row_min;
+
+            while(y < dirty_row_max)
+            {
+                while(y < dirty_row_max && !this.render_dirty_rows[y])
+                {
+                    y++;
+                }
+
+                min_y = y;
+
+                while(y < dirty_row_max && this.render_dirty_rows[y])
+                {
+                    this.render_dirty_rows[y] = 0;
+                    y++;
+                }
+
+                max_y = y;
+
+                if(min_y < max_y)
+                {
+                    this.render_rows(min_y, max_y);
+                    layers.push({
+                        image_data: this.render_image_data,
+                        screen_x: 0,
+                        screen_y: min_y,
+                        buffer_x: 0,
+                        buffer_y: min_y,
+                        buffer_width: this.render_width,
+                        buffer_height: max_y - min_y,
+                    });
+                }
+            }
+        }
+    }
+    else
+    {
+        const dirty_min = Math.max(0, this.render_dirty_min - this.render_offset);
+        const dirty_max = Math.min(this.render_frame_size, this.render_dirty_max - this.render_offset);
+        min_y = Math.max(0, Math.min(this.render_height, dirty_min / stride | 0));
+        max_y = Math.max(min_y, Math.min(this.render_height, (dirty_max + stride - 1) / stride | 0));
+
+        if(min_y < max_y)
+        {
+            this.render_rows(min_y, max_y);
+            layers.push({
+                image_data: this.render_image_data,
+                screen_x: 0,
+                screen_y: min_y,
+                buffer_x: 0,
+                buffer_y: min_y,
+                buffer_width: this.render_width,
+                buffer_height: max_y - min_y,
+            });
+        }
+    }
+
+    if(layers.length)
+    {
+        this.screen.update_buffer(layers);
         this.render_update_count++;
 
         if(this.render_update_count === 1)
         {
-            dbg_log(this.name + " render bridge frame update y=" + min_y +
-                    " rows=" + (max_y - min_y), LOG_PCI);
+            dbg_log(this.name + " render bridge frame update y=" + layers[0].screen_y +
+                    " rows=" + layers[0].buffer_height +
+                    " layers=" + layers.length, LOG_PCI);
         }
     }
 
-    this.render_dirty_min = this.render_offset + this.render_frame_size;
-    this.render_dirty_max = this.render_offset;
+    this.render_clear_dirty();
     return true;
 };
 
@@ -5255,6 +7334,9 @@ NV20GeForce.prototype.render_rows = function(min_y, max_y)
 
     if(this.render_bpp === 8)
     {
+        const vga = this.cpu && this.cpu.devices && this.cpu.devices.vga;
+        const palette = vga && vga.vga256_palette;
+
         for(var y = min_y; y < max_y; y++)
         {
             var src_i = this.render_offset + y * this.render_stride;
@@ -5262,10 +7344,11 @@ NV20GeForce.prototype.render_rows = function(min_y, max_y)
 
             for(var x = 0; x < this.render_width; x++, src_i++, dst_i += 4)
             {
-                const color = src[src_i];
-                dst[dst_i] = color;
-                dst[dst_i + 1] = color;
-                dst[dst_i + 2] = color;
+                const index = src[src_i];
+                const color = palette ? palette[index] >>> 0 : index * 0x010101;
+                dst[dst_i] = color >>> 16 & 0xFF;
+                dst[dst_i + 1] = color >>> 8 & 0xFF;
+                dst[dst_i + 2] = color & 0xFF;
                 dst[dst_i + 3] = 0xFF;
             }
         }
@@ -5356,6 +7439,1049 @@ NV20GeForce.prototype.render_rows = function(min_y, max_y)
             }
         }
     }
+
+    this.render_overlay_hw_cursor(min_y, max_y);
+};
+
+NV20GeForce.prototype.register_rma_io = function()
+{
+    const io = this.cpu.io;
+
+    io.register_read(0x3D0, this, this.rma_read8_d0, this.rma_read16_d0, this.rma_read32_d0);
+    io.register_read(0x3D1, this, this.rma_read8_d1);
+    io.register_read(0x3D2, this, this.rma_read8_d2, this.rma_read16_d2);
+    io.register_read(0x3D3, this, this.rma_read8_d3);
+
+    io.register_write(0x3D0, this, this.rma_write8_d0, this.rma_write16_d0, this.rma_write32_d0);
+    io.register_write(0x3D1, this, this.rma_write8_d1);
+    io.register_write(0x3D2, this, this.rma_write8_d2, this.rma_write16_d2);
+    io.register_write(0x3D3, this, this.rma_write8_d3);
+};
+
+NV20GeForce.prototype.register_legacy_vga_io = function()
+{
+    const io = this.cpu.io;
+    const write8 = port => value => this.vga_port_write8(port, value);
+    const write16 = port => value => this.vga_port_write16(port, value);
+
+    io.register_read(0x3C0, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3C1, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3C2, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3C3, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3C4, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3C5, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3C6, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3C7, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3C8, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3C9, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3CA, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3CC, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3CE, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3CF, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3BA, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+    io.register_read(0x3DA, this, this.legacy_vga_port_read8, this.legacy_vga_port_read16);
+
+    io.register_write(0x3C0, this, write8(0x3C0), write16(0x3C0));
+    io.register_write(0x3C2, this, write8(0x3C2), write16(0x3C2));
+    io.register_write(0x3C3, this, write8(0x3C3), write16(0x3C3));
+    io.register_write(0x3C4, this, write8(0x3C4), write16(0x3C4));
+    io.register_write(0x3C5, this, write8(0x3C5), write16(0x3C5));
+    io.register_write(0x3C6, this, write8(0x3C6), write16(0x3C6));
+    io.register_write(0x3C7, this, write8(0x3C7), write16(0x3C7));
+    io.register_write(0x3C8, this, write8(0x3C8), write16(0x3C8));
+    io.register_write(0x3C9, this, write8(0x3C9), write16(0x3C9));
+    io.register_write(0x3CE, this, write8(0x3CE), write16(0x3CE));
+    io.register_write(0x3CF, this, write8(0x3CF), write16(0x3CF));
+    io.register_write(0x3D8, this, write8(0x3D8), write16(0x3D8));
+    io.register_write(0x3DA, this, write8(0x3DA), write16(0x3DA));
+
+    io.register_read(0x3B4, this, this.legacy_vga_read8_3b4, this.legacy_vga_read16_3b4);
+    io.register_read(0x3B5, this, this.legacy_vga_read8_3b5, this.legacy_vga_read16_3b5);
+    io.register_read(0x3D4, this, this.legacy_vga_read8_3d4, this.legacy_vga_read16_3d4);
+    io.register_read(0x3D5, this, this.legacy_vga_read8_3d5, this.legacy_vga_read16_3d5);
+
+    io.register_write(0x3B4, this, this.legacy_vga_write8_3b4, this.legacy_vga_write16_3b4);
+    io.register_write(0x3B5, this, this.legacy_vga_write8_3b5, this.legacy_vga_write16_3b5);
+    io.register_write(0x3D4, this, this.legacy_vga_write8_3d4, this.legacy_vga_write16_3d4);
+    io.register_write(0x3D5, this, this.legacy_vga_write8_3d5, this.legacy_vga_write16_3d5);
+
+    io.register_read(0x1CE, this, this.dispi_index_read8, this.dispi_index_read16);
+    io.register_write(0x1CE, this, this.dispi_index_write8, this.dispi_index_write16);
+    io.register_read(0x1CF, this, this.dispi_data_read8, this.dispi_data_read16);
+    io.register_write(0x1CF, this, this.dispi_data_write8, this.dispi_data_write16);
+
+    dbg_log(this.name + " legacy VGA CRTC I/O owner installed", LOG_PCI);
+};
+
+NV20GeForce.prototype.register_legacy_vga_memory = function()
+{
+    this.cpu.io.mmap_register(NV20_LEGACY_VGA_MEM_BASE, NV20_LEGACY_VGA_MEM_SIZE,
+        addr => this.legacy_vga_memory_read8(addr),
+        (addr, value) => this.legacy_vga_memory_write8(addr, value));
+
+    dbg_log(this.name + " legacy VGA memory owner installed", LOG_PCI);
+};
+
+NV20GeForce.prototype.rma_read_target32 = function(for_write)
+{
+    const address = this.rma_addr >>> 0;
+    var offset = for_write ? address & ~3 : address;
+    const vram = !!(offset & 0x80000000);
+
+    if(vram)
+    {
+        offset = offset & ~0x80000000;
+        return offset < this.vram_size ? this.vram_read32(offset) : 0xFFFFFFFF;
+    }
+
+    if(offset < NV20_MMIO_SIZE)
+    {
+        const result = this.register_read32(offset & ~3).value;
+        this.mmio_note_hot_poll(offset & ~3, result, 32);
+        return result;
+    }
+
+    return 0xFFFFFFFF;
+};
+
+NV20GeForce.prototype.rma_write_target32 = function(value)
+{
+    const address = this.rma_addr >>> 0;
+    var offset = address & ~3;
+    const vram = !!(offset & 0x80000000);
+
+    value >>>= 0;
+
+    if(vram)
+    {
+        offset = offset & ~0x80000000;
+        if(offset < this.vram_size)
+        {
+            this.vram_write32(offset, value);
+        }
+    }
+    else if(offset < NV20_MMIO_SIZE)
+    {
+        this.register_write32(offset, value);
+    }
+};
+
+NV20GeForce.prototype.rma_read16 = function(port)
+{
+    const crtc38 = this.prmcio_crtc_regs[0x38];
+
+    if(!(crtc38 & 1))
+    {
+        return 0;
+    }
+
+    const rma_index = crtc38 >> 1;
+    const high = (port & 2) !== 0;
+
+    if(rma_index === 1)
+    {
+        return high ? this.rma_addr >>> 16 & 0xFFFF : this.rma_addr & 0xFFFF;
+    }
+
+    if(rma_index === 2)
+    {
+        const value = this.rma_read_target32(false);
+        return high ? value >>> 16 & 0xFFFF : value & 0xFFFF;
+    }
+
+    return 0;
+};
+
+NV20GeForce.prototype.rma_read32 = function()
+{
+    const crtc38 = this.prmcio_crtc_regs[0x38];
+
+    if(!(crtc38 & 1))
+    {
+        return 0;
+    }
+
+    const rma_index = crtc38 >> 1;
+
+    if(rma_index === 1)
+    {
+        return this.rma_addr | 0;
+    }
+
+    if(rma_index === 2)
+    {
+        return this.rma_read_target32(false) | 0;
+    }
+
+    return 0;
+};
+
+NV20GeForce.prototype.rma_write16 = function(port, value)
+{
+    const crtc38 = this.prmcio_crtc_regs[0x38];
+
+    value &= 0xFFFF;
+
+    if(!(crtc38 & 1))
+    {
+        return;
+    }
+
+    const rma_index = crtc38 >> 1;
+    const high = (port & 2) !== 0;
+
+    if(rma_index === 1)
+    {
+        if(high)
+        {
+            this.rma_addr = (this.rma_addr & 0x0000FFFF | value << 16) >>> 0;
+        }
+        else
+        {
+            this.rma_addr = (this.rma_addr & 0xFFFF0000 | value) >>> 0;
+        }
+    }
+    else if(rma_index === 3)
+    {
+        var value32 = this.rma_read_target32(true);
+        value32 = high ? value32 & 0x0000FFFF | value << 16 : value32 & 0xFFFF0000 | value;
+        this.rma_write_target32(value32);
+    }
+};
+
+NV20GeForce.prototype.rma_write32 = function(value)
+{
+    const crtc38 = this.prmcio_crtc_regs[0x38];
+
+    value >>>= 0;
+
+    if(!(crtc38 & 1))
+    {
+        return;
+    }
+
+    const rma_index = crtc38 >> 1;
+
+    if(rma_index === 1)
+    {
+        this.rma_addr = value;
+    }
+    else if(rma_index === 3)
+    {
+        this.rma_write_target32(value);
+    }
+};
+
+NV20GeForce.prototype.rma_read8 = function(port)
+{
+    const value = this.rma_read16(port & ~1);
+    return port & 1 ? value >> 8 & 0xFF : value & 0xFF;
+};
+
+NV20GeForce.prototype.rma_write8 = function(port, value)
+{
+    const base = port & ~1;
+    const shift = port & 1 ? 8 : 0;
+    const old_value = this.rma_read16(base);
+    this.rma_write16(base, old_value & ~(0xFF << shift) | (value & 0xFF) << shift);
+};
+
+NV20GeForce.prototype.rma_read8_d0 = function(port) { return this.rma_read8(port); };
+NV20GeForce.prototype.rma_read8_d1 = function(port) { return this.rma_read8(port); };
+NV20GeForce.prototype.rma_read8_d2 = function(port) { return this.rma_read8(port); };
+NV20GeForce.prototype.rma_read8_d3 = function(port) { return this.rma_read8(port); };
+NV20GeForce.prototype.rma_read16_d0 = function() { return this.rma_read16(0x3D0); };
+NV20GeForce.prototype.rma_read16_d2 = function() { return this.rma_read16(0x3D2); };
+NV20GeForce.prototype.rma_read32_d0 = function() { return this.rma_read32(); };
+NV20GeForce.prototype.rma_write8_d0 = function(value) { this.rma_write8(0x3D0, value); };
+NV20GeForce.prototype.rma_write8_d1 = function(value) { this.rma_write8(0x3D1, value); };
+NV20GeForce.prototype.rma_write8_d2 = function(value) { this.rma_write8(0x3D2, value); };
+NV20GeForce.prototype.rma_write8_d3 = function(value) { this.rma_write8(0x3D3, value); };
+NV20GeForce.prototype.rma_write16_d0 = function(value) { this.rma_write16(0x3D0, value); };
+NV20GeForce.prototype.rma_write16_d2 = function(value) { this.rma_write16(0x3D2, value); };
+NV20GeForce.prototype.rma_write32_d0 = function(value) { this.rma_write32(value); };
+
+NV20GeForce.prototype.prmcio_set_crtc_index = function(value)
+{
+    this.prmcio_crtc_index = value & 0xFF;
+    return true;
+};
+
+NV20GeForce.prototype.prmcio_write_crtc_data = function(value)
+{
+    value &= 0xFF;
+
+    const index = this.prmcio_crtc_index & 0xFF;
+
+    if(index === 0x1C && !(this.prmcio_crtc_regs[index] & 0x80) && (value & 0x80))
+    {
+        this.crtc_intr_en = 0;
+        this.update_irq_level();
+    }
+    else if(index === 0x58)
+    {
+        return true;
+    }
+    else if(index === NV20_CRTC_DDC0_STATUS ||
+            index === NV20_CRTC_DDC0_WRITE ||
+            index === NV20_CRTC_I2C_READ ||
+            index === NV20_CRTC_I2C_WRITE)
+    {
+        this.prmcio_crtc_regs[index] = value;
+
+        if(index === NV20_CRTC_DDC0_WRITE || index === NV20_CRTC_I2C_WRITE)
+        {
+            this.prmcio_crtc_regs[NV20_CRTC_DDC0_STATUS] |= NV20_CRTC_DDC_LINES_HIGH;
+            this.prmcio_crtc_regs[NV20_CRTC_I2C_READ] |= NV20_CRTC_DDC_LINES_HIGH;
+        }
+
+        return true;
+    }
+
+    this.prmcio_crtc_regs[index] = value;
+    this.update_render_mode_from_crtc("crtc[" + h(index, 2) + "]");
+
+    if(index === 0x2F || index === 0x30 || index === 0x31)
+    {
+        this.hw_cursor_update(true);
+    }
+
+    return true;
+};
+
+NV20GeForce.prototype.crtc_next_raster_status = function()
+{
+    const visible = Math.max(1, this.render_height || this.dispi_height || NV20_DEFAULT_RENDER_HEIGHT);
+    const total = visible + Math.max(16, visible >> 4);
+
+    this.crtc_raster_counter = (this.crtc_raster_counter + 1) >>> 0;
+    this.crtc_status_read_count = (this.crtc_status_read_count + 1) >>> 0;
+
+    // Bochs advances retrace timing independently of CPU I/O polling. v86 does
+    // not have that timer here, so make reads progress through a compact
+    // visible/vblank cycle. This prevents XP's miniport from busy-waiting
+    // forever on 0x3DA/PCRTC_RASTER while still exposing both phases.
+    const phase = this.crtc_status_read_count & (NV20_CRTC_RASTER_POLL_PHASES - 1);
+    const vblank = phase < 2;
+    const display_enable = phase & 1;
+    const visible_line = this.crtc_raster_counter % visible;
+    const line = vblank ? visible + phase : visible_line;
+    const status = display_enable | (vblank ? 0x08 : 0x00);
+
+    this.legacy_vga_status = status;
+
+    return {
+        line: Math.min(line, total - 1),
+        status: status,
+    };
+};
+
+NV20GeForce.prototype.prmcio_read_crtc_data = function()
+{
+    const index = this.prmcio_crtc_index & 0xFF;
+
+    if(index === NV20_CRTC_DDC0_STATUS || index === NV20_CRTC_I2C_READ)
+    {
+        // The XP NVIDIA miniport probes monitor DDC through NV CRTC I2C bits.
+        // With no emulated monitor bus, report the wire state as idle high.
+        // Do not echo the write latch here: the guest polls the line state,
+        // not the last drive value.
+        return NV20_CRTC_DDC_LINES_HIGH;
+    }
+
+    if(index === NV20_CRTC_DDC0_WRITE || index === NV20_CRTC_I2C_WRITE)
+    {
+        return NV20_CRTC_DDC_WRITE_LINES_HIGH;
+    }
+
+    return this.prmcio_crtc_regs[index];
+};
+
+NV20GeForce.prototype.reset_legacy_vga_shadow = function()
+{
+    this.legacy_vga_memory.fill(0);
+    this.legacy_vga_attr_regs.fill(0);
+    this.legacy_vga_seq_regs.fill(0);
+    this.legacy_vga_graphics_regs.fill(0);
+    this.legacy_vga_dac_data.fill(0);
+
+    this.legacy_vga_attr_index = 0;
+    this.legacy_vga_attr_palette_source = 0x20;
+    this.legacy_vga_attr_data_phase = false;
+    this.legacy_vga_seq_index = 0;
+    this.legacy_vga_graphics_index = 0;
+    this.legacy_vga_dac_mask = 0xFF;
+    this.legacy_vga_dac_read = 0;
+    this.legacy_vga_dac_write = 0;
+    this.legacy_vga_misc_output = 0xFF;
+    this.legacy_vga_enable = 0;
+    this.legacy_vga_status = 0;
+
+    this.legacy_vga_seq_regs[0x02] = 0x0F;
+    this.legacy_vga_seq_regs[0x04] = 0x06;
+    this.legacy_vga_graphics_regs[0x06] = 0x0C;
+};
+
+NV20GeForce.prototype.reset_dispi_shadow = function()
+{
+    this.dispi_index = 0;
+    this.dispi_version = NV20_DISPI_VERSION;
+    this.dispi_enable_value = 0;
+    this.dispi_width = 640;
+    this.dispi_height = 480;
+    this.dispi_bpp = 8;
+    this.dispi_bank = 0;
+    this.dispi_virtual_width = 0;
+    this.dispi_virtual_height = 0;
+    this.dispi_offset_x = 0;
+    this.dispi_offset_y = 0;
+    this.dispi_takeover_logged = false;
+};
+
+NV20GeForce.prototype.geforce_owns_legacy_vga = function()
+{
+    return this.render_active || this.render_initialized ||
+        !!(this.pci_config_space8 && (this.pci_config_space8[0x04] & 0x01));
+};
+
+NV20GeForce.prototype.geforce_handles_dispi = function()
+{
+    // The Bochs DISPI/VBE ports belong to v86's Bochs VGA adapter. Windows can
+    // keep using that path during boot even when the GeForce PCI device is
+    // present, so swallowing these writes here leaves the visible framebuffer
+    // blank. Native GeForce scanout is driven by NV registers/surfaces instead.
+    return false;
+};
+
+NV20GeForce.prototype.dispi_vga_delegate = function()
+{
+    return this.cpu && this.cpu.devices && this.cpu.devices.vga || null;
+};
+
+NV20GeForce.prototype.dispi_turn_off_vga_svga = function()
+{
+    const vga = this.dispi_vga_delegate();
+
+    if(!vga || !vga.svga_enabled)
+    {
+        return;
+    }
+
+    vga.svga_enabled = false;
+    vga.dispi_enable_value = vga.dispi_enable_value & ~1;
+    vga.svga_bank_offset = 0;
+
+    if(vga.update_layers)
+    {
+        vga.update_layers();
+    }
+};
+
+NV20GeForce.prototype.dispi_apply_render_mode = function(source)
+{
+    if(!(this.dispi_enable_value & 1))
+    {
+        return false;
+    }
+
+    const bpp = nv20_sane_render_bpp(this.dispi_bpp) ? this.dispi_bpp : this.render_bpp;
+    const bytes_per_pixel = nv20_render_bytes_per_pixel(bpp);
+
+    if(!bytes_per_pixel)
+    {
+        return false;
+    }
+
+    const width = this.dispi_width || this.render_width;
+    const height = this.dispi_height || this.render_height;
+    const virtual_width = Math.max(width, this.dispi_virtual_width || 0);
+    const stride = virtual_width * bytes_per_pixel;
+
+    if(!this.set_render_mode(width, height, bpp, stride, 0, source || "dispi"))
+    {
+        return false;
+    }
+
+    this.dispi_turn_off_vga_svga();
+    this.activate_rendering();
+    this.render_mark_dirty_rect(0, 0, width, height);
+    this.schedule_render();
+    return true;
+};
+
+NV20GeForce.prototype.dispi_index_read8 = function()
+{
+    return this.dispi_index_read16() & 0xFF;
+};
+
+NV20GeForce.prototype.dispi_index_read16 = function()
+{
+    const vga = this.dispi_vga_delegate();
+
+    if(!this.geforce_handles_dispi() && vga && vga.port1CE_read)
+    {
+        return vga.port1CE_read() & 0xFFFF;
+    }
+
+    return this.dispi_index & 0xFFFF;
+};
+
+NV20GeForce.prototype.dispi_index_write8 = function(value)
+{
+    this.dispi_index_write16(value);
+};
+
+NV20GeForce.prototype.dispi_index_write16 = function(value)
+{
+    const vga = this.dispi_vga_delegate();
+
+    value &= 0xFFFF;
+
+    if(!this.geforce_handles_dispi() && vga && vga.port1CE_write)
+    {
+        vga.port1CE_write(value);
+        return;
+    }
+
+    this.dispi_index = value;
+};
+
+NV20GeForce.prototype.dispi_data_read_local = function()
+{
+    switch(this.dispi_index & 0xFFFF)
+    {
+        case 0:
+            return this.dispi_version;
+        case 1:
+            return this.dispi_enable_value & 2 ? NV20_DISPI_MAX_XRES : this.dispi_width;
+        case 2:
+            return this.dispi_enable_value & 2 ? NV20_DISPI_MAX_YRES : this.dispi_height;
+        case 3:
+            return this.dispi_enable_value & 2 ? NV20_DISPI_MAX_BPP : this.dispi_bpp;
+        case 4:
+            return this.dispi_enable_value;
+        case 5:
+            return this.dispi_bank;
+        case 6:
+            return this.dispi_virtual_width || this.dispi_width || 1;
+        case 7:
+            return this.dispi_virtual_height || this.dispi_height || 1;
+        case 8:
+            return this.dispi_offset_x;
+        case 9:
+            return this.dispi_offset_y;
+        case 0x0A:
+            return this.vram_size / 0x10000 | 0;
+    }
+
+    return 0xFFFF;
+};
+
+NV20GeForce.prototype.dispi_data_read8 = function()
+{
+    return this.dispi_data_read16() & 0xFF;
+};
+
+NV20GeForce.prototype.dispi_data_read16 = function()
+{
+    const vga = this.dispi_vga_delegate();
+
+    if(!this.geforce_handles_dispi() && vga && vga.port1CF_read)
+    {
+        return vga.port1CF_read() & 0xFFFF;
+    }
+
+    return this.dispi_data_read_local() & 0xFFFF;
+};
+
+NV20GeForce.prototype.dispi_data_write8 = function(value)
+{
+    const old_value = this.dispi_data_read_local();
+    this.dispi_data_write16(old_value & 0xFF00 | value & 0xFF);
+};
+
+NV20GeForce.prototype.dispi_data_write16 = function(value)
+{
+    const vga = this.dispi_vga_delegate();
+    const index = this.dispi_index & 0xFFFF;
+
+    value &= 0xFFFF;
+
+    if(!this.geforce_handles_dispi() && vga && vga.port1CF_write)
+    {
+        vga.port1CF_write(value);
+        return;
+    }
+
+    if(!this.dispi_takeover_logged)
+    {
+        dbg_log(this.name + " owns Bochs DISPI/VBE ports", LOG_PCI);
+        this.dispi_takeover_logged = true;
+    }
+
+    switch(index)
+    {
+        case 0:
+            if(value >= 0xB0C0 && value <= NV20_DISPI_VERSION)
+            {
+                this.dispi_version = value;
+            }
+            break;
+        case 1:
+            this.dispi_width = Math.min(value, NV20_DISPI_MAX_XRES);
+            this.dispi_apply_render_mode("dispi-width");
+            break;
+        case 2:
+            this.dispi_height = Math.min(value, NV20_DISPI_MAX_YRES);
+            this.dispi_apply_render_mode("dispi-height");
+            break;
+        case 3:
+            this.dispi_bpp = value;
+            this.dispi_apply_render_mode("dispi-bpp");
+            break;
+        case 4:
+            this.dispi_enable_value = value;
+            this.dispi_apply_render_mode("dispi-enable");
+            break;
+        case 5:
+            this.dispi_bank = value;
+            break;
+        case 6:
+            this.dispi_virtual_width = Math.min(value, NV20_DISPI_MAX_XRES);
+            this.dispi_apply_render_mode("dispi-virtual-width");
+            break;
+        case 7:
+            this.dispi_virtual_height = Math.min(value, NV20_DISPI_MAX_YRES);
+            break;
+        case 8:
+            this.dispi_offset_x = Math.min(value, NV20_DISPI_MAX_XRES);
+            break;
+        case 9:
+            this.dispi_offset_y = Math.min(value, NV20_DISPI_MAX_YRES);
+            break;
+    }
+};
+
+NV20GeForce.prototype.legacy_vga_crtc_data_is_local = function()
+{
+    return this.geforce_owns_legacy_vga() ||
+        this.prmcio_crtc_index > NV20_VGA_CRTC_MAX;
+};
+
+NV20GeForce.prototype.legacy_vga_port_read_shadow = function(port)
+{
+    port &= 0xFFFF;
+
+    switch(port)
+    {
+        case 0x3C0:
+            return (this.legacy_vga_attr_index | this.legacy_vga_attr_palette_source) & 0xFF;
+        case 0x3C1:
+            return this.legacy_vga_attr_regs[this.legacy_vga_attr_index & 0x1F];
+        case 0x3C2:
+        case 0x3CA:
+            return 0;
+        case 0x3C3:
+            return this.legacy_vga_enable;
+        case 0x3C4:
+            return this.legacy_vga_seq_index;
+        case 0x3C5:
+            return this.legacy_vga_seq_regs[this.legacy_vga_seq_index];
+        case 0x3C6:
+            return this.legacy_vga_dac_mask;
+        case 0x3C7:
+            return 0;
+        case 0x3C8:
+            return this.legacy_vga_dac_write / 3 & 0xFF;
+        case 0x3C9:
+            return this.legacy_vga_dac_data[this.legacy_vga_dac_read++ % this.legacy_vga_dac_data.length];
+        case 0x3CC:
+            return this.legacy_vga_misc_output;
+        case 0x3CE:
+            return this.legacy_vga_graphics_index;
+        case 0x3CF:
+            return this.legacy_vga_graphics_regs[this.legacy_vga_graphics_index];
+        case 0x3BA:
+        case 0x3DA:
+            this.legacy_vga_attr_data_phase = false;
+            return this.crtc_next_raster_status().status;
+    }
+
+    return -1;
+};
+
+NV20GeForce.prototype.legacy_vga_port_write_shadow = function(port, value)
+{
+    port &= 0xFFFF;
+    value &= 0xFF;
+
+    switch(port)
+    {
+        case 0x3C0:
+            if(!this.legacy_vga_attr_data_phase)
+            {
+                this.legacy_vga_attr_index = value & 0x1F;
+                this.legacy_vga_attr_palette_source = value & 0x20;
+                this.legacy_vga_attr_data_phase = true;
+            }
+            else
+            {
+                this.legacy_vga_attr_regs[this.legacy_vga_attr_index & 0x1F] = value;
+                this.legacy_vga_attr_data_phase = false;
+            }
+            return true;
+        case 0x3C2:
+            this.legacy_vga_misc_output = value;
+            return true;
+        case 0x3C3:
+            this.legacy_vga_enable = value;
+            return true;
+        case 0x3C4:
+            this.legacy_vga_seq_index = value;
+            return true;
+        case 0x3C5:
+            this.legacy_vga_seq_regs[this.legacy_vga_seq_index] = value;
+            return true;
+        case 0x3C6:
+            this.legacy_vga_dac_mask = value;
+            return true;
+        case 0x3C7:
+            this.legacy_vga_dac_read = (value & 0xFF) * 3;
+            return true;
+        case 0x3C8:
+            this.legacy_vga_dac_write = (value & 0xFF) * 3;
+            return true;
+        case 0x3C9:
+            this.legacy_vga_dac_data[this.legacy_vga_dac_write++ % this.legacy_vga_dac_data.length] = value;
+            return true;
+        case 0x3CE:
+            this.legacy_vga_graphics_index = value;
+            return true;
+        case 0x3CF:
+            this.legacy_vga_graphics_regs[this.legacy_vga_graphics_index] = value;
+            return true;
+        case 0x3D8:
+        case 0x3DA:
+            return true;
+    }
+
+    return false;
+};
+
+NV20GeForce.prototype.legacy_vga_memory_read8 = function(addr)
+{
+    const vga = this.cpu && this.cpu.devices && this.cpu.devices.vga;
+
+    if(!this.geforce_owns_legacy_vga() && vga)
+    {
+        return vga.vga_memory_read(addr);
+    }
+
+    return this.legacy_vga_memory[(addr - NV20_LEGACY_VGA_MEM_BASE) & (NV20_LEGACY_VGA_MEM_SIZE - 1)];
+};
+
+NV20GeForce.prototype.legacy_vga_memory_write8 = function(addr, value)
+{
+    const vga = this.cpu && this.cpu.devices && this.cpu.devices.vga;
+
+    if(!this.geforce_owns_legacy_vga() && vga)
+    {
+        vga.vga_memory_write(addr, value);
+        return;
+    }
+
+    this.legacy_vga_memory[(addr - NV20_LEGACY_VGA_MEM_BASE) & (NV20_LEGACY_VGA_MEM_SIZE - 1)] = value & 0xFF;
+};
+
+NV20GeForce.prototype.legacy_vga_port_read8 = function(port)
+{
+    return this.vga_port_read8(port);
+};
+
+NV20GeForce.prototype.legacy_vga_port_read16 = function(port)
+{
+    return this.vga_port_read16(port);
+};
+
+NV20GeForce.prototype.legacy_vga_read = function(port)
+{
+    port &= 0xFFFF;
+
+    if(port === 0x3B4 || port === 0x3D4)
+    {
+        return this.prmcio_crtc_index;
+    }
+
+    if(port === 0x3B5 || port === 0x3D5)
+    {
+        if(this.legacy_vga_crtc_data_is_local())
+        {
+            return this.prmcio_read_crtc_data();
+        }
+    }
+
+    return -1;
+};
+
+NV20GeForce.prototype.legacy_vga_write = function(port, value)
+{
+    port &= 0xFFFF;
+    value &= 0xFF;
+
+    if(port === 0x3B4 || port === 0x3D4)
+    {
+        return this.prmcio_set_crtc_index(value);
+    }
+
+    if(port === 0x3B5 || port === 0x3D5)
+    {
+        return this.prmcio_write_crtc_data(value);
+    }
+
+    return false;
+};
+
+NV20GeForce.prototype.vga_port_read8 = function(port)
+{
+    const vga = this.cpu && this.cpu.devices && this.cpu.devices.vga;
+
+    port &= 0xFFFF;
+
+    const crtc_value = this.legacy_vga_read(port);
+    if(crtc_value >= 0)
+    {
+        return crtc_value;
+    }
+
+    if(this.geforce_owns_legacy_vga())
+    {
+        const shadow_value = this.legacy_vga_port_read_shadow(port);
+
+        if(shadow_value >= 0)
+        {
+            return shadow_value;
+        }
+    }
+
+    if(!vga)
+    {
+        const shadow_value = this.legacy_vga_port_read_shadow(port);
+        return shadow_value >= 0 ? shadow_value : 0xFF;
+    }
+
+    switch(port)
+    {
+        case 0x3B4:
+        case 0x3D4:
+            return vga.port3D4_read();
+        case 0x3B5:
+        case 0x3D5:
+            return vga.port3D5_read();
+        case 0x3BA:
+        case 0x3DA:
+            return vga.port3DA_read();
+        case 0x3C0:
+            return vga.port3C0_read();
+        case 0x3C1:
+            return vga.port3C1_read();
+        case 0x3C2:
+            return 0x10;
+        case 0x3C3:
+            return 0;
+        case 0x3C4:
+            return vga.port3C4_read();
+        case 0x3C5:
+            return vga.port3C5_read();
+        case 0x3C6:
+            return vga.port3C6_read();
+        case 0x3C7:
+            return vga.port3C7_read();
+        case 0x3C8:
+            return vga.port3C8_read();
+        case 0x3C9:
+            return vga.port3C9_read();
+        case 0x3CC:
+            return vga.port3CC_read();
+        case 0x3CE:
+            return vga.port3CE_read();
+        case 0x3CF:
+            return vga.port3CF_read();
+    }
+
+    return -1;
+};
+
+NV20GeForce.prototype.vga_port_write8 = function(port, value)
+{
+    const vga = this.cpu && this.cpu.devices && this.cpu.devices.vga;
+
+    port &= 0xFFFF;
+    value &= 0xFF;
+
+    switch(port)
+    {
+        case 0x3B4:
+        case 0x3D4:
+            this.prmcio_set_crtc_index(value);
+            if(vga && value <= NV20_VGA_CRTC_MAX && !this.geforce_owns_legacy_vga())
+            {
+                vga.port3D4_write(value);
+            }
+            return true;
+        case 0x3B5:
+        case 0x3D5:
+            if(this.legacy_vga_crtc_data_is_local() || !vga)
+            {
+                this.prmcio_write_crtc_data(value);
+            }
+            else
+            {
+                this.prmcio_crtc_regs[this.prmcio_crtc_index] = value;
+                vga.port3D5_write(value);
+            }
+            return true;
+    }
+
+    const shadow_handled = this.legacy_vga_port_write_shadow(port, value);
+
+    if(this.geforce_owns_legacy_vga())
+    {
+        return shadow_handled;
+    }
+
+    if(!vga)
+    {
+        return shadow_handled || this.legacy_vga_write(port, value);
+    }
+
+    switch(port)
+    {
+        case 0x3C0:
+            vga.port3C0_write(value);
+            return true;
+        case 0x3C2:
+            vga.port3C2_write(value);
+            return true;
+        case 0x3C3:
+            return true;
+        case 0x3C4:
+            vga.port3C4_write(value);
+            return true;
+        case 0x3C5:
+            vga.port3C5_write(value);
+            return true;
+        case 0x3C6:
+            vga.port3C6_write(value);
+            return true;
+        case 0x3C7:
+            vga.port3C7_write(value);
+            return true;
+        case 0x3C8:
+            vga.port3C8_write(value);
+            return true;
+        case 0x3C9:
+            vga.port3C9_write(value);
+            return true;
+        case 0x3CE:
+            vga.port3CE_write(value);
+            return true;
+        case 0x3CF:
+            vga.port3CF_write(value);
+            return true;
+        case 0x3D8:
+        case 0x3DA:
+            return true;
+    }
+
+    return false;
+};
+
+NV20GeForce.prototype.vga_port_read16 = function(port)
+{
+    var low = this.vga_port_read8(port);
+    var high = this.vga_port_read8(port + 1);
+
+    if(low < 0)
+    {
+        low = 0xFF;
+    }
+
+    if(high < 0)
+    {
+        high = 0xFF;
+    }
+
+    return low | high << 8;
+};
+
+NV20GeForce.prototype.vga_port_write16 = function(port, value)
+{
+    value &= 0xFFFF;
+
+    this.vga_port_write8(port, value & 0xFF);
+
+    if(port === 0x3B4 || port === 0x3D4)
+    {
+        this.vga_port_write8(port + 1, value >> 8 & 0xFF);
+    }
+
+    return true;
+};
+
+NV20GeForce.prototype.legacy_vga_read8_3b4 = function() { return this.vga_port_read8(0x3B4); };
+NV20GeForce.prototype.legacy_vga_read8_3b5 = function() { return this.vga_port_read8(0x3B5); };
+NV20GeForce.prototype.legacy_vga_read8_3d4 = function() { return this.vga_port_read8(0x3D4); };
+NV20GeForce.prototype.legacy_vga_read8_3d5 = function() { return this.vga_port_read8(0x3D5); };
+NV20GeForce.prototype.legacy_vga_read16_3b4 = function() { return this.vga_port_read16(0x3B4); };
+NV20GeForce.prototype.legacy_vga_read16_3b5 = function() { return this.vga_port_read16(0x3B5); };
+NV20GeForce.prototype.legacy_vga_read16_3d4 = function() { return this.vga_port_read16(0x3D4); };
+NV20GeForce.prototype.legacy_vga_read16_3d5 = function() { return this.vga_port_read16(0x3D5); };
+NV20GeForce.prototype.legacy_vga_write8_3b4 = function(value) { return this.vga_port_write8(0x3B4, value); };
+NV20GeForce.prototype.legacy_vga_write8_3b5 = function(value) { return this.vga_port_write8(0x3B5, value); };
+NV20GeForce.prototype.legacy_vga_write8_3d4 = function(value) { return this.vga_port_write8(0x3D4, value); };
+NV20GeForce.prototype.legacy_vga_write8_3d5 = function(value) { return this.vga_port_write8(0x3D5, value); };
+NV20GeForce.prototype.legacy_vga_write16_3b4 = function(value) { return this.vga_port_write16(0x3B4, value); };
+NV20GeForce.prototype.legacy_vga_write16_3b5 = function(value) { return this.vga_port_write16(0x3B5, value); };
+NV20GeForce.prototype.legacy_vga_write16_3d4 = function(value) { return this.vga_port_write16(0x3D4, value); };
+NV20GeForce.prototype.legacy_vga_write16_3d5 = function(value) { return this.vga_port_write16(0x3D5, value); };
+
+NV20GeForce.prototype.mmio_vga_alias_read8 = function(offset)
+{
+    const port = nv20_mmio_vga_alias_port(offset);
+
+    if(port < 0)
+    {
+        return -1;
+    }
+
+    if(port === 0x3BA || port === 0x3DA)
+    {
+        return this.legacy_vga_port_read_shadow(port);
+    }
+
+    if(nv20_mmio_vga_alias_head(offset))
+    {
+        return 0;
+    }
+
+    return this.vga_port_read8(port);
+};
+
+NV20GeForce.prototype.mmio_vga_alias_write8 = function(offset, value)
+{
+    const port = nv20_mmio_vga_alias_port(offset);
+
+    if(port < 0)
+    {
+        return false;
+    }
+
+    if(nv20_mmio_vga_alias_head(offset))
+    {
+        return true;
+    }
+
+    return this.vga_port_write8(port, value);
 };
 
 NV20GeForce.prototype.prmcio_read8 = function(offset)
@@ -5364,12 +8490,12 @@ NV20GeForce.prototype.prmcio_read8 = function(offset)
 
     if(offset === NV20_PRMCIO_CRTC_INDEX_COLOR || offset === NV20_PRMCIO_CRTC_INDEX_MONO)
     {
-        return this.prmcio_crtc_index;
+        return this.legacy_vga_read(0x3D4);
     }
 
     if(offset === NV20_PRMCIO_CRTC_DATA_COLOR || offset === NV20_PRMCIO_CRTC_DATA_MONO)
     {
-        return this.prmcio_crtc_regs[this.prmcio_crtc_index];
+        return this.prmcio_read_crtc_data();
     }
 
     return -1;
@@ -5382,16 +8508,12 @@ NV20GeForce.prototype.prmcio_write8 = function(offset, value)
 
     if(offset === NV20_PRMCIO_CRTC_INDEX_COLOR || offset === NV20_PRMCIO_CRTC_INDEX_MONO)
     {
-        this.prmcio_crtc_index = value;
-        this.update_render_mode_from_crtc("crtc-index[" + h(this.prmcio_crtc_index, 2) + "]");
-        return true;
+        return this.prmcio_set_crtc_index(value);
     }
 
     if(offset === NV20_PRMCIO_CRTC_DATA_COLOR || offset === NV20_PRMCIO_CRTC_DATA_MONO)
     {
-        this.prmcio_crtc_regs[this.prmcio_crtc_index] = value;
-        this.update_render_mode_from_crtc("crtc[" + h(this.prmcio_crtc_index, 2) + "]");
-        return true;
+        return this.prmcio_write_crtc_data(value);
     }
 
     return false;
@@ -5427,12 +8549,111 @@ NV20GeForce.prototype.prmcio_write32 = function(offset, value)
     return true;
 };
 
+NV20GeForce.prototype.mmio_note_hot_poll = function(offset, value, width)
+{
+    offset >>>= 0;
+    value >>>= 0;
+    width = width || 32;
+
+    if(!DEBUG || !this.missing_trace || !nv20_mmio_hot_poll_read_offset(offset))
+    {
+        return;
+    }
+
+    const key = h(offset, 6) + ":" + width;
+    const count = (this.mmio_hot_poll_counts.get(key) || 0) + 1;
+    this.mmio_hot_poll_counts.set(key, count);
+
+    const name = nv20_mmio_register_name(offset);
+
+    this["debug_mmio_hot_poll"] = {
+        "offset": offset,
+        "name": name || null,
+        "width": width,
+        "value": value,
+        "count": count,
+        "master_intr": this.get_master_interrupt_status(),
+        "fifo_cache_error": this.fifo_cache_error,
+        "fifo_intr": this.fifo_intr,
+        "fifo_intr_en": this.fifo_intr_en,
+        "fifo_get": this.fifo_get,
+        "fifo_put": this.fifo_cache1_put,
+        "fifo_dma_get": this.fifo_dma_get,
+        "fifo_dma_put": this.fifo_dma_put,
+        "fifo_wait_notify": this.fifo_wait_notify,
+        "fifo_wait_flip": this.fifo_wait_flip,
+        "fifo_wait_soft": this.fifo_wait_soft,
+        "fifo_wait_acquire": this.fifo_wait_acquire,
+        "graph_intr": this.graph_intr,
+        "graph_intr_en": this.graph_intr_en,
+        "graph_status": this.graph_status,
+        "crtc_intr": this.crtc_intr,
+        "crtc_intr_en": this.crtc_intr_en,
+        "crtc_index": this.prmcio_crtc_index,
+    };
+
+    if(!nv20_mmio_hot_poll_log_count(count))
+    {
+        return;
+    }
+
+    if(this.mmio_hot_poll_log_count >= this.mmio_hot_poll_log_limit)
+    {
+        if(!this.mmio_hot_poll_suppressed)
+        {
+            this.mmio_hot_poll_suppressed = true;
+            dbg_log(this.name + " mmio hot poll log suppressed" +
+                    " unique=" + this.mmio_hot_poll_counts.size,
+                    LOG_PCI);
+        }
+
+        return;
+    }
+
+    this.mmio_hot_poll_log_count++;
+
+    dbg_log(this.name + " mmio hot poll read" + width + " " + h(offset, 6) +
+            (name ? " (" + name + ")" : "") +
+            " count=" + count +
+            " value=" + h(value, width <= 8 ? 2 : 8) +
+            " master=" + h(this.get_master_interrupt_status(), 8) +
+            " fifo_cache_error=" + h(this.fifo_cache_error, 8) +
+            " fifo_intr=" + h(this.fifo_intr, 8) +
+            "/" + h(this.fifo_intr_en, 8) +
+            " fifo_get_put=" + h(this.fifo_get, 8) +
+            "/" + h(this.fifo_cache1_put, 8) +
+            " dma_get_put=" + h(this.fifo_dma_get, 8) +
+            "/" + h(this.fifo_dma_put, 8) +
+            " fifo_wait=" +
+            (this.fifo_wait_notify ? "n" : "-") +
+            (this.fifo_wait_flip ? "f" : "-") +
+            (this.fifo_wait_soft ? "s" : "-") +
+            (this.fifo_wait_acquire ? "a" : "-") +
+            " graph_intr=" + h(this.graph_intr, 8) +
+            "/" + h(this.graph_intr_en, 8) +
+            " graph_status=" + h(this.graph_status, 8) +
+            " crtc_intr=" + h(this.crtc_intr, 8) +
+            "/" + h(this.crtc_intr_en, 8) +
+            " crtc_index=" + h(this.prmcio_crtc_index, 2),
+            LOG_PCI);
+};
+
 NV20GeForce.prototype.mmio_read8 = function(offset)
 {
+    offset = offset & (NV20_MMIO_SIZE - 1);
+
+    const alias_value = this.mmio_vga_alias_read8(offset);
+    if(alias_value >= 0)
+    {
+        this.mmio_note_hot_poll(offset, alias_value, 8);
+        return alias_value;
+    }
+
     const value = this.prmcio_read8(offset);
 
     if(value >= 0)
     {
+        this.mmio_note_hot_poll(offset, value, 8);
         return value;
     }
 
@@ -5441,6 +8662,14 @@ NV20GeForce.prototype.mmio_read8 = function(offset)
 
 NV20GeForce.prototype.mmio_write8 = function(offset, value)
 {
+    offset = offset & (NV20_MMIO_SIZE - 1);
+
+    if(this.mmio_vga_alias_write8(offset, value))
+    {
+        this.mmio_log("write", offset & ~3, this.register_read32(offset & ~3).value, true);
+        return;
+    }
+
     if(this.prmcio_write8(offset, value))
     {
         this.mmio_log("write", offset & ~3, this.register_read32(offset & ~3).value, true);
@@ -5457,16 +8686,30 @@ NV20GeForce.prototype.mmio_read32 = function(offset)
 {
     offset = offset & (NV20_MMIO_SIZE - 1) & ~3;
 
+    if(nv20_mmio_vga_alias_port(offset) >= 0)
+    {
+        const value =
+            this.mmio_vga_alias_read8(offset) |
+            this.mmio_vga_alias_read8(offset + 1) << 8 |
+            this.mmio_vga_alias_read8(offset + 2) << 16 |
+            this.mmio_vga_alias_read8(offset + 3) << 24;
+        this.mmio_log("read", offset, value >>> 0, true);
+        this.mmio_note_hot_poll(offset, value >>> 0, 32);
+        return value >>> 0;
+    }
+
     const prmcio_value = this.prmcio_read32(offset);
 
     if(prmcio_value >= 0)
     {
         this.mmio_log("read", offset, prmcio_value, true);
+        this.mmio_note_hot_poll(offset, prmcio_value, 32);
         return prmcio_value;
     }
 
     const result = this.register_read32(offset);
     this.mmio_log("read", offset, result.value, result.known);
+    this.mmio_note_hot_poll(offset, result.value, 32);
     return result.value;
 };
 
@@ -5474,6 +8717,16 @@ NV20GeForce.prototype.mmio_write32 = function(offset, value)
 {
     offset = offset & (NV20_MMIO_SIZE - 1) & ~3;
     value = value >>> 0;
+
+    if(nv20_mmio_vga_alias_port(offset) >= 0)
+    {
+        this.mmio_vga_alias_write8(offset, value);
+        this.mmio_vga_alias_write8(offset + 1, value >>> 8);
+        this.mmio_vga_alias_write8(offset + 2, value >>> 16);
+        this.mmio_vga_alias_write8(offset + 3, value >>> 24);
+        this.mmio_log("write", offset, value, true);
+        return;
+    }
 
     if(this.prmcio_write32(offset, value))
     {
@@ -5598,7 +8851,7 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.fifo_dma_dcount;
                 break;
             case 0x003220:
-                value = this.fifo_dma_push;
+                value = this.fifo_dma_push_read();
                 break;
             case 0x00322C:
                 value = this.fifo_dma_instance;
@@ -5661,6 +8914,23 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.timer_alarm;
                 break;
 
+            case 0x008100:
+                value = this.video_intr;
+                break;
+            case 0x008140:
+            case 0x200140:
+                value = this.video_intr_en;
+                break;
+            case 0x008704:
+                value = this.video_stop;
+                break;
+
+            case 0x100000:
+                value = this.fb_boot_0;
+                break;
+            case 0x100200:
+                value = this.fb_cfg;
+                break;
             case 0x10020C:
                 value = this.vram_size;
                 break;
@@ -5677,7 +8947,7 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.fb_tile0_pitch;
                 break;
             case 0x100320:
-                value = NV20_PFB_CFG0;
+                value = this.fb_cfg0;
                 break;
             case 0x101000:
                 value = this.straps0_primary;
@@ -5763,9 +9033,14 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.crtc_config;
                 break;
             case 0x600808:
-                this.crtc_raster_pos ^= 1;
-                value = this.crtc_raster_pos;
+            {
+                const raster = this.crtc_next_raster_status();
+                // Bochs exposes VGA status through this register. In
+                // particular, VGA status bit 3 becomes bit 16 here; XP's
+                // driver polls it while waiting for retrace.
+                value = (raster.status << 13) | raster.line;
                 break;
+            }
             case 0x60080C:
                 value = this.crtc_cursor_offset;
                 break;
@@ -5776,7 +9051,7 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.crtc_gpio_ext;
                 break;
             case 0x600868:
-                value = 0;
+                value = this.crtc_engine_ctrl;
                 break;
             case 0x6013B4:
             case 0x6013D4:
@@ -5787,7 +9062,7 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.ramdac_cursor_start;
                 break;
             case 0x680404:
-                value = 0;
+                value = this.ramdac_fp_tg_control;
                 break;
             case 0x680508:
                 value = this.ramdac_vpll;
@@ -5802,12 +9077,20 @@ NV20GeForce.prototype.register_read32 = function(offset)
                 value = this.ramdac_general_control;
                 break;
             case 0x680828:
-                value = 0;
+                value = this.ramdac_dacclk;
                 break;
 
             default:
-                known = !!nv20_mmio_register_name(offset);
-                value = this.mmio_registers.get(offset) || 0;
+                if((offset >= NV20_PVIDEO_BASE && offset < NV20_PVIDEO_BASE + NV20_PVIDEO_SIZE) ||
+                   (offset >= NV20_PVIDEO_OVERLAY_BASE && offset < NV20_PVIDEO_OVERLAY_BASE + NV20_PVIDEO_OVERLAY_SIZE))
+                {
+                    value = this.pvideo_regs.get(offset) || 0;
+                }
+                else
+                {
+                    known = !!nv20_mmio_register_name(offset);
+                    value = this.mmio_registers.get(offset) || 0;
+                }
                 break;
         }
     }
@@ -5872,9 +9155,11 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
     {
         case 0x000100:
             this.mc_soft_intr = !!(value >>> 31);
+            this.update_irq_level();
             return true;
         case 0x000140:
             this.mc_intr_en = value;
+            this.update_irq_level();
             return true;
         case 0x000200:
             this.mc_enable = value;
@@ -5882,9 +9167,11 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
 
         case 0x001100:
             this.bus_intr &= ~value;
+            this.update_irq_level();
             return true;
         case 0x001140:
             this.bus_intr_en = value;
+            this.update_irq_level();
             return true;
 
         case 0x002080:
@@ -5892,9 +9179,11 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             return true;
         case 0x002100:
             this.fifo_intr &= ~value;
+            this.update_irq_level();
             return true;
         case 0x002140:
             this.fifo_intr_en = value;
+            this.update_irq_level();
             return true;
         case 0x002200:
             this.fifo_config = value;
@@ -5941,7 +9230,7 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             this.fifo_active_channel = value & 0x1F;
             return true;
         case 0x003210:
-            this.fifo_cache1_put = value;
+            this.fifo_cache1_put = value & NV20_FIFO_CACHE_GET_MASK;
             return true;
         case 0x003218:
             this.fifo_dma_dcount = value;
@@ -5950,7 +9239,12 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             channel.context_loaded = true;
             return true;
         case 0x003220:
-            this.fifo_dma_push = value;
+            this.fifo_dma_push = value & NV20_FIFO_DMA_PUSH_CONTROL_MASK;
+            if((this.fifo_dma_push & NV20_FIFO_DMA_PUSH_ACCESS) &&
+                !(this.fifo_dma_push & NV20_FIFO_DMA_PUSH_STATUS_SUSPENDED))
+            {
+                this.fifo_kick_enabled_dma_channels("dma-push");
+            }
             return true;
         case 0x00322C:
             this.fifo_dma_instance = value;
@@ -5969,12 +9263,17 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             channel = this.fifo_active_channel_state();
             channel.dma_put = value;
             channel.context_loaded = true;
+            if(this.fifo_dma_push & NV20_FIFO_DMA_PUSH_ACCESS)
+            {
+                this.fifo_dma_kick(channel, "dma-put");
+            }
             return true;
         case 0x003244:
             this.fifo_dma_get = value;
             channel = this.fifo_active_channel_state();
             channel.dma_get = value;
             channel.context_loaded = true;
+            this.fifo_update_dma_push_state();
             return true;
         case 0x003248:
             this.fifo_ref_cnt = value;
@@ -5991,15 +9290,12 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             return true;
         case 0x003270:
             this.fifo_get = value & NV20_FIFO_CACHE_GET_MASK;
-            if(this.fifo_get !== (this.fifo_cache1_put & NV20_FIFO_CACHE_GET_MASK))
+            this.fifo_intr &= ~NV20_FIFO_INTR_CACHE_ERROR;
+            if(this.fifo_get === this.fifo_cache1_put)
             {
-                this.fifo_intr |= NV20_FIFO_INTR_CACHE_ERROR;
-            }
-            else
-            {
-                this.fifo_intr &= ~NV20_FIFO_INTR_CACHE_ERROR;
                 this.fifo_pull0 &= ~0x100;
             }
+            this.update_irq_level();
             return true;
         case 0x0032E0:
             this.fifo_engine = value;
@@ -6013,9 +9309,11 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
 
         case 0x009100:
             this.timer_intr &= ~value;
+            this.update_irq_level();
             return true;
         case 0x009140:
             this.timer_intr_en = value;
+            this.update_irq_level();
             return true;
         case 0x009200:
             this.timer_num = value;
@@ -6035,6 +9333,27 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             this.timer_alarm = value;
             return true;
 
+        case 0x008100:
+            this.video_intr &= ~value;
+            return true;
+        case 0x008140:
+        case 0x200140:
+            this.video_intr_en = value;
+            return true;
+        case 0x008704:
+            this.video_stop = value;
+            return true;
+
+        case 0x100000:
+            // Strap-derived memory configuration register. It is effectively
+            // read-only for the guest, but acknowledge writes like hardware.
+            return true;
+        case 0x100200:
+            this.fb_cfg = value;
+            return true;
+        case 0x100320:
+            this.fb_cfg0 = value;
+            return true;
         case 0x100240:
         case 0x400900:
             this.fb_tile0_flags = value;
@@ -6054,12 +9373,21 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
 
         case 0x400100:
             this.graph_intr &= ~value;
+            this.update_irq_level();
+
+            if(this.fifo_wait_notify && this.graph_intr === 0)
+            {
+                this.fifo_wait_notify = false;
+                this.fifo_resume_wait("notify");
+            }
+
             return true;
         case 0x400108:
             this.graph_nsource = value;
             return true;
         case 0x400140:
             this.graph_intr_en = value;
+            this.update_irq_level();
             return true;
         case 0x400144:
             this.graph_ctx_control = value;
@@ -6098,6 +9426,18 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             this.graph_notify = value;
             return true;
         case 0x40071C:
+            if(value & 0x00000002)
+            {
+                this.graph_flip_modulo = this.graph_flip_modulo || 2;
+                this.graph_flip_read = (this.graph_flip_read + 1) % this.graph_flip_modulo;
+
+                if(this.fifo_wait_flip && this.graph_flip_read !== this.graph_flip_write)
+                {
+                    this.fifo_wait_flip = false;
+                    this.fifo_resume_wait("flip");
+                }
+            }
+
             this.graph_notify_instance = value;
             return true;
         case 0x400720:
@@ -6118,9 +9458,11 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
 
         case 0x600100:
             this.crtc_intr &= ~value;
+            this.update_irq_level();
             return true;
         case 0x600140:
             this.crtc_intr_en = value;
+            this.update_irq_level();
             return true;
         case 0x600800:
             this.crtc_start = value;
@@ -6132,12 +9474,17 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             return true;
         case 0x60080C:
             this.crtc_cursor_offset = value;
+            this.hw_cursor_update(true);
             return true;
         case 0x600810:
             this.crtc_cursor_config = value;
+            this.hw_cursor_update(true);
             return true;
         case 0x60081C:
             this.crtc_gpio_ext = value;
+            return true;
+        case 0x600868:
+            this.crtc_engine_ctrl = value;
             return true;
         case 0x6013B4:
         case 0x6013D4:
@@ -6146,6 +9493,10 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
 
         case 0x680300:
             this.ramdac_cursor_start = value;
+            this.hw_cursor_update(true);
+            return true;
+        case 0x680404:
+            this.ramdac_fp_tg_control = value;
             return true;
         case 0x680508:
             this.ramdac_vpll = value;
@@ -6159,6 +9510,24 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
         case 0x680600:
             this.ramdac_general_control = value;
             return true;
+        case 0x680828:
+            this.ramdac_dacclk = value;
+            return true;
+    }
+
+    if((offset >= NV20_PVIDEO_BASE && offset < NV20_PVIDEO_BASE + NV20_PVIDEO_SIZE) ||
+       (offset >= NV20_PVIDEO_OVERLAY_BASE && offset < NV20_PVIDEO_OVERLAY_BASE + NV20_PVIDEO_OVERLAY_SIZE))
+    {
+        if(value)
+        {
+            this.pvideo_regs.set(offset, value);
+        }
+        else
+        {
+            this.pvideo_regs.delete(offset);
+        }
+
+        return true;
     }
 
     if(value)
@@ -6175,6 +9544,14 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
 
 NV20GeForce.prototype.mmio_log = function(kind, offset, value, known)
 {
+    if(!known)
+    {
+        this.log_missing_command("mmio-" + kind,
+            h(offset >>> 0, 6),
+            "offset=" + h(offset >>> 0, 6) +
+            (kind === "read" ? " value=" : " data=") + h(value >>> 0, 8));
+    }
+
     if(!this.mmio_trace)
     {
         return;
@@ -6229,6 +9606,33 @@ NV20GeForce.prototype.get_master_interrupt_status = function()
     return value >>> 0;
 };
 
+NV20GeForce.prototype.update_irq_level = function()
+{
+    const level = !!(((this.mc_intr_en & 1) && this.get_master_interrupt_status()) ||
+                     ((this.mc_intr_en & 2) && this.mc_soft_intr));
+
+    if(level === this.irq_level)
+    {
+        return;
+    }
+
+    this.irq_level = level;
+
+    if(!this.pci)
+    {
+        return;
+    }
+
+    if(level)
+    {
+        this.pci.raise_irq(this.pci_id);
+    }
+    else
+    {
+        this.pci.lower_irq(this.pci_id);
+    }
+};
+
 NV20GeForce.prototype.timer_read64 = function()
 {
     const elapsed_ms = Math.max(0, nv20_now_ms() - this.timer_epoch_ms);
@@ -6243,6 +9647,67 @@ NV20GeForce.prototype.timer_read_low = function()
 NV20GeForce.prototype.timer_read_high = function()
 {
     return Math.floor(this.timer_read64() / 0x100000000) >>> 0;
+};
+
+NV20GeForce.prototype.restore_pci_readonly_config = function()
+{
+    const space = this.pci_config_space8;
+
+    if(!space)
+    {
+        return;
+    }
+
+    space[0x00] = NV20_VENDOR_ID & 0xFF;
+    space[0x01] = NV20_VENDOR_ID >> 8;
+    space[0x02] = NV20_DEVICE_ID_GEFORCE3_TI_500 & 0xFF;
+    space[0x03] = NV20_DEVICE_ID_GEFORCE3_TI_500 >> 8;
+    space[0x06] = 0xB0;
+    space[0x07] = 0x02;
+    space[0x08] = 0xA3;
+    space[0x09] = 0x00;
+    space[0x0A] = 0x00;
+    space[0x0B] = 0x03;
+    space[0x0E] = 0x00;
+
+    space[0x2C] = NV20_SUBSYSTEM_VENDOR_ID & 0xFF;
+    space[0x2D] = NV20_SUBSYSTEM_VENDOR_ID >> 8;
+    space[0x2E] = NV20_SUBSYSTEM_ID_GEFORCE3_TI_500 & 0xFF;
+    space[0x2F] = NV20_SUBSYSTEM_ID_GEFORCE3_TI_500 >> 8;
+    space[0x34] = 0x60;
+    space[0x35] = 0x00;
+    space[0x36] = 0x00;
+    space[0x37] = 0x00;
+    space[0x3D] = 0x01;
+
+    space[0x40] = space[0x2C];
+    space[0x41] = space[0x2D];
+    space[0x42] = space[0x2E];
+    space[0x43] = space[0x2F];
+
+    space[0x44] = 0x02;
+    space[0x45] = 0x00;
+    space[0x46] = 0x20;
+    space[0x47] = 0x00;
+    space[0x48] = 0x07;
+    space[0x49] = 0x00;
+    space[0x4A] = 0x00;
+    space[0x4B] = 0x1F;
+
+    space[0x54] = 0x01;
+    space[0x55] = 0x00;
+    space[0x56] = 0x00;
+    space[0x57] = 0x00;
+
+    space[0x60] = 0x01;
+    space[0x61] = 0x44;
+    space[0x62] = 0x02;
+    space[0x63] = 0x00;
+};
+
+NV20GeForce.prototype.pci_on_config_write = function()
+{
+    this.restore_pci_readonly_config();
 };
 
 NV20GeForce.prototype.pci_config_read32 = function(offset)

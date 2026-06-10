@@ -292,15 +292,16 @@ PCI.prototype.pci_query = function()
     dbg_line += " dev=" + h(dev, 2);
     dbg_line += " addr=" + h(addr, 2);
 
-    var device = this.device_spaces[bdf];
+    var device = this.devices[bdf];
+    var space = this.device_spaces[bdf];
 
-    if(device !== undefined)
+    if(space !== undefined && !this.device_is_hidden(device))
     {
         this.pci_status32[0] = 0x80000000 | 0;
 
-        if(addr < device.byteLength)
+        if(addr < space.byteLength)
         {
-            this.pci_response32[0] = device[addr >> 2];
+            this.pci_response32[0] = space[addr >> 2];
         }
         else
         {
@@ -310,12 +311,12 @@ PCI.prototype.pci_query = function()
 
         dbg_line += " " + h(this.pci_addr32[0] >>> 0, 8) + " -> " + h(this.pci_response32[0] >>> 0, 8);
 
-        if(addr >= device.byteLength)
+        if(addr >= space.byteLength)
         {
             dbg_line += " (undef)";
         }
 
-        dbg_line += " (" + this.devices[bdf].name + ")";
+        dbg_line += " (" + device.name + ")";
 
         dbg_log(dbg_line, LOG_PCI);
     }
@@ -326,18 +327,30 @@ PCI.prototype.pci_query = function()
     }
 };
 
+PCI.prototype.device_is_hidden = function(device)
+{
+    if(!device)
+    {
+        return false;
+    }
+
+    return typeof device.pci_hidden === "function" ? device.pci_hidden() : !!device.pci_hidden;
+};
+
 PCI.prototype.pci_write8 = function(address, written)
 {
     var bdf = address >> 8 & 0xFFFF;
     var addr = address & 0xFF;
 
-    var space = new Uint8Array(this.device_spaces[bdf].buffer);
+    var config_space = this.device_spaces[bdf];
     var device = this.devices[bdf];
 
-    if(!space)
+    if(!config_space || this.device_is_hidden(device))
     {
         return;
     }
+
+    var space = new Uint8Array(config_space.buffer);
 
     dbg_assert(!(addr >= 0x10 && addr < 0x2C || addr >= 0x30 && addr < 0x34),
                "PCI: Expected 32-bit write, got 8-bit (addr: " + h(addr) + ")");
@@ -346,6 +359,11 @@ PCI.prototype.pci_write8 = function(address, written)
             " value=" + h(written, 2), LOG_PCI);
 
     space[addr] = written;
+
+    if(device.pci_on_config_write)
+    {
+        device.pci_on_config_write(addr, 1, written);
+    }
 };
 
 PCI.prototype.pci_write16 = function(address, written)
@@ -355,13 +373,15 @@ PCI.prototype.pci_write16 = function(address, written)
     var bdf = address >> 8 & 0xFFFF;
     var addr = address & 0xFF;
 
-    var space = new Uint16Array(this.device_spaces[bdf].buffer);
+    var config_space = this.device_spaces[bdf];
     var device = this.devices[bdf];
 
-    if(!space)
+    if(!config_space || this.device_is_hidden(device))
     {
         return;
     }
+
+    var space = new Uint16Array(config_space.buffer);
 
     if(addr >= 0x10 && addr < 0x2C)
     {
@@ -377,6 +397,11 @@ PCI.prototype.pci_write16 = function(address, written)
             " value=" + h(written, 4), LOG_PCI);
 
     space[addr >>> 1] = written;
+
+    if(device.pci_on_config_write)
+    {
+        device.pci_on_config_write(addr, 2, written);
+    }
 };
 
 PCI.prototype.pci_write32 = function(address, written)
@@ -389,7 +414,7 @@ PCI.prototype.pci_write32 = function(address, written)
     var space = this.device_spaces[bdf];
     var device = this.devices[bdf];
 
-    if(!space)
+    if(!space || this.device_is_hidden(device))
     {
         return;
     }
@@ -490,12 +515,18 @@ PCI.prototype.pci_write32 = function(address, written)
     {
         dbg_log("PCI write dev=" + h(bdf >> 3, 2) + " (" + device.name + ") addr=" + h(addr, 4) +
                 " value=" + h(written >>> 0, 8), LOG_PCI);
+        space[addr >> 2] = (space[addr >> 2] & 0xFFFF0000) | (written & 0x0000FFFF);
     }
     else
     {
         dbg_log("PCI write dev=" + h(bdf >> 3, 2) + " (" + device.name + ") addr=" + h(addr, 4) +
                 " value=" + h(written >>> 0, 8), LOG_PCI);
         space[addr >>> 2] = written;
+    }
+
+    if(device.pci_on_config_write)
+    {
+        device.pci_on_config_write(addr, 4, written);
     }
 };
 
