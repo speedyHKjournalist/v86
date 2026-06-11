@@ -22,7 +22,6 @@ const NV20_DEFAULT_MMIO_BASE = 0xF1000000;
 const NV20_MMIO_SIZE = 16 * 1024 * 1024;
 const NV20_DEFAULT_VRAM_BASE = 0xD0000000;
 const NV20_DEFAULT_VRAM_SIZE = 64 * 1024 * 1024;
-const NV20_FAST_LFB_BASE = 0xD0000000;
 const NV20_DEFAULT_ROM_BASE = 0xFE000000;
 const NV20_PRAMIN_BASE = 0x00700000;
 const NV20_PRAMIN_SIZE = 1024 * 1024;
@@ -76,6 +75,8 @@ const NV20_FIFO_DMA_MGET = 0x58;
 const NV20_FIFO_DMA_MGET_HIGH = 0x5C;
 const NV20_FIFO_DMA_GET_HIGH = 0x60;
 const NV20_FIFO_DMA_KICK_LIMIT = 0x1000;
+const NV20_FIFO_DMA_SYNC_KICK_LIMIT = 0x100;
+const NV20_FIFO_DMA_ASYNC_KICK_LIMIT = 0x400;
 const NV20_FIFO_METHOD_LOG_LIMIT = 32;
 const NV20_RAMHT_ENTRY_SIZE = 8;
 const NV20_RAMFC_NV10_STRIDE = 64;
@@ -1194,7 +1195,7 @@ export function NV20GeForce(cpu, options)
     options = options || {};
 
     this.name = "geforce-nv20";
-    this["debug_build_tag"] = "nv20-fast-lfb-20260607";
+    this["debug_build_tag"] = "nv20-ext-lfb-no-vram-clear-20260611";
     this.cpu = cpu;
 
     this.pci_id = options.pci_id || NV20_DEFAULT_PCI_ID;
@@ -1213,6 +1214,9 @@ export function NV20GeForce(cpu, options)
     this.vram_fast_size = this.vram_fast_memory ?
         Math.min(vram_size, this.vram_fast_memory.length) : 0;
     this.vram_fast_dirty = false;
+    this.vram_fast_dirty_min = this.vram_fast_size;
+    this.vram_fast_dirty_max = 0;
+    this.vram_fast_discard_svga_dirty = false;
     this.vram_fast_sync_key = "";
     this.option_rom = option_rom;
 
@@ -1533,7 +1537,10 @@ export function NV20GeForce(cpu, options)
             write8: this.vram_write8,
             read32: this.vram_read32,
             write32: this.vram_write32,
-            on_remap: function(from, to) { this.vram_base = to; },
+            on_remap: function(from, to) {
+                this.vram_base = to >>> 0;
+                this.update_fast_lfb_mapping();
+            },
         },
         {
             size: NV20_BAR2_SIZE,
@@ -1549,6 +1556,7 @@ export function NV20GeForce(cpu, options)
     this.pci_config_space = this.pci.register_device(this);
     this.pci_config_space8 = new Uint8Array(this.pci_config_space.buffer);
     this.restore_pci_readonly_config();
+    this.update_fast_lfb_mapping();
     this.hide_default_vga_pci_device();
 
     this.register_rma_io();
@@ -1614,6 +1622,10 @@ NV20GeForce.prototype.reset = function()
     this.vram_write_count = 0;
     this.vram_dirty_min = this.vram_size;
     this.vram_dirty_max = 0;
+    this.vram_fast_dirty = false;
+    this.vram_fast_dirty_min = this.vram_fast_size;
+    this.vram_fast_dirty_max = 0;
+    this.vram_fast_discard_svga_dirty = false;
 
     this.render_active = false;
     this.render_initialized = false;
@@ -1828,19 +1840,80 @@ NV20GeForce.prototype.vram_offset = function(offset)
     return offset;
 };
 
+NV20GeForce.prototype.update_fast_lfb_mapping = function()
+{
+    const fn = this.cpu && this.cpu.wm && this.cpu.wm.exports &&
+        this.cpu.wm.exports["set_geforce_lfb_address"];
+
+    if(!fn)
+    {
+        return;
+    }
+
+    fn(this.vram_fast_memory ? this.vram_base >>> 0 : 0);
+};
+
 NV20GeForce.prototype.vram_fast_array = function(offset, width)
 {
     offset >>>= 0;
     width >>>= 0;
 
     if(this.vram_fast_memory &&
-        this.vram_base === NV20_FAST_LFB_BASE &&
         offset + width <= this.vram_fast_size)
     {
         return this.vram_fast_memory;
     }
 
     return this.vram;
+};
+
+NV20GeForce.prototype.vram_note_fast_dirty = function(offset, width)
+{
+    if(!this.vram_fast_memory || !width)
+    {
+        return;
+    }
+
+    offset >>>= 0;
+    width >>>= 0;
+    const end = Math.min(this.vram_fast_size, offset + width);
+
+    if(offset >= end)
+    {
+        return;
+    }
+
+    if(offset < this.vram_fast_dirty_min)
+    {
+        this.vram_fast_dirty_min = offset;
+    }
+
+    if(end > this.vram_fast_dirty_max)
+    {
+        this.vram_fast_dirty_max = end;
+    }
+
+    this.vram_fast_dirty = true;
+};
+
+NV20GeForce.prototype.vram_sync_fast_range = function(offset, width)
+{
+    if(!this.vram_fast_memory || !width)
+    {
+        return;
+    }
+
+    offset >>>= 0;
+    width >>>= 0;
+    const end = Math.min(this.vram_fast_size, this.vram.length, offset + width);
+
+    if(offset >= end)
+    {
+        return;
+    }
+
+    this.vram_fast_memory.set(this.vram.subarray(offset, end), offset);
+    this.vram_note_fast_dirty(offset, end - offset);
 };
 
 NV20GeForce.prototype.vram_read8 = function(offset)
@@ -1854,9 +1927,14 @@ NV20GeForce.prototype.vram_write8 = function(offset, value)
     offset = this.vram_offset(offset);
     value &= 0xFF;
 
-    const vram = this.vram_fast_array(offset, 1);
-    vram[offset] = value;
-    this.vram_fast_dirty = this.vram_fast_dirty || vram === this.vram_fast_memory;
+    this.vram[offset] = value;
+
+    if(this.vram_fast_memory && offset < this.vram_fast_size)
+    {
+        this.vram_fast_memory[offset] = value;
+        this.vram_note_fast_dirty(offset, 1);
+    }
+
     this.vram_mark_write(offset, 1, value);
 };
 
@@ -1884,22 +1962,18 @@ NV20GeForce.prototype.vram_write32 = function(offset, value)
 {
     offset = this.vram_offset(offset);
     value = value >>> 0;
-    const vram = this.vram_fast_array(offset, 4);
 
-    if(offset + 3 < vram.length)
+    for(var i = 0; i < 4; i++)
     {
-        vram[offset] = value & 0xFF;
-        vram[offset + 1] = value >> 8 & 0xFF;
-        vram[offset + 2] = value >> 16 & 0xFF;
-        vram[offset + 3] = value >>> 24;
-        this.vram_fast_dirty = this.vram_fast_dirty || vram === this.vram_fast_memory;
-    }
-    else
-    {
-        this.vram[offset] = value & 0xFF;
-        this.vram[this.vram_offset(offset + 1)] = value >> 8 & 0xFF;
-        this.vram[this.vram_offset(offset + 2)] = value >> 16 & 0xFF;
-        this.vram[this.vram_offset(offset + 3)] = value >>> 24;
+        const dst = this.vram_offset(offset + i);
+        const byte = value >>> (i << 3) & 0xFF;
+        this.vram[dst] = byte;
+
+        if(this.vram_fast_memory && dst < this.vram_fast_size)
+        {
+            this.vram_fast_memory[dst] = byte;
+            this.vram_note_fast_dirty(dst, 1);
+        }
     }
 
     this.vram_mark_write(offset, 4, value);
@@ -2231,6 +2305,7 @@ NV20GeForce.prototype.fifo_channel = function(chid)
         dma_subroutine_active: false,
         context_loaded: false,
         processing: false,
+        dma_kick_scheduled: false,
         pending_method: 0,
         pending_count: 0,
         pending_subchannel: 0,
@@ -2264,6 +2339,7 @@ NV20GeForce.prototype.fifo_reset_channel_state = function(channel, clear_objects
     channel.dma_subroutine_active = false;
     channel.context_loaded = false;
     channel.processing = false;
+    channel.dma_kick_scheduled = false;
     channel.pending_method = 0;
     channel.pending_count = 0;
     channel.pending_subchannel = 0;
@@ -2636,14 +2712,16 @@ NV20GeForce.prototype.fifo_dma_object = function(channel)
     const offset = instance << 4 & (NV20_PRAMIN_SIZE - 1);
     const flags = this.ramin_read32(offset);
     const limit = this.ramin_read32(offset + 4);
-    const base = this.ramin_read32(offset + 8);
+    const base_raw = this.ramin_read32(offset + 8);
 
     return {
         instance: instance,
         offset: offset,
         flags: flags,
         limit: limit,
-        base: base & 0xFFFFF000,
+        base_raw: base_raw >>> 0,
+        base: base_raw & 0xFFFFF000,
+        target: base_raw & 3,
         adjust: flags >>> 20,
         linear: !!(flags & 0x00002000),
         physical: !!(flags & 0x00020000),
@@ -2764,14 +2842,16 @@ NV20GeForce.prototype.fifo_dma_read32 = function(channel, offset, source)
     if(object)
     {
         const translated = this.dma_translate(object, offset);
-
-        if(translated && translated.physical)
+        if(translated)
         {
-            value = this.fifo_read_system32(translated.address);
-        }
-        else if(translated)
-        {
-            value = this.vram_read32(translated.address % this.vram_size);
+            if(translated.physical)
+            {
+                value = this.fifo_read_system32(translated.address);
+            }
+            else
+            {
+                value = this.vram_read32(translated.address % this.vram_size);
+            }
         }
     }
 
@@ -2840,7 +2920,7 @@ NV20GeForce.prototype.fifo_dma_reg_write32 = function(channel, reg, value)
         case NV20_FIFO_DMA_PUT:
             channel.dma_put = value;
             this.fifo_set_active_channel(channel.id);
-            this.fifo_dma_kick(channel, "user-put");
+            this.fifo_dma_kick(channel, "user-put", NV20_FIFO_DMA_SYNC_KICK_LIMIT);
             return true;
         case NV20_FIFO_DMA_GET:
             channel.dma_get = value;
@@ -2898,7 +2978,7 @@ NV20GeForce.prototype.fifo_kick_enabled_dma_channels = function(source)
             if(channel.dma_put !== channel.dma_get || channel.pending_count)
             {
                 this.fifo_set_active_channel(chid);
-                this.fifo_dma_kick(channel, source);
+                this.fifo_dma_kick(channel, source, NV20_FIFO_DMA_SYNC_KICK_LIMIT);
             }
         }
     }
@@ -6442,7 +6522,37 @@ NV20GeForce.prototype.fifo_submit_method = function(chid, subchannel, method, da
     return false;
 };
 
-NV20GeForce.prototype.fifo_dma_kick = function(channel, source)
+NV20GeForce.prototype.fifo_dma_has_work = function(channel)
+{
+    return !!channel.pending_count || channel.dma_get !== channel.dma_put;
+};
+
+NV20GeForce.prototype.fifo_schedule_dma_kick = function(channel, source)
+{
+    if(channel.dma_kick_scheduled)
+    {
+        return;
+    }
+
+    channel.dma_kick_scheduled = true;
+
+    const run = () => {
+        channel.dma_kick_scheduled = false;
+        this.fifo_dma_kick(channel, "async-" + (source || "dma"),
+                           NV20_FIFO_DMA_ASYNC_KICK_LIMIT);
+    };
+
+    if(typeof setTimeout !== "undefined")
+    {
+        setTimeout(run, 0);
+    }
+    else if(typeof requestAnimationFrame !== "undefined")
+    {
+        requestAnimationFrame(run);
+    }
+};
+
+NV20GeForce.prototype.fifo_dma_kick = function(channel, source, limit)
 {
     if(channel.processing)
     {
@@ -6456,7 +6566,8 @@ NV20GeForce.prototype.fifo_dma_kick = function(channel, source)
 
     channel.processing = true;
 
-    var budget = NV20_FIFO_DMA_KICK_LIMIT;
+    var budget = limit || NV20_FIFO_DMA_KICK_LIMIT;
+    var exhausted = false;
 
     while(budget-- > 0)
     {
@@ -6578,25 +6689,59 @@ NV20GeForce.prototype.fifo_dma_kick = function(channel, source)
             continue;
         }
 
+const bad_get = channel.dma_get - 4 >>> 0;
+const bad_object = this.fifo_dma_object(channel);
+const bad_translated = bad_object ? this.dma_translate(bad_object, bad_get) : null;
+
+if(bad_object && bad_translated)
+{
+    const sys_value = this.fifo_read_system32(bad_translated.address);
+    const vram_value = this.vram_read32(bad_translated.address % this.vram_size);
+
+    dbg_log(this.name + " pfifo invalid header debug" +
+            " ch=" + channel.id +
+            " header=" + h(header >>> 0, 8) +
+            " get=" + h(bad_get >>> 0, 8) +
+            " put=" + h(channel.dma_put >>> 0, 8) +
+            " instance=" + h(bad_object.instance, 4) +
+            " flags=" + h(bad_object.flags >>> 0, 8) +
+            " base_raw=" + h(bad_object.base_raw >>> 0, 8) +
+            " base=" + h(bad_object.base >>> 0, 8) +
+            " target=" + h(bad_object.target >>> 0, 1) +
+            " physical=" + (bad_object.physical ? 1 : 0) +
+            " linear=" + (bad_object.linear ? 1 : 0) +
+            " translated=" + h(bad_translated.address >>> 0, 8) +
+            " sys=" + (sys_value === null ? "null" : h(sys_value >>> 0, 8)) +
+            " vram=" + h(vram_value >>> 0, 8),
+            LOG_PCI);
+}
+
         this.fifo_cache_error = header >>> 0;
+
         this.log_missing_command("pfifo-dma-header",
             "ch" + channel.id + ":header" + h(header >>> 0, 8),
             "channel=" + channel.id +
             " header=" + h(header >>> 0, 8) +
-            " get=" + h(channel.dma_get >>> 0, 8) +
+            " bad_get=" + h(bad_get >>> 0, 8) +
+            " next_get=" + h(channel.dma_get >>> 0, 8) +
+            " put=" + h(channel.dma_put >>> 0, 8) +
             " source=" + (source || "dma") +
-            " skipped=1");
+            " aborted=1");
 
-        if(this.fifo_trace)
-        {
-            dbg_log(this.name + " pfifo skipped unsupported dma header channel=" + channel.id +
-                    " header=" + h(header >>> 0, 8) +
-                    " get=" + h(channel.dma_get >>> 0, 8) +
-                    " source=" + source, LOG_PCI);
-        }
+        // Stop on invalid pushbuffer headers instead of scanning a large
+        // 0xFFFFFFFF area on every user-put and stalling the main thread.
+        channel.dma_get = channel.dma_put >>> 0;
+        channel.pending_count = 0;
+        channel.dma_dcount = 0;
+        channel.dma_state = 0x80000000;
 
-        continue;
+        this.fifo_sync_cache1_from_channel(channel);
+        this.fifo_update_dma_push_state();
+
+        break;
     }
+
+    exhausted = budget <= 0 && !this.fifo_should_wait() && this.fifo_dma_has_work(channel);
 
     channel.processing = false;
     channel.dma_dcount = channel.pending_count >>> 0;
@@ -6604,6 +6749,11 @@ NV20GeForce.prototype.fifo_dma_kick = function(channel, source)
     this.fifo_sync_cache1_from_channel(channel);
     this.fifo_save_channel_context(channel);
     this.fifo_update_dma_push_state();
+
+    if(exhausted)
+    {
+        this.fifo_schedule_dma_kick(channel, source);
+    }
 };
 
 NV20GeForce.prototype.fifo_dma_user_read32 = function(offset)
@@ -6670,6 +6820,8 @@ NV20GeForce.prototype.fifo_pio_user_write32 = function(offset, value)
 NV20GeForce.prototype.vram_mark_write = function(offset, width, value)
 {
     this.vram_write_count++;
+
+    this.vram_sync_fast_range(offset, width);
 
     if(offset < this.vram_dirty_min)
     {
@@ -6801,10 +6953,18 @@ NV20GeForce.prototype.set_render_mode = function(width, height, bpp, stride, off
         this.render_format !== render_format ||
         this.render_stride !== stride ||
         this.render_offset !== offset;
-
     if(!changed)
     {
         return true;
+    }
+
+    if(this.vram_fast_memory)
+    {
+        this.vram_fast_dirty = false;
+        this.vram_fast_dirty_min = this.vram_fast_size;
+        this.vram_fast_dirty_max = 0;
+        this.vram_fast_sync_key = "";
+        this.vram_fast_discard_svga_dirty = true;
     }
 
     this.render_width = width;
@@ -6823,6 +6983,7 @@ NV20GeForce.prototype.set_render_mode = function(width, height, bpp, stride, off
     this.render_buffer = null;
     this.render_image_data = null;
     this.render_source = source || "registers";
+
     this["debug_render_mode"] = {
         "width": width,
         "height": height,
@@ -7128,10 +7289,8 @@ NV20GeForce.prototype.sync_fast_lfb_vga = function()
 
     if(!this.vram_fast_memory ||
         !vga ||
-        this.vram_base !== NV20_FAST_LFB_BASE ||
         this.render_offset + this.render_frame_size > this.vram_fast_size ||
-        !vga.set_size_graphical ||
-        !vga.screen_fill_buffer)
+        !vga.screen_fill_external_lfb)
     {
         return false;
     }
@@ -7145,24 +7304,25 @@ NV20GeForce.prototype.sync_fast_lfb_vga = function()
 
     const offset_pixels = this.render_offset / bytes_per_pixel | 0;
     const key = this.render_width + "x" + this.render_height + "x" +
-        this.render_bpp + "@" + offset_pixels;
+        this.render_bpp + ":" + this.render_format +
+        " stride=" + this.render_stride +
+        "@" + offset_pixels;
 
-    vga.graphical_mode = true;
-    vga.svga_enabled = true;
-    vga.svga_width = this.render_width;
-    vga.svga_height = this.render_height;
-    vga.svga_bpp = this.render_bpp;
-    vga.svga_offset = offset_pixels;
-    vga.svga_offset_x = 0;
-    vga.svga_offset_y = offset_pixels / Math.max(1, this.render_width) | 0;
+    this.vram_fast_sync_config = {
+        width: this.render_width,
+        height: this.render_height,
+        bpp: this.render_bpp,
+        stride: this.render_stride,
+        offset: this.render_offset,
+        format: this.render_format,
+        dirty_min: this.vram_fast_dirty_min,
+        dirty_max: this.vram_fast_dirty_max,
+        discard_svga_dirty: this.vram_fast_discard_svga_dirty,
+    };
 
     if(this.vram_fast_sync_key !== key)
     {
         this.vram_fast_sync_key = key;
-        vga.set_size_graphical(this.render_width, this.render_height,
-                               this.render_width, this.render_height,
-                               this.render_bpp);
-        this.cpu.svga_mark_dirty();
     }
 
     return true;
@@ -7177,14 +7337,15 @@ NV20GeForce.prototype.screen_fill_buffer = function()
 
     if(this.sync_fast_lfb_vga())
     {
-        if(this.vram_fast_dirty)
+        if(this.cpu.devices.vga.screen_fill_external_lfb(this.vram_fast_sync_config))
         {
             this.vram_fast_dirty = false;
-            this.cpu.svga_mark_dirty();
+            this.vram_fast_dirty_min = this.vram_fast_size;
+            this.vram_fast_dirty_max = 0;
+            this.vram_fast_discard_svga_dirty = false;
+            this.render_clear_dirty();
+            return true;
         }
-
-        this.cpu.devices.vga.screen_fill_buffer();
-        return true;
     }
 
     if(this.render_dirty_min >= this.render_dirty_max)
@@ -9265,7 +9426,7 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             channel.context_loaded = true;
             if(this.fifo_dma_push & NV20_FIFO_DMA_PUSH_ACCESS)
             {
-                this.fifo_dma_kick(channel, "dma-put");
+                this.fifo_dma_kick(channel, "dma-put", NV20_FIFO_DMA_SYNC_KICK_LIMIT);
             }
             return true;
         case 0x003244:

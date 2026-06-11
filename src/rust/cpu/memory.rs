@@ -50,6 +50,8 @@ pub unsafe fn zero_memory(addr: u32, size: u32) {
 pub static mut vga_mem8: *mut u8 = ptr::null_mut();
 #[allow(non_upper_case_globals)]
 pub static mut vga_memory_size: u32 = 0;
+#[allow(non_upper_case_globals)]
+static mut geforce_lfb_address: u32 = 0;
 
 #[no_mangle]
 pub fn svga_allocate_memory(size: u32) -> u32 {
@@ -76,23 +78,28 @@ pub fn in_mapped_range(addr: u32) -> bool {
 }
 
 pub const VGA_LFB_ADDRESS: u32 = 0xE0000000;
-pub const GEFORCE_LFB_ADDRESS: u32 = 0xD0000000;
+
+#[no_mangle]
+pub unsafe fn set_geforce_lfb_address(addr: u32) {
+    geforce_lfb_address = addr;
+}
+
 fn in_lfb_range(addr: u32, base: u32, width: u32) -> bool {
     let size = unsafe { vga_memory_size };
-    width > 0 && size >= width && addr >= base && addr - base <= size - width
+    base != 0 && width > 0 && size >= width && addr >= base && addr - base <= size - width
 }
 pub fn in_svga_lfb(addr: u32) -> bool {
     in_lfb_range(addr, VGA_LFB_ADDRESS, 1)
 }
 pub fn in_geforce_lfb(addr: u32) -> bool {
-    in_lfb_range(addr, GEFORCE_LFB_ADDRESS, 1)
+    in_lfb_range(addr, unsafe { geforce_lfb_address }, 1)
 }
 fn lfb_offset(addr: u32, width: u32) -> Option<u32> {
     if in_lfb_range(addr, VGA_LFB_ADDRESS, width) {
         Some(addr - VGA_LFB_ADDRESS)
     }
-    else if in_lfb_range(addr, GEFORCE_LFB_ADDRESS, width) {
-        Some(addr - GEFORCE_LFB_ADDRESS)
+    else if in_lfb_range(addr, unsafe { geforce_lfb_address }, width) {
+        Some(addr - unsafe { geforce_lfb_address })
     }
     else {
         None

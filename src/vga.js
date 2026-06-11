@@ -116,6 +116,9 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
      */
     this.virtual_height = 0;
 
+    /** @type {number} */
+    this.screen_bpp = 0;
+
     /**
      * The rectangular fragments of the image buffer, and their destination
      * locations, to be drawn every screen_fill_buffer during VGA modes.
@@ -540,7 +543,9 @@ VGAScreen.prototype.set_state = function(state)
 
         if(this.svga_enabled)
         {
-            this.set_size_graphical(this.svga_width, this.svga_height, this.svga_width, this.svga_height, this.svga_bpp);
+            this.set_size_graphical(this.svga_width, this.svga_height,
+                                    this.svga_width, this.svga_height,
+                                    this.svga_bpp, false);
             this.update_layers();
         }
         else
@@ -1150,7 +1155,7 @@ VGAScreen.prototype.set_size_text = function(cols_count, rows_count)
     this.bus.send("screen-set-size", [cols_count, rows_count, 0]);
 };
 
-VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, virtual_height, bpp)
+VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, virtual_height, bpp, skip_dirty_mark)
 {
     dbg_assert(this.graphical_mode);
 
@@ -1162,6 +1167,8 @@ VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, 
         this.screen_height !== height ||
         this.virtual_width !== virtual_width ||
         this.virtual_height !== virtual_height;
+
+    this.screen_bpp = bpp;
 
     if(needs_update)
     {
@@ -1178,7 +1185,10 @@ VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, 
             this.dest_buffet_offset = offset;
             this.image_data = new ImageData(new Uint8ClampedArray(this.cpu.wasm_memory.buffer, offset, 4 * size), virtual_width, virtual_height);
 
-            this.cpu.svga_mark_dirty();
+            if(!skip_dirty_mark)
+            {
+                this.cpu.svga_mark_dirty();
+            }
         }
         else
         {
@@ -1187,6 +1197,227 @@ VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, 
 
         this.screen.set_size_graphical(width, height, virtual_width, virtual_height);
         this.bus.send("screen-set-size", [width, height, bpp]);
+    }
+};
+
+VGAScreen.prototype.refresh_image_data = function()
+{
+    if(typeof ImageData === "undefined" ||
+        !this.image_data ||
+        this.image_data.data.byteLength !== 0)
+    {
+        return;
+    }
+
+    // wasm memory resized; rebind ImageData to the current destination buffer.
+    const buffer = new Uint8ClampedArray(this.cpu.wasm_memory.buffer,
+        this.dest_buffet_offset, 4 * this.virtual_width * this.virtual_height);
+    this.image_data = new ImageData(buffer, this.virtual_width, this.virtual_height);
+    this.update_layers();
+};
+
+VGAScreen.prototype.screen_fill_external_lfb = function(config)
+{
+    const width = config.width >>> 0;
+    const height = config.height >>> 0;
+    const bpp = config.bpp >>> 0;
+    const stride = config.stride >>> 0;
+    const offset = config.offset >>> 0;
+    const format = config.format || "";
+    const bytes_per_pixel = bpp === 15 ? 2 : bpp >>> 3;
+    const dirty_min = config.dirty_min >>> 0;
+    const dirty_max = config.dirty_max >>> 0;
+    const has_explicit_dirty = dirty_min !== 0xFFFFFFFF && dirty_min < dirty_max;
+    const discard_svga_dirty = !!config.discard_svga_dirty;
+
+    if(!width || !height || !bytes_per_pixel ||
+        stride < width * bytes_per_pixel ||
+        stride % bytes_per_pixel ||
+        offset % bytes_per_pixel ||
+        offset + (height - 1) * stride + width * bytes_per_pixel > this.vga_memory_size)
+    {
+        return false;
+    }
+
+    const virtual_width = Math.max(width, stride / bytes_per_pixel | 0);
+    const offset_pixels = offset / bytes_per_pixel | 0;
+
+    if(!this.graphical_mode)
+    {
+        this.graphical_mode = true;
+        this.screen.set_mode(true);
+    }
+
+    const old_bpp = this.screen_bpp >>> 0;
+    const bpp_changed = old_bpp && old_bpp !== bpp;
+
+    if((discard_svga_dirty || bpp_changed) && bpp !== 8 && this.image_data)
+    {
+        // Drop dirty pages from the old mode before rebinding ImageData. The
+        // helper writes to the old destination buffer, so the new frame cannot
+        // be polluted by interpreting 8bpp bytes as 32bpp pixels.
+        this.cpu.svga_fill_pixel_buffer(bpp, offset_pixels);
+    }
+
+    this.set_size_graphical(width, height, virtual_width, height, bpp,
+                            discard_svga_dirty || bpp_changed);
+    this.refresh_image_data();
+
+    var min_y = 0;
+    var max_y = height;
+    const js_convert =
+        bpp === 8 ||
+        bpp === 15 ||
+        bpp === 16 ||
+        bpp === 24 ||
+        (bpp === 32 && (format === "rgba8888" ||
+                        format === "xbgr8888" ||
+                        format === "xrgb8888"));
+
+    if(has_explicit_dirty)
+    {
+        min_y = (((dirty_min / bytes_per_pixel | 0) - offset_pixels) / virtual_width | 0);
+        max_y = (((dirty_max / bytes_per_pixel | 0) - offset_pixels) / virtual_width | 0) + 1;
+    }
+    else if(discard_svga_dirty || bpp_changed)
+    {
+        this.update_vertical_retrace();
+        return true;
+    }
+    else if(!js_convert || bpp !== 8)
+    {
+        this.cpu.svga_fill_pixel_buffer(bpp, offset_pixels);
+
+        const svga_dirty_min = this.cpu.svga_dirty_bitmap_min_offset[0] >>> 0;
+        const svga_dirty_max = this.cpu.svga_dirty_bitmap_max_offset[0] >>> 0;
+
+        if(svga_dirty_min === 0xFFFFFFFF)
+        {
+            return true;
+        }
+
+        min_y = (((svga_dirty_min / bytes_per_pixel | 0) - offset_pixels) / virtual_width | 0);
+        max_y = (((svga_dirty_max / bytes_per_pixel | 0) - offset_pixels) / virtual_width | 0) + 1;
+    }
+
+    min_y = Math.max(min_y, 0);
+    max_y = Math.min(max_y, height);
+
+    if(min_y >= max_y)
+    {
+        return true;
+    }
+
+    if(js_convert || has_explicit_dirty)
+    {
+        this.fill_external_lfb_rows(min_y, max_y, width, virtual_width, stride, offset, bpp, format);
+    }
+
+    this.screen.update_buffer([{
+        image_data: this.image_data,
+        screen_x: 0, screen_y: min_y,
+        buffer_x: 0, buffer_y: min_y,
+        buffer_width: width,
+        buffer_height: max_y - min_y,
+    }]);
+
+    this.update_vertical_retrace();
+    return true;
+};
+
+VGAScreen.prototype.fill_external_lfb_rows = function(min_y, max_y, width, virtual_width, stride, offset, bpp, format)
+{
+    const dst = new Int32Array(this.cpu.wasm_memory.buffer,
+        this.dest_buffet_offset, this.virtual_width * this.virtual_height);
+    const src = new Uint8Array(this.cpu.wasm_memory.buffer,
+        this.svga_memory.byteOffset, this.vga_memory_size);
+    const palette = this.vga256_palette;
+
+    if(bpp === 8)
+    {
+        for(var y = min_y; y < max_y; y++)
+        {
+            var src_i = offset + y * stride;
+            var dst_i = y * virtual_width;
+
+            for(var x = 0; x < width; x++, src_i++, dst_i++)
+            {
+                const color = palette[src[src_i]];
+                dst[dst_i] = color & 0xFF00 | color << 16 | color >> 16 | 0xFF000000;
+            }
+        }
+    }
+    else if(bpp === 15 || bpp === 16)
+    {
+        const is_555 = bpp === 15;
+
+        for(var y = min_y; y < max_y; y++)
+        {
+            var src_i = offset + y * stride;
+            var dst_i = y * virtual_width;
+
+            for(var x = 0; x < width; x++, src_i += 2, dst_i++)
+            {
+                const pixel = src[src_i] | src[src_i + 1] << 8;
+                var r, g, b;
+
+                if(is_555)
+                {
+                    r = (pixel >> 10 & 0x1F) * 0xFF / 0x1F | 0;
+                    g = (pixel >> 5 & 0x1F) * 0xFF / 0x1F | 0;
+                    b = (pixel & 0x1F) * 0xFF / 0x1F | 0;
+                }
+                else
+                {
+                    r = (pixel >> 11 & 0x1F) * 0xFF / 0x1F | 0;
+                    g = (pixel >> 5 & 0x3F) * 0xFF / 0x3F | 0;
+                    b = (pixel & 0x1F) * 0xFF / 0x1F | 0;
+                }
+
+                dst[dst_i] = 0xFF000000 | b << 16 | g << 8 | r;
+            }
+        }
+    }
+    else if(bpp === 24)
+    {
+        for(var y = min_y; y < max_y; y++)
+        {
+            var src_i = offset + y * stride;
+            var dst_i = y * virtual_width;
+
+            for(var x = 0; x < width; x++, src_i += 3, dst_i++)
+            {
+                dst[dst_i] = 0xFF000000 | src[src_i] << 16 |
+                    src[src_i + 1] << 8 | src[src_i + 2];
+            }
+        }
+    }
+    else
+    {
+        for(var y = min_y; y < max_y; y++)
+        {
+            var src_i = offset + y * stride;
+            var dst_i = y * virtual_width;
+
+            for(var x = 0; x < width; x++, src_i += 4, dst_i++)
+            {
+                if(format === "rgba8888")
+                {
+                    dst[dst_i] = 0xFF000000 | src[src_i + 2] << 16 |
+                        src[src_i + 1] << 8 | src[src_i];
+                }
+                else if(format === "xrgb8888")
+                {
+                    dst[dst_i] = 0xFF000000 | src[src_i] << 16 |
+                        src[src_i + 1] << 8 | src[src_i + 2];
+                }
+                else
+                {
+                    dst[dst_i] = 0xFF000000 | src[src_i + 3] << 16 |
+                        src[src_i + 2] << 8 | src[src_i + 1];
+                }
+            }
+        }
     }
 };
 
@@ -1246,7 +1477,8 @@ VGAScreen.prototype.update_vga_size = function()
         const bytes_per_line = this.vga_bytes_per_line();
         const virtual_height = bytes_per_line ? Math.ceil(available_bytes / bytes_per_line) : screen_height;
 
-        this.set_size_graphical(screen_width, screen_height, virtual_width, virtual_height, bpp);
+        this.set_size_graphical(screen_width, screen_height,
+                                virtual_width, virtual_height, bpp, false);
 
         this.update_vertical_retrace();
         this.update_layers();
@@ -2252,7 +2484,9 @@ VGAScreen.prototype.port1CF_write = function(value)
 
         this.graphical_mode = true;
         this.screen.set_mode(this.graphical_mode);
-        this.set_size_graphical(this.svga_width, this.svga_height, this.svga_width, this.svga_height, this.svga_bpp);
+        this.set_size_graphical(this.svga_width, this.svga_height,
+                                this.svga_width, this.svga_height,
+                                this.svga_bpp, false);
     }
 
     if(was_enabled && !this.svga_enabled)
@@ -2510,13 +2744,7 @@ VGAScreen.prototype.screen_fill_buffer = function()
         return;
     }
 
-    if(this.image_data.data.byteLength === 0)
-    {
-        // wasm memory resized
-        const buffer = new Uint8ClampedArray(this.cpu.wasm_memory.buffer, this.dest_buffet_offset, 4 * this.virtual_width * this.virtual_height);
-        this.image_data = new ImageData(buffer, this.virtual_width, this.virtual_height);
-        this.update_layers();
-    }
+    this.refresh_image_data();
 
     if(this.svga_enabled)
     {
