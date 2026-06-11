@@ -267,6 +267,7 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size, options = {})
     if(this.is_cirrus)
     {
         this.cirrus_patch_pci_space();
+        this.cirrus_init();
     }
 
     this.index_crtc = 0;
@@ -414,6 +415,170 @@ VGAScreen.prototype.cirrus_patch_pci_space = function()
     this.pci_space[0x0B] = 0x03;
 };
 
+VGAScreen.prototype.cirrus_init = function()
+{
+    this.cirrus_sr = new Uint8Array(0x20);
+    this.cirrus_gr = new Uint8Array(0x40);
+    this.cirrus_cr = new Uint8Array(0x40);
+
+    this.cirrus_bank0 = 0;
+    this.cirrus_bank1 = 0;
+    this.cirrus_bank_granularity = 4 * 1024;
+    this.cirrus_linear_enabled = false;
+    this.cirrus_mmio_enabled = false;
+    this.cirrus_bpp = 8;
+
+    this.cirrus_unhandled_register_log = Object.create(null);
+
+    this.cirrus_sr[0x06] = 0x12;
+    this.cirrus_cr[0x27] = 0xB8;
+};
+
+VGAScreen.prototype.cirrus_log_unhandled_register = function(kind, index, value)
+{
+    var key = kind + ":" + index + ":" + (value === undefined ? "r" : "w");
+
+    if(this.cirrus_unhandled_register_log[key])
+    {
+        return;
+    }
+
+    this.cirrus_unhandled_register_log[key] = true;
+
+    if(value === undefined)
+    {
+        dbg_log("cirrus unhandled " + kind + h(index, 2) + " read", LOG_VGA);
+    }
+    else
+    {
+        dbg_log("cirrus unhandled " + kind + h(index, 2) + "=" + h(value, 2), LOG_VGA);
+    }
+};
+
+VGAScreen.prototype.cirrus_seq_write = function(index, value)
+{
+    index &= 0x1F;
+    value &= 0xFF;
+    this.cirrus_sr[index] = value;
+
+    switch(index)
+    {
+        case 0x07:
+            break;
+        case 0x0F:
+            break;
+        case 0x17:
+            this.cirrus_linear_enabled = !!(value & 0x04);
+            this.cirrus_mmio_enabled = !!(value & 0x08);
+            break;
+        default:
+            this.cirrus_log_unhandled_register("SR", index, value);
+    }
+
+    return true;
+};
+
+VGAScreen.prototype.cirrus_seq_read = function(index)
+{
+    index &= 0x1F;
+
+    switch(index)
+    {
+        case 0x06:
+        case 0x07:
+        case 0x0F:
+        case 0x17:
+            break;
+        default:
+            this.cirrus_log_unhandled_register("SR", index, undefined);
+    }
+
+    return this.cirrus_sr[index];
+};
+
+VGAScreen.prototype.cirrus_gr_write = function(index, value)
+{
+    index &= 0x3F;
+    value &= 0xFF;
+    this.cirrus_gr[index] = value;
+
+    switch(index)
+    {
+        case 0x09:
+            this.cirrus_bank0 = this.cirrus_decode_bank(value);
+            break;
+        case 0x0A:
+            this.cirrus_bank1 = this.cirrus_decode_bank(value);
+            break;
+        case 0x0B:
+            this.cirrus_update_bank_mode(value);
+            break;
+        default:
+            this.cirrus_log_unhandled_register("GR", index, value);
+    }
+
+    return true;
+};
+
+VGAScreen.prototype.cirrus_gr_read = function(index)
+{
+    index &= 0x3F;
+
+    switch(index)
+    {
+        case 0x09:
+        case 0x0A:
+        case 0x0B:
+            break;
+        default:
+            this.cirrus_log_unhandled_register("GR", index, undefined);
+    }
+
+    return this.cirrus_gr[index];
+};
+
+VGAScreen.prototype.cirrus_cr_write = function(index, value)
+{
+    index &= 0x3F;
+    value &= 0xFF;
+
+    if(index === 0x27)
+    {
+        this.cirrus_log_unhandled_register("CR", index, value);
+        return true;
+    }
+
+    this.cirrus_cr[index] = value;
+    this.cirrus_log_unhandled_register("CR", index, value);
+
+    return true;
+};
+
+VGAScreen.prototype.cirrus_cr_read = function(index)
+{
+    index &= 0x3F;
+
+    if(index === 0x27)
+    {
+        return 0xB8;
+    }
+
+    this.cirrus_log_unhandled_register("CR", index, undefined);
+    return this.cirrus_cr[index];
+};
+
+VGAScreen.prototype.cirrus_decode_bank = function(value)
+{
+    return (value & 0xFF) * this.cirrus_bank_granularity;
+};
+
+VGAScreen.prototype.cirrus_update_bank_mode = function(value)
+{
+    this.cirrus_bank_granularity = value & 0x20 ? 16 * 1024 : 4 * 1024;
+    this.cirrus_bank0 = this.cirrus_decode_bank(this.cirrus_gr[0x09]);
+    this.cirrus_bank1 = this.cirrus_decode_bank(this.cirrus_gr[0x0A]);
+};
+
 VGAScreen.prototype.get_state = function()
 {
     var state = [];
@@ -483,6 +648,21 @@ VGAScreen.prototype.get_state = function()
     state[62] = this.dac_mask;
     state[63] = this.character_map_select;
     state[64] = this.font_page_ab_enabled;
+    state[65] = this.vga_adapter;
+    state[66] = this.is_cirrus;
+
+    if(this.is_cirrus)
+    {
+        state[67] = this.cirrus_sr;
+        state[68] = this.cirrus_gr;
+        state[69] = this.cirrus_cr;
+        state[70] = this.cirrus_bank0;
+        state[71] = this.cirrus_bank1;
+        state[72] = this.cirrus_bank_granularity;
+        state[73] = this.cirrus_linear_enabled;
+        state[74] = this.cirrus_mmio_enabled;
+        state[75] = this.cirrus_bpp;
+    }
 
     return state;
 };
@@ -554,6 +734,25 @@ VGAScreen.prototype.set_state = function(state)
     this.dac_mask = state[62] === undefined ? 0xFF : state[62];
     this.character_map_select = state[63] === undefined ? 0 : state[63];
     this.font_page_ab_enabled = state[64] === undefined ? 0 : state[64];
+
+    if(this.is_cirrus)
+    {
+        if(!this.cirrus_sr)
+        {
+            this.cirrus_init();
+        }
+
+        state[67] && this.cirrus_sr.set(state[67]);
+        state[68] && this.cirrus_gr.set(state[68]);
+        state[69] && this.cirrus_cr.set(state[69]);
+        this.cirrus_bank_granularity = state[72] === undefined ? this.cirrus_bank_granularity : state[72];
+        this.cirrus_bank0 = state[70] === undefined ? this.cirrus_decode_bank(this.cirrus_gr[0x09]) : state[70];
+        this.cirrus_bank1 = state[71] === undefined ? this.cirrus_decode_bank(this.cirrus_gr[0x0A]) : state[71];
+        this.cirrus_linear_enabled = state[73] === undefined ? this.cirrus_linear_enabled : !!state[73];
+        this.cirrus_mmio_enabled = state[74] === undefined ? this.cirrus_mmio_enabled : !!state[74];
+        this.cirrus_bpp = state[75] === undefined ? this.cirrus_bpp : state[75];
+        this.cirrus_cr[0x27] = 0xB8;
+    }
 
     this.screen.set_mode(this.graphical_mode);
 
@@ -1574,6 +1773,14 @@ VGAScreen.prototype.port3C4_read = function()
  */
 VGAScreen.prototype.port3C5_write = function(value)
 {
+    if(this.is_cirrus && this.sequencer_index >= 0x06)
+    {
+        if(this.cirrus_seq_write(this.sequencer_index, value))
+        {
+            return;
+        }
+    }
+
     switch(this.sequencer_index)
     {
         case 0x01:
@@ -1618,6 +1825,11 @@ VGAScreen.prototype.port3C5_write = function(value)
 VGAScreen.prototype.port3C5_read = function()
 {
     dbg_log("3C5 / sequencer read " + h(this.sequencer_index), LOG_VGA);
+
+    if(this.is_cirrus && this.sequencer_index >= 0x06)
+    {
+        return this.cirrus_seq_read(this.sequencer_index);
+    }
 
     switch(this.sequencer_index)
     {
@@ -1761,6 +1973,14 @@ VGAScreen.prototype.port3CE_read = function()
  */
 VGAScreen.prototype.port3CF_write = function(value)
 {
+    if(this.is_cirrus && this.graphics_index >= 0x09)
+    {
+        if(this.cirrus_gr_write(this.graphics_index, value))
+        {
+            return;
+        }
+    }
+
     switch(this.graphics_index)
     {
         case 0:
@@ -1818,6 +2038,11 @@ VGAScreen.prototype.port3CF_read = function()
 {
     dbg_log("3CF / graphics read " + h(this.graphics_index), LOG_VGA);
 
+    if(this.is_cirrus && this.graphics_index >= 0x09)
+    {
+        return this.cirrus_gr_read(this.graphics_index);
+    }
+
     switch(this.graphics_index)
     {
         case 0:
@@ -1869,6 +2094,14 @@ VGAScreen.prototype.port3D4_read = function()
  */
 VGAScreen.prototype.port3D5_write = function(value)
 {
+    if(this.is_cirrus && this.index_crtc >= 0x19)
+    {
+        if(this.cirrus_cr_write(this.index_crtc, value))
+        {
+            return;
+        }
+    }
+
     switch(this.index_crtc)
     {
         case 0x1:
@@ -2064,6 +2297,11 @@ VGAScreen.prototype.port3D5_write16 = function(register)
 VGAScreen.prototype.port3D5_read = function()
 {
     dbg_log("3D5 read " + h(this.index_crtc), LOG_VGA);
+
+    if(this.is_cirrus && this.index_crtc >= 0x19)
+    {
+        return this.cirrus_cr_read(this.index_crtc);
+    }
 
     switch(this.index_crtc)
     {
