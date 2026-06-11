@@ -194,6 +194,24 @@ var emulator = new V86({
 });
 ```
 
+To expose the optional Cirrus Logic GD5446 PCI VGA adapter, use the Cirrus VGA
+BIOS with the opt-in adapter setting:
+
+```javascript
+var emulator = new V86({
+    screen_container: document.getElementById("screen_container"),
+    bios: {
+        url: "bios/seabios.bin",
+    },
+    vga_adapter: "cirrus",
+    vga_memory_size: 4 * 1024 * 1024,
+    vga_bios: {
+        url: "bios/VGABIOS-lgpl-latest-cirrus.bin",
+    },
+    autostart: true,
+});
+```
+
 See [v86.d.ts](v86.d.ts) for TypeScript definitions. You can use `make doc` (TypeDoc) or `make denodoc` (Deno) to generate HTML documentation in `./docs/api/`.
 
 ## Generative AI

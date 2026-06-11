@@ -358,9 +358,15 @@ export interface V86Options {
     /**
      * VGA memory size in bytes.
      * @example 8 * 1024 * 1024
-     * @default 8 * 1024 * 1024
+     * @default 8 * 1024 * 1024, or 4 * 1024 * 1024 with vga_adapter: "cirrus"
      */
     vga_memory_size?: number;
+
+    /**
+     * VGA adapter type exposed to the guest.
+     * @default "vbe"
+     */
+    vga_adapter?: "vbe" | "cirrus";
 
     /**
      * If emulation should be started when emulator is ready.

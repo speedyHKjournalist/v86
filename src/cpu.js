@@ -1176,7 +1176,10 @@ CPU.prototype.init = function(settings, device_bus)
 
         this.devices.dma = new DMA(this);
 
-        this.devices.vga = new VGAScreen(this, device_bus, settings.screen, settings.vga_memory_size || 8 * 1024 * 1024);
+        const default_vga_memory_size = (settings.vga_adapter === "cirrus" ? 4 : 8) * 1024 * 1024;
+        this.devices.vga = new VGAScreen(this, device_bus, settings.screen, settings.vga_memory_size || default_vga_memory_size, {
+            vga_adapter: settings.vga_adapter,
+        });
 
         this.devices.ps2 = new PS2(this, device_bus);
         this.devices.vmware = new VMwareMouse(this, device_bus);

@@ -231,7 +231,9 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.disable_jit = options.disable_jit;
     settings.load_devices = true;
     settings.memory_size = options.memory_size || 64 * 1024 * 1024;
-    settings.vga_memory_size = options.vga_memory_size || 8 * 1024 * 1024;
+    settings.vga_adapter = options.vga_adapter || "vbe";
+    const default_vga_memory_size = (settings.vga_adapter === "cirrus" ? 4 : 8) * 1024 * 1024;
+    settings.vga_memory_size = options.vga_memory_size || default_vga_memory_size;
     settings.boot_order = boot_order;
     settings.fastboot = options.fastboot || false;
     settings.fda = undefined;

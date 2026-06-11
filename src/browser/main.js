@@ -11,9 +11,11 @@ const ON_LOCALHOST = !location.hostname.endsWith("copy.sh");
 const DEFAULT_NETWORKING_PROXIES = ["wss://relay.widgetry.org/", "ws://localhost:8080/"];
 const DEFAULT_MEMORY_SIZE = 128;
 const DEFAULT_VGA_MEMORY_SIZE = 8;
+const DEFAULT_VGA_ADAPTER = "vbe";
 const DEFAULT_BOOT_ORDER = 0;
 const DEFAULT_MTU = 1500;
 const DEFAULT_NIC_TYPE = "ne2k";
+const CIRRUS_VGA_BIOS = "VGABIOS-lgpl-latest-cirrus.bin";
 
 const MAX_ARRAY_BUFFER_SIZE_MB = 2000;
 
@@ -117,6 +119,21 @@ function $(id)
     return document.getElementById(id);
 }
 
+function update_vga_adapter_defaults(update_vram)
+{
+    const vga_adapter = $("vga_adapter");
+    if(!vga_adapter)
+    {
+        return;
+    }
+
+    const is_cirrus = vga_adapter.value === "cirrus";
+    if(update_vram && $("vga_memory_size"))
+    {
+        $("vga_memory_size").value = is_cirrus ? "4" : String(DEFAULT_VGA_MEMORY_SIZE);
+    }
+}
+
 // These values were previously stored in localStorage
 const elements_to_restore = [
     "memory_size",
@@ -148,6 +165,11 @@ function onload()
         start_emulation(null, null);
         $("start_emulation").blur();
         e.preventDefault();
+    };
+
+    $("vga_adapter").onchange = function()
+    {
+        update_vga_adapter_defaults(true);
     };
 
     if(DEBUG)
@@ -1751,9 +1773,11 @@ function onload()
                     id: p["id"],
                     name: p["name"],
                     memory_size: p["memory_size"],
+                    vga_adapter: p["vga_adapter"],
                     vga_memory_size: p["vga_memory_size"],
                     acpi: p["acpi"],
                     boot_order: p["boot_order"],
+                    vga_bios: handle_image(p["vga_bios"]),
                     hda: handle_image(p["hda"]),
                     cdrom: handle_image(p["cdrom"]),
                     fda: handle_image(p["fda"]),
@@ -1767,6 +1791,7 @@ function onload()
     }
 
     if(query_args.has("m")) $("memory_size").value = query_args.get("m");
+    if(query_args.has("vga_adapter")) $("vga_adapter").value = query_args.get("vga_adapter");
     if(query_args.has("vram")) $("vga_memory_size").value = query_args.get("vram");
     if(query_args.has("relay_url")) $("relay_url").value = query_args.get("relay_url");
     if(query_args.has("mute")) $("disable_audio").checked = bool_arg(query_args.get("mute"));
@@ -1775,6 +1800,8 @@ function onload()
     if(query_args.has("net_device_type")) $("net_device_type").value = query_args.get("net_device_type");
     if(query_args.has("mtu")) $("mtu").value = query_args.get("mtu");
     if(query_args.has("modem")) $("modem").value = query_args.get("modem");
+
+    update_vga_adapter_defaults(!query_args.has("vram"));
 
     for(const dev of ["fda", "fdb"])
     {
@@ -2074,7 +2101,9 @@ function start_emulation(profile, query_args)
         settings.cpuid_level = profile.cpuid_level;
         settings.acpi = profile.acpi;
         settings.memory_size = profile.memory_size;
+        settings.vga_adapter = profile.vga_adapter;
         settings.vga_memory_size = profile.vga_memory_size;
+        settings.vga_bios = profile.vga_bios;
         settings.boot_order = profile.boot_order;
         settings.net_device_type = profile.net_device_type;
         settings.modem = profile.modem;
@@ -2175,6 +2204,7 @@ function start_emulation(profile, query_args)
                 settings.vga_memory_size = vram * 1024 * 1024;
             }
 
+            settings.vga_adapter = query_args.get("vga_adapter") || settings.vga_adapter;
             settings.acpi = query_args.has("acpi") ? bool_arg(query_args.get("acpi")) : settings.acpi;
             settings.use_bochs_bios = query_args.get("bios") === "bochs";
             settings.net_device_type = query_args.get("net_device_type") || settings.net_device_type;
@@ -2301,12 +2331,20 @@ function start_emulation(profile, query_args)
         }
         if(memory_size !== DEFAULT_MEMORY_SIZE) new_query_args.set("m", String(memory_size));
 
-        const vga_memory_size = parseInt($("vga_memory_size").value, 10) || DEFAULT_VGA_MEMORY_SIZE;
-        if(!settings.vga_memory_size || vga_memory_size !== DEFAULT_VGA_MEMORY_SIZE)
+        const vga_adapter = $("vga_adapter").value || DEFAULT_VGA_ADAPTER;
+        if(!settings.vga_adapter || vga_adapter !== DEFAULT_VGA_ADAPTER)
+        {
+            settings.vga_adapter = vga_adapter;
+        }
+        if(settings.vga_adapter !== DEFAULT_VGA_ADAPTER) new_query_args.set("vga_adapter", settings.vga_adapter);
+
+        const default_vga_memory_size = settings.vga_adapter === "cirrus" ? 4 : DEFAULT_VGA_MEMORY_SIZE;
+        const vga_memory_size = parseInt($("vga_memory_size").value, 10) || default_vga_memory_size;
+        if(vga_memory_size !== default_vga_memory_size)
         {
             settings.vga_memory_size = vga_memory_size * MB;
         }
-        if(vga_memory_size !== DEFAULT_VGA_MEMORY_SIZE) new_query_args.set("vram", String(vga_memory_size));
+        if(vga_memory_size !== default_vga_memory_size) new_query_args.set("vram", String(vga_memory_size));
 
         const boot_order = parseInt($("boot_order").value, 16) || DEFAULT_BOOT_ORDER;
         if(!settings.boot_order || boot_order !== DEFAULT_BOOT_ORDER)
@@ -2329,7 +2367,14 @@ function start_emulation(profile, query_args)
         }
         if(!settings.vga_bios)
         {
-            settings.vga_bios = { url: BIOSPATH + (DEBUG ? "vgabios-debug.bin" : "vgabios.bin") };
+            if(settings.vga_adapter === "cirrus")
+            {
+                settings.vga_bios = { url: BIOSPATH + CIRRUS_VGA_BIOS };
+            }
+            else
+            {
+                settings.vga_bios = { url: BIOSPATH + (DEBUG ? "vgabios-debug.bin" : "vgabios.bin") };
+            }
         }
         if(settings.use_bochs_bios)
         {
@@ -2380,6 +2425,7 @@ function start_emulation(profile, query_args)
         autostart: true,
 
         memory_size: settings.memory_size,
+        vga_adapter: settings.vga_adapter,
         vga_memory_size: settings.vga_memory_size,
         boot_order: settings.boot_order,
 

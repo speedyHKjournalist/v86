@@ -58,8 +58,9 @@ const VGA_HOST_MEMORY_SPACE_SIZE = Uint32Array.from([
  * @param {BusConnector} bus
  * @param {ScreenAdapter|DummyScreenAdapter} screen
  * @param {number} vga_memory_size
+ * @param {Object=} options
  */
-export function VGAScreen(cpu, bus, screen, vga_memory_size)
+export function VGAScreen(cpu, bus, screen, vga_memory_size, options = {})
 {
     this.cpu = cpu;
 
@@ -69,7 +70,13 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     /** @const */
     this.screen = screen;
 
+    this.vga_adapter = options.vga_adapter || "vbe";
+    this.is_cirrus = this.vga_adapter === "cirrus";
     this.vga_memory_size = vga_memory_size;
+    if(this.is_cirrus && this.vga_memory_size === undefined)
+    {
+        this.vga_memory_size = 4 * 1024 * 1024;
+    }
 
     /** @type {number} */
     this.cursor_address = 0;
@@ -257,6 +264,10 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.pci_rom_address = 0xFEB00000;
 
     this.name = "vga";
+    if(this.is_cirrus)
+    {
+        this.cirrus_patch_pci_space();
+    }
 
     this.index_crtc = 0;
 
@@ -388,6 +399,20 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
 
     cpu.devices.pci.register_device(this);
 }
+
+VGAScreen.prototype.cirrus_patch_pci_space = function()
+{
+    this.name = "cirrus-vga";
+
+    this.pci_space[0x00] = 0x13;
+    this.pci_space[0x01] = 0x10;
+    this.pci_space[0x02] = 0xB8;
+    this.pci_space[0x03] = 0x00;
+
+    this.pci_space[0x09] = 0x00;
+    this.pci_space[0x0A] = 0x00;
+    this.pci_space[0x0B] = 0x03;
+};
 
 VGAScreen.prototype.get_state = function()
 {
