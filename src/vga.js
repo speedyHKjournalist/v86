@@ -427,8 +427,11 @@ VGAScreen.prototype.cirrus_init = function()
     this.cirrus_linear_enabled = false;
     this.cirrus_mmio_enabled = false;
     this.cirrus_bpp = 8;
+    this.cirrus_bank_mode = 0;
+    this.cirrus_banked_window_enabled = false;
 
     this.cirrus_unhandled_register_log = Object.create(null);
+    this.cirrus_banked_memory_log = Object.create(null);
 
     this.cirrus_sr[0x06] = 0x12;
     this.cirrus_cr[0x27] = 0xB8;
@@ -505,10 +508,22 @@ VGAScreen.prototype.cirrus_gr_write = function(index, value)
     switch(index)
     {
         case 0x09:
+            this.cirrus_banked_window_enabled = true;
+            var previous_bank0 = this.cirrus_bank0;
             this.cirrus_bank0 = this.cirrus_decode_bank(value);
+            if(previous_bank0 !== this.cirrus_bank0)
+            {
+                dbg_log("cirrus bank0=" + h(this.cirrus_bank0, 8), LOG_VGA);
+            }
             break;
         case 0x0A:
+            this.cirrus_banked_window_enabled = true;
+            var previous_bank1 = this.cirrus_bank1;
             this.cirrus_bank1 = this.cirrus_decode_bank(value);
+            if(previous_bank1 !== this.cirrus_bank1)
+            {
+                dbg_log("cirrus bank1=" + h(this.cirrus_bank1, 8), LOG_VGA);
+            }
             break;
         case 0x0B:
             this.cirrus_update_bank_mode(value);
@@ -574,9 +589,104 @@ VGAScreen.prototype.cirrus_decode_bank = function(value)
 
 VGAScreen.prototype.cirrus_update_bank_mode = function(value)
 {
+    var previous_bank_mode = this.cirrus_bank_mode;
+    var previous_bank_granularity = this.cirrus_bank_granularity;
+    this.cirrus_bank_mode = value & 0xFF;
+    this.cirrus_banked_window_enabled = true;
     this.cirrus_bank_granularity = value & 0x20 ? 16 * 1024 : 4 * 1024;
     this.cirrus_bank0 = this.cirrus_decode_bank(this.cirrus_gr[0x09]);
     this.cirrus_bank1 = this.cirrus_decode_bank(this.cirrus_gr[0x0A]);
+
+    if(previous_bank_mode !== this.cirrus_bank_mode ||
+       previous_bank_granularity !== this.cirrus_bank_granularity)
+    {
+        dbg_log("cirrus bank mode=" + h(this.cirrus_bank_mode, 2) +
+                " granularity=" + this.cirrus_bank_granularity +
+                " bank0=" + h(this.cirrus_bank0, 8) +
+                " bank1=" + h(this.cirrus_bank1, 8), LOG_VGA);
+    }
+};
+
+VGAScreen.prototype.cirrus_use_banked_window = function(addr)
+{
+    if(!this.cirrus_banked_window_enabled)
+    {
+        return false;
+    }
+
+    // Keep B0000-BFFFF on the legacy VGA path for text and monochrome modes.
+    if(addr < 0xA0000 || addr >= 0xB0000)
+    {
+        return false;
+    }
+
+    // Bank register probes can happen while the guest is still using legacy
+    // VGA planar modes. Leave those on the existing VGA path until Cirrus
+    // packed-pixel mode decoding is implemented more fully.
+    if(!this.graphical_mode || !(this.attribute_mode & 0x40) ||
+       this.plane_write_bm !== 0xF || (this.sequencer_memory_mode & 0x8))
+    {
+        return false;
+    }
+
+    return true;
+};
+
+VGAScreen.prototype.cirrus_bank_addr = function(addr)
+{
+    var offset = addr - 0xA0000;
+
+    if(offset < 0 || offset >= 0x10000)
+    {
+        return -1;
+    }
+
+    if(offset < 0x8000)
+    {
+        return (this.cirrus_bank0 + offset) % this.vga_memory_size;
+    }
+
+    return (this.cirrus_bank1 + offset - 0x8000) % this.vga_memory_size;
+};
+
+VGAScreen.prototype.cirrus_log_banked_memory_access = function(addr, write)
+{
+    var key = (write ? "w:" : "r:") + (addr >>> 12);
+
+    if(this.cirrus_banked_memory_log[key])
+    {
+        return;
+    }
+
+    this.cirrus_banked_memory_log[key] = true;
+    dbg_log("cirrus unusual banked " + (write ? "write" : "read") +
+            " addr=" + h(addr >>> 0, 5), LOG_VGA);
+};
+
+VGAScreen.prototype.cirrus_bank_read8 = function(addr)
+{
+    var vram_addr = this.cirrus_bank_addr(addr);
+
+    if(vram_addr < 0)
+    {
+        this.cirrus_log_banked_memory_access(addr, false);
+        return 0xFF;
+    }
+
+    return this.cpu.read8((VGA_LFB_ADDRESS + vram_addr) | 0);
+};
+
+VGAScreen.prototype.cirrus_bank_write8 = function(addr, value)
+{
+    var vram_addr = this.cirrus_bank_addr(addr);
+
+    if(vram_addr < 0)
+    {
+        this.cirrus_log_banked_memory_access(addr, true);
+        return;
+    }
+
+    this.cpu.write8((VGA_LFB_ADDRESS + vram_addr) | 0, value & 0xFF);
 };
 
 VGAScreen.prototype.get_state = function()
@@ -662,6 +772,8 @@ VGAScreen.prototype.get_state = function()
         state[73] = this.cirrus_linear_enabled;
         state[74] = this.cirrus_mmio_enabled;
         state[75] = this.cirrus_bpp;
+        state[76] = this.cirrus_bank_mode;
+        state[77] = this.cirrus_banked_window_enabled;
     }
 
     return state;
@@ -751,6 +863,10 @@ VGAScreen.prototype.set_state = function(state)
         this.cirrus_linear_enabled = state[73] === undefined ? this.cirrus_linear_enabled : !!state[73];
         this.cirrus_mmio_enabled = state[74] === undefined ? this.cirrus_mmio_enabled : !!state[74];
         this.cirrus_bpp = state[75] === undefined ? this.cirrus_bpp : state[75];
+        this.cirrus_bank_mode = state[76] === undefined ? this.cirrus_gr[0x0B] : state[76];
+        this.cirrus_banked_window_enabled = state[77] === undefined ?
+            !!(this.cirrus_bank0 || this.cirrus_bank1 || this.cirrus_gr[0x09] || this.cirrus_gr[0x0A] || this.cirrus_gr[0x0B]) :
+            !!state[77];
         this.cirrus_cr[0x27] = 0xB8;
     }
 
@@ -788,6 +904,11 @@ VGAScreen.prototype.set_state = function(state)
 
 VGAScreen.prototype.vga_memory_read = function(addr)
 {
+    if(this.is_cirrus && this.cirrus_use_banked_window(addr))
+    {
+        return this.cirrus_bank_read8(addr);
+    }
+
     if(this.svga_enabled)
     {
         // vbe banked mode (accessing svga memory through the regular vga memory range)
@@ -862,6 +983,12 @@ VGAScreen.prototype.vga_memory_read = function(addr)
 
 VGAScreen.prototype.vga_memory_write = function(addr, value)
 {
+    if(this.is_cirrus && this.cirrus_use_banked_window(addr))
+    {
+        this.cirrus_bank_write8(addr, value);
+        return;
+    }
+
     if(this.svga_enabled)
     {
         // vbe banked mode (accessing svga memory through the regular vga memory range)
@@ -1757,12 +1884,12 @@ VGAScreen.prototype.port3C2_write = function(value)
 
 VGAScreen.prototype.port3C4_write = function(value)
 {
-    this.sequencer_index = value;
+    this.sequencer_index = value & 0xFF;
 };
 
 VGAScreen.prototype.port3C4_read = function()
 {
-    return this.sequencer_index;
+    return this.sequencer_index & 0xFF;
 };
 
 /**
@@ -1957,12 +2084,12 @@ VGAScreen.prototype.port3CC_read = function()
 
 VGAScreen.prototype.port3CE_write = function(value)
 {
-    this.graphics_index = value;
+    this.graphics_index = value & 0xFF;
 };
 
 VGAScreen.prototype.port3CE_read = function()
 {
-    return this.graphics_index;
+    return this.graphics_index & 0xFF;
 };
 
 /**
@@ -2071,7 +2198,7 @@ VGAScreen.prototype.port3CF_read = function()
 VGAScreen.prototype.port3D4_write = function(register)
 {
     dbg_log("3D4 / crtc index: " + register, LOG_VGA);
-    this.index_crtc = register;
+    this.index_crtc = register & 0xFF;
 };
 
 VGAScreen.prototype.port3D4_write16 = function(register)
@@ -2083,7 +2210,7 @@ VGAScreen.prototype.port3D4_write16 = function(register)
 VGAScreen.prototype.port3D4_read = function()
 {
     dbg_log("3D4 read / crtc index: " + this.index_crtc, LOG_VGA);
-    return this.index_crtc;
+    return this.index_crtc & 0xFF;
 };
 
 /**
