@@ -32,6 +32,12 @@ pub unsafe fn svga_mark_dirty() {
     }
 }
 
+fn clear_dirty_bitmap() {
+    for v in unsafe { dirty_bitmap.iter_mut() } {
+        *v = 0
+    }
+}
+
 fn iter_dirty_pages(f: &dyn Fn(isize)) {
     let mut min_off = u32::MAX;
     let mut max_off = u32::MIN;
@@ -169,7 +175,138 @@ pub unsafe fn svga_fill_pixel_buffer(bpp: u32, svga_dest_offset: u32) {
     //    );
     //}
 
-    for v in dirty_bitmap.iter_mut() {
-        *v = 0
+    clear_dirty_bitmap()
+}
+
+#[no_mangle]
+pub unsafe fn svga_fill_pixel_buffer_strided(
+    bpp: u32,
+    pitch: u32,
+    width: u32,
+    height: u32,
+    svga_dest_offset: u32,
+) {
+    if pitch == 0 || width == 0 || height == 0 {
+        *global_pointers::svga_dirty_bitmap_min_offset = u32::MAX;
+        *global_pointers::svga_dirty_bitmap_max_offset = 0;
+        clear_dirty_bitmap();
+        return;
     }
+
+    let mut min_y = u32::MAX;
+    let mut max_y = 0;
+
+    for (i, &word) in dirty_bitmap.iter().enumerate() {
+        if word == 0 {
+            continue;
+        }
+
+        for j in 0..64 {
+            if word & 1 << j == 0 {
+                continue;
+            }
+
+            let off = ((i << 6 | j) << 12) as u32;
+            let row = off / pitch;
+            let end_row = ((off + 0xFFF) / pitch + 1).min(height);
+
+            if row < height {
+                min_y = min_y.min(row);
+                max_y = max_y.max(end_row);
+            }
+        }
+    }
+
+    if min_y == u32::MAX || min_y >= max_y {
+        *global_pointers::svga_dirty_bitmap_min_offset = u32::MAX;
+        *global_pointers::svga_dirty_bitmap_max_offset = 0;
+        clear_dirty_bitmap();
+        return;
+    }
+
+    let width = width as isize;
+    let pitch = pitch as isize;
+
+    match bpp {
+        32 => {
+            for y in min_y..max_y {
+                let src = memory::vga_mem8.offset(y as isize * pitch);
+                let dest_offset = y as isize * width - svga_dest_offset as isize;
+                if dest_offset < 0 {
+                    continue;
+                }
+                let dest = dest_buffer.as_mut_ptr().offset(dest_offset) as *mut u32;
+                let end = isize::min(width, dest_buffer.len() as isize - dest_offset);
+
+                for x in 0..end {
+                    let dword = ptr::read_unaligned(src.offset(x * 4) as *const u32);
+                    *dest.offset(x) =
+                        dword << 16 | dword >> 16 & 0xFF | dword & 0xFF00 | 0xFF00_0000;
+                }
+            }
+        },
+        24 => {
+            for y in min_y..max_y {
+                let src = memory::vga_mem8.offset(y as isize * pitch);
+                let dest_offset = y as isize * width - svga_dest_offset as isize;
+                if dest_offset < 0 {
+                    continue;
+                }
+                let dest = dest_buffer.as_mut_ptr().offset(dest_offset) as *mut u32;
+                let end = isize::min(width, dest_buffer.len() as isize - dest_offset);
+
+                for x in 0..end {
+                    let dword = ptr::read_unaligned(src.offset(x * 3) as *const u32);
+                    *dest.offset(x) =
+                        dword << 16 | dword >> 16 & 0xFF | dword & 0xFF00 | 0xFF00_0000;
+                }
+            }
+        },
+        16 => {
+            for y in min_y..max_y {
+                let src = memory::vga_mem8.offset(y as isize * pitch) as *const u16;
+                let dest_offset = y as isize * width - svga_dest_offset as isize;
+                if dest_offset < 0 {
+                    continue;
+                }
+                let dest = dest_buffer.as_mut_ptr().offset(dest_offset) as *mut u32;
+                let end = isize::min(width, dest_buffer.len() as isize - dest_offset);
+
+                for x in 0..end {
+                    let word = *src.offset(x);
+                    let r = (word & 0x1F) * 0xFF / 0x1F;
+                    let g = (word >> 5 & 0x3F) * 0xFF / 0x3F;
+                    let b = (word >> 11) * 0xFF / 0x1F;
+                    *dest.offset(x) = (r as u32) << 16 | (g as u32) << 8 | b as u32 | 0xFF00_0000;
+                }
+            }
+        },
+        15 => {
+            for y in min_y..max_y {
+                let src = memory::vga_mem8.offset(y as isize * pitch) as *const u16;
+                let dest_offset = y as isize * width - svga_dest_offset as isize;
+                if dest_offset < 0 {
+                    continue;
+                }
+                let dest = dest_buffer.as_mut_ptr().offset(dest_offset) as *mut u32;
+                let end = isize::min(width, dest_buffer.len() as isize - dest_offset);
+
+                for x in 0..end {
+                    let word = *src.offset(x);
+                    let r = (word & 0x1F) * 0xFF / 0x1F;
+                    let g = (word >> 5 & 0x1F) * 0xFF / 0x1F;
+                    let b = (word >> 10 & 0x1F) * 0xFF / 0x1F;
+                    *dest.offset(x) = (r as u32) << 16 | (g as u32) << 8 | b as u32 | 0xFF00_0000;
+                }
+            }
+        },
+        _ => {
+            dbg_log!("{}", bpp);
+            dbg_assert!(false, "Unsupported bpp");
+        },
+    }
+
+    *global_pointers::svga_dirty_bitmap_min_offset = min_y * pitch as u32;
+    *global_pointers::svga_dirty_bitmap_max_offset = max_y * pitch as u32 - 1;
+    clear_dirty_bitmap()
 }

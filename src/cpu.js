@@ -419,6 +419,7 @@ CPU.prototype.wasm_patch = function()
     this.svga_allocate_memory = get_import("svga_allocate_memory");
     this.svga_allocate_dest_buffer = get_import("svga_allocate_dest_buffer");
     this.svga_fill_pixel_buffer = get_import("svga_fill_pixel_buffer");
+    this.svga_fill_pixel_buffer_strided = get_optional_import("svga_fill_pixel_buffer_strided");
     this.svga_mark_dirty = get_import("svga_mark_dirty");
 
     this.get_pic_addr_master = get_import("get_pic_addr_master");

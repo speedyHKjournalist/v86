@@ -419,15 +419,27 @@ PCI.prototype.pci_write32 = function(address, written)
                 {
                     // memory
                     var original_bar = bar.original_bar;
+                    var effective_bar = written & ~(bar.size - 1) & ~0xF;
 
                     if((written & ~0xF) !== (original_bar & ~0xF))
                     {
-                        // seabios
-                        dbg_log("Warning: Changing memory bar not supported, ignored", LOG_PCI);
+                        if(bar.on_bar_changed)
+                        {
+                            effective_bar = bar.on_bar_changed(space[space_addr] & ~0xF, effective_bar) >>> 0;
+                            space[space_addr] = effective_bar | type;
+                        }
+                        else
+                        {
+                            // seabios
+                            dbg_log("Warning: Changing memory bar not supported, ignored", LOG_PCI);
+                            // changing isn't supported yet, reset to default
+                            space[space_addr] = original_bar;
+                        }
                     }
-
-                    // changing isn't supported yet, reset to default
-                    space[space_addr] = original_bar;
+                    else
+                    {
+                        space[space_addr] = original_bar;
+                    }
                 }
             }
 
