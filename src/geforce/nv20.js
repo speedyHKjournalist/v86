@@ -123,12 +123,16 @@ const NV20_CLASS_TEXUPLOAD_NV30 = 0x037B;
 const NV20_CLASS_TEXUPLOAD_NV40 = 0x307B;
 const NV20_CLASS_M2MF = 0x0039;
 const NV20_CLASS_ROP = 0x0043;
+const NV20_CLASS_PATTERN_NV1 = 0x0018;
 const NV20_CLASS_PATTERN = 0x0044;
 const NV20_CLASS_GDI_NV3 = 0x004B;
 const NV20_CLASS_GDI_NV4 = 0x004A;
+const NV20_CLASS_SWIZZLED_SURFACE_NV4 = 0x0052;
+const NV20_CLASS_SWIZZLED_SURFACE_NV15 = 0x009E;
 const NV20_CLASS_CHROMA = 0x0057;
 const NV20_CLASS_BETA = 0x0072;
 const NV20_CLASS_SIFM_NV10 = 0x0089;
+const NV20_CLASS_SIFM_NV30 = 0x0389;
 const NV20_CLASS_D3D_NV10 = 0x0096;
 const NV20_CLASS_D3D_NV10_TCL = 0x0097;
 const NV20_CLASS_D3D_NV15 = 0x0497;
@@ -648,6 +652,60 @@ function nv20_surface_bpp_from_format(format, fallback_bpp)
     }
 }
 
+function nv20_swizzled_surface_bpp_from_format(format, fallback_bpp)
+{
+    switch(format & 0xFFFF)
+    {
+        case 0x1:
+            return 8;
+        case 0x2:
+        case 0x4:
+            return 16;
+        case 0x6:
+        case 0xA:
+        case 0xB:
+            return 32;
+        default:
+            return fallback_bpp || NV20_DEFAULT_RENDER_BPP;
+    }
+}
+
+function nv20_swizzle_index(x, y, width, height)
+{
+    x >>>= 0;
+    y >>>= 0;
+    width >>>= 0;
+    height >>>= 0;
+
+    var index = 0;
+    var out_bit = 1;
+
+    for(var bit = 1; bit < width || bit < height; bit <<= 1)
+    {
+        if(bit < width)
+        {
+            if(x & bit)
+            {
+                index |= out_bit;
+            }
+
+            out_bit <<= 1;
+        }
+
+        if(bit < height)
+        {
+            if(y & bit)
+            {
+                index |= out_bit;
+            }
+
+            out_bit <<= 1;
+        }
+    }
+
+    return index >>> 0;
+}
+
 function nv20_source_color_bpp_from_format(format, fallback_bpp, surface_format, allow_mono)
 {
     if((surface_format & 0xFF) === 0x1)
@@ -713,6 +771,26 @@ function nv20_d3d_bpp_from_format(class_id, format, fallback_bpp)
             return 32;
         default:
             return fallback_bpp || NV20_DEFAULT_RENDER_BPP;
+    }
+}
+
+function nv20_d3d_depth_bytes_from_format(class_id, format, fallback_bytes)
+{
+    class_id &= 0xFFFF;
+    const depth_format = class_id <= NV20_CLASS_D3D_NV10_TCL ?
+        format >>> 4 & 0xF :
+        format >>> 5 & 0x7;
+
+    switch(depth_format)
+    {
+        case 0:
+            return nv20_render_bytes_per_pixel(nv20_d3d_bpp_from_format(class_id, format, 32));
+        case 1:
+            return 2;
+        case 2:
+            return 4;
+        default:
+            return fallback_bytes || 4;
     }
 }
 
@@ -960,18 +1038,26 @@ function nv20_class_name(class_id)
             return "NV3_M2MF";
         case NV20_CLASS_ROP:
             return "NV4_ROP";
+        case NV20_CLASS_PATTERN_NV1:
+            return "NV1_PATTERN";
         case NV20_CLASS_PATTERN:
             return "NV4_PATTERN";
         case NV20_CLASS_GDI_NV3:
             return "NV3_GDI";
         case NV20_CLASS_GDI_NV4:
             return "NV4_GDI";
+        case NV20_CLASS_SWIZZLED_SURFACE_NV4:
+            return "NV4_SWIZZLED_SURFACE";
+        case NV20_CLASS_SWIZZLED_SURFACE_NV15:
+            return "NV15_SWIZZLED_SURFACE";
         case NV20_CLASS_CHROMA:
             return "NV4_CHROMA";
         case NV20_CLASS_BETA:
             return "NV4_BETA";
         case NV20_CLASS_SIFM_NV10:
             return "NV10_SIFM";
+        case NV20_CLASS_SIFM_NV30:
+            return "NV30_SIFM";
         case NV20_CLASS_D3D_NV10:
             return "NV10_D3D";
         case NV20_CLASS_D3D_NV10_TCL:
@@ -1066,9 +1152,25 @@ function nv20_is_gdi_class(class_id)
         class_id === NV20_CLASS_GDI_NV4;
 }
 
+function nv20_is_pattern_class(class_id)
+{
+    class_id &= 0xFFFF;
+    return class_id === NV20_CLASS_PATTERN_NV1 ||
+        class_id === NV20_CLASS_PATTERN;
+}
+
+function nv20_is_swizzled_surface_class(class_id)
+{
+    class_id &= 0xFFFF;
+    return class_id === NV20_CLASS_SWIZZLED_SURFACE_NV4 ||
+        class_id === NV20_CLASS_SWIZZLED_SURFACE_NV15;
+}
+
 function nv20_is_sifm_class(class_id)
 {
-    return (class_id & 0xFFFF) === NV20_CLASS_SIFM_NV10;
+    class_id &= 0xFFFF;
+    return class_id === NV20_CLASS_SIFM_NV10 ||
+        class_id === NV20_CLASS_SIFM_NV30;
 }
 
 function nv20_is_d3d_class(class_id)
@@ -1080,13 +1182,22 @@ function nv20_is_d3d_class(class_id)
         class_id === NV20_CLASS_D3D_NV20;
 }
 
+function nv20_is_d3d_known_method(method)
+{
+    method &= 0x1FFC;
+    const word = method >>> 2;
+
+    return word === 0x000 ||
+        word >= 0x048 && word <= 0x04C ||
+        word >= 0x061 && word <= 0x06A ||
+        word >= 0x080 && word <= 0x7FF;
+}
+
 function nv20_is_d3d_like_method(method)
 {
     method &= 0x1FFC;
 
-    return method >= 0x0120 && method <= 0x0130 ||
-        method >= 0x0184 && method <= 0x01A8 ||
-        method >= 0x0200 && method < 0x2000;
+    return nv20_is_d3d_known_method(method);
 }
 
 function nv20_init_default_crtc_regs(regs)
@@ -1152,6 +1263,7 @@ function nv20_graph_debug_2d_default()
         "sifm": 0,
         "gdi_rect": 0,
         "gdi_image": 0,
+        "d3d_depth_clear_skip": 0,
         "accel": 0,
         "last": null,
         "by_class": {},
@@ -3202,6 +3314,7 @@ NV20GeForce.prototype.graph_init_object_state = function(channel, object)
         rop_context: null,
         chroma: null,
         beta_context: null,
+        swizzled_surface: null,
         clip_point: { x: 0, y: 0 },
         clip_size: { w: 0, h: 0 },
         point: { x: 0, y: 0 },
@@ -3261,9 +3374,16 @@ NV20GeForce.prototype.graph_init_object_state = function(channel, object)
         chroma_color: 0,
         chroma_color_set: false,
         beta: 0xFFFFFFFF,
+        swz_dma: null,
+        swz_format: 0,
+        swz_width: 1,
+        swz_height: 1,
+        swz_offset: 0,
         mono_format: 0,
         mono_color0: 0,
         mono_color1: 0xFFFFFFFF,
+        tex_clip_point: { x: 0, y: 0 },
+        tex_clip_size: { w: 0, h: 0 },
         sifm_src_dma: null,
         sifm_surface: null,
         sifm_color_format: 0,
@@ -3285,10 +3405,42 @@ NV20GeForce.prototype.graph_init_object_state = function(channel, object)
         d3d_vertex_b_dma: null,
         d3d_semaphore_dma: null,
         d3d_report_dma: null,
+        d3d_methods: {},
+        d3d_textures: [],
+        d3d_vertex_arrays: [],
+        d3d_vertex_data_imm: [],
+        d3d_transform_program: [],
+        d3d_transform_program_load: 0,
+        d3d_transform_program_start: 0,
+        d3d_transform_constant: [],
+        d3d_transform_constant_load: 0,
+        d3d_attrib_count: 16,
+        d3d_tex_coord_count: 8,
+        d3d_window_offset_x: 0,
+        d3d_window_offset_y: 0,
+        d3d_window_clip: [],
+        d3d_scissor_x: 0,
+        d3d_scissor_y: 0,
+        d3d_scissor_width: 0,
+        d3d_scissor_height: 0,
+        d3d_viewport_x: 0,
+        d3d_viewport_y: 0,
+        d3d_viewport_width: 0,
+        d3d_viewport_height: 0,
+        d3d_begin_end: 0,
+        d3d_vertex_data_base_index: 0,
+        d3d_index_array_offset: 0,
+        d3d_index_array_dma: 0,
+        d3d_semaphore_offset: 0,
         d3d_surface_format: 0,
         d3d_surface_pitch: 0,
+        d3d_surface_pitch_z: 0,
         d3d_surface_color_offset: 0,
         d3d_surface_zeta_offset: 0,
+        d3d_color_clear_value: 0,
+        d3d_zstencil_clear_value: 0,
+        d3d_clear_surface: 0,
+        d3d_shader_control: 0,
     };
 };
 
@@ -3367,6 +3519,14 @@ NV20GeForce.prototype.graph_bind_surface_handle = function(channel, state, handl
     if(nv20_is_surface2d_class(object.class_id))
     {
         state.surface = object_state;
+        state.swizzled_surface = null;
+        state.image_upload = null;
+    }
+    else if(nv20_is_swizzled_surface_class(object.class_id))
+    {
+        state.swizzled_surface = object_state;
+        state.surface = null;
+        state.image_upload = null;
     }
     else if(object.class_id === NV20_CLASS_CLIP)
     {
@@ -3388,7 +3548,9 @@ NV20GeForce.prototype.graph_bind_context_handle = function(channel, state, handl
     const object_state = this.graph_get_object_state(channel, object);
     const class_id = object.class_id & 0xFFFF;
 
-    if(nv20_is_surface2d_class(class_id) || class_id === NV20_CLASS_CLIP)
+    if(nv20_is_surface2d_class(class_id) ||
+        nv20_is_swizzled_surface_class(class_id) ||
+        class_id === NV20_CLASS_CLIP)
     {
         return this.graph_bind_surface_handle(channel, state, handle);
     }
@@ -3397,7 +3559,7 @@ NV20GeForce.prototype.graph_bind_context_handle = function(channel, state, handl
     {
         state.rop_context = object_state;
     }
-    else if(class_id === NV20_CLASS_PATTERN)
+    else if(nv20_is_pattern_class(class_id))
     {
         state.pattern = object_state;
     }
@@ -3408,6 +3570,69 @@ NV20GeForce.prototype.graph_bind_context_handle = function(channel, state, handl
     else if(class_id === NV20_CLASS_BETA)
     {
         state.beta_context = object_state;
+    }
+
+    return true;
+};
+
+NV20GeForce.prototype.graph_submit_swizzled_surface = function(channel, state, method, data)
+{
+    switch(method)
+    {
+        case 0x0184:
+            state.swz_dma = this.graph_dma_object_from_handle(channel, data);
+            return true;
+        case 0x0300:
+        {
+            const width_bits = data >>> 16 & 0xFF;
+            const height_bits = data >>> 24 & 0xFF;
+            state.swz_format = data & 0xFFFF;
+            state.swz_width = width_bits < 16 ? 1 << width_bits : 0;
+            state.swz_height = height_bits < 16 ? 1 << height_bits : 0;
+
+            if(!state.swz_width)
+            {
+                state.swz_width = 1;
+            }
+
+            if(!state.swz_height)
+            {
+                state.swz_height = 1;
+            }
+
+            return true;
+        }
+        case 0x0304:
+            state.swz_offset = data >>> 0;
+            return true;
+        default:
+            return false;
+    }
+};
+
+NV20GeForce.prototype.graph_write_swizzled_surface_pixel = function(surface, x, y, bytes)
+{
+    if(!surface || !surface.swz_width || !surface.swz_height)
+    {
+        return false;
+    }
+
+    x |= 0;
+    y |= 0;
+
+    if(x < 0 || y < 0 || x >= surface.swz_width || y >= surface.swz_height)
+    {
+        return false;
+    }
+
+    const bytes_per_pixel = nv20_render_bytes_per_pixel(
+        nv20_swizzled_surface_bpp_from_format(surface.swz_format, this.render_bpp));
+    const pixel = nv20_swizzle_index(x, y, surface.swz_width, surface.swz_height);
+    const offset = surface.swz_offset + pixel * bytes_per_pixel >>> 0;
+
+    for(var i = 0; i < bytes_per_pixel; i++)
+    {
+        this.graph_write_dma_byte(surface.swz_dma, offset + i >>> 0, bytes[i] || 0, true);
     }
 
     return true;
@@ -4543,6 +4768,7 @@ NV20GeForce.prototype.graph_begin_image_upload = function(state)
         dst_bpp;
     const src_bytes = src_bpp === 1 ? 0 : nv20_render_bytes_per_pixel(src_bpp);
     const mono_words_per_row = src_bpp === 1 ? Math.max(1, size.w + 31 >>> 5) : 0;
+    const clip_enabled = !!(is_texupload && state.tex_clip_size.w && state.tex_clip_size.h);
     this.update_render_mode_from_surface(surface, "2d-upload",
                                          point.x + dest_w, point.y + dest_h);
 
@@ -4569,6 +4795,11 @@ NV20GeForce.prototype.graph_begin_image_upload = function(state)
         rop: this.graph_effective_rop(state, state.operation),
         operation: state.operation >>> 0,
         src_format: state.color_format >>> 0,
+        clip_enabled: clip_enabled,
+        clip_x0: state.tex_clip_point.x | 0,
+        clip_y0: state.tex_clip_point.y | 0,
+        clip_x1: (state.tex_clip_point.x | 0) + (state.tex_clip_size.w | 0),
+        clip_y1: (state.tex_clip_point.y | 0) + (state.tex_clip_size.h | 0),
         start_ms: nv20_now_ms(),
         dirty_min: this.vram_size,
         dirty_max: 0,
@@ -4618,6 +4849,13 @@ NV20GeForce.prototype.graph_upload_mono_word = function(state, data, upload)
         const dst_x = upload.x + (src_x * upload.dest_width / upload.width | 0);
         const dst_y = upload.y + (row * upload.dest_height / upload.height | 0);
         const bytes = data >>> bit & 1 ? color1 : color0;
+
+        if(upload.clip_enabled &&
+            (dst_x < upload.clip_x0 || dst_x >= upload.clip_x1 ||
+             dst_y < upload.clip_y0 || dst_y >= upload.clip_y1))
+        {
+            continue;
+        }
 
         this.graph_write_surface_pixel(surface, dst_x, dst_y, bytes, upload.rop, null, {
             defer_mark: upload,
@@ -4685,6 +4923,16 @@ NV20GeForce.prototype.graph_upload_data_word = function(state, data)
             const dst_x = upload.x + (src_x * upload.dest_width / upload.width | 0);
             const dst_y = upload.y + (src_y * upload.dest_height / upload.height | 0);
             const src_color = upload.pixel_value >>> 0;
+
+            if(upload.clip_enabled &&
+                (dst_x < upload.clip_x0 || dst_x >= upload.clip_x1 ||
+                 dst_y < upload.clip_y0 || dst_y >= upload.clip_y1))
+            {
+                upload.pixel_value = 0;
+                upload.pixel_byte = 0;
+                upload.pixel_index++;
+                continue;
+            }
 
             if(this.graph_chroma_matches(state, src_color, upload.src_bytes))
             {
@@ -4862,6 +5110,129 @@ NV20GeForce.prototype.graph_execute_iifc = function(state)
         dst_bpp: dst_bpp,
         ms: nv20_now_ms() - start_ms,
     });
+
+    return true;
+};
+
+NV20GeForce.prototype.graph_begin_swizzled_upload = function(state)
+{
+    const surface = state.swizzled_surface;
+    const width = state.size.w >>> 0;
+    const height = state.size.h >>> 0;
+
+    if(!surface || !width || !height)
+    {
+        return null;
+    }
+
+    const dst_bpp = nv20_swizzled_surface_bpp_from_format(surface.swz_format, this.render_bpp);
+    const src_bpp = state.color_format_set ?
+        nv20_ifc_bpp_from_format(state.color_format, dst_bpp, surface.swz_format, false) :
+        dst_bpp;
+    const src_bytes = nv20_render_bytes_per_pixel(src_bpp);
+
+    if(!src_bytes)
+    {
+        return null;
+    }
+
+    const clip_enabled = !!(state.tex_clip_size.w && state.tex_clip_size.h);
+
+    state.image_upload = {
+        swizzled_surface: surface,
+        x: state.point.x | 0,
+        y: state.point.y | 0,
+        width: width,
+        height: height,
+        src_bpp: src_bpp,
+        src_bytes: src_bytes,
+        dst_bpp: dst_bpp,
+        bytes_total: width * height * src_bytes,
+        bytes_done: 0,
+        pixel_byte: 0,
+        pixel_value: 0,
+        pixel_index: 0,
+        src_format: state.color_format >>> 0,
+        clip_enabled: clip_enabled,
+        clip_x0: state.tex_clip_point.x | 0,
+        clip_y0: state.tex_clip_point.y | 0,
+        clip_x1: (state.tex_clip_point.x | 0) + (state.tex_clip_size.w | 0),
+        clip_y1: (state.tex_clip_point.y | 0) + (state.tex_clip_size.h | 0),
+        start_ms: nv20_now_ms(),
+    };
+
+    return state.image_upload;
+};
+
+NV20GeForce.prototype.graph_upload_swizzled_data_word = function(state, data)
+{
+    var upload = state.image_upload;
+
+    if(!upload ||
+        !upload.swizzled_surface ||
+        upload.swizzled_surface !== state.swizzled_surface ||
+        upload.bytes_done >= upload.bytes_total)
+    {
+        upload = this.graph_begin_swizzled_upload(state);
+    }
+
+    if(!upload)
+    {
+        return false;
+    }
+
+    this.graph_count_2d("upload_words");
+
+    for(var i = 0; i < 4 && upload.bytes_done < upload.bytes_total; i++)
+    {
+        const byte = data >>> (i << 3) & 0xFF;
+        upload.pixel_value |= byte << (upload.pixel_byte << 3);
+        upload.pixel_byte++;
+        upload.bytes_done++;
+
+        if(upload.pixel_byte === upload.src_bytes)
+        {
+            const src_x = upload.pixel_index % upload.width;
+            const src_y = upload.pixel_index / upload.width | 0;
+            const dst_x = upload.x + src_x;
+            const dst_y = upload.y + src_y;
+
+            if(!upload.clip_enabled ||
+                dst_x >= upload.clip_x0 && dst_x < upload.clip_x1 &&
+                dst_y >= upload.clip_y0 && dst_y < upload.clip_y1)
+            {
+                const src_color = upload.pixel_value >>> 0;
+                const bytes = nv20_color_to_bytes(src_color,
+                                                  upload.src_bpp,
+                                                  upload.src_format,
+                                                  upload.dst_bpp,
+                                                  upload.swizzled_surface.swz_format);
+                this.graph_write_swizzled_surface_pixel(upload.swizzled_surface,
+                                                        dst_x,
+                                                        dst_y,
+                                                        bytes);
+            }
+
+            upload.pixel_value = 0;
+            upload.pixel_byte = 0;
+            upload.pixel_index++;
+        }
+    }
+
+    if(upload.bytes_done >= upload.bytes_total)
+    {
+        this["graph_accel_count"]++;
+        this.graph_note_2d("tex_swizzle", state, {
+            x: upload.x,
+            y: upload.y,
+            w: upload.width,
+            h: upload.height,
+            src_bpp: upload.src_bpp,
+            dst_bpp: upload.dst_bpp,
+            fmt: upload.src_format >>> 0,
+            ms: nv20_now_ms() - upload.start_ms,
+        });
+    }
 
     return true;
 };
@@ -5825,9 +6196,34 @@ NV20GeForce.prototype.graph_submit_texupload = function(channel, state, method, 
             state.size = nv20_unpack_wh(data);
             state.image_upload = null;
             return true;
+        case 0x030C:
+            state.tex_clip_point = {
+                x: data & 0xFFFF,
+                y: state.tex_clip_point.y,
+            };
+            state.tex_clip_size = {
+                w: data >>> 16,
+                h: state.tex_clip_size.h,
+            };
+            return true;
+        case 0x0310:
+            state.tex_clip_point = {
+                x: state.tex_clip_point.x,
+                y: data & 0xFFFF,
+            };
+            state.tex_clip_size = {
+                w: state.tex_clip_size.w,
+                h: data >>> 16,
+            };
+            return true;
         default:
             if(method >= 0x0400 && method < 0x2000)
             {
+                if(state.swizzled_surface)
+                {
+                    return this.graph_upload_swizzled_data_word(state, data);
+                }
+
                 return this.graph_upload_data_word(state, data);
             }
 
@@ -6002,8 +6398,109 @@ NV20GeForce.prototype.graph_submit_beta = function(state, method, data)
     return false;
 };
 
+NV20GeForce.prototype.graph_execute_sifm_swizzled = function(state, surface)
+{
+    const width = state.sifm_dhw.w || state.sifm_shw.w;
+    const height = state.sifm_dhw.h || state.sifm_shw.h;
+
+    if(!surface || !width || !height)
+    {
+        return false;
+    }
+
+    const start_ms = nv20_now_ms();
+    const src_bpp = nv20_sifm_bpp_from_format(state.sifm_color_format, this.render_bpp);
+    const src_bytes = nv20_render_bytes_per_pixel(src_bpp);
+    const dst_bpp = nv20_swizzled_surface_bpp_from_format(surface.swz_format, this.render_bpp);
+    const src_pitch = (state.sifm_sfmt & 0xFFFF) || (state.sifm_shw.w || width) * src_bytes;
+    const dudx = state.sifm_dudx ? state.sifm_dudx | 0 : 0x00100000;
+    const dvdy = state.sifm_dvdy ? state.sifm_dvdy | 0 : 0x00100000;
+    const unscaled = dudx === 0x00100000 && dvdy === 0x00100000;
+    const syx_raw = state.sifm_syx_raw >>> 0;
+    const unscaled_src_x0 = (syx_raw & 0xFFFF) >>> 4;
+    const unscaled_src_y0 = ((syx_raw >>> 16) & 0xFFFF) >>> 4;
+    var scaled_src_x0 = ((syx_raw & 0xFFFF) << 16) - 0x80000;
+    var scaled_src_y = ((syx_raw & 0xFFFF0000) | 0) - 0x80000;
+
+    if(scaled_src_x0 < 0)
+    {
+        scaled_src_x0 = 0;
+    }
+
+    if(scaled_src_y < 0)
+    {
+        scaled_src_y = 0;
+    }
+
+    for(var y = 0; y < height; y++)
+    {
+        const src_y = unscaled ?
+            unscaled_src_y0 + y :
+            scaled_src_y >> 20;
+        var scaled_src_x = scaled_src_x0;
+        const row_offset = state.sifm_sofs + src_y * src_pitch >>> 0;
+        const row_location = this.graph_dma_linear_location(state.sifm_src_dma, row_offset, false);
+
+        for(var x = 0; x < width; x++)
+        {
+            const src_x = unscaled ?
+                unscaled_src_x0 + x :
+                scaled_src_x >> 20;
+            const src_row_offset = src_x * src_bytes >>> 0;
+            const src_offset = row_offset + src_row_offset >>> 0;
+            var color = row_location ?
+                this.graph_read_linear_pixel(row_location, src_row_offset, src_bytes) :
+                this.graph_read_dma_pixel(state.sifm_src_dma, src_offset, src_bytes, false);
+
+            if((state.sifm_color_format & 0xFF) === 4)
+            {
+                color = color | 0xFF000000;
+            }
+
+            const bytes = nv20_color_to_bytes(color >>> 0,
+                                              src_bpp,
+                                              state.sifm_color_format,
+                                              dst_bpp,
+                                              surface.swz_format);
+            this.graph_write_swizzled_surface_pixel(surface,
+                                                    state.sifm_dyx.x + x,
+                                                    state.sifm_dyx.y + y,
+                                                    bytes);
+
+            if(!unscaled)
+            {
+                scaled_src_x += dudx;
+            }
+        }
+
+        if(!unscaled)
+        {
+            scaled_src_y += dvdy;
+        }
+    }
+
+    this["graph_accel_count"]++;
+    this.graph_note_2d("sifm_swizzle", state, {
+        x: state.sifm_dyx.x,
+        y: state.sifm_dyx.y,
+        w: width,
+        h: height,
+        src_bpp: src_bpp,
+        dst_bpp: dst_bpp,
+        fmt: state.sifm_color_format >>> 0,
+        pitch: src_pitch,
+        ms: nv20_now_ms() - start_ms,
+    });
+    return true;
+};
+
 NV20GeForce.prototype.graph_execute_sifm = function(state)
 {
+    if(state.swizzled_surface)
+    {
+        return this.graph_execute_sifm_swizzled(state, state.swizzled_surface);
+    }
+
     const surface = state.surface || state.sifm_surface || this.graph_default_surface();
     const width = state.sifm_dhw.w || state.sifm_shw.w;
     const height = state.sifm_dhw.h || state.sifm_shw.h;
@@ -6176,9 +6673,687 @@ NV20GeForce.prototype.graph_submit_sifm = function(channel, state, method, data)
     }
 };
 
+NV20GeForce.prototype.graph_d3d_init_defaults = function(state)
+{
+    const class_id = state.class_id & 0xFFFF;
+
+    state.d3d_attrib_count = class_id === NV20_CLASS_D3D_NV10 ? 8 : 16;
+    state.d3d_tex_coord_count = class_id === NV20_CLASS_D3D_NV10 ? 2 :
+        class_id === NV20_CLASS_D3D_NV10_TCL ? 4 : 8;
+    state.d3d_window_offset_x = class_id === NV20_CLASS_D3D_NV10 ? 2048 : 0;
+    state.d3d_window_offset_y = class_id === NV20_CLASS_D3D_NV10 ? 2048 : 0;
+    state.d3d_vertex_arrays = [];
+    state.d3d_vertex_data_imm = [];
+    state.d3d_transform_program = [];
+    state.d3d_transform_program_load = 0;
+    state.d3d_transform_program_start = 0;
+    state.d3d_transform_constant = [];
+    state.d3d_transform_constant_load = 0;
+    state.d3d_begin_end = 0;
+};
+
+NV20GeForce.prototype.graph_d3d_note_method = function(state, method, data)
+{
+    if(!state.d3d_methods)
+    {
+        state.d3d_methods = {};
+    }
+
+    state.d3d_methods[h(method & 0x1FFC, 4)] = data >>> 0;
+};
+
+NV20GeForce.prototype.graph_d3d_texture_state = function(state, index)
+{
+    index &= 0xF;
+    var texture = state.d3d_textures[index];
+
+    if(!texture)
+    {
+        texture = {
+            offset: 0,
+            dma: null,
+            dma_select: 0,
+            cubemap: false,
+            format: 0,
+            levels: 0,
+            base_size: [0, 0, 0],
+            wrap: [0, 0, 0],
+            control0: 0,
+            control1: 0,
+            control3: 0,
+            enabled: false,
+            filter: 0,
+            image_rect: 0,
+            key_color: 0,
+            palette: 0,
+            offset_matrix: [0, 0, 0, 0],
+            methods: {},
+        };
+        state.d3d_textures[index] = texture;
+    }
+
+    return texture;
+};
+
+NV20GeForce.prototype.graph_d3d_vertex_array_state = function(state, index)
+{
+    index &= 0xF;
+    var array = state.d3d_vertex_arrays[index];
+
+    if(!array)
+    {
+        array = {
+            offset: 0,
+            format: 0,
+            stride: 0,
+            type: 0,
+            size: 0,
+            dx: false,
+            homogeneous: false,
+        };
+        state.d3d_vertex_arrays[index] = array;
+    }
+
+    return array;
+};
+
+NV20GeForce.prototype.graph_d3d_vector_state = function(list, index)
+{
+    index >>>= 0;
+    var vector = list[index];
+
+    if(!vector)
+    {
+        vector = [0, 0, 0, 0];
+        list[index] = vector;
+    }
+
+    return vector;
+};
+
+NV20GeForce.prototype.graph_d3d_set_vertex_array_format = function(array, value)
+{
+    value >>>= 0;
+    array.format = value;
+    array.stride = value >>> 8 & 0xFF;
+    array.dx = (value & 0x00010000) !== 0;
+    array.homogeneous = (value & 0x01000000) !== 0;
+
+    if(!array.dx)
+    {
+        array.type = value & 0xF;
+        array.size = value >>> 4 & 0xF;
+        return;
+    }
+
+    switch(value & 0xFF)
+    {
+        case 0x44:
+            array.type = 4;
+            array.size = 4;
+            break;
+        case 0x99:
+            array.type = 2;
+            array.size = 2;
+            break;
+        case 0xAA:
+            array.type = 2;
+            array.size = 3;
+            break;
+        case 0xBB:
+            array.type = 2;
+            array.size = 4;
+            break;
+        case 0xCC:
+            array.type = 0;
+            array.size = 4;
+            break;
+    }
+};
+
+NV20GeForce.prototype.graph_d3d_record_texture_method = function(state, word, data)
+{
+    const class_id = state.class_id & 0xFFFF;
+    var method_offset = 0;
+    var texture_index = 0;
+    var texture_method = 0;
+
+    if(class_id === NV20_CLASS_D3D_NV10 && word >= 0x086 && word <= 0x095)
+    {
+        method_offset = word - 0x086;
+        texture_index = method_offset & 1;
+        texture_method = method_offset >>> 1;
+    }
+    else if(class_id === NV20_CLASS_D3D_NV10_TCL && word >= 0x6C0 && word <= 0x6FF)
+    {
+        method_offset = word - 0x6C0;
+        texture_index = method_offset >>> 4;
+        texture_method = method_offset & 0xF;
+    }
+    else if(class_id >= NV20_CLASS_D3D_NV15 && word >= 0x680 && word <= 0x6FF)
+    {
+        method_offset = word - 0x680;
+        texture_index = method_offset >>> 3;
+        texture_method = method_offset & 7;
+    }
+    else if(class_id >= NV20_CLASS_D3D_NV15 && word >= 0x610 && word <= 0x61F)
+    {
+        const texture = this.graph_d3d_texture_state(state, word & 0xF);
+        texture.control3 = data >>> 0;
+        texture.methods["control3"] = data >>> 0;
+        return true;
+    }
+    else if(class_id >= NV20_CLASS_D3D_NV15 && word >= 0x740 && word <= 0x74F)
+    {
+        const texture = this.graph_d3d_texture_state(state, word - 0x740);
+        texture.key_color = data >>> 0;
+        texture.methods["key_color"] = data >>> 0;
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+
+    const texture = this.graph_d3d_texture_state(state, texture_index);
+    texture.methods[h(texture_method, 2)] = data >>> 0;
+
+    if(texture_method === 0)
+    {
+        texture.offset = data >>> 0;
+    }
+    else if(texture_method === 1)
+    {
+        texture.dma_select = data & 3;
+        texture.dma = (data & 3) === 1 ? state.d3d_a_dma : state.d3d_b_dma;
+        texture.cubemap = (data & 4) !== 0;
+
+        if(class_id === NV20_CLASS_D3D_NV10)
+        {
+            texture.format = data >>> 7 & 0x1F;
+            texture.levels = data >>> 12 & 0xF;
+            texture.base_size[0] = data >>> 16 & 0xF;
+            texture.base_size[1] = data >>> 20 & 0xF;
+            texture.wrap[0] = data >>> 24 & 0xF;
+            texture.wrap[1] = data >>> 28 & 0xF;
+        }
+        else
+        {
+            texture.format = data >>> 8 & 0xFF;
+            texture.levels = data >>> 16 & 0xF;
+            texture.base_size[0] = data >>> 20 & 0xF;
+            texture.base_size[1] = data >>> 24 & 0xF;
+            texture.base_size[2] = data >>> 28 & 0xF;
+        }
+    }
+    else if(texture_method === 2 && class_id !== NV20_CLASS_D3D_NV10)
+    {
+        texture.wrap[0] = data & 0xF;
+        texture.wrap[1] = data >>> 8 & 0xF;
+        texture.wrap[2] = data >>> 16 & 0xF;
+    }
+    else if((texture_method === 2 && class_id === NV20_CLASS_D3D_NV10) ||
+            (texture_method === 3 && class_id !== NV20_CLASS_D3D_NV10))
+    {
+        texture.control0 = data >>> 0;
+        texture.enabled = (data >>> 30 & 1) !== 0;
+    }
+    else if((texture_method === 3 && class_id === NV20_CLASS_D3D_NV10) ||
+            (texture_method === 4 && class_id !== NV20_CLASS_D3D_NV10))
+    {
+        texture.control1 = data >>> 0;
+    }
+    else if((texture_method === 6 && class_id === NV20_CLASS_D3D_NV10) ||
+            (texture_method === 5 && class_id !== NV20_CLASS_D3D_NV10))
+    {
+        texture.filter = data >>> 0;
+    }
+    else if((texture_method === 5 && class_id === NV20_CLASS_D3D_NV10) ||
+            (texture_method === 7 && class_id === NV20_CLASS_D3D_NV10_TCL) ||
+            (texture_method === 6 && class_id >= NV20_CLASS_D3D_NV15))
+    {
+        texture.image_rect = data >>> 0;
+    }
+    else if((texture_method === 7 && class_id === NV20_CLASS_D3D_NV10) ||
+            (texture_method === 8 && class_id === NV20_CLASS_D3D_NV10_TCL))
+    {
+        texture.palette = data >>> 0;
+    }
+    else if(texture_method >= 10 && texture_method <= 13 && class_id === NV20_CLASS_D3D_NV10_TCL)
+    {
+        texture.offset_matrix[texture_method - 10] = data >>> 0;
+    }
+
+    return true;
+};
+
+NV20GeForce.prototype.graph_d3d_record_vertex_array_method = function(state, word, data)
+{
+    const class_id = state.class_id & 0xFFFF;
+    var array_index = -1;
+    var is_format = false;
+
+    if(word === 0x5CF && class_id > NV20_CLASS_D3D_NV15)
+    {
+        state.d3d_vertex_data_base_index = data >>> 0;
+        return true;
+    }
+
+    if(class_id === NV20_CLASS_D3D_NV10 && word >= 0x340 && word <= 0x34F)
+    {
+        const method_offset = word - 0x340;
+        array_index = method_offset >>> 1;
+        is_format = (method_offset & 1) !== 0;
+    }
+    else if(class_id === NV20_CLASS_D3D_NV10_TCL && word >= 0x5C8 && word <= 0x5D7)
+    {
+        array_index = word - 0x5C8;
+    }
+    else if(class_id === NV20_CLASS_D3D_NV10_TCL && word >= 0x5D8 && word <= 0x5E7)
+    {
+        array_index = word - 0x5D8;
+        is_format = true;
+    }
+    else if(class_id >= NV20_CLASS_D3D_NV15 && word >= 0x5A0 && word <= 0x5AF)
+    {
+        array_index = word - 0x5A0;
+    }
+    else if(class_id >= NV20_CLASS_D3D_NV15 && word >= 0x5D0 && word <= 0x5DF)
+    {
+        array_index = word - 0x5D0;
+        is_format = true;
+    }
+    else
+    {
+        return false;
+    }
+
+    const array = this.graph_d3d_vertex_array_state(state, array_index);
+
+    if(is_format)
+    {
+        this.graph_d3d_set_vertex_array_format(array, data);
+    }
+    else
+    {
+        array.offset = data >>> 0;
+    }
+
+    return true;
+};
+
+NV20GeForce.prototype.graph_d3d_record_transform_method = function(state, word, data)
+{
+    const class_id = state.class_id & 0xFFFF;
+
+    if((class_id === NV20_CLASS_D3D_NV10_TCL && word >= 0x2C0 && word <= 0x2C3) ||
+       (class_id >= NV20_CLASS_D3D_NV15 && word >= 0x2E0 && word <= 0x2E3))
+    {
+        const vector = this.graph_d3d_vector_state(
+            state.d3d_transform_program,
+            state.d3d_transform_program_load);
+        const component = word & 3;
+        vector[component] = data >>> 0;
+
+        if(component === 3)
+        {
+            state.d3d_transform_program_load++;
+        }
+
+        return true;
+    }
+
+    if((class_id === NV20_CLASS_D3D_NV10_TCL && word >= 0x2E0 && word <= 0x2E3) ||
+       (class_id >= NV20_CLASS_D3D_NV15 && word >= 0x7C0 && word <= 0x7CF))
+    {
+        const vector = this.graph_d3d_vector_state(
+            state.d3d_transform_constant,
+            state.d3d_transform_constant_load);
+        const component = word & 3;
+        vector[component] = data >>> 0;
+
+        if(component === 3)
+        {
+            state.d3d_transform_constant_load++;
+        }
+
+        return true;
+    }
+
+    if(word === 0x7A7)
+    {
+        state.d3d_transform_program_load = data >>> 0;
+        return true;
+    }
+
+    if(word === 0x7A8)
+    {
+        state.d3d_transform_program_start = data >>> 0;
+        return true;
+    }
+
+    if((word === 0x7A9 && class_id === NV20_CLASS_D3D_NV10_TCL) ||
+       (word === 0x7BF && class_id >= NV20_CLASS_D3D_NV15))
+    {
+        state.d3d_transform_constant_load = data >>> 0;
+        return true;
+    }
+
+    return false;
+};
+
+NV20GeForce.prototype.graph_d3d_record_immediate_vertex_method = function(state, word, data)
+{
+    const class_id = state.class_id & 0xFFFF;
+    var attrib_index = -1;
+    var component = 0;
+
+    if(class_id >= NV20_CLASS_D3D_NV15 && word >= 0x540 && word <= 0x57F)
+    {
+        attrib_index = word >>> 2 & 0xF;
+        component = word & 3;
+    }
+    else if(class_id >= NV20_CLASS_D3D_NV10_TCL && word >= 0x620 && word <= 0x63F)
+    {
+        attrib_index = word >>> 1 & 0xF;
+        component = word & 1;
+    }
+    else if(class_id >= NV20_CLASS_D3D_NV10_TCL && word >= 0x640 && word <= 0x64F)
+    {
+        attrib_index = word & 0xF;
+        const vector = this.graph_d3d_vector_state(state.d3d_vertex_data_imm, attrib_index);
+        vector[0] = data & 0xFFFF;
+        vector[1] = data >>> 16;
+        vector[2] = 0;
+        vector[3] = 0x3F800000;
+        return true;
+    }
+    else if(class_id >= NV20_CLASS_D3D_NV10_TCL && word >= 0x650 && word <= 0x65F)
+    {
+        attrib_index = word & 0xF;
+        const vector = this.graph_d3d_vector_state(state.d3d_vertex_data_imm, attrib_index);
+        vector[0] = data >>> 0;
+        return true;
+    }
+    else if((class_id === NV20_CLASS_D3D_NV10_TCL && word >= 0x680 && word <= 0x6BF) ||
+            (class_id >= NV20_CLASS_D3D_NV15 && word >= 0x700 && word <= 0x73F))
+    {
+        attrib_index = word >>> 2 & 0xF;
+        component = word & 3;
+    }
+    else
+    {
+        return false;
+    }
+
+    this.graph_d3d_vector_state(state.d3d_vertex_data_imm, attrib_index)[component] = data >>> 0;
+    return true;
+};
+
+NV20GeForce.prototype.graph_d3d_record_state_method = function(channel, state, method, data)
+{
+    const word = method >>> 2;
+    const class_id = state.class_id & 0xFFFF;
+
+    if(word === 0x000)
+    {
+        this.graph_d3d_init_defaults(state);
+        return true;
+    }
+
+    if(this.graph_d3d_record_texture_method(state, word, data) ||
+       this.graph_d3d_record_vertex_array_method(state, word, data) ||
+       this.graph_d3d_record_transform_method(state, word, data) ||
+       this.graph_d3d_record_immediate_vertex_method(state, word, data))
+    {
+        return true;
+    }
+
+    switch(word)
+    {
+        case 0x08B:
+            state.d3d_surface_pitch_z = data >>> 0;
+            return true;
+        case 0x0AE:
+            state.d3d_window_offset_x = nv20_i16(data);
+            state.d3d_window_offset_y = nv20_i16(data >>> 16);
+            return true;
+        case 0x230:
+            state.d3d_scissor_x = data & 0xFFFF;
+            state.d3d_scissor_width = data >>> 16;
+            return true;
+        case 0x231:
+            state.d3d_scissor_y = data & 0xFFFF;
+            state.d3d_scissor_height = data >>> 16;
+            return true;
+        case 0x239:
+            state.d3d_shader_program = data >>> 0;
+            return true;
+        case 0x280:
+            state.d3d_viewport_x = data & 0xFFFF;
+            state.d3d_viewport_width = data >>> 16;
+            return true;
+        case 0x281:
+            state.d3d_viewport_y = data & 0xFFFF;
+            state.d3d_viewport_height = data >>> 16;
+            return true;
+        case 0x37F:
+        case 0x4FF:
+            if(class_id === NV20_CLASS_D3D_NV10)
+            {
+                state.d3d_begin_end = data >>> 0;
+            }
+            return true;
+        case 0x5FF:
+            if(class_id <= NV20_CLASS_D3D_NV10_TCL)
+            {
+                state.d3d_begin_end = data >>> 0;
+            }
+            return true;
+        case 0x602:
+            if(class_id >= NV20_CLASS_D3D_NV15)
+            {
+                state.d3d_begin_end = data >>> 0;
+            }
+            return true;
+        case 0x607:
+            state.d3d_index_array_offset = data >>> 0;
+            return true;
+        case 0x608:
+            state.d3d_index_array_dma = data >>> 0;
+            return true;
+        case 0x758:
+            state.d3d_shader_control = data >>> 0;
+            return true;
+        case 0x75D:
+            this.crtc_start = data >>> 0;
+            this.update_render_mode_from_crtc("d3d-crtc-start");
+            return true;
+        default:
+            break;
+    }
+
+    if(word >= 0x0B0 && word <= 0x0BF)
+    {
+        const index = word >>> 1 & 7;
+        var clip = state.d3d_window_clip[index];
+
+        if(!clip)
+        {
+            clip = { x1: 0, x2: 0, y1: 0, y2: 0 };
+            state.d3d_window_clip[index] = clip;
+        }
+
+        if((word & 1) === 0)
+        {
+            clip.x1 = data & 0xFFFF;
+            clip.x2 = data >>> 16;
+        }
+        else
+        {
+            clip.y1 = data & 0xFFFF;
+            clip.y2 = data >>> 16;
+        }
+
+        return true;
+    }
+
+    return false;
+};
+
+NV20GeForce.prototype.graph_d3d_write_report = function(state, offset)
+{
+    if(!state.d3d_report_dma)
+    {
+        return;
+    }
+
+    offset = offset >>> 0 & 0x00FFFFFF;
+    const timestamp = this.timer_read64();
+    this.graph_write_dma32(state.d3d_report_dma, offset, timestamp >>> 0, false);
+    this.graph_write_dma32(state.d3d_report_dma, offset + 4 >>> 0,
+                           Math.floor(timestamp / 0x100000000) >>> 0, false);
+    this.graph_write_dma32(state.d3d_report_dma, offset + 8 >>> 0, 0, false);
+    this.graph_write_dma32(state.d3d_report_dma, offset + 12 >>> 0, 0, false);
+};
+
+NV20GeForce.prototype.graph_d3d_write_semaphore = function(state, value)
+{
+    if(!state.d3d_semaphore_dma)
+    {
+        return;
+    }
+
+    this.graph_write_dma32(state.d3d_semaphore_dma,
+                           state.d3d_semaphore_offset || 0,
+                           value >>> 0,
+                           false);
+};
+
+NV20GeForce.prototype.graph_d3d_write_dma16 = function(dma, offset, value, prefer_vram)
+{
+    value >>>= 0;
+    this.graph_write_dma_byte(dma, offset, value, prefer_vram);
+    this.graph_write_dma_byte(dma, offset + 1 >>> 0, value >>> 8, prefer_vram);
+};
+
+NV20GeForce.prototype.graph_d3d_clear_rect = function(state)
+{
+    var x = state.d3d_clip_horizontal & 0xFFFF;
+    var y = state.d3d_clip_vertical & 0xFFFF;
+    var width = state.d3d_clip_horizontal >>> 16;
+    var height = state.d3d_clip_vertical >>> 16;
+
+    if(width <= 0 || height <= 0)
+    {
+        return null;
+    }
+
+    if(state.d3d_scissor_width && state.d3d_scissor_height)
+    {
+        const max_x = x + width;
+        const max_y = y + height;
+        const scissor_x = state.d3d_scissor_x + state.d3d_window_offset_x | 0;
+        const scissor_y = state.d3d_scissor_y + state.d3d_window_offset_y | 0;
+        const scissor_max_x = scissor_x + state.d3d_scissor_width;
+        const scissor_max_y = scissor_y + state.d3d_scissor_height;
+
+        x = Math.max(x, scissor_x);
+        y = Math.max(y, scissor_y);
+        width = Math.min(max_x, scissor_max_x) - x;
+        height = Math.min(max_y, scissor_max_y) - y;
+    }
+
+    if(width <= 0 || height <= 0)
+    {
+        return null;
+    }
+
+    return {
+        x: x | 0,
+        y: y | 0,
+        w: width | 0,
+        h: height | 0,
+    };
+};
+
+NV20GeForce.prototype.graph_d3d_color_surface = function(state)
+{
+    const surface_format = nv20_surface_format_from_d3d_format(
+        state.class_id,
+        state.d3d_surface_format) || nv20_surface_format_from_bpp(this.render_bpp);
+    const pitch = (state.d3d_surface_pitch & 0xFFFF) ||
+        state.d3d_surface_pitch ||
+        this.render_stride;
+
+    return {
+        class_id: state.class_id,
+        class_name: (state.class_name || "d3d") + "-clear-color",
+        format: surface_format,
+        src_pitch: pitch,
+        dst_pitch: pitch,
+        src_offset: state.d3d_surface_color_offset >>> 0,
+        dst_offset: state.d3d_surface_color_offset >>> 0,
+        surface_format_set: true,
+        surface_pitch_set: true,
+        surface_src_offset_set: true,
+        surface_dst_offset_set: true,
+        src_dma: state.d3d_color_dma || null,
+        dst_dma: state.d3d_color_dma || null,
+    };
+};
+
+NV20GeForce.prototype.graph_d3d_clear_depth = function(state, rect)
+{
+    const clear = state.d3d_clear_surface >>> 0;
+    const depth_clear = (clear & 1) !== 0;
+    const stencil_clear = (clear & 2) !== 0;
+
+    if(!depth_clear && !stencil_clear)
+    {
+        return;
+    }
+
+    // Depth/stencil contents are not consumed until the 3D rasterizer exists.
+    // Do not spend millions of byte writes or risk touching the visible front
+    // buffer when the guest is only using clears as part of a mode transition.
+    this.graph_count_2d("d3d_depth_clear_skip");
+};
+
+NV20GeForce.prototype.graph_execute_d3d_clear = function(state)
+{
+    const rect = this.graph_d3d_clear_rect(state);
+
+    if(!rect)
+    {
+        return false;
+    }
+
+    if(state.d3d_clear_surface & 0x000000F0)
+    {
+        const surface = this.graph_d3d_color_surface(state);
+        this.graph_fill_rect(surface,
+                             rect.x,
+                             rect.y,
+                             rect.w,
+                             rect.h,
+                             state.d3d_color_clear_value,
+                             surface.format,
+                             null,
+                             NV20_ROP_SRCCOPY,
+                             state);
+    }
+
+    this.graph_d3d_clear_depth(state, rect);
+    return true;
+};
+
 NV20GeForce.prototype.graph_submit_d3d = function(channel, state, method, data)
 {
     this["graph_d3d_method_count"]++;
+    this.graph_d3d_note_method(state, method, data);
+    this.graph_d3d_record_state_method(channel, state, method, data);
+    const class_id = state.class_id & 0xFFFF;
 
     switch(method)
     {
@@ -6212,20 +7387,26 @@ NV20GeForce.prototype.graph_submit_d3d = function(channel, state, method, data)
             state.d3d_b_dma = this.graph_dma_object_from_handle(channel, data);
             return true;
         case 0x018C:
-        case 0x0194:
             state.d3d_vertex_a_dma = this.graph_dma_object_from_handle(channel, data);
+            if(class_id === NV20_CLASS_D3D_NV10)
+            {
+                state.d3d_vertex_b_dma = state.d3d_vertex_a_dma;
+            }
             return true;
-        case 0x0198:
+        case 0x0194:
             state.d3d_color_dma = this.graph_dma_object_from_handle(channel, data);
             return true;
-        case 0x019C:
+        case 0x0198:
             state.d3d_zeta_dma = this.graph_dma_object_from_handle(channel, data);
             return true;
-        case 0x01A0:
+        case 0x019C:
             state.d3d_vertex_a_dma = this.graph_dma_object_from_handle(channel, data);
             return true;
-        case 0x01A4:
+        case 0x01A0:
             state.d3d_vertex_b_dma = this.graph_dma_object_from_handle(channel, data);
+            return true;
+        case 0x01A4:
+            state.d3d_semaphore_dma = this.graph_dma_object_from_handle(channel, data);
             return true;
         case 0x01A8:
             state.d3d_report_dma = this.graph_dma_object_from_handle(channel, data);
@@ -6251,10 +7432,67 @@ NV20GeForce.prototype.graph_submit_d3d = function(channel, state, method, data)
         case 0x0214:
             state.d3d_surface_zeta_offset = data >>> 0;
             return true;
+        case 0x022C:
+            state.d3d_surface_pitch_z = data >>> 0;
+            return true;
+        case 0x0DFC:
+        case 0x13FC:
+            if(class_id === NV20_CLASS_D3D_NV10)
+            {
+                state.d3d_begin_end = data >>> 0;
+            }
+            return true;
+        case 0x17D0:
+            if(class_id === NV20_CLASS_D3D_NV10_TCL)
+            {
+                this.graph_d3d_write_report(state, data);
+            }
+            return true;
+        case 0x17FC:
+            if(class_id <= NV20_CLASS_D3D_NV10_TCL)
+            {
+                state.d3d_begin_end = data >>> 0;
+            }
+            return true;
+        case 0x1800:
+            if(class_id >= NV20_CLASS_D3D_NV15)
+            {
+                this.graph_d3d_write_report(state, data);
+            }
+            return true;
+        case 0x1808:
+            if(class_id >= NV20_CLASS_D3D_NV15)
+            {
+                state.d3d_begin_end = data >>> 0;
+            }
+            return true;
+        case 0x181C:
+            state.d3d_index_array_offset = data >>> 0;
+            return true;
+        case 0x1820:
+            state.d3d_index_array_dma = data >>> 0;
+            return true;
+        case 0x1D6C:
+            state.d3d_semaphore_offset = data >>> 0;
+            return true;
+        case 0x1D70:
+            this.graph_d3d_write_semaphore(state, data);
+            return true;
+        case 0x1D74:
+            this.crtc_start = data >>> 0;
+            this.update_render_mode_from_crtc("d3d-crtc-start");
+            return true;
+        case 0x1D8C:
+            state.d3d_zstencil_clear_value = data >>> 0;
+            return true;
+        case 0x1D90:
+            state.d3d_color_clear_value = data >>> 0;
+            return true;
+        case 0x1D94:
+            state.d3d_clear_surface = data >>> 0;
+            this.graph_execute_d3d_clear(state);
+            return true;
         default:
-            // Windows XP's inbox GeForce driver programs a small D3D state
-            // block during startup. We do not render 3D here, but accepting
-            // these methods lets notifiers complete instead of timing out.
             return nv20_is_d3d_like_method(method);
     }
 };
@@ -6415,11 +7653,15 @@ NV20GeForce.prototype.graph_submit_method = function(channel, subchannel, method
     {
         handled = this.graph_submit_m2mf(channel, state, method, data);
     }
+    else if(nv20_is_swizzled_surface_class(class_id))
+    {
+        handled = this.graph_submit_swizzled_surface(channel, state, method, data);
+    }
     else if(class_id === NV20_CLASS_ROP)
     {
         handled = this.graph_submit_rop(state, method, data);
     }
-    else if(class_id === NV20_CLASS_PATTERN)
+    else if(nv20_is_pattern_class(class_id))
     {
         handled = this.graph_submit_pattern(state, method, data);
     }
@@ -6953,6 +8195,7 @@ NV20GeForce.prototype.set_render_mode = function(width, height, bpp, stride, off
         this.render_format !== render_format ||
         this.render_stride !== stride ||
         this.render_offset !== offset;
+
     if(!changed)
     {
         return true;
@@ -7043,6 +8286,13 @@ NV20GeForce.prototype.update_render_mode_from_surface = function(surface, source
         return false;
     }
 
+    const crtc_mode = this.crtc_render_mode();
+
+    if(crtc_mode && crtc_mode.bpp !== bpp)
+    {
+        return false;
+    }
+
     if(surface.surface_dst_offset_set === false)
     {
         return false;
@@ -7124,11 +8374,70 @@ NV20GeForce.prototype.update_render_mode_from_surface = function(surface, source
         height = this.render_height;
     }
 
+    if(crtc_mode)
+    {
+        if(offset !== crtc_mode.offset)
+        {
+            return false;
+        }
+
+        width = crtc_mode.width;
+        height = crtc_mode.height;
+        stride = crtc_mode.stride;
+    }
+
     this.render_surface_inferred = true;
     this.render_surface_pitch = stride;
     this.render_surface_offset = offset;
     this.render_surface_bpp = bpp;
     return this.set_render_mode(width, height, bpp, stride, offset, source || "surface2d");
+};
+
+NV20GeForce.prototype.crtc_render_mode = function()
+{
+    const crtc = this.prmcio_crtc_regs;
+
+    const horizontal_display_chars = (crtc[0x01] | (crtc[0x2D] & 0x02) << 7) + 1;
+    const width = horizontal_display_chars * 8;
+    const vertical_display =
+        crtc[0x12] |
+        (crtc[0x07] & 0x02) << 7 |
+        (crtc[0x07] & 0x40) << 3 |
+        (crtc[0x25] & 0x02) << 9 |
+        (crtc[0x41] & 0x04) << 9;
+    const height = vertical_display + 1;
+    const pixel_mode = crtc[0x28] & 3;
+    const row_offset = crtc[0x13] | (crtc[0x19] & 0xE0) << 3;
+
+    if(!pixel_mode || !row_offset)
+    {
+        return null;
+    }
+
+    const bpp = pixel_mode === 1 ? 8 :
+        pixel_mode === 2 ? 16 :
+        pixel_mode === 3 ? 32 :
+        this.render_bpp;
+    const bytes_per_pixel = nv20_render_bytes_per_pixel(bpp);
+    var stride = row_offset * 8;
+
+    if(!bytes_per_pixel)
+    {
+        return null;
+    }
+
+    if(stride < width * bytes_per_pixel)
+    {
+        stride = width * bytes_per_pixel;
+    }
+
+    return {
+        width: width,
+        height: height,
+        bpp: bpp,
+        stride: stride,
+        offset: this.crtc_start,
+    };
 };
 
 NV20GeForce.prototype.update_render_mode_from_d3d_surface = function(state, source)
@@ -7171,40 +8480,15 @@ NV20GeForce.prototype.update_render_mode_from_crtc = function(source)
         return;
     }
 
-    const crtc = this.prmcio_crtc_regs;
+    const mode = this.crtc_render_mode();
 
-    const horizontal_display_chars = (crtc[0x01] | (crtc[0x2D] & 0x02) << 7) + 1;
-    const width = horizontal_display_chars * 8;
-    const vertical_display =
-        crtc[0x12] |
-        (crtc[0x07] & 0x02) << 7 |
-        (crtc[0x07] & 0x40) << 3 |
-        (crtc[0x25] & 0x02) << 9 |
-        (crtc[0x41] & 0x04) << 9;
-    const height = vertical_display + 1;
-    const pixel_mode = crtc[0x28] & 3;
-    const row_offset = crtc[0x13] | (crtc[0x19] & 0xE0) << 3;
-
-    if(!pixel_mode || !row_offset)
+    if(!mode)
     {
         return;
     }
 
-    const bpp = pixel_mode === 1 ? 8 : pixel_mode === 2 ? 16 : pixel_mode === 3 ? 32 : this.render_bpp;
-    const bytes_per_pixel = nv20_render_bytes_per_pixel(bpp);
-    var stride = row_offset * 8;
-
-    if(this.render_surface_inferred && bpp === 8 && this.render_bpp >= 16)
-    {
-        return;
-    }
-
-    if(stride < width * bytes_per_pixel)
-    {
-        stride = width * bytes_per_pixel;
-    }
-
-    this.set_render_mode(width, height, bpp, stride, this.crtc_start, source);
+    this.render_surface_inferred = false;
+    this.set_render_mode(mode.width, mode.height, mode.bpp, mode.stride, mode.offset, source);
 };
 
 NV20GeForce.prototype.activate_rendering = function()
@@ -7874,6 +9158,11 @@ NV20GeForce.prototype.prmcio_write_crtc_data = function(value)
 
     const index = this.prmcio_crtc_index & 0xFF;
 
+    if(this.dispi_delegated_crtc_writes)
+    {
+        this.dispi_clear_delegated_crtc();
+    }
+
     if(index === 0x1C && !(this.prmcio_crtc_regs[index] & 0x80) && (value & 0x80))
     {
         this.crtc_intr_en = 0;
@@ -7997,6 +9286,8 @@ NV20GeForce.prototype.reset_dispi_shadow = function()
     this.dispi_offset_x = 0;
     this.dispi_offset_y = 0;
     this.dispi_takeover_logged = false;
+    this.dispi_delegated_crtc_writes = 0;
+    this.dispi_delegated_crtc_log_count = 0;
 };
 
 NV20GeForce.prototype.geforce_owns_legacy_vga = function()
@@ -8017,6 +9308,44 @@ NV20GeForce.prototype.geforce_handles_dispi = function()
 NV20GeForce.prototype.dispi_vga_delegate = function()
 {
     return this.cpu && this.cpu.devices && this.cpu.devices.vga || null;
+};
+
+NV20GeForce.prototype.dispi_note_delegated_vbe_write = function(index)
+{
+    index &= 0xFFFF;
+
+    if(index === 4)
+    {
+        this.dispi_delegated_crtc_writes = 128;
+    }
+};
+
+NV20GeForce.prototype.dispi_delegated_crtc_active = function()
+{
+    return this.dispi_delegated_crtc_writes > 0 &&
+        this.prmcio_crtc_index <= NV20_VGA_CRTC_MAX;
+};
+
+NV20GeForce.prototype.dispi_clear_delegated_crtc = function()
+{
+    this.dispi_delegated_crtc_writes = 0;
+};
+
+NV20GeForce.prototype.dispi_report_geforce_mode = function()
+{
+    const mode = this["debug_render_mode"];
+
+    if(!this.bus ||
+        !mode ||
+        mode["source"] === "default" ||
+        !mode["width"] ||
+        !mode["height"] ||
+        !mode["bpp"])
+    {
+        return;
+    }
+
+    this.bus.send("screen-set-size", [mode["width"], mode["height"], mode["bpp"]]);
 };
 
 NV20GeForce.prototype.dispi_turn_off_vga_svga = function()
@@ -8097,14 +9426,13 @@ NV20GeForce.prototype.dispi_index_write16 = function(value)
     const vga = this.dispi_vga_delegate();
 
     value &= 0xFFFF;
+    this.dispi_index = value;
 
     if(!this.geforce_handles_dispi() && vga && vga.port1CE_write)
     {
         vga.port1CE_write(value);
         return;
     }
-
-    this.dispi_index = value;
 };
 
 NV20GeForce.prototype.dispi_data_read_local = function()
@@ -8170,7 +9498,9 @@ NV20GeForce.prototype.dispi_data_write16 = function(value)
 
     if(!this.geforce_handles_dispi() && vga && vga.port1CF_write)
     {
+        this.dispi_note_delegated_vbe_write(index);
         vga.port1CF_write(value);
+        this.dispi_report_geforce_mode();
         return;
     }
 
@@ -8225,8 +9555,13 @@ NV20GeForce.prototype.dispi_data_write16 = function(value)
 
 NV20GeForce.prototype.legacy_vga_crtc_data_is_local = function()
 {
-    return this.geforce_owns_legacy_vga() ||
-        this.prmcio_crtc_index > NV20_VGA_CRTC_MAX;
+    return this.prmcio_crtc_index > NV20_VGA_CRTC_MAX ||
+        this.geforce_owns_legacy_vga() && !this.dispi_delegated_crtc_active();
+};
+
+NV20GeForce.prototype.legacy_vga_crtc_data_is_dispi_delegated = function()
+{
+    return this.dispi_delegated_crtc_active();
 };
 
 NV20GeForce.prototype.legacy_vga_port_read_shadow = function(port)
@@ -8484,15 +9819,31 @@ NV20GeForce.prototype.vga_port_write8 = function(port, value)
         case 0x3B4:
         case 0x3D4:
             this.prmcio_set_crtc_index(value);
-            if(vga && value <= NV20_VGA_CRTC_MAX && !this.geforce_owns_legacy_vga())
+            if(vga && value <= NV20_VGA_CRTC_MAX &&
+                (!this.geforce_owns_legacy_vga() || this.dispi_delegated_crtc_writes > 0))
             {
                 vga.port3D4_write(value);
             }
             return true;
         case 0x3B5:
         case 0x3D5:
-            if(this.legacy_vga_crtc_data_is_local() || !vga)
+            if(vga && this.legacy_vga_crtc_data_is_dispi_delegated())
             {
+                vga.port3D5_write(value);
+                this.dispi_delegated_crtc_writes--;
+
+                if(this.dispi_delegated_crtc_log_count < 4)
+                {
+                    this.dispi_delegated_crtc_log_count++;
+                    dbg_log(this.name + " delegated Bochs VBE CRTC write index=" +
+                            h(this.prmcio_crtc_index, 2), LOG_PCI);
+                }
+
+                this.dispi_report_geforce_mode();
+            }
+            else if(this.legacy_vga_crtc_data_is_local() || !vga)
+            {
+                this.dispi_clear_delegated_crtc();
                 this.prmcio_write_crtc_data(value);
             }
             else
@@ -9626,10 +10977,12 @@ NV20GeForce.prototype.register_write32 = function(offset, value)
             this.update_irq_level();
             return true;
         case 0x600800:
+            this.dispi_clear_delegated_crtc();
             this.crtc_start = value;
             this.update_render_mode_from_crtc("pcrtc_start");
             return true;
         case 0x600804:
+            this.dispi_clear_delegated_crtc();
             this.crtc_config = value;
             this.update_render_mode_from_crtc("pcrtc_config");
             return true;
