@@ -1,0 +1,26 @@
+LIBRARY opengl32
+
+EXPORTS
+    wglCreateContext
+    wglDeleteContext
+    wglMakeCurrent
+    wglGetCurrentContext
+    wglGetCurrentDC
+    wglGetProcAddress
+    wglShareLists
+    wglSwapLayerBuffers
+    wglSwapBuffers
+
+    glGetString
+    glGetError
+    glViewport
+    glClearColor
+    glClear
+    glBegin
+    glEnd
+    glColor3f
+    glColor4f
+    glVertex2f
+    glVertex3f
+    glFlush
+    glFinish
