@@ -1423,6 +1423,7 @@ export function NV20GeForce(cpu, options)
     this.pci = cpu.devices.pci;
     this.hide_default_vga_pci = options.hide_default_vga_pci !== false;
     this.default_vga_pci_hidden_logged = false;
+    this.default_vga_display_taken_over = false;
     this.pci_config_space = null;
     this.pci_config_space8 = null;
 
@@ -1715,9 +1716,34 @@ NV20GeForce.prototype.should_hide_default_vga_pci_device = function()
     {
         this.default_vga_pci_hidden_logged = true;
         dbg_log("geforce-nv20 hiding default vga pci function in paged protected mode", LOG_PCI);
+        this.take_over_default_vga_display();
     }
 
     return hide;
+};
+
+NV20GeForce.prototype.take_over_default_vga_display = function()
+{
+    if(this.default_vga_display_taken_over)
+    {
+        return;
+    }
+
+    this.default_vga_display_taken_over = true;
+    this.dispi_ignore_boot_mode_sets = 1;
+
+    const mode = this.crtc_render_mode();
+
+    if(mode)
+    {
+        this.render_surface_inferred = false;
+        this.set_render_mode(mode.width, mode.height, mode.bpp, mode.stride, mode.offset, "crtc-takeover");
+    }
+
+    this.dispi_turn_off_vga_svga();
+    this.activate_rendering();
+    this.render_mark_dirty_rect(0, 0, this.render_width, this.render_height);
+    this.schedule_render();
 };
 
 NV20GeForce.prototype.reset = function()
@@ -1743,6 +1769,7 @@ NV20GeForce.prototype.reset = function()
     this.render_initialized = false;
     this.render_pending = false;
     this.default_vga_pci_hidden_logged = false;
+    this.default_vga_display_taken_over = false;
     this.render_update_count = 0;
     this.render_buffer = null;
     this.render_image_data = null;
@@ -8393,6 +8420,35 @@ NV20GeForce.prototype.update_render_mode_from_surface = function(surface, source
     return this.set_render_mode(width, height, bpp, stride, offset, source || "surface2d");
 };
 
+function nv20_crtc_register_affects_render_mode(index)
+{
+    switch(index & 0xFF)
+    {
+        case 0x01:
+        case 0x07:
+        case 0x12:
+        case 0x13:
+        case 0x19:
+        case 0x25:
+        case 0x28:
+        case 0x2D:
+        case 0x41:
+            return true;
+        default:
+            return false;
+    }
+}
+
+function nv20_render_modes_equal(a, b)
+{
+    return !!a && !!b &&
+        a.width === b.width &&
+        a.height === b.height &&
+        a.bpp === b.bpp &&
+        a.stride === b.stride &&
+        a.offset === b.offset;
+}
+
 NV20GeForce.prototype.crtc_render_mode = function()
 {
     const crtc = this.prmcio_crtc_regs;
@@ -8483,6 +8539,18 @@ NV20GeForce.prototype.update_render_mode_from_crtc = function(source)
     const mode = this.crtc_render_mode();
 
     if(!mode)
+    {
+        return;
+    }
+
+    if(this.dispi_pending_disable)
+    {
+        return;
+    }
+
+    const dispi_mode = this.dispi_render_mode();
+
+    if(dispi_mode && !nv20_render_modes_equal(mode, dispi_mode))
     {
         return;
     }
@@ -9189,7 +9257,11 @@ NV20GeForce.prototype.prmcio_write_crtc_data = function(value)
     }
 
     this.prmcio_crtc_regs[index] = value;
-    this.update_render_mode_from_crtc("crtc[" + h(index, 2) + "]");
+
+    if(nv20_crtc_register_affects_render_mode(index))
+    {
+        this.update_render_mode_from_crtc("crtc[" + h(index, 2) + "]");
+    }
 
     if(index === 0x2F || index === 0x30 || index === 0x31)
     {
@@ -9286,8 +9358,13 @@ NV20GeForce.prototype.reset_dispi_shadow = function()
     this.dispi_offset_x = 0;
     this.dispi_offset_y = 0;
     this.dispi_takeover_logged = false;
+    this.dispi_pending_disable = false;
     this.dispi_delegated_crtc_writes = 0;
     this.dispi_delegated_crtc_log_count = 0;
+    this.dispi_suppressed_crtc_writes = 0;
+    this.dispi_suppressed_crtc_log_count = 0;
+    this.dispi_ignore_boot_mode_sets = 0;
+    this.dispi_ignoring_boot_mode_set = false;
 };
 
 NV20GeForce.prototype.geforce_owns_legacy_vga = function()
@@ -9310,13 +9387,32 @@ NV20GeForce.prototype.dispi_vga_delegate = function()
     return this.cpu && this.cpu.devices && this.cpu.devices.vga || null;
 };
 
-NV20GeForce.prototype.dispi_note_delegated_vbe_write = function(index)
+NV20GeForce.prototype.dispi_note_delegated_vbe_write = function(index, value)
 {
     index &= 0xFFFF;
+    value &= 0xFFFF;
 
     if(index === 4)
     {
-        this.dispi_delegated_crtc_writes = 128;
+        if(value & 1)
+        {
+            this.dispi_delegated_crtc_writes = 128;
+            this.dispi_delegated_crtc_log_count = 0;
+            this.dispi_suppressed_crtc_writes = 0;
+        }
+        else if(this.render_active)
+        {
+            this.dispi_pending_disable = true;
+            this.dispi_delegated_crtc_writes = 0;
+            this.dispi_suppressed_crtc_writes = 128;
+            this.dispi_suppressed_crtc_log_count = 0;
+        }
+        else
+        {
+            this.dispi_delegated_crtc_writes = 128;
+            this.dispi_delegated_crtc_log_count = 0;
+            this.dispi_suppressed_crtc_writes = 0;
+        }
     }
 };
 
@@ -9326,9 +9422,52 @@ NV20GeForce.prototype.dispi_delegated_crtc_active = function()
         this.prmcio_crtc_index <= NV20_VGA_CRTC_MAX;
 };
 
+NV20GeForce.prototype.dispi_suppressed_crtc_active = function()
+{
+    return this.dispi_suppressed_crtc_writes > 0 &&
+        this.prmcio_crtc_index <= NV20_VGA_CRTC_MAX;
+};
+
 NV20GeForce.prototype.dispi_clear_delegated_crtc = function()
 {
     this.dispi_delegated_crtc_writes = 0;
+    this.dispi_suppressed_crtc_writes = 0;
+    this.dispi_pending_disable = false;
+};
+
+NV20GeForce.prototype.dispi_ignore_boot_mode_write = function(index, value)
+{
+    index &= 0xFFFF;
+    value &= 0xFFFF;
+
+    if(this.dispi_ignore_boot_mode_sets <= 0 && !this.dispi_ignoring_boot_mode_set)
+    {
+        return false;
+    }
+
+    if(!this.dispi_ignoring_boot_mode_set)
+    {
+        if(index !== 4 || value & 1)
+        {
+            return false;
+        }
+
+        this.dispi_ignoring_boot_mode_set = true;
+    }
+
+    if(index === 4 && (value & 1))
+    {
+        this.dispi_ignoring_boot_mode_set = false;
+        this.dispi_ignore_boot_mode_sets--;
+        this.dispi_pending_disable = false;
+        this.dispi_delegated_crtc_writes = 0;
+        this.dispi_suppressed_crtc_writes = 128;
+        this.dispi_suppressed_crtc_log_count = 0;
+
+        dbg_log(this.name + " ignored initial Bochs VBE mode set", LOG_PCI);
+    }
+
+    return true;
 };
 
 NV20GeForce.prototype.dispi_report_geforce_mode = function()
@@ -9346,6 +9485,130 @@ NV20GeForce.prototype.dispi_report_geforce_mode = function()
     }
 
     this.bus.send("screen-set-size", [mode["width"], mode["height"], mode["bpp"]]);
+};
+
+NV20GeForce.prototype.dispi_render_mode = function()
+{
+    if(!(this.dispi_enable_value & 1))
+    {
+        return null;
+    }
+
+    const bpp = nv20_sane_render_bpp(this.dispi_bpp) ? this.dispi_bpp : this.render_bpp;
+    const bytes_per_pixel = nv20_render_bytes_per_pixel(bpp);
+
+    if(!bytes_per_pixel)
+    {
+        return null;
+    }
+
+    const width = this.dispi_width || this.render_width;
+    const height = this.dispi_height || this.render_height;
+    const virtual_width = Math.max(width, this.dispi_virtual_width || 0);
+
+    return {
+        width: width,
+        height: height,
+        bpp: bpp,
+        stride: virtual_width * bytes_per_pixel,
+        offset: 0,
+    };
+};
+
+NV20GeForce.prototype.dispi_mirror_crtc_mode = function(mode)
+{
+    if(!mode)
+    {
+        return;
+    }
+
+    const crtc = this.prmcio_crtc_regs;
+    const horizontal_display_chars = Math.max(1, mode.width >>> 3) - 1;
+    const vertical_display = Math.max(1, mode.height) - 1;
+    const row_offset = Math.max(1, mode.stride >>> 3);
+    const pixel_mode =
+        mode.bpp === 8 ? 1 :
+        mode.bpp === 15 || mode.bpp === 16 ? 2 :
+        mode.bpp === 32 ? 3 : 0;
+
+    crtc[0x01] = horizontal_display_chars & 0xFF;
+    crtc[0x2D] = crtc[0x2D] & ~0x02 | (horizontal_display_chars & 0x100 ? 0x02 : 0);
+
+    crtc[0x12] = vertical_display & 0xFF;
+    crtc[0x07] = crtc[0x07] & ~(0x02 | 0x40) |
+        (vertical_display & 0x100 ? 0x02 : 0) |
+        (vertical_display & 0x200 ? 0x40 : 0);
+    crtc[0x25] = crtc[0x25] & ~0x02 | (vertical_display & 0x400 ? 0x02 : 0);
+    crtc[0x41] = crtc[0x41] & ~0x04 | (vertical_display & 0x800 ? 0x04 : 0);
+
+    if(pixel_mode)
+    {
+        crtc[0x28] = crtc[0x28] & ~0x03 | pixel_mode;
+    }
+
+    crtc[0x13] = row_offset & 0xFF;
+    crtc[0x19] = crtc[0x19] & ~0xE0 | (row_offset >>> 3) & 0xE0;
+};
+
+NV20GeForce.prototype.dispi_write_shadow = function(index, value, source)
+{
+    index &= 0xFFFF;
+    value &= 0xFFFF;
+
+    switch(index)
+    {
+        case 0:
+            if(value >= 0xB0C0 && value <= NV20_DISPI_VERSION)
+            {
+                this.dispi_version = value;
+            }
+            break;
+        case 1:
+            this.dispi_width = Math.min(value, NV20_DISPI_MAX_XRES);
+            this.dispi_apply_render_mode(source || "dispi-width");
+            break;
+        case 2:
+            this.dispi_height = Math.min(value, NV20_DISPI_MAX_YRES);
+            this.dispi_apply_render_mode(source || "dispi-height");
+            break;
+        case 3:
+            this.dispi_bpp = value;
+            this.dispi_apply_render_mode(source || "dispi-bpp");
+            break;
+        case 4:
+            if(value & 1)
+            {
+                this.dispi_pending_disable = false;
+                this.dispi_enable_value = value;
+                this.dispi_apply_render_mode(source || "dispi-enable");
+            }
+            else if(this.render_active)
+            {
+                this.dispi_pending_disable = true;
+            }
+            else
+            {
+                this.dispi_pending_disable = false;
+                this.dispi_enable_value = value;
+            }
+            break;
+        case 5:
+            this.dispi_bank = value;
+            break;
+        case 6:
+            this.dispi_virtual_width = Math.min(value, NV20_DISPI_MAX_XRES);
+            this.dispi_apply_render_mode(source || "dispi-virtual-width");
+            break;
+        case 7:
+            this.dispi_virtual_height = Math.min(value, NV20_DISPI_MAX_YRES);
+            break;
+        case 8:
+            this.dispi_offset_x = Math.min(value, NV20_DISPI_MAX_XRES);
+            break;
+        case 9:
+            this.dispi_offset_y = Math.min(value, NV20_DISPI_MAX_YRES);
+            break;
+    }
 };
 
 NV20GeForce.prototype.dispi_turn_off_vga_svga = function()
@@ -9369,32 +9632,27 @@ NV20GeForce.prototype.dispi_turn_off_vga_svga = function()
 
 NV20GeForce.prototype.dispi_apply_render_mode = function(source)
 {
-    if(!(this.dispi_enable_value & 1))
+    if(this.dispi_pending_disable)
     {
         return false;
     }
 
-    const bpp = nv20_sane_render_bpp(this.dispi_bpp) ? this.dispi_bpp : this.render_bpp;
-    const bytes_per_pixel = nv20_render_bytes_per_pixel(bpp);
+    const mode = this.dispi_render_mode();
 
-    if(!bytes_per_pixel)
+    if(!mode)
     {
         return false;
     }
 
-    const width = this.dispi_width || this.render_width;
-    const height = this.dispi_height || this.render_height;
-    const virtual_width = Math.max(width, this.dispi_virtual_width || 0);
-    const stride = virtual_width * bytes_per_pixel;
-
-    if(!this.set_render_mode(width, height, bpp, stride, 0, source || "dispi"))
+    if(!this.set_render_mode(mode.width, mode.height, mode.bpp, mode.stride, mode.offset, source || "dispi"))
     {
         return false;
     }
 
+    this.dispi_mirror_crtc_mode(mode);
     this.dispi_turn_off_vga_svga();
     this.activate_rendering();
-    this.render_mark_dirty_rect(0, 0, width, height);
+    this.render_mark_dirty_rect(0, 0, mode.width, mode.height);
     this.schedule_render();
     return true;
 };
@@ -9498,8 +9756,21 @@ NV20GeForce.prototype.dispi_data_write16 = function(value)
 
     if(!this.geforce_handles_dispi() && vga && vga.port1CF_write)
     {
-        this.dispi_note_delegated_vbe_write(index);
+        if(this.dispi_ignore_boot_mode_write(index, value))
+        {
+            this.dispi_report_geforce_mode();
+            return;
+        }
+
+        this.dispi_note_delegated_vbe_write(index, value);
         vga.port1CF_write(value);
+        this.dispi_write_shadow(index, value, "dispi-delegated");
+
+        if(this.render_active)
+        {
+            this.dispi_turn_off_vga_svga();
+        }
+
         this.dispi_report_geforce_mode();
         return;
     }
@@ -9510,47 +9781,7 @@ NV20GeForce.prototype.dispi_data_write16 = function(value)
         this.dispi_takeover_logged = true;
     }
 
-    switch(index)
-    {
-        case 0:
-            if(value >= 0xB0C0 && value <= NV20_DISPI_VERSION)
-            {
-                this.dispi_version = value;
-            }
-            break;
-        case 1:
-            this.dispi_width = Math.min(value, NV20_DISPI_MAX_XRES);
-            this.dispi_apply_render_mode("dispi-width");
-            break;
-        case 2:
-            this.dispi_height = Math.min(value, NV20_DISPI_MAX_YRES);
-            this.dispi_apply_render_mode("dispi-height");
-            break;
-        case 3:
-            this.dispi_bpp = value;
-            this.dispi_apply_render_mode("dispi-bpp");
-            break;
-        case 4:
-            this.dispi_enable_value = value;
-            this.dispi_apply_render_mode("dispi-enable");
-            break;
-        case 5:
-            this.dispi_bank = value;
-            break;
-        case 6:
-            this.dispi_virtual_width = Math.min(value, NV20_DISPI_MAX_XRES);
-            this.dispi_apply_render_mode("dispi-virtual-width");
-            break;
-        case 7:
-            this.dispi_virtual_height = Math.min(value, NV20_DISPI_MAX_YRES);
-            break;
-        case 8:
-            this.dispi_offset_x = Math.min(value, NV20_DISPI_MAX_XRES);
-            break;
-        case 9:
-            this.dispi_offset_y = Math.min(value, NV20_DISPI_MAX_YRES);
-            break;
-    }
+    this.dispi_write_shadow(index, value, "dispi");
 };
 
 NV20GeForce.prototype.legacy_vga_crtc_data_is_local = function()
@@ -9820,16 +10051,37 @@ NV20GeForce.prototype.vga_port_write8 = function(port, value)
         case 0x3D4:
             this.prmcio_set_crtc_index(value);
             if(vga && value <= NV20_VGA_CRTC_MAX &&
-                (!this.geforce_owns_legacy_vga() || this.dispi_delegated_crtc_writes > 0))
+                !this.dispi_suppressed_crtc_active() &&
+                (!this.geforce_owns_legacy_vga() ||
+                 this.dispi_delegated_crtc_writes > 0 && !this.render_active))
             {
                 vga.port3D4_write(value);
             }
             return true;
         case 0x3B5:
         case 0x3D5:
-            if(vga && this.legacy_vga_crtc_data_is_dispi_delegated())
+            if(this.dispi_suppressed_crtc_active())
             {
-                vga.port3D5_write(value);
+                this.dispi_suppressed_crtc_writes--;
+
+                if(this.dispi_suppressed_crtc_log_count < 4)
+                {
+                    this.dispi_suppressed_crtc_log_count++;
+                    dbg_log(this.name + " suppressed Bochs VBE CRTC write index=" +
+                            h(this.prmcio_crtc_index, 2), LOG_PCI);
+                }
+
+                this.dispi_report_geforce_mode();
+            }
+            else if(this.legacy_vga_crtc_data_is_dispi_delegated())
+            {
+                this.prmcio_crtc_regs[this.prmcio_crtc_index] = value;
+
+                if(vga && !this.render_active)
+                {
+                    vga.port3D5_write(value);
+                }
+
                 this.dispi_delegated_crtc_writes--;
 
                 if(this.dispi_delegated_crtc_log_count < 4)
