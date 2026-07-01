@@ -32,6 +32,7 @@ import { IDEController } from "./ide.js";
 import { VirtioNet } from "./virtio_net.js";
 import { VGAScreen } from "./vga.js";
 import { VirtioBalloon } from "./virtio_balloon.js";
+import { V86GLPCI } from "./v86gl_pci.js";
 import { Virtio9p, Virtio9pHandler, Virtio9pProxy } from "../lib/9p.js";
 
 import { load_kernel } from "./kernel.js";
@@ -572,6 +573,7 @@ CPU.prototype.get_state = function()
     state[87] = this.fpu_status_word;
     state[88] = this.mxcsr;
     state[89] = this.devices.vmware;
+    state[90] = this.devices.v86gl_pci;
 
     return state;
 };
@@ -741,6 +743,7 @@ CPU.prototype.set_state = function(state)
     this.devices.virtio_net && this.devices.virtio_net.set_state(state[83]);
     this.devices.virtio_balloon && this.devices.virtio_balloon.set_state(state[84]);
     this.devices.vmware && state[89] && this.devices.vmware.set_state(state[89]);
+    this.devices.v86gl_pci && state[90] && this.devices.v86gl_pci.set_state(state[90]);
 
     this.fw_value = state[62];
 
@@ -951,6 +954,10 @@ CPU.prototype.reboot_internal = function()
     if(this.devices.ps2)
     {
         this.devices.ps2.reset();
+    }
+    if(this.devices.v86gl_pci)
+    {
+        this.devices.v86gl_pci.reset();
     }
 
     this.load_bios();
@@ -1165,6 +1172,12 @@ CPU.prototype.init = function(settings, device_bus)
     if(settings.load_devices)
     {
         this.devices.pci = new PCI(this);
+
+        if(settings.v86gl_pci)
+        {
+            const v86gl_pci_options = typeof settings.v86gl_pci === "object" ? settings.v86gl_pci : {};
+            this.devices.v86gl_pci = new V86GLPCI(this, device_bus, v86gl_pci_options);
+        }
 
         if(this.acpi_enabled[0])
         {
