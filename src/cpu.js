@@ -19,6 +19,7 @@ import { ACPI } from "./acpi.js";
 import { PIT } from "./pit.js";
 import { DMA } from "./dma.js";
 import { UART } from "./uart.js";
+import { ParallelPort } from "./parallel.js";
 import { Ne2k } from "./ne2k.js";
 import { IO } from "./io.js";
 import { VirtioConsole } from "./virtio_console.js";
@@ -568,7 +569,9 @@ CPU.prototype.get_state = function()
     state[87] = this.fpu_status_word;
     state[88] = this.mxcsr;
     state[89] = this.devices.vmware;
-    state[90] = this.devices.v86gl_pci;
+    state[90] = this.devices.parallel0;
+    state[91] = this.devices.parallel1;
+    state[92] = this.devices.v86gl_pci;
 
     return state;
 };
@@ -737,7 +740,9 @@ CPU.prototype.set_state = function(state)
     this.devices.virtio_net && this.devices.virtio_net.set_state(state[83]);
     this.devices.virtio_balloon && this.devices.virtio_balloon.set_state(state[84]);
     this.devices.vmware && state[89] && this.devices.vmware.set_state(state[89]);
-    this.devices.v86gl_pci && state[90] && this.devices.v86gl_pci.set_state(state[90]);
+    this.devices.parallel0 && state[90] && this.devices.parallel0.set_state(state[90]);
+    this.devices.parallel1 && state[91] && this.devices.parallel1.set_state(state[91]);
+    this.devices.v86gl_pci && state[92] && this.devices.v86gl_pci.set_state(state[92]);
 
     this.fw_value = state[62];
 
@@ -1193,6 +1198,7 @@ CPU.prototype.init = function(settings, device_bus)
         this.devices.vmware = new VMwareMouse(this, device_bus);
 
         this.devices.uart0 = new UART(this, 0x3F8, device_bus);
+        this.devices.parallel0 = new ParallelPort(this, 0x378, 7, 0, device_bus);
 
         if(settings.uart1)
         {
@@ -1205,6 +1211,10 @@ CPU.prototype.init = function(settings, device_bus)
         if(settings.uart3)
         {
             this.devices.uart3 = new UART(this, 0x2E8, device_bus);
+        }
+        if(settings.parallel1)
+        {
+            this.devices.parallel1 = new ParallelPort(this, 0x278, 5, 1, device_bus);
         }
 
         this.devices.fdc = new FloppyController(this, settings.fda, settings.fdb);
