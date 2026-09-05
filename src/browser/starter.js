@@ -234,6 +234,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.vga_memory_size = options.vga_memory_size || 8 * 1024 * 1024;
     settings.boot_order = boot_order;
     settings.fastboot = options.fastboot || false;
+    settings.bootmenu = options.bootmenu || false;
     settings.fda = undefined;
     settings.fdb = undefined;
     settings.uart1 = options.uart1;
@@ -632,6 +633,19 @@ V86.prototype.continue_init = async function(emulator, options)
 
         this.serial_adapter && this.serial_adapter.show && this.serial_adapter.show();
         this.virtio_console_adapter && this.virtio_console_adapter.show && this.virtio_console_adapter.show();
+
+        if(!settings.initial_state)
+        {
+            // ide needs to read the mbr to calculate the device geometry
+            if(settings.hda)
+            {
+                await new Promise(resolve => settings.hda.get_and_cache(0, 512, resolve));
+            }
+            if(settings.hdb)
+            {
+                await new Promise(resolve => settings.hdb.get_and_cache(0, 512, resolve));
+            }
+        }
 
         this.v86.init(settings);
 
