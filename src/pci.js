@@ -246,7 +246,11 @@ PCI.prototype.set_state = function(state)
             var value = space[(0x10 >> 2) + bar_nr];
             var bar = device.pci_bars[bar_nr];
 
-            if(bar && bar.fixed)
+            // Like register_device, allow holes in a device's BAR array.
+            // A saved probe value in an unimplemented slot is not an I/O BAR.
+            if(!bar) continue;
+
+            if(bar.fixed)
             {
                 // Legacy devices can expose a firmware-assigned BAR without a PnP guest driver.
                 // Keep the original port mapping when restoring an old snapshot.

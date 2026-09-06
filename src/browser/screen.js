@@ -33,13 +33,20 @@ export function ScreenAdapter(options, screen_fill_buffer)
     this.FLAG_BLINKING = FLAG_BLINKING;
     this.FLAG_FONT_PAGE_B = FLAG_FONT_PAGE_B;
 
-    let graphic_screen = screen_container.getElementsByTagName("canvas")[0];
+    // A graphics proxy may already have an overlay in this container. It must
+    // never acquire the VGA canvas's 2D context (or vice versa).
+    let graphic_screen = options.canvas || Array.from(screen_container.getElementsByTagName("canvas"))
+        .find(canvas => !canvas.hasAttribute("data-v86-graphics"));
     if(!graphic_screen)
     {
         graphic_screen = document.createElement("canvas");
         screen_container.appendChild(graphic_screen);
     }
     const graphic_context = graphic_screen.getContext("2d", { alpha: false });
+    this.get_graphics_canvas = () => graphic_screen;
+    this.is_graphical = () => mode === MODE_GRAPHICAL;
+    this.on_geometry_change = null;
+    const notify_geometry = () => this.on_geometry_change && this.on_geometry_change();
 
     let text_screen = screen_container.getElementsByTagName("div")[0];
     if(!text_screen)
@@ -491,6 +498,7 @@ export function ScreenAdapter(options, screen_fill_buffer)
 
     this.destroy = function()
     {
+        this.on_geometry_change = null;
         if(timer_id)
         {
             cancelAnimationFrame(timer_id);
@@ -544,6 +552,7 @@ export function ScreenAdapter(options, screen_fill_buffer)
                 changed_rows.fill(1);
             }
         }
+        notify_geometry();
     };
 
     this.set_font_bitmap = function(height, width_9px, width_dbl, copy_8th_col, vga_bitmap, vga_bitmap_changed)
@@ -700,6 +709,7 @@ export function ScreenAdapter(options, screen_fill_buffer)
         }
 
         update_scale_graphic();
+        notify_geometry();
     };
 
     this.set_scale = function(s_x, s_y)
@@ -709,6 +719,7 @@ export function ScreenAdapter(options, screen_fill_buffer)
 
         update_scale_text();
         update_scale_graphic();
+        notify_geometry();
     };
 
     function update_scale_text()

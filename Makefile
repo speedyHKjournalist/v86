@@ -20,9 +20,16 @@ endif
 WASM_OPT ?= false
 
 default: build/v86-debug.wasm
-all: build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm
-all-debug: build/libv86-debug.js build/libv86-debug.mjs build/v86-debug.wasm
+all: build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm glbridge
+all-debug: build/libv86-debug.js build/libv86-debug.mjs build/v86-debug.wasm glbridge
 browser: build/v86_all.js
+
+.PHONY: glbridge test-glbridge
+glbridge:
+	node tools/build_glbridge.mjs
+
+test-glbridge:
+	node tests/glbridge/run.cjs
 
 # Used for nodejs builds and in order to profile code.
 # `debug` gives identifiers a readable name, make sure it doesn't have any side effects.
@@ -270,7 +277,7 @@ clean:
 	-rm build/*.o
 	$(MAKE) -C $(NASM_TEST_DIR) clean
 
-run:
+run: build/v86_all.js glbridge
 	python3 -m http.server 2> /dev/null
 
 update_version:

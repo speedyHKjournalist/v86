@@ -146,6 +146,7 @@ var VirtIO_DeviceSpecificCapabilityOptions;
  *     pci_id: number,
  *     device_id: number,
  *     subsystem_device_id: number,
+ *     on_reset: (undefined | function()),
  *     common: VirtIO_CommonCapabilityOptions,
  *     notification: VirtIO_NotificationCapabilityOptions,
  *     isr_status: VirtIO_ISRCapabilityOptions,
@@ -170,6 +171,7 @@ export function VirtIO(cpu, options)
     this.pci = cpu.devices.pci;
 
     this.device_id = options.device_id;
+    this.on_reset = options.on_reset;
 
     this.pci_space =
     [
@@ -970,6 +972,7 @@ VirtIO.prototype.reset = function()
     this.config_generation = 0;
 
     this.lower_irq();
+    if(this.on_reset) this.on_reset();
 };
 
 /**
@@ -1184,14 +1187,25 @@ VirtQueue.prototype.pop_request = function()
  */
 VirtQueue.prototype.push_reply = function(bufchain)
 {
+    this.push_reply_id(bufchain.head_idx, bufchain.length_written);
+};
+
+/**
+ * Complete an already validated fixed-layout request without allocating a
+ * generic buffer-chain object. Uses the same used-ring and interrupt path.
+ * @param {number} head_idx
+ * @param {number} length_written
+ */
+VirtQueue.prototype.push_reply_id = function(head_idx, length_written)
+{
     dbg_assert(this.used_addr, "VirtQueue addresses must be configured before use");
     dbg_assert(this.num_staged_replies < this.size, "VirtQueue replies must not exceed queue size");
 
     const used_idx = this.used_get_idx() + this.num_staged_replies & this.mask;
     dbg_log("Push reply: used_idx=" + used_idx +
-        " desc_idx=" + bufchain.head_idx, LOG_VIRTIO);
+        " desc_idx=" + head_idx, LOG_VIRTIO);
 
-    this.used_set_entry(used_idx, bufchain.head_idx, bufchain.length_written);
+    this.used_set_entry(used_idx, head_idx, length_written);
     this.num_staged_replies++;
 };
 

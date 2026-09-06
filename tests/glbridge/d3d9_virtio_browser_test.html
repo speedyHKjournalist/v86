@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>D3D9 virtio transport regression</title>
+<div id="screen"><div></div><canvas></canvas></div>
+<pre id="result">RUNNING</pre>
+<script src="../../build/libv86.js"></script>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script>
+(async () => {
+    const checks = [];
+    const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+    let emulator;
+    try {
+        emulator = new V86({
+            wasm_path: "../../build/v86.wasm", memory_size: 32 * 1024 * 1024,
+            bios: { buffer: new Uint8Array(65536).fill(0xf4).buffer },
+            screen: { container: document.getElementById("screen") },
+            disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+            net_device: { type: "none" }, autostart: false,
+            graphics_adapter: installV86GLGraphicsAdapter,
+        });
+        await new Promise(resolve => emulator.add_listener("emulator-loaded",resolve));
+        const bridge = emulator.graphics_adapter;
+        check(!bridge.failed, "graphics initializes");
+        emulator.screen_adapter.set_mode(true);
+        emulator.screen_adapter.set_size_graphical(64,64,64,64);
+        const cpu = emulator.v86.cpu, io = cpu.io;
+        const ram = cpu.read_blob(0,32*1024*1024);
+        const memory = new DataView(ram.buffer,ram.byteOffset,ram.byteLength);
+    const table = 0x10000, avail = table + 128, used = table + 160;
+    const request = table + 256, reply = table + 288, arena = 0x100000;
+    const w8 = (off, value) => io.port_write8(0xf100 + off, value);
+    const w16 = (off, value) => io.port_write16(0xf100 + off, value);
+    const w32 = (off, value) => io.port_write32(0xf100 + off, value);
+    w8(20, 0); w8(20, 3);
+    w32(8, 0); w32(12, 1); w32(8, 1); w32(12, 1); w8(20, 11);
+    check(io.port_read8(0xf114) === 11, "virtio features negotiated");
+    w16(22, 0); w16(24, 8);
+    w32(32, table); w32(36, 0); w32(40, avail); w32(44, 0);
+    w32(48, used); w32(52, 0);
+    memory.setUint32(table, request, true); memory.setUint32(table + 8, 24, true);
+    memory.setUint16(table + 12, 1, true); memory.setUint16(table + 14, 1, true);
+    memory.setUint32(table + 16, reply, true); memory.setUint32(table + 24, 16, true);
+    memory.setUint16(table + 28, 2, true); memory.setUint16(avail, 1, true);
+    w16(28, 1); w8(20, 15);
+    let idx = 0;
+    const submit = (opcode, address, length, flags) => {
+        [opcode, address, 0, length, flags, 0].forEach((v, i) => memory.setUint32(request + i * 4, v, true));
+        memory.setUint32(reply, 0xffffffff, true);
+        memory.setUint16(avail + 4 + (idx & 7) * 2, 0, true);
+        memory.setUint16(avail + 2, ++idx, true);
+        io.port_write16(0xf200, 0);
+        if(memory.getUint16(used + 2, true) !== idx || memory.getUint32(reply, true) !== 0)
+            throw new Error("virtio request failed: " + memory.getUint32(reply, true));
+    };
+    submit(1, arena, 16 * 1024 * 1024, 0);
+
+        // Exactly the wrapper authored by d3d9_proxy.c (also D3D8/DDraw):
+        // VGL2 reserved0 = D9WG_MAGIC, one extended 0xFFE1 record, D9WG v1.3.
+        const session = [0xd0090001,0x20260806];
+        const commands = [
+            [1,[32,0,...session]], // HELLO
+            [2,[1,0x1234,0,0,64,64,22,1,0x20,1,75,0,0]], // CREATE_DEVICE
+            [5,[1,1,0xffff0000,0x3f800000,0,0]], // CLEAR red
+            [4,[1,0x1234,0,0,64,64]], // PRESENT
+        ];
+        const sizes = commands.map(([,values]) => (16+values.length*4+7)&~7);
+        const batchBytes = 32 + sizes.reduce((a,b)=>a+b,0);
+        const wrapped = new Uint8Array(8 + batchBytes);
+        const d9 = new DataView(wrapped.buffer);
+        d9.setUint16(0,0xffe1,true); d9.setUint16(2,0xffff,true);
+        d9.setUint32(4,batchBytes,true);
+        d9.setUint32(8,0x47573944,true);
+        d9.setUint16(12,1,true); d9.setUint16(14,3,true);
+        [1,1,commands.length,batchBytes-32,...session].forEach((v,i)=>d9.setUint32(16+i*4,v,true));
+        let cursor = 40;
+        commands.forEach(([op,values],i)=>{
+            d9.setUint16(cursor,op,true); d9.setUint32(cursor+4,sizes[i],true);
+            d9.setUint32(cursor+8,i+1,true);
+            values.forEach((v,j)=>d9.setUint32(cursor+16+j*4,v,true));
+            cursor += sizes[i];
+        });
+        [0x324c4756,1,0,1,1,wrapped.length,0x47573944,0].forEach((v,i)=>memory.setUint32(arena+i*4,v,true));
+        ram.set(wrapped,arena+32);
+        submit(2,0,32+wrapped.length,0);
+        check(cpu.devices.v86gl_pci.submitCount===1,"virtqueue accepts shipping D9WG reserved0 marker");
+        await bridge.d3d9Executor.idle();
+        check(!bridge.d3d9Executor.failed,"D3D9 batch executes");
+        check(bridge.activeOwner==="d3d9","D3D9 Present displays its overlay");
+        const shot = emulator.screen_make_screenshot();
+        await shot.decode();
+        const capture = document.createElement("canvas");
+        capture.width = capture.height = 64;
+        const ctx = capture.getContext("2d");
+        ctx.drawImage(shot,0,0);
+        const pixel = [...ctx.getImageData(32,32,1,1).data];
+        check(pixel.join()==="255,0,0,255","D3D9 virtqueue produces red pixels: "+pixel);
+        await emulator.destroy();
+        document.getElementById("result").textContent="PASS\n"+checks.join("\n");
+    } catch(error) {
+        if(emulator) await emulator.destroy();
+        document.getElementById("result").textContent="FAIL\n"+(error.stack||error);
+    }
+})();
+</script>

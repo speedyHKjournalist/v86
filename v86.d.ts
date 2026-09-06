@@ -107,6 +107,9 @@ export type ScreenConfig =
          */
         container?: HTMLElement | null;
 
+        /** Explicit VGA 2D canvas. Graphics overlays always use a different canvas. */
+        canvas?: HTMLCanvasElement;
+
         /**
          * Encoding for text mode screen
          * @default "cp437"
@@ -343,6 +346,16 @@ type V86NetworkDevice =
  * Emulator instance constructor options.
  */
 export interface V86Options {
+    /** Optional custom virtio graphics device (historical option name); requires the virtio v86gl.sys driver. Automatically enabled by graphics_adapter. */
+    v86gl_pci?: boolean | { port?: number; maxBatchBytes?: number };
+    /** Factory exported as installV86GLGraphicsAdapter by build/glbridge/libv86-webgpu.js. */
+    graphics_adapter?: (emulator: V86, options: V86GraphicsOptions & {
+        container: HTMLElement;
+        screenCanvas: HTMLCanvasElement;
+        isGraphical: () => boolean;
+        managedState: boolean;
+    }) => V86GraphicsAdapter;
+    graphics_options?: V86GraphicsOptions;
     /**
      * Reference to the v86 wasm exported function.
      */
@@ -625,8 +638,36 @@ export interface V86Options {
     parallel1?: boolean;
 }
 
+/** Optional browser graphics bundle's lifecycle interface. */
+export interface V86GraphicsAdapter {
+    ready: Promise<void>;
+    failed?: Error | null;
+    canvas: HTMLCanvasElement;
+    screenChanged(): void;
+    serializeCheckpoint(): Uint8Array;
+    onPCIStateRestored(checkpoint?: Uint8Array): void;
+    prepareSaveState(): { entries: number; bytes: number };
+    beginStateRestore(): void;
+    finishStateRestore(): Promise<{ hasGLState: boolean }>;
+    cancelStateRestore(): void;
+    hideOverlayCanvas(includeSwapChains?: boolean): void;
+    makeScreenshot(): HTMLImageElement | null;
+    reset(): Promise<void>;
+    destroy(): Promise<void>;
+}
+
+export interface V86GraphicsOptions {
+    graphicsCanvas?: HTMLCanvasElement;
+    onError?: (error: Error) => void;
+    maxGLJournalBytes?: number;
+    gl?: Record<string, unknown>;
+    d3d8?: Record<string, unknown>;
+    d3d9?: Record<string, unknown>;
+}
+
 export class V86 {
     constructor(options: V86Options);
+    graphics_adapter?: V86GraphicsAdapter;
 
     /**
      * Start emulation. Do nothing if emulator is running already. Can be asynchronous.
@@ -646,7 +687,7 @@ export class V86 {
     /**
      * Restart (force a reboot).
      */
-    restart(): void;
+    restart(): Promise<void>;
 
     /**
      * Add an event listener (the emulator is an event emitter).

@@ -162,6 +162,7 @@ function onload()
     }
 
     const query_args = new URLSearchParams(location.search);
+    if(query_args.has("graphics_proxy")) $("graphics_proxy").checked = bool_arg(query_args.get("graphics_proxy"));
     const host = query_args.get("cdn") || (ON_LOCALHOST ? "images/" : "//i.copy.sh/");
 
     // Abandonware OS images are from https://winworldpc.com/library/operating-systems
@@ -2064,17 +2065,72 @@ if(document.readyState === "complete")
     onload();
 }
 
+function set_graphics_proxy_status(message)
+{
+    const status = $("graphics_proxy_status");
+    status.textContent = message;
+    status.style.display = message ? "block" : "none";
+}
+
+async function load_graphics_proxy()
+{
+    if(!navigator["gpu"])
+    {
+        throw new Error("WebGPU is unavailable. Use a WebGPU-capable browser over HTTPS or localhost.");
+    }
+    if(typeof window["installV86GLGraphicsAdapter"] === "function") return;
+
+    // Fetch the current revision so the bundle and shader workers use matching assets.
+    const response = await fetch("build/glbridge/manifest.json", { cache: "no-store" });
+    if(!response.ok) throw new Error("Graphics bundle is missing. Run make glbridge and reload.");
+    const manifest = await response.json();
+    await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "build/glbridge/libv86-webgpu.js?v=" + encodeURIComponent(manifest["revision"]);
+        script.onload = () => resolve();
+        script.onerror = () => {
+            script.remove();
+            reject(new Error("Could not load the graphics bundle. Run make glbridge and reload."));
+        };
+        document.head.appendChild(script);
+    });
+    if(typeof window["installV86GLGraphicsAdapter"] !== "function")
+    {
+        throw new Error("Graphics bundle did not initialize. Check the browser console and rebuild with make glbridge.");
+    }
+}
+
 // we can get here in various ways:
 // - the user clicked on the "start emulation" button
 // - the user clicked on a profile
 // - the ?profile= query parameter specified a valid profile
 // - the ?profile= query parameter was set to "custom" and at least one disk image was given
-function start_emulation(profile, query_args)
+async function start_emulation(profile, query_args)
 {
     $("boot_options").style.display = "none";
 
+    const graphics_proxy = query_args?.has("graphics_proxy") ?
+        bool_arg(query_args.get("graphics_proxy")) : $("graphics_proxy").checked;
+    set_graphics_proxy_status("");
+    if(graphics_proxy)
+    {
+        set_graphics_proxy_status("Loading graphics proxy...");
+        try
+        {
+            await load_graphics_proxy();
+            set_graphics_proxy_status("");
+        }
+        catch(error)
+        {
+            set_graphics_proxy_status("Graphics proxy could not start: " + error.message);
+            $("boot_options").style.display = "block";
+            return;
+        }
+    }
+
     const new_query_args = new Map();
     new_query_args.set("profile", profile?.id || "custom");
+    if(graphics_proxy) new_query_args.set("graphics_proxy", "1");
 
     const settings = {};
 
@@ -2395,6 +2451,13 @@ function start_emulation(profile, query_args)
 
     const emulator = new V86({
         wasm_path: "build/" + (DEBUG ? "v86-debug.wasm" : "v86.wasm") + query_append(),
+        "graphics_adapter": graphics_proxy ? window["installV86GLGraphicsAdapter"] : undefined,
+        "graphics_options": {
+            "onError": error => {
+                console.error("Graphics proxy initialization failed", error);
+                set_graphics_proxy_status("Graphics proxy failed; VGA remains available: " + error.message);
+            },
+        },
         screen: {
             container: $("screen_container"),
             use_graphical_text: false,

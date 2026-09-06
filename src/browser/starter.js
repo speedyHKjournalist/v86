@@ -51,6 +51,7 @@ export function V86(options)
     //var adapter_bus = this.bus = WorkerBus.init(worker);
 
     this.cpu_is_running = false;
+    this.destroyed = false;
     this.cpu_exception_hook = function(n) {};
 
     const bus = Bus.create();
@@ -176,6 +177,7 @@ export function V86(options)
 
     wasm_fn({ "env": wasm_shared_funcs })
         .then((exports) => {
+            if(this.destroyed) return;
             wasm_memory = exports.memory;
             exports["rust_init"]();
 
@@ -247,7 +249,8 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.cpuid_level = options.cpuid_level;
     settings.virtio_balloon = options.virtio_balloon;
     settings.virtio_console = !!options.virtio_console;
-    settings.v86gl_pci = options.v86gl_pci;
+    settings.v86gl_pci = options.v86gl_pci || (options["graphics_adapter"] ?
+        { maxBatchBytes: 16 * 1024 * 1024 } : undefined);
 
     const relay_url = options.network_relay_url || options.net_device && options.net_device.relay_url;
     if(relay_url)
@@ -319,6 +322,23 @@ V86.prototype.continue_init = async function(emulator, options)
     }
     settings.screen = this.screen_adapter;
     settings.screen_options = screen_options;
+
+    // The optional graphics bundle supplies a factory. Keep its public
+    // interface quoted: v86_all uses Closure ADVANCED, the bundle does not.
+    if(options["graphics_adapter"])
+    {
+        if(!this.screen_adapter.get_graphics_canvas)
+            throw new Error("graphics_adapter requires a browser screen container");
+        this["graphics_adapter"] = options["graphics_adapter"](this, {
+            ...options["graphics_options"],
+            "container": screen_options.container,
+            "screenCanvas": this.screen_adapter.get_graphics_canvas(),
+            "isGraphical": () => this.screen_adapter.is_graphical(),
+            "managedState": true,
+        });
+        this.screen_adapter.on_geometry_change = () =>
+            this["graphics_adapter"]["screenChanged"]();
+    }
 
     settings.serial_console = options.serial_console || { type: "none" };
 
@@ -647,13 +667,25 @@ V86.prototype.continue_init = async function(emulator, options)
             }
         }
 
+        if(this.destroyed) return;
         this.v86.init(settings);
+
+        if(this["graphics_adapter"])
+        {
+            const graphics = this["graphics_adapter"];
+            this.v86.cpu.devices.v86gl_pci.graphics_state_handlers = {
+                save: () => graphics["serializeCheckpoint"](),
+                restore: checkpoint => graphics["onPCIStateRestored"](checkpoint),
+            };
+            await graphics["ready"];
+        }
+        if(this.destroyed) return;
 
         this.modem && this.modem.initialize();
 
         if(settings.initial_state)
         {
-            emulator.restore_state(settings.initial_state);
+            await this.restore_state(settings.initial_state);
 
             // The GC can't free settings, since it is referenced from
             // several closures. This isn't needed anymore, so we delete it
@@ -839,9 +871,11 @@ V86.prototype.stop = async function()
  */
 V86.prototype.destroy = async function()
 {
+    this.destroyed = true;
     await this.stop();
 
-    this.v86.destroy();
+    if(this["graphics_adapter"]) await this["graphics_adapter"]["destroy"]();
+    this.v86 && this.v86.destroy();
     this.keyboard_adapter && this.keyboard_adapter.destroy();
     this.network_adapter && this.network_adapter.destroy();
     this.mouse_adapter && this.mouse_adapter.destroy();
@@ -855,9 +889,16 @@ V86.prototype.destroy = async function()
 /**
  * Restart (force a reboot).
  */
-V86.prototype.restart = function()
+V86.prototype.restart = async function()
 {
+    const was_running = this.is_running();
+    if(this["graphics_adapter"])
+    {
+        await this.stop();
+        await this["graphics_adapter"]["reset"]();
+    }
     this.v86.restart();
+    if(this["graphics_adapter"] && was_running) this.run();
 };
 
 /**
@@ -901,7 +942,18 @@ V86.prototype.remove_listener = function(event, listener)
 V86.prototype.restore_state = async function(state)
 {
     dbg_assert(arguments.length === 1);
-    this.v86.restore_state(state);
+    const graphics = this["graphics_adapter"];
+    if(graphics) graphics["beginStateRestore"]();
+    try
+    {
+        this.v86.restore_state(state);
+        if(graphics) await graphics["finishStateRestore"]();
+    }
+    catch(error)
+    {
+        if(graphics) graphics["cancelStateRestore"]();
+        throw error;
+    }
 };
 
 /**
@@ -912,6 +964,7 @@ V86.prototype.restore_state = async function(state)
 V86.prototype.save_state = async function()
 {
     dbg_assert(arguments.length === 0);
+    if(this["graphics_adapter"]) this["graphics_adapter"]["prepareSaveState"]();
     return this.v86.save_state();
 };
 
@@ -1117,6 +1170,11 @@ V86.prototype.keyboard_send_text = async function(string, delay)
  */
 V86.prototype.screen_make_screenshot = function()
 {
+    if(this["graphics_adapter"])
+    {
+        const image = this["graphics_adapter"]["makeScreenshot"]();
+        if(image) return image;
+    }
     if(this.screen_adapter)
     {
         return this.screen_adapter.make_screenshot();
@@ -1148,7 +1206,8 @@ V86.prototype.screen_go_fullscreen = function()
         return;
     }
 
-    var elem = document.getElementById("screen_container");
+    var elem = this.screen_adapter.get_graphics_canvas &&
+        this.screen_adapter.get_graphics_canvas().parentElement;
 
     if(!elem)
     {
@@ -1156,7 +1215,7 @@ V86.prototype.screen_go_fullscreen = function()
     }
 
     // bracket notation because otherwise they get renamed by closure compiler
-    var fn = elem["requestFullScreen"] ||
+    var fn = elem["requestFullscreen"] || elem["requestFullScreen"] ||
             elem["webkitRequestFullscreen"] ||
             elem["mozRequestFullScreen"] ||
             elem["msRequestFullScreen"];
@@ -1599,6 +1658,11 @@ function FileNotFoundError(message)
 FileNotFoundError.prototype = Error.prototype;
 
 /* global module, self */
+
+// The optional graphics bundle uses these across the compilation boundary.
+V86.prototype["add_listener"] = V86.prototype.add_listener;
+V86.prototype["remove_listener"] = V86.prototype.remove_listener;
+V86.prototype["write_memory"] = V86.prototype.write_memory;
 
 if(typeof module !== "undefined" && typeof module.exports !== "undefined")
 {
