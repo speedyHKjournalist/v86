@@ -489,13 +489,28 @@ const CORPUS = [
 
 // ---- run ----
 
+// SM1 has no dcl_2d/dcl_cube: specialize ordinary tex/texld from SetTexture.
+for (const minor of [1, 4]) {
+    const code = minor === 1 ? [
+        PS(1, 1), instruction(OP.TEX), dst(REG.TEXTURE, 0),
+        instruction(OP.MOV), dst(REG.TEMP, 0), src(REG.TEXTURE, 0), END,
+    ] : [
+        PS(1, 4), instruction(OP.TEX), dst(REG.TEMP, 0), src(REG.TEXTURE, 0), END,
+    ];
+    for (const type of ["cube", "3d"]) {
+        CORPUS.push(["ps_1_" + minor + " bound " + type, code, {
+            legacySamplerTypes: { 0: type },
+        }]);
+    }
+}
+
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "d9wgsl-"));
 const failures = [];
 let validated = 0;
 
-for (const [name, list] of CORPUS) {
+for (const [name, list, options] of CORPUS) {
     const stream = new Uint32Array(list);
-    const result = pipeline.compileShader(stream);
+    const result = pipeline.compileShader(stream, options);
     if (!result.ok) {
         failures.push({ name, message: "translation failed: " + result.error });
         continue;

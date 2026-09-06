@@ -1708,6 +1708,14 @@
             return rows;
         }
 
+        legacySamplerType(index) {
+            // ps_1_x tex/texld have no sampler declaration. SetTexture selects
+            // the dimension at draw time; default to 2D only for the base
+            // translation made before a texture is bound.
+            const type = (this.options.legacySamplerTypes || {})[index];
+            return type === "cube" || type === "3d" ? type : "2d";
+        }
+
         textureLoad(instruction, options) {
             const dest = instruction.dest;
             const sources = instruction.sources;
@@ -1718,13 +1726,15 @@
                 // ps_1_1-1_3 `tex t#`: register number selects both the
                 // sampler and the texture coordinate set.
                 index = dest.index;
-                if (!this.samplers.has(index)) this.samplers.set(index, "2d");
+                if (!this.samplers.has(index))
+                    this.samplers.set(index, this.legacySamplerType(index));
                 this.psTexcoordInputs.add(index);
                 coordinateExpression = "t" + index;
             } else if (this.kind === "pixel" && this.major === 1) {
                 // ps_1_4 `texld r#, t#`: sampler comes from the destination.
                 index = dest.index;
-                if (!this.samplers.has(index)) this.samplers.set(index, "2d");
+                if (!this.samplers.has(index))
+                    this.samplers.set(index, this.legacySamplerType(index));
                 coordinateExpression = this.sourceExpression(sources[0]);
             } else {
                 index = this.samplerIndexFor(sources[1]);

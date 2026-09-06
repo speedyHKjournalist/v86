@@ -9831,6 +9831,22 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                     return { error: "pixel shader translation failed: " +
                         psResource.translated.error, shaderError: true };
                 let variant = psResource.translated;
+                // SM1 tex/texld have implicit sampler types. A shader can be
+                // used with 2D, cube or volume textures on different draws, so
+                // specialize its WGSL and cache key from the current bindings.
+                // SM2+ dcl_* types remain authoritative and are checked below.
+                const legacySamplerTypes = {};
+                let legacySamplerKey = "";
+                if (variant.reflection.version.major === 1) {
+                    for (const sampler of variant.reflection.samplers) {
+                        const texture = this.resources.get(state.textures.get(sampler.index));
+                        const type = texture && (texture.textureType || "2d");
+                        if (type && type !== sampler.type) {
+                            legacySamplerTypes[sampler.index] = type;
+                            legacySamplerKey += "_t" + sampler.index + ":" + type;
+                        }
+                    }
+                }
                 // Which stages have a depth texture bound decides the WGSL:
                 // a shadow-map stage is texture_depth_2d sampled through a
                 // comparison sampler, and there is nothing in the bytecode to
@@ -9884,9 +9900,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                     }
                 }
                 const pixelVariantKey = alphaTestKey + clipKey + depthKey +
-                    lodBiasKey + mirrorOnceKey;
+                    lodBiasKey + mirrorOnceKey + legacySamplerKey;
                 if (alphaTest.enabled || clipPlaneCount || depthSamplers.length
-                        || lodBiasKey || mirrorOnceKey) {
+                        || lodBiasKey || mirrorOnceKey || legacySamplerKey) {
                     variant = psResource.variants.get(pixelVariantKey);
                     if (!variant) {
                         variant = shaderPipeline.compileShader(psResource.tokens, {
@@ -9897,6 +9913,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                             depthFetchSamplers,
                             samplerLodBias,
                             samplerMirrorOnce,
+                            legacySamplerTypes,
                         });
                         psResource.variants.set(pixelVariantKey, variant);
                         if (variant.ok) ++this.stats.shaderVariantsTranslated;

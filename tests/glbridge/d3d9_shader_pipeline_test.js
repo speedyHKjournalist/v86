@@ -269,6 +269,34 @@ test("ps_1_1: t# is both coordinate and sample destination, r0 is the output", (
     assert.ok(wgsl.includes("t0 = stage_in.varying2;"), "t0 not wired to TEXCOORD0");
 });
 
+test("ps_1_x tex/texld take sampler dimensions from the bound texture", () => {
+    for (const minor of [1, 4]) {
+        const code = minor === 1 ? [
+            PS(1, 1), instruction(OP.TEX), dst(REG.TEXTURE, 0),
+            instruction(OP.MOV), dst(REG.TEMP, 0), src(REG.TEXTURE, 0), END,
+        ] : [
+            PS(1, 4), instruction(OP.TEX), dst(REG.TEMP, 0), src(REG.TEXTURE, 0), END,
+        ];
+        for (const type of ["2d", "cube", "3d"]) {
+            const result = pipeline.compileShader(tokens(code), {
+                legacySamplerTypes: { 0: type, 7: "cube" },
+            });
+            assert.ok(result.ok, result.error);
+            assert.equal(result.reflection.samplers.length, 1,
+                "an unused bound texture must not add a sampler");
+            assert.equal(result.reflection.samplers[0].type, type);
+            assert.ok(result.wgsl.includes("var d9_tex0: texture_" + type + "<f32>"));
+            if (type !== "2d") assert.match(result.wgsl, /textureSample\(d9_tex0, d9_smp0, [^\n]*\.xyz\)/);
+        }
+    }
+    const sm2 = pipeline.compileShader(tokens(PS_2_0_TEXTURED), {
+        legacySamplerTypes: { 0: "cube" },
+    });
+    assert.ok(sm2.ok, sm2.error);
+    assert.equal(sm2.reflection.samplers[0].type, "2d",
+        "SM2 explicit declarations must not be overridden by bindings");
+});
+
 test("a vs_1_1 with no dcl gets the API's fixed v# semantics", () => {
     // Real vs_1_x bytecode contains no dcl_ at all -- the instruction did not
     // exist before vs_2_0 -- so what v0/v5/v7 mean comes from D3D's fixed

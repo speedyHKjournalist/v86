@@ -1133,6 +1133,62 @@ await test("programmable vs+ps: modules, bindings and constants all line up", as
     assert.equal(data.getFloat32(pixelBase + 28, true), 1, "ps c1.w");
 });
 
+await test("SM1 sampler variants follow cube/2D/volume bindings without poisoning the base shader",
+        async () => {
+    const { executor, find } = makeExecutor();
+    const psHandle = 0x40000189; // NFS9's reported dropped ps_1_1 draw.
+    const code = [PS(1, 1), instr(SIO.TEX), dst(REG.TEXTURE, 0),
+        instr(SIO.MOV), dst(REG.TEMP, 0), src(REG.TEXTURE, 0), END];
+    const ps = shaderCreatePayload(psHandle, code);
+    const vs = shaderCreatePayload(0x40000001, VS_TEXCOORD0_BYTECODE);
+    await executor.submit(buildBatch([
+        command(OP.CREATE_DEVICE, createDevicePayload(64, 64)),
+        command(OP.CREATE_BUFFER, createBufferPayload(0x201, 1, 72)),
+        command(OP.CREATE_VERTEX_DECLARATION, declarationPayload(0x301, [
+            element(0, 0, DECLTYPE.FLOAT3, DECLUSAGE.POSITION),
+            element(0, 12, DECLTYPE.FLOAT3, DECLUSAGE.TEXCOORD),
+        ])),
+        command(OP.SET_VERTEX_DECLARATION, u32(DEVICE, 0x301)),
+        command(OP.SET_STREAM_SOURCE, setStreamSourcePayload(0, 0x201, 24)),
+        command(OP.CREATE_VERTEX_SHADER, vs.payload, vs.blob, vs.blobOffsetField),
+        command(OP.CREATE_PIXEL_SHADER, ps.payload, ps.blob, ps.blobOffsetField),
+        command(OP.SET_VERTEX_SHADER, u32(DEVICE, 0x40000001)),
+        command(OP.SET_PIXEL_SHADER, u32(DEVICE, psHandle)),
+        command(OP.CREATE_TEXTURE_CUBE, u32(DEVICE, 0x401, 4, 1, 21, 0, 1, 0)),
+        command(OP.CREATE_TEXTURE_2D, u32(DEVICE, 0x402, 4, 4, 1, 21, 0, 1)),
+        command(OP.CREATE_TEXTURE_VOLUME, u32(DEVICE, 0x403, 4, 4, 4, 1, 21, 0, 1)),
+    ]));
+    for (const [handle, type] of [[0x401, "cube"], [0x402, "2d"],
+            [0x403, "3d"], [0x401, "cube"]]) {
+        const before = executor.stats.programmableDraws;
+        await executor.submit(buildBatch([
+            command(OP.SET_TEXTURE, u32(DEVICE, 0, handle, 0)),
+            command(OP.DRAW_PRIMITIVE, drawPrimitivePayload(4, 0, 1)),
+            command(OP.PRESENT, u32(DEVICE, 0x1234, 0, 0, 64, 64)),
+        ], { present: true }));
+        assert.equal(executor.stats.programmableDraws, before + 1, type + " draw must execute");
+        assert.equal(executor.stats.droppedDraws, 0);
+        const group = find("setBindGroup").filter(call =>
+            call[2].entries.some(entry => entry.binding === 3)).pop()[2];
+        assert.equal(group.layout.descriptor.entries.find(entry => entry.binding === 2)
+            .texture.viewDimension, type);
+        const view = group.entries.find(entry => entry.binding === 2).resource;
+        assert.equal((view.descriptor && view.descriptor.dimension) ||
+            view.texture.descriptor.dimension || "2d", type);
+    }
+    const shader = executor.resources.get(psHandle);
+    assert.equal(shader.translated.reflection.samplers[0].type, "2d");
+    assert.equal(shader.variants.size, 2, "revisiting cube must reuse its variant");
+    // SM2 really does declare 2D; the same binding is still invalid for it.
+    const explicit = shaderCreatePayload(0x40000200, PS_BYTECODE);
+    await executor.submit(buildBatch([
+        command(OP.CREATE_PIXEL_SHADER, explicit.payload, explicit.blob, explicit.blobOffsetField),
+        command(OP.SET_PIXEL_SHADER, u32(DEVICE, 0x40000200)),
+        command(OP.DRAW_PRIMITIVE, drawPrimitivePayload(4, 0, 1)),
+    ]));
+    assert.equal(executor.stats.droppedDraws, 1);
+});
+
 await test("all-draw solid probe overrides programmable shading and rejecting state",
         async () => {
     const { executor, find } = makeExecutor();
