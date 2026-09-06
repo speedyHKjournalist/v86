@@ -67,4 +67,4 @@ The following games and applications have been tested with the graphics proxy:
 - **Direct3D 8:** 3DMark 2001 SE, MapleStory v083.
 - **Direct3D 9:** 3DMark06, KartRider, Warcraft III, Grand Theft Auto: San Andreas, Need for Speed: Most Wanted (2005).
 
-![Graphics proxy test screenshot](9069f4a8-0123-4350-8192-69b1f1930849.png)
+![Graphics proxy test screenshot](3dmark06_result.png)
