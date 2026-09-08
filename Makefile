@@ -20,9 +20,16 @@ endif
 WASM_OPT ?= false
 
 default: build/v86-debug.wasm
-all: build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm
-all-debug: build/libv86-debug.js build/libv86-debug.mjs build/v86-debug.wasm
+all: build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm glbridge
+all-debug: build/libv86-debug.js build/libv86-debug.mjs build/v86-debug.wasm glbridge
 browser: build/v86_all.js
+
+.PHONY: glbridge test-glbridge
+glbridge:
+	node tools/build_glbridge.mjs
+
+test-glbridge:
+	node tests/glbridge/run.cjs
 
 # Used for nodejs builds and in order to profile code.
 # `debug` gives identifiers a readable name, make sure it doesn't have any side effects.
@@ -82,6 +89,7 @@ CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.j
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
 	   acpi.js iso9660.js \
 	   state.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
+	   v86gl_pci.js \
 	   bus.js log.js cpu.js \
 	   elf.js kernel.js
 LIB_FILES=9p.js filesystem.js marshall.js
@@ -269,7 +277,7 @@ clean:
 	-rm build/*.o
 	$(MAKE) -C $(NASM_TEST_DIR) clean
 
-run:
+run: build/v86_all.js glbridge
 	python3 -m http.server 2> /dev/null
 
 update_version:

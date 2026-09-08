@@ -1,0 +1,43 @@
+<!doctype html><meta charset="utf-8"><title>Graphics journal frame overhead</title>
+<pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script>
+(async () => {
+    const params = new URLSearchParams(location.search);
+    if (params.has("baseline")) {
+        await new Promise((resolve, reject) => {
+            const script = document.createElement("script");
+            script.src = "../../build/glbridge/graphics_journal_baseline.js";
+            script.onload = resolve; script.onerror = reject; document.head.append(script);
+        });
+    }
+    const journal = params.has("disabled") ? { append() {}, async snapshot() {}, async destroy() {} } :
+        new V86GraphicsJournal({ budget: 1024 * 1024, worker: !params.has("local") });
+    const record = { bytes: new Uint8Array(128), frameId: 0, commandCount: 1 };
+    const times = [], intervals = [];
+    let previous = 0;
+    const started = performance.now();
+    for (let frame = 0; frame < 180; frame++) {
+        const now = await new Promise(requestAnimationFrame);
+        if (previous) intervals.push(now - previous);
+        previous = now;
+        const start = performance.now();
+        for (let n = 0; n < 4096; n++) {
+            record.frameId++;
+            record.bytes[0] = n & 255;
+            journal.append(record);
+        }
+        times.push(performance.now() - start);
+    }
+    await journal.snapshot();
+    const elapsed = performance.now() - started;
+    await journal.destroy();
+    const percentile = (values, p) => [...values].sort((a,b) => a-b)[Math.floor((values.length - 1) * p)];
+    return { status: "PASS", mode: params.has("disabled") ? "disabled" : params.has("baseline") ? "baseline" : params.has("local") ? "local" : "worker", rawMiB: 180 * 4096 * 160 / 1048576,
+        appendMs: { median: percentile(times, .5), p95: percentile(times, .95), max: Math.max(...times) },
+        frameMs: { median: percentile(intervals, .5), p95: percentile(intervals, .95), max: Math.max(...intervals) }, elapsedMs: elapsed };
+})().catch(error => ({ status: "FAIL", error: String(error.stack) })).then(result => {
+    document.getElementById("result").textContent = JSON.stringify(result);
+    fetch("/__test_result", { method: "POST", body: JSON.stringify(result) });
+});
+</script>

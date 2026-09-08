@@ -378,7 +378,10 @@ SB16.prototype.set_state = function(state)
     this.dsp_16bit = state[11];
     this.dsp_signed = state[12];
 
-    // this.dac_buffers = state[13];
+    // Host audio and unsaved DAC samples belong to the discarded timeline.
+    this.bus.send("dac-reset");
+    this.dac_buffers[0].clear();
+    this.dac_buffers[1].clear();
     //state[14]
 
     this.dma_sample_count = state[15];
@@ -393,7 +396,7 @@ SB16.prototype.set_state = function(state)
     this.dma_buffer_uint8 = state[24];
     this.dma_waiting_transfer = state[25];
     this.dma_paused = state[26];
-    this.sampling_rate = state[27];
+    this.sampling_rate_change(state[27]);
     this.bytes_per_sample = state[28];
 
     this.e2_value = state[29];

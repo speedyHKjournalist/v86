@@ -305,6 +305,14 @@
             </tr>
 
             <tr>
+                <td><label for="graphics_proxy">Enable graphics proxy (WebGPU)</label></td>
+                <td>
+                    <input id="graphics_proxy" type="checkbox" aria-describedby="graphics_proxy_help"><br>
+                    <small id="graphics_proxy_help">Requires WebGPU and guest graphics proxy DLLs / v86gl driver.</small>
+                </td>
+            </tr>
+
+            <tr>
                 <td><label for="acpi">Enable ACPI (experimental)</label></td>
                 <td>
                     <input id="acpi" type="checkbox"><br>
@@ -334,6 +342,8 @@
         <br>
         <button id="start_emulation">Start Emulation</button>
     </div>
+
+    <p id="graphics_proxy_status" role="status" style="display: none"></p>
 
     <div id="runtime_options" style="display: none">
         <button id="run">Pause</button>
