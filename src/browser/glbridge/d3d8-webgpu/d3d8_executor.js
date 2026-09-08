@@ -190,6 +190,7 @@
     const BUFFER_USAGE_INDEX = 0x10;
     const BUFFER_USAGE_VERTEX = 0x20;
     const BUFFER_USAGE_UNIFORM = 0x40;
+    const TEXTURE_USAGE_COPY_SRC = 0x01;
     const TEXTURE_USAGE_COPY_DST = 0x02;
     const TEXTURE_USAGE_TEXTURE_BINDING = 0x04;
     const TEXTURE_USAGE_RENDER_ATTACHMENT = 0x10;
@@ -645,8 +646,7 @@
             "    output.specular = vertex_specular;",
         ];
         for (let stage = 0; stage < 2; stage++) {
-            const texcoordIndex = state.textureStageStates[stage]
-                [D3DTSS_TEXCOORDINDEX] >>> 0;
+            const texcoordIndex = state.textureStageStates[stage][D3DTSS_TEXCOORDINDEX] >>> 0;
             const coordinateSet = texcoordIndex & 0xFFFF;
             const dimensions = coordinateSet < layout.texDims.length ?
                 layout.texDims[coordinateSet] : 0;
@@ -665,8 +665,7 @@
                 source = "vec4<f32>(eye_normal, 1.0)";
             else if (generated === 0x30000 && layout.normal)
                 source = "vec4<f32>(reflect(normalize(eye_position.xyz), eye_normal), 1.0)";
-            const transformFlags = state.textureStageStates[stage]
-                [D3DTSS_TEXTURETRANSFORMFLAGS] >>> 0;
+            const transformFlags = state.textureStageStates[stage][D3DTSS_TEXTURETRANSFORMFLAGS] >>> 0;
             if (transformFlags & 0xFF) {
                 const transformed = "transformed_tex" + stage;
                 vertexAssignments.push("    let " + transformed +
@@ -1795,6 +1794,7 @@ ${body.join("\n")}
                 device: this.device,
                 format: this.format,
                 alphaMode: "opaque",
+                usage: TEXTURE_USAGE_RENDER_ATTACHMENT | TEXTURE_USAGE_COPY_DST,
             });
         }
 
@@ -2069,7 +2069,7 @@ ${body.join("\n")}
             const surface = this.parseSurface(bytes, payloadOffset);
             let state = this.devices.get(handle);
             if (!state || !reset) {
-                if (state) this.retireGPUObjects(state.depthTexture);
+                if (state) this.retireGPUObjects(state.depthTexture, state.backBuffer);
                 state = freshDeviceState(handle, surface);
                 this.devices.set(handle, state);
             } else {
@@ -2083,6 +2083,15 @@ ${body.join("\n")}
             this.configureContext();
             this.createSurfaceUniform(state);
             this.createDepthSurface(state);
+            this.retireGPUObjects(state.backBuffer);
+            state.backBuffer = this.device.createTexture({
+                label: "D3D8 retained back buffer",
+                size: { width: surface.width, height: surface.height },
+                format: this.format,
+                usage: TEXTURE_USAGE_RENDER_ATTACHMENT | TEXTURE_USAGE_COPY_SRC |
+                    TEXTURE_USAGE_COPY_DST | TEXTURE_USAGE_TEXTURE_BINDING,
+            });
+            state.backBufferInitialized = false;
             if (typeof this.options.onSurface === "function") {
                 this.options.onSurface(surface,
                     surfaceReason || (reset ? "reset" : "create"));
@@ -2320,7 +2329,7 @@ struct VertexOutput {
                 const view = target ? target.gpuTexture.createView({
                     baseMipLevel: state.renderTarget.level,
                     mipLevelCount: 1,
-                }) : this.context.getCurrentTexture().createView();
+                }) : state.backBuffer.createView();
                 this.frame = {
                     sessionKey: this.activeSession.key,
                     deviceHandle: state.handle,
@@ -2329,7 +2338,7 @@ struct VertexOutput {
                     encoder,
                     view,
                     pass: null,
-                    fresh: true,
+                    fresh: !target && !state.backBufferInitialized,
                     transientBuffers: [],
                     deferredDestroy: [],
                 };
@@ -2380,6 +2389,17 @@ struct VertexOutput {
             const transientBuffers = this.frame.transientBuffers;
             const deferredDestroy = this.frame.deferredDestroy;
             this.endPass();
+            if (!this.frame.targetHandle) state.backBufferInitialized = true;
+            if (notify) {
+                // The canvas texture expires at the browser's frame boundary.
+                // Keep partial frames in owned storage, including across save.
+                if (this.canvas.width !== state.surface.width) this.canvas.width = state.surface.width;
+                if (this.canvas.height !== state.surface.height) this.canvas.height = state.surface.height;
+                const target = this.context.getCurrentTexture();
+                this.frame.encoder.copyTextureToTexture({ texture: state.backBuffer },
+                    { texture: target }, { width: state.surface.width,
+                        height: state.surface.height, depthOrArrayLayers: 1 });
+            }
             this.device.queue.submit([this.frame.encoder.finish()]);
             this.stats.queueSubmits++;
             this.frame = null;
@@ -2412,7 +2432,7 @@ struct VertexOutput {
                 if (this.frame && this.frame.deviceHandle === handle) {
                     this.discardFrame();
                 }
-                this.retireGPUObjects(state.depthTexture);
+                this.retireGPUObjects(state.depthTexture, state.backBuffer);
                 for (const [resourceHandle, child] of this.resources) {
                     if (child.deviceHandle !== handle) continue;
                     this.retireHandle(this.retiredResourceHandles,

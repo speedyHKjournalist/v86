@@ -37,7 +37,7 @@ const path = require("node:path");
             w16(22, 0); w16(24, 8);
             w32(32, table); w32(36, 0); w32(40, avail); w32(44, 0);
             w32(48, used); w32(52, 0);
-            for(let i = 0; i < 320; i++) mem.setUint8(table + i, 0);
+            for (let i = 0; i < 320; i++) mem.setUint8(table + i, 0);
             mem.setUint32(table, req, true); mem.setUint32(table + 8, 24, true);
             mem.setUint16(table + 12, 1, true); mem.setUint16(table + 14, 1, true);
             mem.setUint32(table + 16, reply, true); mem.setUint32(table + 24, 16, true);
@@ -112,7 +112,7 @@ const path = require("node:path");
         assert.equal(mem.getUint16(used+2,true),0,"no consumption before DRIVER_OK");
         setup();
         // Relocate every BAR via real PCI config writes, as an OS enumerator can.
-        for(let bar = 0; bar < 4; bar++) {
+        for (let bar = 0; bar < 4; bar++) {
             io.port_write32(0xcf8, (0x80000000 | (0x13 << 11) | (0x10 + bar*4)) >>> 0);
             io.port_write32(0xcfc, 0xe001 + bar*0x100);
         }
@@ -151,7 +151,7 @@ const path = require("node:path");
         pci.raise_irq=function(type) { interrupts++; return raise.call(this,type); };
         const dirty=cpu.jit_dirty_cache;
         cpu.jit_dirty_cache=(start,end)=>{
-            if((start===reply || start===reply2) && end===start+16) invalidations++;
+            if ((start===reply || start===reply2) && end===start+16) invalidations++;
             return dirty(start,end);
         };
         io.port_write16(notify,0);

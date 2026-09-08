@@ -68,3 +68,64 @@ The following games and applications have been tested with the graphics proxy:
 - **Direct3D 9:** 3DMark06, KartRider, Warcraft III, Grand Theft Auto: San Andreas, Need for Speed: Most Wanted (2005).
 
 ![Graphics proxy test screenshot](3dmark06_result.png)
+
+## 7. Save and restore graphics state
+
+Use `await emulator.save_state()` and `await emulator.restore_state(state)`.
+The graphics adapter pauses a running guest while saving or restoring, waits
+for accepted GPU work and readbacks, and resumes it after success. Saves and
+restores on the same instance are serialized. A failed restore leaves the guest
+stopped. `initial_state` also restores graphics before `emulator-loaded`.
+Historical graphics surfaces stay hidden during reconstruction; the final
+surface is revealed after replay completes. Loading still takes time proportional
+to the history. Browser audio is paused during the operation. Restoring clears
+audio from the discarded timeline and reapplies the saved SB16 sampling rate
+before playback resumes.
+
+Checkpoint version 3 records OpenGL, Direct3D 8, Direct3D 9 and DirectDraw batches
+in order, including Present and checkpoint flush boundaries. On restore the
+adapter rebuilds clean executors and replays the history. This reconstructs
+resource handles, shaders, render state, palettes, queries and GPU-rendered
+contents, rather than relying only on CPU upload shadows. Historical readbacks
+never write to the restored guest memory. D3D8 uses an owned back buffer so
+unfinished frames survive browser frame boundaries and checkpoint flushes.
+
+Commands are copied directly into contiguous pages, avoiding allocations per
+batch. In browsers, completed page buffers are transferred to a dedicated
+`graphics_journal_worker.js` worker for compression, keeping that work off the
+emulation thread. Deploy this file beside `libv86-webgpu.js`; `make glbridge`
+generates both. Environments without workers use local compression. There is no 512 MiB raw
+history cutoff. `graphics_options.graphicsJournalMemoryBytes` sets the compressed
+RAM cache budget (default 64 MiB); older `maxGraphicsJournalBytes` and
+`maxGLJournalBytes` options are aliases for this budget. Excess pages are stored
+temporarily in IndexedDB and deleted when the emulator resets or is destroyed.
+If disk caching is unavailable or its quota is exhausted, pages stay in RAM;
+commands are never discarded to enforce the cache budget. Pending compression
+and the current page also use memory outside this cache budget.
+
+Saving packs all pages into a portable checkpoint; loading needs no original
+browser database. It decompresses and replays one page at a time. Saving still
+needs memory for the complete output, and the emulator's overall state format
+uses signed 32-bit offsets. History size and restore time grow with the recorded
+workload. This remains a replay checkpoint, rather than a compact snapshot of
+only live resources, and GPU results need the same supported features.
+
+Version 2 checkpoints remain readable. A running session that already exceeded
+the old history cutoff must be restarted with the new code: commands discarded
+by the old implementation cannot be recovered.
+
+Version 1 checkpoints can restore only their original OpenGL/D3D8 payloads.
+They never stored D3D9/DirectDraw resources or GL query lifetimes, so missing
+state in those old files cannot be recovered retroactively.
+
+Regression checks:
+
+```sh
+make test-glbridge
+node tests/glbridge/gl_multipass_browser_runner.js graphics_checkpoint_browser_test.html
+node tests/glbridge/gl_multipass_browser_runner.js graphics_vga_browser_test.html
+node tests/glbridge/gl_multipass_browser_runner.js graphics_journal_perf_test.html
+```
+
+The browser test checks actual GPU pixels for all four APIs after restoring in
+both the same and a new emulator instance, including unfinished D3D8 drawing.

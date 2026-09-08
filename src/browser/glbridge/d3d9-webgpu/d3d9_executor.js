@@ -3104,6 +3104,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             this.frame = null;             // { ops, transientBuffers, serial }
             this.frameSerial = 0;
             this.readyPromise = null;
+            this.pendingReadbacks = new Set();
             this.work = Promise.resolve();
             this.failed = null;
             // Console-togglable diagnostics, e.g.
@@ -3500,7 +3501,44 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             return this.work;
         }
 
+        trackReadback(operation) {
+            this.pendingReadbacks.add(operation);
+            operation.then(() => this.pendingReadbacks.delete(operation),
+                () => this.pendingReadbacks.delete(operation));
+            return operation;
+        }
+
         idle() { return this.work; }
+
+        async checkpointIdle() {
+            await this.work;
+            while (this.pendingReadbacks.size)
+                await Promise.all(Array.from(this.pendingReadbacks));
+        }
+
+        flushForCheckpoint() {
+            const original = this.sessionKey;
+            for (const key of this.sessionStates.keys()) {
+                this.switchSession(key);
+                this.finishFrame(false);
+            }
+            if (original !== null) this.switchSession(original);
+        }
+
+        async resetForReplay() {
+            await this.checkpointIdle();
+            for (const key of this.sessionStates.keys()) {
+                this.switchSession(key);
+                this.releaseActiveSession("state-restore");
+            }
+            this.sessionStates.clear();
+            this.sessionKey = null;
+            this.pipelineCache.clear();
+            this.bindGroupCache.clear();
+            this.moduleCache.clear();
+            this.samplerCache.clear();
+            this.failed = null;
+        }
 
         // ---- batch decode ----
 
@@ -5528,7 +5566,7 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                     if (pending.kind === "occlusion") {
                         for (const completion of pending.completions) {
                             const record = completion.record;
-                            record.pending = record.pending.then(() => mapping)
+                            record.pending = this.trackReadback(record.pending.then(() => mapping)
                                 .then(result => {
                                     if (result.error) record.failed = true;
                                     else record.value += result.values.get(completion);
@@ -5539,10 +5577,10 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                                         record.failed ? D9WG_RESPONSE_FAILED
                                             : D9WG_RESPONSE_OK,
                                         completion.metadata);
-                                });
+                                }));
                         }
                     } else {
-                        mapping.then(result => {
+                        this.trackReadback(mapping.then(result => {
                             for (const completion of pending.completions) {
                                 if (result.error) {
                                     this.writeQueryResponse(completion.query,
@@ -5557,24 +5595,24 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                                     result.values.get(completion),
                                     D9WG_RESPONSE_OK, completion.metadata);
                             }
-                        });
+                        }));
                     }
                 }
                 const fence = this.device.queue &&
                         typeof this.device.queue.onSubmittedWorkDone === "function"
                     ? this.device.queue.onSubmittedWorkDone() : Promise.resolve();
-                if (fenceCompletions.length) fence.then(() => {
+                if (fenceCompletions.length) this.trackReadback(fence.then(() => {
                     for (const completion of fenceCompletions) {
                         if (completion.zeroOcclusion) {
                             const record = completion.record;
-                            record.pending = record.pending.then(() => {
+                            record.pending = this.trackReadback(record.pending.then(() => {
                                 ++this.stats.occlusionQueriesResolved;
                                 this.writeQueryResponse(record.query,
                                     completion.requestId, record.value,
                                     record.failed ? D9WG_RESPONSE_FAILED
                                         : D9WG_RESPONSE_OK,
                                     completion.metadata);
-                            });
+                            }));
                             continue;
                         }
                         let value = 0n;
@@ -5605,21 +5643,21 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                     for (const completion of fenceCompletions) {
                         if (completion.zeroOcclusion) {
                             const record = completion.record;
-                            record.pending = record.pending.then(() => {
+                            record.pending = this.trackReadback(record.pending.then(() => {
                                 record.failed = true;
                                 ++this.stats.occlusionQueriesResolved;
                                 this.writeQueryResponse(record.query,
                                     completion.requestId, record.value,
                                     D9WG_RESPONSE_FAILED,
                                     completion.metadata);
-                            });
+                            }));
                         } else {
                             this.writeQueryResponse(completion.query,
                                 completion.requestId, 0,
                                 D9WG_RESPONSE_FAILED, completion.metadata);
                         }
                     }
-                });
+                }));
             }
             if (present) ++this.stats.presents;
             const start = frame.statStart || {};

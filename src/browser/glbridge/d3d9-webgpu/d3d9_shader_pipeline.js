@@ -812,7 +812,7 @@
                         usage: declaration.usage, usageIndex: declaration.usageIndex });
                     this.psColorInputs.add(dest.index);
                 }
-                return;
+
             }
             // vs_1_1/2_0 output dcls carry no information we need.
         }

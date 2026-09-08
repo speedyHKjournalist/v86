@@ -1076,7 +1076,6 @@ test("a truncated record stops the batch instead of reading past it", () => {
 });
 
 
-
 test("glDrawElements draws with the indices the guest sent", () => {
     const { executor, log } = newExecutor();
     // 0x544D4143 is the multitexture magic that sits between the fixed header

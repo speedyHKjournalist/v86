@@ -873,6 +873,7 @@ V86.prototype.destroy = async function()
 {
     this.destroyed = true;
     await this.stop();
+    if(this.graphics_state_operation) await this.graphics_state_operation;
 
     if(this["graphics_adapter"]) await this["graphics_adapter"]["destroy"]();
     this.v86 && this.v86.destroy();
@@ -891,14 +892,11 @@ V86.prototype.destroy = async function()
  */
 V86.prototype.restart = async function()
 {
-    const was_running = this.is_running();
-    if(this["graphics_adapter"])
-    {
-        await this.stop();
+    if(!this["graphics_adapter"]) return this.v86.restart();
+    return this.with_graphics_state(async () => {
         await this["graphics_adapter"]["reset"]();
-    }
-    this.v86.restart();
-    if(this["graphics_adapter"] && was_running) this.run();
+        this.v86.restart();
+    }, false);
 };
 
 /**
@@ -943,17 +941,21 @@ V86.prototype.restore_state = async function(state)
 {
     dbg_assert(arguments.length === 1);
     const graphics = this["graphics_adapter"];
-    if(graphics) graphics["beginStateRestore"]();
-    try
-    {
-        this.v86.restore_state(state);
-        if(graphics) await graphics["finishStateRestore"]();
-    }
-    catch(error)
-    {
-        if(graphics) graphics["cancelStateRestore"]();
-        throw error;
-    }
+    if(!graphics) return this.v86.restore_state(state);
+    return this.with_graphics_state(async () => {
+        graphics["beginStateRestore"]();
+        try
+        {
+            await graphics["waitForIdle"](false, true);
+            this.v86.restore_state(state);
+            await graphics["finishStateRestore"]();
+        }
+        catch(error)
+        {
+            graphics["cancelStateRestore"]();
+            throw error;
+        }
+    }, false);
 };
 
 /**
@@ -964,8 +966,47 @@ V86.prototype.restore_state = async function(state)
 V86.prototype.save_state = async function()
 {
     dbg_assert(arguments.length === 0);
-    if(this["graphics_adapter"]) this["graphics_adapter"]["prepareSaveState"]();
-    return this.v86.save_state();
+    if(!this["graphics_adapter"]) return this.v86.save_state();
+    return this.with_graphics_state(async () => {
+        const graphics = this["graphics_adapter"];
+        try
+        {
+            await graphics["prepareSaveState"]();
+            return this.v86.save_state();
+        }
+        finally
+        {
+            if(graphics["releaseCheckpoint"]) graphics["releaseCheckpoint"]();
+        }
+    }, true);
+};
+
+// Serialize saves/restores and pause the CPU while graphics jobs can still
+// write guest RAM. A failed restore leaves the CPU stopped; a failed save
+// resumes the untouched guest.
+V86.prototype.with_graphics_state = function(operation, resume_on_error)
+{
+    const previous = this.graphics_state_operation || Promise.resolve();
+    const next = previous.catch(() => {}).then(async () => {
+        if(this.destroyed) throw new Error("Emulator has been destroyed");
+        const was_running = this.is_running();
+        await this.stop();
+        if(this.speaker_adapter) await this.speaker_adapter.pause();
+        let success = false;
+        try
+        {
+            const result = await operation();
+            success = true;
+            return result;
+        }
+        finally
+        {
+            if(was_running && !this.destroyed && (success || resume_on_error)) this.run();
+        }
+    });
+    // Keep only a completion barrier, not the potentially large saved buffer.
+    this.graphics_state_operation = next.then(() => {}, () => {});
+    return next;
 };
 
 /**
@@ -1660,9 +1701,11 @@ FileNotFoundError.prototype = Error.prototype;
 /* global module, self */
 
 // The optional graphics bundle uses these across the compilation boundary.
+/* eslint-disable no-self-assign -- Quoted names export methods across Closure ADVANCED. */
 V86.prototype["add_listener"] = V86.prototype.add_listener;
 V86.prototype["remove_listener"] = V86.prototype.remove_listener;
 V86.prototype["write_memory"] = V86.prototype.write_memory;
+/* eslint-enable no-self-assign */
 
 if(typeof module !== "undefined" && typeof module.exports !== "undefined")
 {

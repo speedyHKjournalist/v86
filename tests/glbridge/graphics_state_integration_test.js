@@ -16,6 +16,7 @@ const assert = require("node:assert/strict");
     const calls = [];
     const graphics = {
         prepareSaveState() { calls.push("prepare"); },
+        async waitForIdle() {},
         beginStateRestore() { calls.push("begin"); },
         onPCIStateRestored(value) { calls.push(value); },
         async finishStateRestore() { await Promise.resolve(); calls.push("finish"); },
@@ -25,7 +26,10 @@ const assert = require("node:assert/strict");
         save() { return checkpoint; },
         restore(value) { graphics.onPCIStateRestored(value); },
     };
-    const emulator = { graphics_adapter: graphics, v86: {
+    const emulator = { graphics_adapter: graphics,
+        with_graphics_state: V86.prototype.with_graphics_state,
+        is_running() { return false; }, async stop() {},
+        v86: {
         save_state() { calls.push("save"); return pci.get_state(); },
         restore_state(state) { calls.push("restore"); pci.set_state(state); },
     } };
@@ -42,6 +46,42 @@ const assert = require("node:assert/strict");
     calls.length = 0;
     await assert.rejects(V86.prototype.restore_state.call(emulator, saved), /bad state/);
     assert.deepEqual(calls, ["begin", "cancel"]);
+    // The public API must stop the CPU before awaiting host work, serialize
+    // concurrent requests, and resume only after the snapshot is consistent.
+    const sequence = [];
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const live = {
+        running: true, value: 0,
+        with_graphics_state: V86.prototype.with_graphics_state,
+        is_running() { return this.running; },
+        async stop() { this.running = false; sequence.push("stop"); },
+        run() { this.running = true; sequence.push("run"); },
+        graphics_adapter: {
+            async prepareSaveState() {
+                sequence.push("prepare");
+                assert.equal(live.running, false);
+                await gate;
+                live.value = 42; // an accepted GPU readback completes here
+            },
+            beginStateRestore() {}, async waitForIdle() {},
+            async finishStateRestore() {}, cancelStateRestore() {},
+        },
+        v86: {
+            save_state() { sequence.push("save"); return live.value; },
+            restore_state() { throw new Error("invalid checkpoint"); },
+        },
+    };
+    const first = V86.prototype.save_state.call(live);
+    const second = V86.prototype.save_state.call(live);
+    for (let i = 0; i < 5; ++i) await Promise.resolve();
+    assert.deepEqual(sequence, ["stop", "prepare"]);
+    release();
+    assert.deepEqual(await Promise.all([first, second]), [42, 42]);
+    assert.deepEqual(sequence, ["stop", "prepare", "save", "run", "stop", "prepare", "save", "run"]);
+    await assert.rejects(V86.prototype.restore_state.call(live, new ArrayBuffer(0)), /invalid checkpoint/);
+    assert.equal(live.running, false, "a failed restore cannot resume a partially restored guest");
+
     const bus = Object.create(PCI.prototype);
     const config = new Int32Array(64);
     config[4] = 1;

@@ -224,6 +224,9 @@ function makeFakeWebGPU(options = {}) {
         copyBufferToTexture(...args) {
             calls.push(["copyBufferToTexture", ...args]);
         }
+        copyTextureToTexture(source, target, size) {
+            calls.push(["copyTextureToTexture", source, target, size]);
+        }
         finish() { calls.push(["finish"]); return { passes: this.passes }; }
     }
     const queue = {
@@ -691,8 +694,8 @@ async function main() {
     assert.equal(executor.failed, null);
     assert.equal(executor.getStats().pipelineCreations, 2);
     assert.equal(executor.getStats().drawCalls, 7);
-    assert.equal(fake.calls.filter(call => call[0] === "createTexture").length, 13,
-        "fallback, automatic depth, uncompressed formats, and DXT1/3/5 must be GPU resources");
+    assert.equal(fake.calls.filter(call => call[0] === "createTexture").length, 14,
+        "fallback, retained back buffer, automatic depth, uncompressed formats, and DXT1/3/5 must be GPU resources");
     const textureWrites = fake.calls.filter(call => call[0] === "writeTexture");
     for (const write of textureWrites.slice(2, 5)) {
         assert.equal(write[2].byteLength, 64,
@@ -1677,7 +1680,9 @@ async function testShaderModel1x() {
         "an unknown pixel shader handle must fail the batch");
 }
 
-main().catch(error => {
+if (require.main === module) main().catch(error => {
     console.error(error);
     process.exitCode = 1;
 });
+
+module.exports = { makeFakeWebGPU, batch, command, u32Payload, createDevicePayload, D3D8WebGPUExecutor };

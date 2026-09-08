@@ -64,6 +64,7 @@ function countingFake() {
         copyBufferToBuffer() {},
         copyBufferToTexture() {},
         copyTextureToBuffer() { n.copyTextureToBuffer++; },
+        copyTextureToTexture() {},
         finish() { return {}; },
     };
     const device = {

@@ -60,16 +60,16 @@ function recordOpcodes(bytes) {
     listeners["v86gl-pci-frame"]({ bytes: authored.bytes(), frameId: 1,
         submitCount: 1, commandCount: 4, flags: 1 });
 
-    const summary = bridge.prepareSaveState();
-    assert.ok(summary.entries >= 3);
+    const summary = await bridge.prepareSaveState();
+    assert.ok(summary.entries >= 2);
     const savedPCI = pci.get_state();
     const checkpoint = savedPCI[8];
     assert.ok(checkpoint instanceof Uint8Array);
-    const header = new DataView(checkpoint.buffer, checkpoint.byteOffset,
-        checkpoint.byteLength);
-    const glBytes = checkpoint.slice(32, 32 + header.getUint32(12, true));
-    assert.ok(!recordOpcodes(glBytes).includes(211),
-        "glGetError is omitted from the replay journal");
+    const parsed = bridge.parseCheckpoint(checkpoint);
+    const { GraphicsJournal } = require("../../src/browser/glbridge/graphics_journal.js");
+    const glBytes = (await GraphicsJournal.records(parsed).next()).value.bytes;
+    assert.ok(recordOpcodes(glBytes).includes(211),
+        "query commands replay locally without writing restored guest RAM");
 
     bridge.beginStateRestore();
     pci.set_state(savedPCI);
@@ -86,6 +86,27 @@ function recordOpcodes(bytes) {
     assert.ok(resetAt >= 0 && replayAt > resetAt && queuedAt > replayAt,
         "restore resets, replays, then drains newly arriving guest work");
     assert.equal(bridge.glJournalBytes, glBytes.byteLength + queued.byteLength);
+
+    // Version 2 stored raw records; keep existing saves loadable after moving
+    // new saves to the paged compressed format.
+    const version2 = new Uint8Array(32 + 32 + glBytes.length + 32);
+    const v2 = new DataView(version2.buffer);
+    v2.setUint32(0, 0x32534756, true);
+    v2.setUint16(4, 2, true);
+    v2.setUint16(6, 32, true);
+    v2.setUint32(8, version2.length, true);
+    v2.setUint32(16, 2, true);
+    v2.setUint32(32, glBytes.length, true);
+    v2.setUint32(36, 1, true);
+    version2.set(glBytes, 64);
+    v2.setUint32(64 + glBytes.length + 24, 1, true);
+    await bridge.restoreCheckpoint(version2);
+    assert.equal(bridge.glJournalBytes, glBytes.length);
+    await bridge.prepareSaveState();
+    const migrated = bridge.parseCheckpoint(bridge.serializeCheckpoint());
+    assert.equal(migrated.version, 3);
+    assert.deepEqual((await GraphicsJournal.records(migrated).next()).value.bytes, glBytes);
+    await bridge.graphicsJournal.destroy();
     console.log("v86_network_bridge_webgpu_state_test: ok");
 })().catch(error => {
     console.error(error);

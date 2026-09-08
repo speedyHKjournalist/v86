@@ -7,22 +7,22 @@
 (function(global) {
     "use strict";
 
+    const GraphicsJournal = global.V86GraphicsJournal ||
+        (typeof require === "function" ? require("./graphics_journal.js").GraphicsJournal : null);
     const V86GL_BRIDGE_VERSION = "gl-webgpu-only-v1-20260824";
     const CTRL_D3D8_BATCH = 0xFFE0;
     const CTRL_D3D9_BATCH = 0xFFE1;
     const EXTENDED_RECORD_SIZE = 0xFFFF;
     const PCI_STATE_GRAPHICS_INDEX = 8;
     const CHECKPOINT_MAGIC = 0x32534756; // "VGS2"
-    const CHECKPOINT_VERSION = 1;
+    const CHECKPOINT_VERSION = 2;
+    const JOURNAL_ENTRY_BYTES = 32;
     const CHECKPOINT_HEADER_BYTES = 32;
-    const DEFAULT_MAX_GL_JOURNAL_BYTES = 512 * 1024 * 1024;
+    const DEFAULT_JOURNAL_MEMORY_BYTES = 64 * 1024 * 1024;
 
-    // Query/readback records do not contribute to reconstructing GL state.
-    // Replaying them could overwrite restored guest DMA or leave a query open.
-    const NON_REPLAYABLE_GL_OPS = new Set([
-        94, 174, 175, 176, 177, 178, 179, 180, 181,
-        188, 189, 190, 191, 192, 193, 211, 213, 216,
-    ]);
+    // Version 3 compresses/spools every accepted batch, including queries and Presents.
+    // Readback writers are disabled during replay; object creation and query
+    // begin/end still run, so guest handles and unfinished frames survive.
 
     function u16(bytes, offset) {
         return bytes[offset] | bytes[offset + 1] << 8;
@@ -64,7 +64,7 @@
             this.d3d9Canvas = this.options.d3d9Canvas || shared;
             this.container = this.options.container || shared && shared.parentElement;
             this.screenCanvas = this.options.screenCanvas || this.findScreenCanvas();
-            if(this.screenCanvas && [this.glCanvas, this.d3d8Canvas, this.d3d9Canvas].includes(this.screenCanvas))
+            if (this.screenCanvas && [this.glCanvas, this.d3d8Canvas, this.d3d9Canvas].includes(this.screenCanvas))
                 throw new Error("WebGPU requires a canvas separate from the VGA 2D canvas");
             this.destroyed = false;
             this.memoryGeneration = 0;
@@ -84,11 +84,15 @@
             this.d3d9SwapChainCanvases = new Map();
             this.d3d9SwapChainSurfaces = new Map();
 
+            this.journalBudget = this.options.graphicsJournalMemoryBytes ??
+                this.options.maxGraphicsJournalBytes ?? this.options.maxGLJournalBytes ?? DEFAULT_JOURNAL_MEMORY_BYTES;
+            this.graphicsJournal = new GraphicsJournal({ budget: this.journalBudget });
+            this.preparedCheckpoint = null;
+            this.graphicsJournalBytes = 0;
+            this.legacyCheckpoint = new Uint8Array(0);
             this.glJournal = [];
             this.glJournalBytes = 0;
             this.glJournalOverflow = false;
-            this.maxGLJournalBytes = this.options.maxGLJournalBytes ||
-                DEFAULT_MAX_GL_JOURNAL_BYTES;
             this.replayingState = false;
             this.restoringState = false;
             this.restorePrepared = false;
@@ -321,6 +325,11 @@
                 this.pendingBatches.push({ ...event, bytes: bytes.slice() });
                 return;
             }
+            if (!this.replayingState) this.recordGraphicsBatch(event, bytes);
+            return this.executePCIBatch(event, bytes);
+        }
+
+        executePCIBatch(event, bytes) {
             if (this.isEnvelope(bytes, CTRL_D3D8_BATCH))
                 return this.pushD3D8PCIBatch(event, bytes);
             if (this.isEnvelope(bytes, CTRL_D3D9_BATCH))
@@ -338,8 +347,8 @@
                 console.error("[gl-webgpu] executor unavailable");
                 return;
             }
-            if (!this.replayingState) this.recordGLBatch(bytes);
             this.glExecutor.submit(bytes, {
+                ...(event.replay ? { replay: true } : {}),
                 pciFrameId: event.frameId >>> 0,
                 submitCount: event.submitCount >>> 0,
                 descriptorCommandCount: event.commandCount >>> 0,
@@ -368,7 +377,8 @@
                 return;
             }
             this.warnOnSharedD3DCanvasConflict("d3d8");
-            this.d3d8Executor.submit(bytes.subarray(8), {
+            return this.d3d8Executor.submit(bytes.subarray(8), {
+                ...(event.replay ? { replay: true } : {}),
                 pciFrameId: event.frameId >>> 0,
                 submitCount: event.submitCount >>> 0,
                 descriptorCommandCount: event.commandCount >>> 0,
@@ -405,7 +415,8 @@
                 this.emulator.write_memory(source,
                     (descriptorBase + offset) >>> 0);
             };
-            this.d3d9Executor.submit(bytes.subarray(8), {
+            return this.d3d9Executor.submit(bytes.subarray(8), {
+                ...(event.replay ? { replay: true } : {}),
                 pciFrameId: event.frameId >>> 0,
                 submitCount: event.submitCount >>> 0,
                 descriptorCommandCount: event.commandCount >>> 0,
@@ -414,86 +425,123 @@
             });
         }
 
-        recordGLBatch(bytes) {
-            let offset = 0;
-            const records = [];
-            let added = 0;
-            while (offset < bytes.byteLength) {
-                const start = offset;
-                if (offset + 4 > bytes.byteLength) return;
-                const fn = u16(bytes, offset);
-                let size = u16(bytes, offset + 2);
-                offset += 4;
-                if (size === EXTENDED_RECORD_SIZE) {
-                    if (offset + 4 > bytes.byteLength) return;
-                    size = u32(bytes, offset);
-                    offset += 4;
-                }
-                if (size > bytes.byteLength - offset) return;
-                offset += size;
-                if (NON_REPLAYABLE_GL_OPS.has(fn)) continue;
-                const record = bytes.slice(start, offset);
-                records.push(record);
-                added += record.byteLength;
-            }
-            if (this.glJournalBytes + added > this.maxGLJournalBytes) {
-                this.glJournalOverflow = true;
-                return;
-            }
-            this.glJournal.push(...records);
-            this.glJournalBytes += added;
+        recordGraphicsBatch(event, bytes) {
+            this.preparedCheckpoint = null;
+            this.graphicsJournal.append(event, bytes);
+            this.graphicsJournalBytes += JOURNAL_ENTRY_BYTES + bytes.byteLength;
+            if (!event.barrier && !this.isEnvelope(bytes, CTRL_D3D8_BATCH) &&
+                    !this.isEnvelope(bytes, CTRL_D3D9_BATCH))
+                this.glJournalBytes += bytes.byteLength;
+        }
+
+        async resetJournal() {
+            await this.graphicsJournal.destroy();
+            this.graphicsJournal = new GraphicsJournal({ budget: this.journalBudget });
+            this.graphicsJournalBytes = 0;
+            this.preparedCheckpoint = null;
         }
 
         serializeCheckpoint() {
             if (this.restoringState || this.replayingState)
                 throw new Error("graphics state is being restored");
-            if (this.glJournalOverflow)
-                throw new Error("OpenGL replay journal exceeded " +
-                    Math.floor(this.maxGLJournalBytes / 1024 / 1024) + " MiB");
-            const gl = new Uint8Array(this.glJournalBytes);
-            let at = 0;
-            for (const record of this.glJournal) {
-                gl.set(record, at);
-                at += record.byteLength;
-            }
-            const d3d8 = this.d3d8Executor &&
-                    typeof this.d3d8Executor.serializeState === "function" ?
-                ownedBytes(this.d3d8Executor.serializeState()) : new Uint8Array(0);
-            const total = CHECKPOINT_HEADER_BYTES + gl.byteLength + d3d8.byteLength;
-            const result = new Uint8Array(total);
-            const view = new DataView(result.buffer);
-            view.setUint32(0, CHECKPOINT_MAGIC, true);
-            view.setUint16(4, CHECKPOINT_VERSION, true);
-            view.setUint16(6, CHECKPOINT_HEADER_BYTES, true);
-            view.setUint32(8, total, true);
-            view.setUint32(12, gl.byteLength, true);
-            view.setUint32(16, d3d8.byteLength, true);
-            view.setUint32(20, this.glJournal.length, true);
-            result.set(gl, CHECKPOINT_HEADER_BYTES);
-            result.set(d3d8, CHECKPOINT_HEADER_BYTES + gl.byteLength);
-            return result;
+            if (!this.preparedCheckpoint)
+                throw new Error("Graphics checkpoint is not prepared; await emulator.save_state()");
+            return this.preparedCheckpoint;
         }
+
+        releaseCheckpoint() { this.preparedCheckpoint = null; }
 
         parseCheckpoint(checkpoint) {
             const bytes = asBytes(checkpoint);
             if (bytes.byteLength < CHECKPOINT_HEADER_BYTES)
                 throw new Error("graphics checkpoint is truncated");
-            const view = new DataView(bytes.buffer, bytes.byteOffset,
-                bytes.byteLength);
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            const version = view.getUint16(4, true);
+            if (version === 3) {
+                const parsed = GraphicsJournal.parse(bytes);
+                if (parsed.legacy.length && (parsed.legacy.length < CHECKPOINT_HEADER_BYTES ||
+                        new DataView(parsed.legacy.buffer).getUint16(4, true) !== 1))
+                    throw new Error("graphics checkpoint legacy data must be version 1");
+                if (parsed.legacy.length) this.parseCheckpoint(parsed.legacy);
+                return parsed;
+            }
             if (view.getUint32(0, true) !== CHECKPOINT_MAGIC ||
-                    view.getUint16(4, true) !== CHECKPOINT_VERSION)
+                    (version !== 1 && version !== CHECKPOINT_VERSION))
                 throw new Error("graphics checkpoint version is unsupported");
             const header = view.getUint16(6, true);
             const total = view.getUint32(8, true);
-            const glBytes = view.getUint32(12, true);
-            const d3d8Bytes = view.getUint32(16, true);
-            if (header < CHECKPOINT_HEADER_BYTES || total !== bytes.byteLength ||
-                    header + glBytes + d3d8Bytes !== total)
+            if (header !== CHECKPOINT_HEADER_BYTES || total !== bytes.byteLength)
                 throw new Error("graphics checkpoint lengths are invalid");
-            return {
-                gl: bytes.slice(header, header + glBytes),
-                d3d8: bytes.slice(header + glBytes, total),
-            };
+            if (version === 1) {
+                const glBytes = view.getUint32(12, true);
+                const d3d8Bytes = view.getUint32(16, true);
+                if (header + glBytes + d3d8Bytes !== total)
+                    throw new Error("graphics checkpoint lengths are invalid");
+                return { version, gl: bytes.slice(header, header + glBytes),
+                    d3d8: bytes.slice(header + glBytes), records: [] };
+            }
+            const legacyBytes = view.getUint32(12, true);
+            if (legacyBytes > total - header)
+                throw new Error("graphics checkpoint legacy data is truncated");
+            const legacy = bytes.slice(header, header + legacyBytes);
+            if (legacyBytes && (legacyBytes < CHECKPOINT_HEADER_BYTES ||
+                    new DataView(legacy.buffer).getUint16(4, true) !== 1))
+                throw new Error("graphics checkpoint legacy data must be version 1");
+            if (legacyBytes) this.parseCheckpoint(legacy);
+            const count = view.getUint32(16, true);
+            const records = [];
+            let offset = header + legacyBytes;
+            for (let i = 0; i < count; ++i) {
+                if (offset + JOURNAL_ENTRY_BYTES > total)
+                    throw new Error("graphics checkpoint batch header is truncated");
+                const size = view.getUint32(offset, true);
+                const kind = view.getUint32(offset + 24, true);
+                if (size > total - offset - JOURNAL_ENTRY_BYTES || kind > 1 ||
+                        (kind === 1 && size) || view.getUint32(offset + 28, true))
+                    throw new Error("graphics checkpoint batch is invalid");
+                records.push({ flags: view.getUint32(offset + 4, true),
+                    frameId: view.getUint32(offset + 8, true),
+                    submitCount: view.getUint32(offset + 12, true),
+                    commandCount: view.getUint32(offset + 16, true),
+                    responseBase: view.getUint32(offset + 20, true), barrier: kind === 1,
+                    bytes: bytes.slice(offset + JOURNAL_ENTRY_BYTES,
+                        offset + JOURNAL_ENTRY_BYTES + size) });
+                offset += JOURNAL_ENTRY_BYTES + size;
+            }
+            if (offset !== total) throw new Error("graphics checkpoint has trailing data");
+            return { version, legacy, records };
+        }
+
+        async waitForIdle(flush, allowFailure = false) {
+            const executors = [this.glExecutor, this.d3d8Executor, this.d3d9Executor].filter(Boolean);
+            for (const executor of executors) {
+                try {
+                    if (executor.readyPromise) await executor.readyPromise;
+                    if (executor.idle) await executor.idle();
+                    else if (executor.work) await executor.work;
+                } catch (error) {
+                    if (!allowFailure) throw error;
+                }
+            }
+            if (flush) {
+                if (this.glExecutor && this.glExecutor.flushFrame) this.glExecutor.flushFrame();
+                if (this.d3d8Executor && this.d3d8Executor.finishFrame) this.d3d8Executor.finishFrame(false);
+                if (this.d3d9Executor && this.d3d9Executor.flushForCheckpoint)
+                    this.d3d9Executor.flushForCheckpoint();
+            }
+            for (const executor of executors) {
+                try {
+                    if (executor.checkpointIdle) await executor.checkpointIdle();
+                    else if (executor.idle) await executor.idle();
+                    const queue = executor.device && executor.device.queue;
+                    if (queue && queue.onSubmittedWorkDone) await queue.onSubmittedWorkDone();
+                    if (executor.failed) throw executor.failed;
+                } catch (error) {
+                    // Loading a good checkpoint must recover an executor that
+                    // failed while processing the timeline being discarded.
+                    if (!allowFailure) throw error;
+                }
+            }
         }
 
         getPCIDevice() {
@@ -531,11 +579,15 @@
             return true;
         }
 
-        prepareSaveState() {
+        async prepareSaveState() {
             if (!this.attachPCIStateHooks())
                 throw new Error("v86gl PCI device is not ready for save state");
-            const checkpoint = this.serializeCheckpoint();
-            return { entries: this.glJournal.length, bytes: checkpoint.byteLength };
+            await this.waitForIdle(true);
+            // Flushes can split an unfinished frame/query. Replay that boundary
+            // too, including when this checkpoint later becomes a parent save.
+            this.recordGraphicsBatch({ barrier: true }, new Uint8Array(0));
+            this.preparedCheckpoint = await this.graphicsJournal.snapshot(this.legacyCheckpoint);
+            return { entries: this.graphicsJournal.count, bytes: this.preparedCheckpoint.byteLength };
         }
 
         beginStateRestore() {
@@ -546,6 +598,7 @@
             this.restoreHadCheckpoint = false;
             this.restoringState = true;
             this.pendingRestore = Promise.resolve();
+            this.positionCanvas();
         }
 
         onPCIStateRestored(checkpoint) {
@@ -560,30 +613,66 @@
         }
 
         async restoreCheckpoint(checkpoint) {
-            const parsed = checkpoint && checkpoint.byteLength ?
-                this.parseCheckpoint(checkpoint) :
-                { gl: new Uint8Array(0), d3d8: new Uint8Array(0) };
-            if (!this.glExecutor ||
-                    typeof this.glExecutor.resetForReplay !== "function")
-                throw new Error("GL WebGPU executor cannot reset for replay");
+            // Validate before discarding live resources. Version 1 can restore
+            // only the GL/D3D8 data that old writers actually saved.
+            const parsed = checkpoint && checkpoint.byteLength ? this.parseCheckpoint(checkpoint) :
+                { version: 2, legacy: new Uint8Array(0), records: [] };
+            await this.waitForIdle(false, true);
             this.replayingState = true;
+            this.positionCanvas();
+            let complete = false;
             try {
-                this.glExecutor.resetForReplay();
-                this.glJournal = parsed.gl.byteLength ? [parsed.gl.slice()] : [];
-                this.glJournalBytes = parsed.gl.byteLength;
+                if (this.resetForStateRestore) await this.resetForStateRestore();
+                else {
+                    if (this.glExecutor) this.glExecutor.resetForReplay();
+                    if (this.d3d8Executor && this.d3d8Executor.restoreState)
+                        await this.d3d8Executor.restoreState(new Uint8Array(0));
+                    if (this.d3d9Executor && this.d3d9Executor.resetForReplay)
+                        await this.d3d9Executor.resetForReplay();
+                }
+                await this.resetJournal();
+                this.glJournal = [];
+                this.glJournalBytes = 0;
                 this.glJournalOverflow = false;
-                if (parsed.gl.byteLength)
-                    this.glExecutor.submit(parsed.gl, { replay: true });
-                if (parsed.gl.byteLength &&
-                        typeof this.glExecutor.onSwapBuffers === "function")
-                    this.glExecutor.onSwapBuffers();
-                if (parsed.d3d8.byteLength && this.d3d8Executor &&
-                        typeof this.d3d8Executor.restoreState === "function")
-                    await this.d3d8Executor.restoreState(parsed.d3d8);
+                this.legacyCheckpoint = parsed.version === 1 ? ownedBytes(checkpoint) : parsed.legacy;
+                const legacy = parsed.version === 1 ? parsed :
+                    (parsed.legacy.byteLength ? this.parseCheckpoint(parsed.legacy) : null);
+                if (legacy) {
+                    if (legacy.gl.byteLength) {
+                        this.glExecutor.submit(legacy.gl.slice(), { replay: true });
+                        this.glExecutor.onSwapBuffers();
+                        this.glJournalBytes = legacy.gl.byteLength;
+                    }
+                    if (this.d3d8Executor && this.d3d8Executor.restoreState)
+                        await this.d3d8Executor.restoreState(legacy.d3d8);
+                }
+                const records = parsed.version === 3 ? GraphicsJournal.records(parsed) : parsed.records;
+                for await (const record of records) {
+                    if (record.barrier) await this.waitForIdle(true);
+                    else {
+                        // Each replay owns its response buffer. Never let query
+                        // responses mutate the journal or restored guest RAM.
+                        const event = { ...record, replay: true, batchAddr: 0, descAddr: 0,
+                            writeGuestMemory() {}, isMemoryValid: () => true };
+                        await this.executePCIBatch(event, record.bytes.slice());
+                    }
+                    this.recordGraphicsBatch(record, record.bytes);
+                    // Do not accumulate an entire decompressed history during
+                    // restore. Compression and disk writes keep pace with replay.
+                    await this.graphicsJournal.work;
+                }
+                await this.waitForIdle(false);
+                complete = true;
             } finally {
                 this.replayingState = false;
                 this.restoringState = false;
-                this.drainPendingBatches();
+                if (complete) {
+                    this.positionCanvas();
+                    this.drainPendingBatches();
+                } else {
+                    this.hideOverlayCanvas(true);
+                    this.pendingBatches = [];
+                }
             }
         }
 
@@ -635,7 +724,8 @@
 
         styleOverlayCanvas(canvas, left, top, width, height, visible) {
             if (!canvas || !canvas.style) return;
-            if (this.destroyed || this.suspended || this.options.isGraphical && !this.options.isGraphical())
+            if (this.destroyed || this.suspended || this.restoringState || this.replayingState ||
+                    this.options.isGraphical && !this.options.isGraphical())
                 visible = false;
             canvas.style.position = "absolute";
             canvas.style.left = left + "px";
@@ -704,7 +794,7 @@
             let clip = surface && surface.clipRect;
             // Clip windowed rendering to the VGA desktop, preserving any
             // DirectDraw primary clip region as well.
-            if(this.screenCanvas && this.screenCanvas.width && this.screenCanvas.height) {
+            if (this.screenCanvas && this.screenCanvas.width && this.screenCanvas.height) {
                 const w = surface.displayWidth || surface.width || canvas.width || 1;
                 const h = surface.displayHeight || surface.height || canvas.height || 1;
                 const x = surface.ddDesktopPrimary ? 0 : surface.x || 0;

@@ -59,11 +59,13 @@
         };
         const disposeExecutors = async () => {
             const old = executors();
-            await Promise.allSettled(old.flatMap(executor => [executor.work, executor.readyPromise]));
+            await Promise.allSettled(old.flatMap(executor => [executor.readyPromise,
+                executor.checkpointIdle ? executor.checkpointIdle() :
+                    executor.idle ? executor.idle() : executor.work]));
             const hosts = new Set(old.map(executor => executor.host).filter(Boolean));
             for (const executor of old) {
                 executor.destroyed = true;
-                if (executor.shaderCacheSaveTimer != null) {
+                if (executor.shaderCacheSaveTimer !== null && executor.shaderCacheSaveTimer !== undefined) {
                     global.clearTimeout(executor.shaderCacheSaveTimer);
                     executor.shaderCacheSaveTimer = null;
                     await executor.flushPersistentShaderCache();
@@ -84,16 +86,18 @@
                 bridge.removeD3D9SwapChainCanvas(handle);
             bridge.glExecutor = bridge.d3d8Executor = bridge.d3d9Executor = null;
         };
-        bridge.reset = async () => {
+        const resetExecutors = async (restoring) => {
             ++bridge.memoryGeneration;
             bridge.suspended = true;
             bridge.restoringState = true;
             bridge.hideOverlayCanvas(true);
             await disposeExecutors();
+            await bridge.resetJournal();
+            bridge.legacyCheckpoint = new Uint8Array(0);
             bridge.glJournal = [];
             bridge.glJournalBytes = 0;
             bridge.glJournalOverflow = false;
-            bridge.pendingBatches = [];
+            if (!restoring) bridge.pendingBatches = [];
             bridge.d3d8BatchStreamSeen = bridge.d3d9BatchStreamSeen = false;
             bridge.sharedD3DCanvasConflictReported = false;
             bridge.d3d8OwnerSessionKey = bridge.d3d9OwnerSessionKey = null;
@@ -106,10 +110,12 @@
             bridge.installD3D9Executor();
             bridge.ready = initialize();
             await bridge.ready;
-            bridge.restoringState = false;
+            bridge.restoringState = !!restoring;
             bridge.suspended = false;
             bridge.hideOverlayCanvas(true);
         };
+        bridge.reset = () => resetExecutors(false);
+        bridge.resetForStateRestore = () => resetExecutors(true);
         bridge.makeScreenshot = () => {
             const hasExtra = Array.from(bridge.d3d9SwapChainCanvases.values())
                 .some(canvas => canvas.style.display !== "none");
@@ -165,6 +171,10 @@
                 await disposeExecutors();
                 bridge.pendingBatches = [];
                 bridge.glJournal = [];
+                await bridge.graphicsJournal.destroy();
+                bridge.preparedCheckpoint = null;
+                bridge.graphicsJournalBytes = 0;
+                bridge.legacyCheckpoint = new Uint8Array(0);
                 if (ownedCanvas && canvas.parentElement === container) container.removeChild(canvas);
                 if (setPosition) container.style.position = oldPosition;
                 const pci = bridge.pciStateDevice;

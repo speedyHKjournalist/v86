@@ -43,7 +43,7 @@ const path = require("node:path");
             w16(22, 0); w16(24, 8);
             w32(32, table); w32(36, 0); w32(40, avail); w32(44, 0);
             w32(48, used); w32(52, 0);
-            for(let i = 0; i < 320; i++) mem.setUint8(table + i, 0);
+            for (let i = 0; i < 320; i++) mem.setUint8(table + i, 0);
             mem.setUint32(table, req, true); mem.setUint32(table + 8, 24, true);
             mem.setUint16(table + 12, 1, true); mem.setUint16(table + 14, 1, true);
             mem.setUint32(table + 16, reply, true); mem.setUint32(table + 24, 16, true);
@@ -70,7 +70,7 @@ const path = require("node:path");
         mem.setUint32(req,2,true); mem.setUint32(req+4,0,true); mem.setUint32(req+12,36,true);
         function run(count) {
             const start=process.hrtime.bigint();
-            for(let i=0;i<count;i++) {
+            for (let i=0;i<count;i++) {
                 mem.setUint16(avail+4+(idx&7)*2,0,true);
                 idx=(idx+1)&65535; mem.setUint16(avail+2,idx,true);
                 io.port_write16(notify,0);

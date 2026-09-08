@@ -1122,4 +1122,6 @@ if (failures.length) {
 console.log(passed + " ddraw executor tests passed");
 }
 
-main().catch(error => { console.error(error); process.exit(1); });
+if (require.main === module) main().catch(error => { console.error(error); process.exit(1); });
+
+module.exports = { makeExecutor, buildBatch, command, u32, createDevicePayload, createSurfacePayload, updateTexturePayload, bltPayload, palettePayload, OP, DEVICE, FMT_P8, USAGE_DDRAW_INDEXED };

@@ -142,5 +142,24 @@ export default [
             "valid-typeof": "error",
             "strict": "error"
         }
-    }
+    },
+    {
+        // The standalone graphics bundle and its Node fixtures use CommonJS
+        // wrappers and WebGPU's camelCase vocabulary. Keep lint enabled, with
+        // conventions scoped to this compilation boundary.
+        files: ["src/browser/glbridge/**/*.js", "tests/glbridge/**/*.js", "tests/glbridge/**/*.cjs", "tools/gen_gl_coverage.cjs"],
+        languageOptions: {
+            sourceType: "commonjs",
+            globals: { global: "readonly", self: "readonly", queueMicrotask: "readonly", __dirname: "readonly" },
+        },
+        rules: {
+            "id-match": ["error", "^([a-zA-Z_$][a-zA-Z0-9_$]*)$", { onlyDeclarations: true }],
+            "keyword-spacing": ["error", { before: true, after: true }],
+        },
+    },
+    {
+        files: ["src/browser/glbridge/**/*.js"],
+        ignores: ["src/browser/glbridge/d3d9-webgpu/d3d9_shader_worker.js"],
+        rules: { strict: ["error", "function"] },
+    },
 ];

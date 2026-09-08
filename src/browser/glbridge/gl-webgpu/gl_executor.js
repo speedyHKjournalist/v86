@@ -888,7 +888,7 @@
         case GL.BGRA: out[0] = c[2]; out[1] = c[1]; out[2] = c[0]; out[3] = c[3]; return;
         case GL.ABGR_EXT: out[0] = c[3]; out[1] = c[2]; out[2] = c[1]; out[3] = c[0]; return;
         default: out[0] = c[0] || 0; out[1] = c[1] || 0; out[2] = c[2] || 0;
-                 out[3] = c[3] === undefined ? 255 : c[3]; return;
+                 out[3] = c[3] === undefined ? 255 : c[3];
         }
     }
 
@@ -909,9 +909,9 @@
             return;
         case "RGB":
             texel[3] = 255;
-            return;
+            break;
         default:
-            return;
+
         }
     }
 
@@ -1743,6 +1743,7 @@
             this.vertexCapacity = Math.max(256 * 1024,
                 this.options.vertexRingBytes || VERTEX_RING_BYTES);
 
+            this.pendingReadbacks = new Set();
             this.pending = [];
             this.busy = false;
             this.heartbeat = 0;
@@ -1815,6 +1816,19 @@
                 throw error;
             });
             return this.readyPromise;
+        }
+
+        trackReadback(operation) {
+            this.pendingReadbacks.add(operation);
+            operation.then(() => this.pendingReadbacks.delete(operation),
+                () => this.pendingReadbacks.delete(operation));
+            return operation;
+        }
+
+        async idle() {
+            if (this.readyPromise) await this.readyPromise;
+            while (this.pendingReadbacks.size)
+                await Promise.all(Array.from(this.pendingReadbacks));
         }
 
         onDeviceLost() {
@@ -2012,6 +2026,14 @@
             this.contexts.clear();
             this.framebuffers.clear();
             this.queries.clear();
+            release(this.activeOcclusionQuerySet);
+            this.activeOcclusionQuerySet = null;
+            this.activeQuery = null;
+            this.pendingQueries = [];
+            this.nextQuerySlot = 0;
+            this.uniformValueCache.clear();
+            this.stateUniformLayouts = new WeakMap();
+            this.pixelMaps = Object.create(null);
             this.nextContextId = 1;
             this.nextShareGroupId = 1;
             this.nextUniformLocation = 1;
@@ -4182,8 +4204,8 @@
             case GL.POST_COLOR_MATRIX_ALPHA_BIAS_SGI:
                 t.postColorMatrixBias[pname -
                     GL.POST_COLOR_MATRIX_RED_BIAS_SGI] = value;
-                return;
-            default: return;    // depth/stencil scales have no effect here
+                break;
+            default:     // depth/stencil scales have no effect here
             }
         },
 
@@ -6495,7 +6517,7 @@
 
         readQueryResults(resolved) {
             const { queries, resolveBuffer, staging } = resolved;
-            staging.mapAsync(1 /* GPUMapMode.READ */).then(() => {
+            this.trackReadback(staging.mapAsync(1 /* GPUMapMode.READ */).then(() => {
                 const words = new Uint32Array(staging.getMappedRange().slice(0));
                 staging.unmap();
                 for (const record of queries) {
@@ -6530,7 +6552,7 @@
             }).then(() => {
                 try { staging.destroy(); } catch (ignored) { /* already gone */ }
                 try { resolveBuffer.destroy(); } catch (ignored) { /* gone */ }
-            });
+            }));
         },
 
         finishFrame(present) {
@@ -8756,7 +8778,7 @@ struct BlitParams {
 
             const writeGuest = this.options.writeGuestMemory;
             const recordOffset = offset;
-            staging.mapAsync(1 /* GPUMapMode.READ */).then(() => {
+            this.trackReadback(staging.mapAsync(1 /* GPUMapMode.READ */).then(() => {
                 const mapped = new Uint8Array(staging.getMappedRange());
                 const out = new Uint8Array(dataSize);
                 const packed = packReadback(mapped, bytesPerRow, width, height,
@@ -8789,7 +8811,7 @@ struct BlitParams {
                 this.warnOnce("readback", "glReadPixels mapping failed",
                     { message: String(error) });
                 try { staging.destroy(); } catch (ignored) { /* already gone */ }
-            });
+            }));
         },
 
         /* ---- occlusion queries ---- */

@@ -192,41 +192,41 @@ V86GLPCI.prototype.handle_request = function(request)
         return INVALID;
     const raw = this.cpu.read_blob(this.arenaAddress, length);
     const header = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-    const commandBytes = header.getUint32(20, true);
+    const command_bytes = header.getUint32(20, true);
     // VGL2 reserved words belong to the existing graphics protocol, not to
     // the virtqueue request. Shipping D3D8/D3D9/DDraw DLLs put D9WG_MAGIC in
     // reserved0; the old PCI transport ignored both words. Preserve that ABI.
     if(header.getUint32(0, true) !== MAGIC || header.getUint32(4, true) !== 1 ||
-        commandBytes !== length - HEADER_BYTES || (header.getUint32(8, true) & ~1)) return INVALID;
+        command_bytes !== length - HEADER_BYTES || (header.getUint32(8, true) & ~1)) return INVALID;
 
     const generation = this.arenaGeneration;
-    const addressBase = this.arenaAddress;
-    const arenaBytes = this.arenaBytes;
-    const memoryValid = () => generation === this.arenaGeneration && !!this.arenaBytes;
+    const address_base = this.arenaAddress;
+    const arena_bytes = this.arenaBytes;
+    const memory_valid = () => generation === this.arenaGeneration && !!this.arenaBytes;
     const event = {
         "frameId": header.getUint32(12, true),
         "flags": header.getUint32(8, true) | flags,
         "commandCount": header.getUint32(16, true),
         "bytes": raw.subarray(HEADER_BYTES),
-        "descAddr": addressBase,
+        "descAddr": address_base,
         "descLen": length,
-        "batchAddr": addressBase + HEADER_BYTES,
-        "responseBase": arenaBytes - 4 * 1024 * 1024 - HEADER_BYTES,
+        "batchAddr": address_base + HEADER_BYTES,
+        "responseBase": arena_bytes - 4 * 1024 * 1024 - HEADER_BYTES,
         "submitCount": this.submitCount + 1,
         "handled": false,
-        "isMemoryValid": memoryValid,
+        "isMemoryValid": memory_valid,
         "writeGuestMemory": (offset, bytes) => {
-            if(!memoryValid()) return;
-            if(!Number.isInteger(offset) || offset < 0 || offset + bytes.length > arenaBytes)
+            if(!memory_valid()) return;
+            if(!Number.isInteger(offset) || offset < 0 || offset + bytes.length > arena_bytes)
                 throw new RangeError("v86gl write outside registered arena");
-            this.cpu.write_blob(bytes, addressBase + offset);
+            this.cpu.write_blob(bytes, address_base + offset);
         },
     };
     if(this.onSubmit) this.onSubmit(event);
     this.bus.send("v86gl-pci-frame", event);
     if(!event["handled"]) return NO_RENDERER;
     this.lastFrameId = event["frameId"];
-    this.lastBytes = commandBytes;
+    this.lastBytes = command_bytes;
     ++this.submitCount;
     return OK;
 };

@@ -50,12 +50,14 @@ export function SpeakerAdapter(bus)
 
     bus.register("emulator-stopped", function()
     {
-        this.audio_context.suspend();
+        this.pause();
     }, this);
 
     bus.register("emulator-started", function()
     {
+        this.dac.paused = false;
         this.audio_context.resume();
+        this.dac.pump();
     }, this);
 
     bus.register("speaker-confirm-initialized", function()
@@ -64,6 +66,12 @@ export function SpeakerAdapter(bus)
     }, this);
     bus.send("speaker-has-initialized");
 }
+
+SpeakerAdapter.prototype.pause = function()
+{
+    if(this.dac) this.dac.paused = true;
+    return this.audio_context ? this.audio_context.suspend() : Promise.resolve();
+};
 
 SpeakerAdapter.prototype.destroy = function()
 {
@@ -466,6 +474,8 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
 
     this.enabled = false;
     this.sampling_rate = 48000;
+    this.paused = true;
+    this.generation = 0;
 
     // Worklet
 
@@ -529,6 +539,7 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
 
             // Same as source_time but rounded down to an index.
             self.source_offset = 0;
+            self.generation = 0;
 
             // Interface
 
@@ -536,6 +547,13 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
             {
                 switch(event.data.type)
                 {
+                    case "reset":
+                        self.queue_data.fill(null);
+                        self.queue_start = self.queue_end = self.queue_length = self.queued_samples = 0;
+                        self.source_buffer_previous = self.source_buffer_current = EMPTY_BUFFER;
+                        self.source_block_start = self.source_time = self.source_offset = 0;
+                        self.generation = event.data.value;
+                        break;
                     case "queue":
                         self.queue_push(event.data.value);
                         break;
@@ -695,6 +713,7 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
                 this.port.postMessage(
                 {
                     type: "pump",
+                    generation: this.generation,
                 });
             }
         };
@@ -784,6 +803,11 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
 
         this.node_processor.port.postMessage(
         {
+            type: "reset",
+            value: this.generation,
+        });
+        this.node_processor.port.postMessage(
+        {
             type: "sampling-rate",
             value: this.sampling_rate,
         });
@@ -793,7 +817,7 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
             switch(event.data.type)
             {
                 case "pump":
-                    this.pump();
+                    if(event.data.generation === this.generation) this.pump();
                     break;
                 case "debug-log":
                     dbg_log("SpeakerWorkletDAC - Worklet: " + event.data.value);
@@ -810,6 +834,8 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
 
     this.mixer_connection = mixer.add_source(this.node_output, MIXER_SRC_DAC);
     this.mixer_connection.set_gain_hidden(3);
+
+    bus.register("dac-reset", this.reset, this);
 
     bus.register("dac-send-data", function(data)
     {
@@ -870,11 +896,17 @@ SpeakerWorkletDAC.prototype.queue = function(data)
 
 SpeakerWorkletDAC.prototype.pump = function()
 {
-    if(!this.enabled)
+    if(!this.enabled || this.paused)
     {
         return;
     }
     this.bus.send("dac-request-data");
+};
+
+SpeakerWorkletDAC.prototype.reset = function()
+{
+    ++this.generation;
+    if(this.node_processor) this.node_processor.port.postMessage({ type: "reset", value: this.generation });
 };
 
 /**
@@ -897,6 +929,9 @@ function SpeakerBufferSourceDAC(bus, audio_context, mixer)
     this.sampling_rate = 22050;
     this.buffered_time = 0;
     this.rate_ratio = 1;
+    this.paused = true;
+    this.generation = 0;
+    this.sources = new Set();
 
     // Nodes
 
@@ -909,6 +944,8 @@ function SpeakerBufferSourceDAC(bus, audio_context, mixer)
 
     this.mixer_connection = mixer.add_source(this.node_output, MIXER_SRC_DAC);
     this.mixer_connection.set_gain_hidden(3);
+
+    bus.register("dac-reset", this.reset, this);
 
     bus.register("dac-send-data", function(data)
     {
@@ -990,7 +1027,14 @@ SpeakerBufferSourceDAC.prototype.queue = function(data)
     var source = this.audio_context.createBufferSource();
     source.buffer = buffer;
     source.connect(this.node_lowpass);
-    source.addEventListener("ended", this.pump.bind(this));
+    const generation = this.generation;
+    const pump = () => { if(this.generation === generation) this.pump(); };
+    this.sources.add(source);
+    source.addEventListener("ended", () => {
+        this.sources.delete(source);
+        source.disconnect();
+        pump();
+    });
 
     var current_time = this.audio_context.currentTime;
 
@@ -1006,7 +1050,7 @@ SpeakerBufferSourceDAC.prototype.queue = function(data)
         {
             current_silence_duration += block_duration;
             this.buffered_time += block_duration;
-            setTimeout(() => this.pump(), current_silence_duration * 1000);
+            setTimeout(pump, current_silence_duration * 1000);
         }
     }
 
@@ -1014,12 +1058,12 @@ SpeakerBufferSourceDAC.prototype.queue = function(data)
     this.buffered_time += block_duration;
 
     // Chase the schedule - ensure reserve is full
-    setTimeout(() => this.pump(), 0);
+    setTimeout(pump, 0);
 };
 
 SpeakerBufferSourceDAC.prototype.pump = function()
 {
-    if(!this.enabled)
+    if(!this.enabled || this.paused)
     {
         return;
     }
@@ -1028,6 +1072,18 @@ SpeakerBufferSourceDAC.prototype.pump = function()
         return;
     }
     this.bus.send("dac-request-data");
+};
+
+SpeakerBufferSourceDAC.prototype.reset = function()
+{
+    ++this.generation;
+    for(const source of this.sources)
+    {
+        source.stop();
+        source.disconnect();
+    }
+    this.sources.clear();
+    this.buffered_time = 0;
 };
 
 /**

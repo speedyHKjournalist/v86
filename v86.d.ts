@@ -645,8 +645,10 @@ export interface V86GraphicsAdapter {
     canvas: HTMLCanvasElement;
     screenChanged(): void;
     serializeCheckpoint(): Uint8Array;
+    releaseCheckpoint?(): void;
     onPCIStateRestored(checkpoint?: Uint8Array): void;
-    prepareSaveState(): { entries: number; bytes: number };
+    prepareSaveState(): Promise<{ entries: number; bytes: number }>;
+    waitForIdle(flush?: boolean, allowFailure?: boolean): Promise<void>;
     beginStateRestore(): void;
     finishStateRestore(): Promise<{ hasGLState: boolean }>;
     cancelStateRestore(): void;
@@ -659,6 +661,11 @@ export interface V86GraphicsAdapter {
 export interface V86GraphicsOptions {
     graphicsCanvas?: HTMLCanvasElement;
     onError?: (error: Error) => void;
+    /** Compressed RAM cache budget (default 64 MiB); excess pages use IndexedDB. */
+    graphicsJournalMemoryBytes?: number;
+    /** Legacy alias for graphicsJournalMemoryBytes. No longer a total history limit. */
+    maxGraphicsJournalBytes?: number;
+    /** Legacy alias for graphicsJournalMemoryBytes. */
     maxGLJournalBytes?: number;
     gl?: Record<string, unknown>;
     d3d8?: Record<string, unknown>;

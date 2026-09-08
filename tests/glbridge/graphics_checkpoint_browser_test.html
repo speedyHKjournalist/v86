@@ -1,0 +1,173 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Graphics checkpoint GPU round trip</title>
+<div id="screen"><div></div><canvas></canvas></div>
+<pre id="result">RUNNING</pre>
+<script src="../../build/libv86.js"></script>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script src="gl_stream_builder.js"></script>
+<script>
+(async () => {
+    const errors = [], checks = [];
+    let mainCompressions = 0;
+    const NativeCompressionStream = globalThis.CompressionStream;
+    globalThis.CompressionStream = class extends NativeCompressionStream {
+        constructor(format) { super(format); ++mainCompressions; }
+    };
+    const check = (ok, text) => { if (!ok) throw new Error(text); checks.push(text); };
+    const gpu = {
+        getPreferredCanvasFormat: () => navigator.gpu.getPreferredCanvasFormat(),
+        async requestAdapter(options) {
+            const adapter = await navigator.gpu.requestAdapter(options);
+            return { features: adapter.features, async requestDevice(descriptor) {
+                const device = await adapter.requestDevice(descriptor);
+                device.addEventListener("uncapturederror", event => errors.push(event.error.message));
+                return device;
+            } };
+        },
+    };
+    const create = async state => {
+        const emulator = new V86({ wasm_path: "../../build/v86.wasm",
+            memory_size: 32 * 1024 * 1024,
+            bios: { buffer: new Uint8Array(65536).fill(0xf4).buffer },
+            screen_container: document.getElementById("screen"),
+            disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+            net_device: { type: "none" }, autostart: false,
+            graphics_adapter: installV86GLGraphicsAdapter,
+            graphics_options: { graphicsJournalMemoryBytes: 1, gl: { hostOptions: { gpu } } },
+            initial_state: state ? { buffer: state } : undefined });
+        await new Promise(resolve => emulator.add_listener("emulator-loaded", resolve));
+        emulator.v86.cpu.devices.vga.graphical_mode = true;
+        emulator.screen_adapter.set_mode(true);
+        return emulator;
+    };
+    const words = values => {
+        const bytes = new Uint8Array(values.length * 4), view = new DataView(bytes.buffer);
+        values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
+        return bytes;
+    };
+    const batch = (api, session, commands) => {
+        const payloads = commands.map(([op, values]) => ({ op, bytes: words(values) }));
+        const count = payloads.reduce((size, cmd) => size + ((16 + cmd.bytes.length + 7) & ~7), 0);
+        const bytes = new Uint8Array(40 + count), view = new DataView(bytes.buffer);
+        view.setUint16(0, api === 8 ? 0xffe0 : 0xffe1, true);
+        view.setUint16(2, 0xffff, true); view.setUint32(4, 32 + count, true);
+        view.setUint32(8, api === 8 ? 0x47573844 : 0x47573944, true);
+        view.setUint16(12, 1, true); view.setUint16(14, 7, true);
+        view.setUint32(24, commands.length, true); view.setUint32(28, count, true);
+        view.setUint32(32, session, true);
+        let offset = 40;
+        for (const cmd of payloads) {
+            const size = (16 + cmd.bytes.length + 7) & ~7;
+            view.setUint16(offset, cmd.op, true); view.setUint32(offset + 4, size, true);
+            bytes.set(cmd.bytes, offset + 16); offset += size;
+        }
+        return bytes;
+    };
+    const send = (emulator, bytes, flags = 0) => emulator.graphics_adapter.pushPCIBatch({
+        bytes, flags, batchAddr: 0x100020, descAddr: 0x100000,
+        writeGuestMemory() { throw new Error("unexpected DMA write in pixel fixture"); } });
+    // D3D9 heartbeat writes are normal live traffic, but replay has no guest writer.
+    const sendD3D = (emulator, bytes) => emulator.graphics_adapter.pushPCIBatch({ bytes,
+        writeGuestMemory() {}, batchAddr: 0x100020, descAddr: 0x100000 });
+    const createDevice = [2, [2, 0x1234, 0, 0, 64, 64, 22, 1, 0x20, 0, 75, 0, 0]];
+    const color = (value) => [5, [2, 1, value, 0x3f800000, 0, 0]];
+    let emulator = await create();
+    const { GLStream, GL } = GLTestStream;
+    send(emulator, new GLStream().makeCurrent(1, 0, 0, 64, 64)
+        .call("CLEAR_COLOR", 1, 1, 1, 1).call("CLEAR", GL.COLOR_BUFFER_BIT).bytes(), 1);
+    await sendD3D(emulator, batch(8, 8, [[1, [32, 0, 8, 0]],
+        [2, createDevice[1].slice(0, 11)], color(0xff0000ff)]));
+    await sendD3D(emulator, batch(9, 9, [createDevice,
+        [0x110, [2, 0x301, 64, 64, 1, 21, 1, 0, 0, 0]],
+        [0x20f, [2, 0, 0x301, 0]], color(0xffff0000)]));
+    await sendD3D(emulator, batch(9, 10, [createDevice,
+        [0x110, [2, 0x302, 64, 64, 1, 21, 1, 0, 0, 0]],
+        [0x500, [2, 0, 0, 0, 0, 0, 0, 0, 0x302, 0, 0, 16,
+            0, 0, 64, 64, 0xff00ff00, 0, 0, 0]] ]));
+    emulator.write_memory(new Uint8Array([42]), 0x80000);
+    const saved = await emulator.save_state();
+    const journal = emulator.graphics_adapter.graphicsJournal;
+    check(!!journal.compressor.worker, "journal compression runs in a dedicated worker");
+    check(mainCompressions === 0, "saving does not compress on the emulation thread");
+    check(journal.residentBytes <= 1 && journal.pages.some(page => page.key), "compressed pages spill to IndexedDB");
+    check(!emulator.graphics_adapter.preparedCheckpoint, "save releases its temporary compressed checkpoint");
+    const pixel = async (device, texture) => {
+        const buffer = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const encoder = device.createCommandEncoder();
+        encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow: 256 }, [1, 1, 1]);
+        device.queue.submit([encoder.finish()]);
+        await buffer.mapAsync(GPUMapMode.READ);
+        const rgba = [...new Uint8Array(buffer.getMappedRange()).slice(0, 4)];
+        buffer.unmap(); buffer.destroy();
+        if (texture.format.startsWith("bgra")) [rgba[0], rgba[2]] = [rgba[2], rgba[0]];
+        return rgba.join();
+    };
+    const verify = async label => {
+        const bridge = emulator.graphics_adapter, device = bridge.glExecutor.device;
+        check(await pixel(device, bridge.glExecutor.backBuffer) === "255,255,255,255", label + " GL rendered pixels");
+        check(await pixel(device, bridge.d3d8Executor.devices.get(2).backBuffer) === "0,0,255,255", label + " D3D8 unfinished back buffer");
+        const sessions = bridge.d3d9Executor.sessionStates;
+        check(await pixel(device, sessions.get("0000000000000009").resources.get(0x301).gpuTexture) === "255,0,0,255", label + " D3D9 render target");
+        check(await pixel(device, sessions.get("000000000000000a").resources.get(0x302).gpuTexture) === "0,255,0,255", label + " DirectDraw color fill");
+        check(emulator.read_memory(0x80000, 1)[0] === 42, label + " guest RAM");
+    };
+    await verify("before save");
+    // This tick used to expire the D3D8 canvas attachment mid-frame.
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const bridge = emulator.graphics_adapter;
+    const execute = bridge.executePCIBatch.bind(bridge);
+    let replayFrames = 0;
+    bridge.executePCIBatch = async (event, bytes) => {
+        await execute(event, bytes);
+        if (event.replay) {
+            await bridge.waitForIdle(false);
+            await new Promise(requestAnimationFrame);
+            const canvases = new Set([bridge.glCanvas, bridge.d3d8Canvas, bridge.d3d9Canvas,
+                ...bridge.d3d9SwapChainCanvases.values()]);
+            check([...canvases].every(canvas => getComputedStyle(canvas).display === "none"),
+                "historical GPU frame stays invisible across browser paint " + (++replayFrames));
+        }
+    };
+    await emulator.restore_state(saved);
+    check(replayFrames >= 4, "visibility checked while replaying all four APIs");
+    check(bridge.activeOwner && getComputedStyle(bridge.ownerCanvas(bridge.activeOwner)).display !== "none",
+        "only the final restored graphics surface becomes visible");
+    check(!journal.compressor.worker, "restore terminates the discarded journal worker");
+    await verify("same instance restore");
+    const savedAgain = await emulator.save_state();
+    await emulator.destroy();
+    emulator = await create(savedAgain);
+    await verify("new instance restore");
+    await emulator.destroy();
+    check(!errors.length, "no WebGPU validation errors: " + errors.join("; "));
+    check(mainCompressions === 0, "round trips keep compression off the emulation thread");
+    const NativeWorker = globalThis.Worker;
+    const badWorkerURL = URL.createObjectURL(new Blob(["throw new Error('startup test');"], { type: "text/javascript" }));
+    try {
+        for (const asynchronous of [false, true]) {
+            globalThis.Worker = class {
+                constructor() {
+                    if (asynchronous) return new NativeWorker(badWorkerURL);
+                    throw new Error("worker unavailable");
+                }
+            };
+            const fallback = new V86GraphicsJournal({ budget: 1 });
+            fallback.append({ bytes: new Uint8Array([1, 2, 3]), frameId: 123 });
+            const checkpoint = await fallback.snapshot();
+            const record = (await V86GraphicsJournal.records(V86GraphicsJournal.parse(checkpoint)).next()).value;
+            check(record.frameId === 123 && record.bytes.join() === "1,2,3",
+                (asynchronous ? "async" : "sync") + " worker startup failure preserves checkpoint data");
+            await fallback.destroy();
+        }
+    } finally {
+        globalThis.Worker = NativeWorker;
+        globalThis.CompressionStream = NativeCompressionStream;
+        URL.revokeObjectURL(badWorkerURL);
+    }
+    return { status: "PASS", checks };
+})().catch(error => ({ status: "FAIL", error: error.stack })).then(async result => {
+    document.getElementById("result").textContent = JSON.stringify(result);
+    await fetch("/__test_result", { method: "POST", body: JSON.stringify(result) });
+});
+</script>

@@ -3208,10 +3208,26 @@ function init_ui(profile, settings, emulator)
 
     $("save_state").onclick = async function()
     {
-        const result = await emulator.save_state();
-        dump_file(result, "v86state.bin");
-
-        $("save_state").blur();
+        const button = $("save_state");
+        button.disabled = true;
+        const label = button.textContent;
+        button.textContent = "Saving...";
+        try
+        {
+            const result = await emulator.save_state();
+            dump_file(result, "v86state.bin");
+        }
+        catch(error)
+        {
+            console.error("Could not save emulator state", error);
+            alert("Could not save the state:\n" + error.message);
+        }
+        finally
+        {
+            button.disabled = false;
+            button.textContent = label;
+            button.blur();
+        }
     };
 
     $("load_state").onclick = async function()
@@ -3226,33 +3242,35 @@ function init_ui(profile, settings, emulator)
             return;
         }
 
-        const was_running = emulator.is_running();
-
-        if(was_running)
+        const button = $("load_state");
+        const label = button.textContent;
+        button.disabled = true;
+        button.textContent = "Loading...";
+        try
         {
-            await emulator.stop();
+            const state = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = () => reject(reader.error);
+                reader.onabort = () => reject(new Error("State file reading was cancelled"));
+                reader.readAsArrayBuffer(file);
+            });
+            const was_running = emulator.is_running();
+            if(was_running) await emulator.stop();
+            await emulator.restore_state(state);
+            if(was_running) emulator.run();
         }
-
-        const filereader = new FileReader();
-        filereader.onload = async function(e)
+        catch(err)
         {
-            try
-            {
-                await emulator.restore_state(e.target.result);
-            }
-            catch(err)
-            {
-                alert("Something bad happened while restoring the state:\n" + err + "\n\n" +
-                      "Note that the current configuration must be the same as the original");
-                throw err;
-            }
-
-            if(was_running)
-            {
-                emulator.run();
-            }
-        };
-        filereader.readAsArrayBuffer(file);
+            console.error("Could not restore emulator state", err);
+            alert("Something bad happened while restoring the state:\n" + err + "\n\n" +
+                  "Note that the current configuration must be the same as the original");
+        }
+        finally
+        {
+            button.disabled = false;
+            button.textContent = label;
+        }
     };
 
     $("ctrlaltdel").onclick = function()
