@@ -3083,10 +3083,13 @@ pub unsafe fn cycle_internal() {
         {
             in_jit = true;
         }
-        wasm::call_indirect1(
-            wasm_table_index as i32 + WASM_TABLE_OFFSET as i32,
-            initial_state,
-        );
+        let function = wasm_table_index as i32 + WASM_TABLE_OFFSET as i32;
+        if profiler::performance_recording_enabled() {
+            run_jit_recorded(function, initial_state, initial_eip);
+        }
+        else {
+            wasm::call_indirect1(function, initial_state);
+        }
         #[cfg(debug_assertions)]
         {
             in_jit = false;
@@ -3095,6 +3098,7 @@ pub unsafe fn cycle_internal() {
             stat::RUN_FROM_CACHE_STEPS,
             (*instruction_counter - initial_instruction_counter) as u64,
         );
+
         dbg_assert!(
             *instruction_counter != initial_instruction_counter,
             "Instruction counter didn't change"
@@ -3154,7 +3158,13 @@ pub unsafe fn cycle_internal() {
         }
 
         let initial_instruction_counter = *instruction_counter;
+        let performance_sample = profiler::performance_chunk_start(
+            false, initial_eip as u32, *cr.offset(3) as u32, *cpl,
+        );
         jit_run_interpreted(phys_addr);
+        profiler::performance_chunk_finish(
+            performance_sample, (*instruction_counter).wrapping_sub(initial_instruction_counter),
+        );
 
         jit::jit_increase_hotness_and_maybe_compile(
             initial_eip,
@@ -3168,11 +3178,29 @@ pub unsafe fn cycle_internal() {
             stat::RUN_INTERPRETED_STEPS,
             (*instruction_counter - initial_instruction_counter) as u64,
         );
+        profiler::performance_recording_add(
+            0,
+            (*instruction_counter).wrapping_sub(initial_instruction_counter) as u64,
+        );
         dbg_assert!(
             *instruction_counter != initial_instruction_counter,
             "Instruction counter didn't change"
         );
     };
+}
+
+// Keep recording-only state and bookkeeping out of the normal JIT call path.
+// Select per call, so a synchronous host callback changing recording still
+// takes effect at the next chunk without duplicating the whole CPU loop.
+#[cold]
+#[inline(never)]
+unsafe fn run_jit_recorded(function: i32, state: u16, eip: i32) {
+    let initial_counter = *instruction_counter;
+    let sample = profiler::performance_chunk_start(true, eip as u32, *cr.offset(3) as u32, *cpl);
+    wasm::call_indirect1(function, state);
+    let steps = (*instruction_counter).wrapping_sub(initial_counter);
+    profiler::performance_chunk_finish(sample, steps);
+    profiler::performance_recording_add(1, steps as u64);
 }
 
 pub unsafe fn get_phys_eip() -> OrPageFault<u32> {
@@ -3271,28 +3299,35 @@ pub unsafe fn main_loop() -> f64 {
     let start = js::microtick();
 
     if *in_hlt {
+        profiler::performance_execution_add(4, 1.0);
         if *flags & FLAG_INTERRUPT != 0 {
+            let performance_start = profiler::performance_timer_start();
             let t = js::run_hardware_timers(*acpi_enabled, start);
             handle_irqs();
+            profiler::performance_timer_finish(performance_start, 1);
             if *in_hlt {
                 profiler::stat_increment(stat::MAIN_LOOP_IDLE);
-                return t;
+                return profiler::performance_main_loop_exit(t, true);
             }
         }
         else {
             // dead
-            return 100.0;
+            return profiler::performance_main_loop_exit(100.0, true);
         }
     }
 
     loop {
+        let performance_start = profiler::performance_batch_start();
         do_many_cycles_native();
+        profiler::performance_timer_finish(performance_start, 0);
 
         let now = js::microtick();
+        let performance_start = profiler::performance_timer_start();
         let t = js::run_hardware_timers(*acpi_enabled, now);
         handle_irqs();
+        profiler::performance_timer_finish(performance_start, 1);
         if *in_hlt {
-            return t;
+            return profiler::performance_main_loop_exit(t, true);
         }
 
         if now - start > TIME_PER_FRAME {
@@ -3300,17 +3335,48 @@ pub unsafe fn main_loop() -> f64 {
         }
     }
 
-    return 0.0;
+    return profiler::performance_main_loop_exit(0.0, false);
+}
+
+// A link is allowed only inside a hardware-timer batch and at most one
+// additional module deep. Never retain Code pointers or table slots across it.
+static mut jit_link_active: bool = false;
+static mut jit_link_count: u32 = 0;
+#[no_mangle]
+pub unsafe fn get_jit_link_count() -> u32 { jit_link_count }
+static mut jit_link_batch: bool = false;
+static mut jit_link_batch_start: u32 = 0;
+#[no_mangle]
+pub unsafe fn jit_link_once() {
+    if jit_link_active || !jit_link_batch || !jit::JIT_LINK_EXITS || *in_hlt
+        || profiler::performance_recording_enabled()
+        || (*instruction_counter).wrapping_sub(jit_link_batch_start) >= LOOP_COUNTER as u32 {
+        return;
+    }
+    let eip = *instruction_pointer as u32;
+    let Some(code) = tlb_code[(eip >> 12) as usize] else { return; };
+    let code = code.as_ref();
+    if code.state_flags != *state_flags { return; }
+    let state = code.state_table[eip as usize & 0xFFF];
+    if state == u16::MAX { return; }
+    let function = code.wasm_table_index.to_u16() as i32 + WASM_TABLE_OFFSET as i32;
+    jit_link_active = true;
+    jit_link_count = jit_link_count.wrapping_add(1);
+    wasm::call_indirect1(function, state);
+    jit_link_active = false;
 }
 
 pub unsafe fn do_many_cycles_native() {
     profiler::stat_increment(stat::DO_MANY_CYCLES);
     let initial_instruction_counter = *instruction_counter;
+    jit_link_batch_start = initial_instruction_counter;
+    jit_link_batch = true;
     while (*instruction_counter).wrapping_sub(initial_instruction_counter) < LOOP_COUNTER as u32
         && !*in_hlt
     {
         cycle_internal();
     }
+    jit_link_batch = false;
 }
 
 #[cold]

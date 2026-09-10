@@ -39,7 +39,6 @@ enum FunctionType {
     FN1_RET,
     FN2_RET,
 
-    FN1_RET_I64,
     FN1_F32_RET,
     FN1_F64_RET,
 
@@ -89,6 +88,7 @@ pub struct WasmBuilder {
 
     free_locals_i32: Vec<WasmLocal>,
     free_locals_i64: Vec<WasmLocalI64>,
+    free_locals_v128: Vec<WasmLocalV128>,
     local_count: u8,
     pub arg_local_initial_state: WasmLocal,
 }
@@ -106,6 +106,8 @@ pub struct WasmLocalI64(u8);
 impl WasmLocalI64 {
     pub fn idx(&self) -> u8 { self.0 }
 }
+
+pub struct WasmLocalV128(u8);
 
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
 pub struct Label(u32);
@@ -135,6 +137,7 @@ impl WasmBuilder {
 
             free_locals_i32: Vec::with_capacity(8),
             free_locals_i64: Vec::with_capacity(8),
+            free_locals_v128: Vec::with_capacity(4),
             local_count: 0,
             arg_local_initial_state: WasmLocal(0),
         };
@@ -165,6 +168,7 @@ impl WasmBuilder {
         self.instruction_body.clear();
         self.free_locals_i32.clear();
         self.free_locals_i64.clear();
+        self.free_locals_v128.clear();
         self.local_count = 0;
 
         dbg_assert!(self.label_to_depth.is_empty());
@@ -199,16 +203,18 @@ impl WasmBuilder {
         self.output.push(0);
 
         dbg_assert!(
-            self.local_count as usize == self.free_locals_i32.len() + self.free_locals_i64.len(),
+            self.local_count as usize == self.free_locals_i32.len() + self.free_locals_i64.len() + self.free_locals_v128.len(),
             "All locals should have been freed"
         );
 
         let free_locals_i32 = &self.free_locals_i32;
         let free_locals_i64 = &self.free_locals_i64;
+        let free_locals_v128 = &self.free_locals_v128;
 
         let locals = (0..self.local_count).map(|i| {
             let local_index = WASM_MODULE_ARGUMENT_COUNT + i;
-            if free_locals_i64.iter().any(|v| v.idx() == local_index) {
+            if free_locals_v128.iter().any(|v| v.0 == local_index) { 0x7B }
+            else if free_locals_i64.iter().any(|v| v.idx() == local_index) {
                 op::TYPE_I64
             }
             else {
@@ -315,13 +321,6 @@ impl WasmBuilder {
                     self.output.push(op::TYPE_I32);
                     self.output.push(1);
                     self.output.push(op::TYPE_I32);
-                },
-                FunctionType::FN1_RET_I64 => {
-                    self.output.push(op::TYPE_FUNC);
-                    self.output.push(1);
-                    self.output.push(op::TYPE_I32);
-                    self.output.push(1);
-                    self.output.push(op::TYPE_I64);
                 },
                 FunctionType::FN1_F32_RET => {
                     self.output.push(op::TYPE_FUNC);
@@ -647,6 +646,54 @@ impl WasmBuilder {
         self.instruction_body.push(local.idx());
     }
 
+    pub fn set_new_local_v128(&mut self) -> WasmLocalV128 {
+        let local = self.free_locals_v128.pop().unwrap_or_else(|| {
+            let index = self.local_count + WASM_MODULE_ARGUMENT_COUNT;
+            self.local_count = self.local_count.checked_add(1).unwrap();
+            WasmLocalV128(index)
+        });
+        self.instruction_body.push(op::OP_SETLOCAL);
+        self.instruction_body.push(local.0);
+        local
+    }
+    pub fn get_local_v128(&mut self, local: &WasmLocalV128) {
+        self.instruction_body.push(op::OP_GETLOCAL);
+        self.instruction_body.push(local.0);
+    }
+    pub fn free_local_v128(&mut self, local: WasmLocalV128) {
+        dbg_assert!((WASM_MODULE_ARGUMENT_COUNT..self.local_count + WASM_MODULE_ARGUMENT_COUNT).contains(&local.0));
+        self.free_locals_v128.push(local);
+    }
+
+    // Standard SIMD binary encoding: 0xfd, unsigned LEB opcode, immediates.
+    pub fn simd(&mut self, opcode: u32) {
+        self.instruction_body.push(0xFD);
+        write_leb_u32(&mut self.instruction_body, opcode);
+    }
+    pub fn simd_lane(&mut self, opcode: u32, lane: u8) {
+        self.simd(opcode);
+        self.instruction_body.push(lane);
+    }
+    pub fn simd_memory(&mut self, opcode: u32, alignment: u8) {
+        self.simd(opcode);
+        self.instruction_body.push(alignment);
+        self.instruction_body.push(0);
+    }
+    pub fn simd_shuffle(&mut self, lanes: [u8; 16]) {
+        dbg_assert!(lanes.iter().all(|&x| x < 32));
+        self.simd(0x0D);
+        self.instruction_body.extend_from_slice(&lanes);
+    }
+    pub fn simd_zero(&mut self) {
+        self.simd(0x0C);
+        self.instruction_body.extend_from_slice(&[0; 16]);
+    }
+    pub fn if_v128(&mut self) {
+        self.open_block();
+        self.instruction_body.push(op::OP_IF);
+        self.instruction_body.push(0x7B);
+    }
+
     pub fn const_i32(&mut self, v: i32) {
         self.instruction_body.push(op::OP_I32CONST);
         write_leb_i32(&mut self.instruction_body, v);
@@ -792,9 +839,11 @@ impl WasmBuilder {
     pub fn add_i64(&mut self) { self.instruction_body.push(op::OP_I64ADD); }
     pub fn sub_i32(&mut self) { self.instruction_body.push(op::OP_I32SUB); }
     pub fn and_i32(&mut self) { self.instruction_body.push(op::OP_I32AND); }
+    pub fn and_i64(&mut self) { self.instruction_body.push(op::OP_I64AND); }
     pub fn or_i32(&mut self) { self.instruction_body.push(op::OP_I32OR); }
     pub fn or_i64(&mut self) { self.instruction_body.push(op::OP_I64OR); }
     pub fn xor_i32(&mut self) { self.instruction_body.push(op::OP_I32XOR); }
+    pub fn xor_i64(&mut self) { self.instruction_body.push(op::OP_I64XOR); }
     pub fn mul_i32(&mut self) { self.instruction_body.push(op::OP_I32MUL); }
     pub fn mul_i64(&mut self) { self.instruction_body.push(op::OP_I64MUL); }
     pub fn div_i64(&mut self) { self.instruction_body.push(op::OP_I64DIVU); }
@@ -944,7 +993,6 @@ impl WasmBuilder {
     pub fn call_fn0_ret_i64(&mut self, name: &str) { self.call_fn(name, FunctionType::FN0_RET_I64) }
     pub fn call_fn1(&mut self, name: &str) { self.call_fn(name, FunctionType::FN1) }
     pub fn call_fn1_ret(&mut self, name: &str) { self.call_fn(name, FunctionType::FN1_RET) }
-    pub fn call_fn1_ret_i64(&mut self, name: &str) { self.call_fn(name, FunctionType::FN1_RET_I64) }
     pub fn call_fn1_f32_ret(&mut self, name: &str) { self.call_fn(name, FunctionType::FN1_F32_RET) }
     pub fn call_fn1_f64_ret(&mut self, name: &str) { self.call_fn(name, FunctionType::FN1_F64_RET) }
     pub fn call_fn2(&mut self, name: &str) { self.call_fn(name, FunctionType::FN2) }

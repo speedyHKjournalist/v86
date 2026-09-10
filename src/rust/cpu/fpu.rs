@@ -629,7 +629,12 @@ pub unsafe fn fpu_fstm32p(addr: i32) {
 pub unsafe fn fpu_fstm64(addr: i32) {
     return_on_pagefault!(fpu_store_m64(addr, fpu_get_st0()));
 }
-pub unsafe fn fpu_store_m64(addr: i32, x: F80) -> OrPageFault<()> { safe_write64(addr, x.to_f64()) }
+pub unsafe fn fpu_store_m64(addr: i32, x: F80) -> OrPageFault<()> {
+    F80::clear_exception_flags();
+    safe_write64(addr, x.to_f64())?;
+    *fpu_status_word |= F80::get_exception_flags() as u16;
+    Ok(())
+}
 pub unsafe fn fpu_fstm64p(addr: i32) {
     // XXX: writable_or_pagefault before get_st0
     return_on_pagefault!(fpu_store_m64(addr, fpu_get_st0()));
@@ -876,7 +881,7 @@ pub unsafe fn fpu_frndint() {
 
 pub unsafe fn fpu_fscale() {
     let st0 = fpu_get_st0();
-    let y = st0 * fpu_get_sti(1).trunc().two_pow();
+    let y = st0.scale(fpu_get_sti(1));
     fpu_write_st(*fpu_stack_ptr as i32, y);
 }
 

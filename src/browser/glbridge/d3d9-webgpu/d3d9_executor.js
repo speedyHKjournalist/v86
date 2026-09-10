@@ -3543,6 +3543,9 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
         // ---- batch decode ----
 
         async executeBatch(bytes, metadata) {
+            const timing = this["performanceTiming"];
+            let segmentStart = timing ? timing["now"]() : 0;
+            try {
             const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
             if (bytes.byteLength < D9WG_BATCH_HEADER_BYTES) {
                 ++this.stats.malformedBatches;
@@ -3616,7 +3619,11 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
                 try {
                     const pending = this.dispatchCommand(opcode, bytes, view,
                         payloadOffset, payloadBytes, metadata);
-                    if (pending && typeof pending.then === "function") await pending;
+                    if (pending && typeof pending.then === "function") {
+                        if (timing) timing["sync"](timing["now"]() - segmentStart);
+                        try { await pending; }
+                        finally { if (timing) segmentStart = timing["now"](); }
+                    }
                 } catch (error) {
                     if (error instanceof D9WGStreamError) throw error;
                     ++this.stats.commandsFailed;
@@ -3655,6 +3662,9 @@ fn d9_ps_main() -> @location(0) vec4<f32> {
             this.beat(metadata);
             if (this.shaderCacheDirty) this.schedulePersistentShaderCacheSave();
             this.saveActiveSessionState();
+            } finally {
+                if (timing) timing["sync"](timing["now"]() - segmentStart);
+            }
         }
 
         dispatchCommand(opcode, bytes, view, offset, length, metadata) {
@@ -12350,6 +12360,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return topology === "triangle-strip" || topology === "line-strip";
     }
 
+    D3D9WebGPUExecutor.prototype["performanceTimingVersion"] = 1;
     global.D3D9WebGPUExecutor = D3D9WebGPUExecutor;
     global.installD3D9WebGPUExecutor = function(canvas, options) {
         return new D3D9WebGPUExecutor(canvas, options);

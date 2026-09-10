@@ -122,6 +122,9 @@ V86GLPCI.prototype.notify = function(queue_id)
     let pending = queue.count_requests();
     while(pending--)
     {
+        // Leave descriptors owned by the guest until transport capacity returns.
+        // The worker calls notify again after receiving a batch acknowledgement.
+        if(this.can_accept && !this.can_accept()) break;
         const head = queue.avail_get_entry(queue.avail_last_idx);
         if(head >= queue.size) { queue.flush_replies(); virtio.needs_reset(); return; }
         const read = queue.desc_addr + head * 16;

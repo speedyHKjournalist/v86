@@ -1,3 +1,4 @@
+import { CPUWorkerController, encode_worker_file } from "./cpu_worker.js";
 import { v86 } from "../main.js";
 import { LOG_CPU, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
 import { get_rand_int, load_file, read_sized_string_from_mem } from "../lib.js";
@@ -47,9 +48,6 @@ export function V86(options)
         set_log_level(options.log_level);
     }
 
-    //var worker = new Worker("src/browser/worker.js");
-    //var adapter_bus = this.bus = WorkerBus.init(worker);
-
     this.cpu_is_running = false;
     this.destroyed = false;
     this.cpu_exception_hook = function(n) {};
@@ -57,6 +55,13 @@ export function V86(options)
     const bus = Bus.create();
     this.bus = bus[0];
     this.emulator_bus = bus[1];
+    if(options["worker_bus_setup"]) options["worker_bus_setup"](this);
+    if(options["cpu_worker"] && typeof Worker !== "undefined")
+    {
+        this.worker_controller = new CPUWorkerController(this, options);
+        this.continue_init(null, options).catch(error => this.worker_controller.fail(error));
+        return;
+    }
 
     var cpu;
     var wasm_memory;
@@ -308,9 +313,14 @@ V86.prototype.continue_init = async function(emulator, options)
         this.absolute_pointer_enabled = enabled;
     }, this);
 
-    if(screen_options.container)
+    if(options["screen_adapter"])
     {
-        this.screen_adapter = new ScreenAdapter(screen_options, () => this.v86.cpu.devices.vga && this.v86.cpu.devices.vga.screen_fill_buffer());
+        this.screen_adapter = options["screen_adapter"];
+    }
+    else if(screen_options.container)
+    {
+        this.screen_adapter = new ScreenAdapter(screen_options, () => this.worker_controller ? this.worker_controller.request_frame() :
+            this.v86.cpu.devices.vga && this.v86.cpu.devices.vga.screen_fill_buffer());
     }
     else if(screen_options.ansi)
     {
@@ -385,6 +395,15 @@ V86.prototype.continue_init = async function(emulator, options)
     if(!options.disable_speaker)
     {
         this.speaker_adapter = new SpeakerAdapter(this.bus);
+    }
+
+    if(this.worker_controller)
+    {
+        this.serial_adapter?.show?.();
+        this.virtio_console_adapter?.show?.();
+        this.modem?.initialize();
+        await this.worker_controller.start();
+        return;
     }
 
     // ugly, but required for closure compiler compilation
@@ -843,6 +862,7 @@ V86.prototype.get_bzimage_initrd_from_filesystem = function(filesystem)
  */
 V86.prototype.run = async function()
 {
+    if(this.worker_controller) return this.worker_controller.serialize(() => this.worker_controller.rpc("run"));
     this.v86.run();
 };
 
@@ -851,6 +871,7 @@ V86.prototype.run = async function()
  */
 V86.prototype.stop = async function()
 {
+    if(this.worker_controller) return this.worker_controller.serialize(() => this.worker_controller.stop());
     if(!this.cpu_is_running)
     {
         return;
@@ -872,7 +893,8 @@ V86.prototype.stop = async function()
 V86.prototype.destroy = async function()
 {
     this.destroyed = true;
-    await this.stop();
+    if(this.worker_controller) await this.worker_controller.destroy();
+    else await this.stop();
     if(this.graphics_state_operation) await this.graphics_state_operation;
 
     if(this["graphics_adapter"]) await this["graphics_adapter"]["destroy"]();
@@ -892,6 +914,7 @@ V86.prototype.destroy = async function()
  */
 V86.prototype.restart = async function()
 {
+    if(this.worker_controller) return this.worker_controller.state("restart");
     if(!this["graphics_adapter"]) return this.v86.restart();
     return this.with_graphics_state(async () => {
         await this["graphics_adapter"]["reset"]();
@@ -939,6 +962,7 @@ V86.prototype.remove_listener = function(event, listener)
  */
 V86.prototype.restore_state = async function(state)
 {
+    if(this.worker_controller) return this.worker_controller.state("restore", state);
     dbg_assert(arguments.length === 1);
     const graphics = this["graphics_adapter"];
     if(!graphics) return this.v86.restore_state(state);
@@ -965,6 +989,7 @@ V86.prototype.restore_state = async function(state)
  */
 V86.prototype.save_state = async function()
 {
+    if(this.worker_controller) return this.worker_controller.state("save");
     dbg_assert(arguments.length === 0);
     if(!this["graphics_adapter"]) return this.v86.save_state();
     return this.with_graphics_state(async () => {
@@ -1015,6 +1040,7 @@ V86.prototype.with_graphics_state = function(operation, resume_on_error)
  */
 V86.prototype.get_instruction_counter = function()
 {
+    if(this.worker_controller) return this.worker_controller.instructions;
     if(this.v86)
     {
         return this.v86.cpu.instruction_counter[0] >>> 0;
@@ -1040,6 +1066,7 @@ V86.prototype.is_running = function()
  */
 V86.prototype.set_fda = async function(file)
 {
+    if(this.worker_controller) return this.worker_controller.rpc("set_fda", [encode_worker_file(file)]);
     const fda = this.v86.cpu.devices.fdc.drives[0];
     if(file.url && !file.async)
     {
@@ -1069,6 +1096,7 @@ V86.prototype.set_fda = async function(file)
  */
 V86.prototype.set_fdb = async function(file)
 {
+    if(this.worker_controller) return this.worker_controller.rpc("set_fdb", [encode_worker_file(file)]);
     const fdb = this.v86.cpu.devices.fdc.drives[1];
     if(file.url && !file.async)
     {
@@ -1098,6 +1126,7 @@ V86.prototype.set_fdb = async function(file)
  */
 V86.prototype.eject_fda = function()
 {
+    if(this.worker_controller) return this.worker_controller.rpc("eject_fda");
     this.v86.cpu.devices.fdc.drives[0].eject_disk();
 };
 
@@ -1106,6 +1135,7 @@ V86.prototype.eject_fda = function()
  */
 V86.prototype.eject_fdb = function()
 {
+    if(this.worker_controller) return this.worker_controller.rpc("eject_fdb");
     this.v86.cpu.devices.fdc.drives[1].eject_disk();
 };
 
@@ -1115,6 +1145,7 @@ V86.prototype.eject_fdb = function()
  */
 V86.prototype.get_disk_fda = function()
 {
+    if(this.worker_controller) return this.worker_controller.rpc("get_disk_fda");
     return this.v86.cpu.devices.fdc.drives[0].get_buffer();
 };
 
@@ -1124,6 +1155,7 @@ V86.prototype.get_disk_fda = function()
  */
 V86.prototype.get_disk_fdb = function()
 {
+    if(this.worker_controller) return this.worker_controller.rpc("get_disk_fdb");
     return this.v86.cpu.devices.fdc.drives[1].get_buffer();
 };
 
@@ -1133,14 +1165,16 @@ V86.prototype.get_disk_fdb = function()
  */
 V86.prototype.set_cdrom = async function(file)
 {
+    if(this.worker_controller) return this.worker_controller.rpc("set_cdrom", [encode_worker_file(file)]);
     if(file.url && !file.async)
     {
-        load_file(file.url, {
+        await new Promise(resolve => load_file(file.url, {
             done: result =>
             {
                 this.v86.cpu.devices.cdrom.set_cdrom(new SyncBuffer(result));
+                resolve();
             },
-        });
+        }));
     }
     else
     {
@@ -1158,6 +1192,7 @@ V86.prototype.set_cdrom = async function(file)
  */
 V86.prototype.eject_cdrom = function()
 {
+    if(this.worker_controller) return this.worker_controller.rpc("eject_cdrom");
     this.v86.cpu.devices.cdrom.eject();
 };
 
@@ -1407,6 +1442,7 @@ V86.prototype.serial_set_clear_to_send = function(serial, status)
  */
 V86.prototype.create_file = async function(file, data)
 {
+    if(this.worker_controller) return this.worker_controller.rpc("create_file", [file, data]);
     dbg_assert(arguments.length === 2);
     var fs = this.fs9p;
 
@@ -1440,6 +1476,7 @@ V86.prototype.create_file = async function(file, data)
  */
 V86.prototype.read_file = async function(file)
 {
+    if(this.worker_controller) return this.worker_controller.rpc("read_file", [file]);
     dbg_assert(arguments.length === 1);
     var fs = this.fs9p;
 
@@ -1633,6 +1670,7 @@ V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
  */
 V86.prototype.read_memory = function(offset, length)
 {
+    if(this.worker_controller) return this.worker_controller.rpc("read_memory", [offset, length]);
     return this.v86.cpu.read_blob(offset, length);
 };
 
@@ -1644,6 +1682,7 @@ V86.prototype.read_memory = function(offset, length)
  */
 V86.prototype.write_memory = function(blob, offset)
 {
+    if(this.worker_controller) return this.worker_controller.rpc("write_memory", [blob, offset]);
     this.v86.cpu.write_blob(blob, offset);
 };
 
@@ -1671,6 +1710,7 @@ V86.prototype.set_virtio_console_container_xtermjs = function(element, xterm_lib
 
 V86.prototype.get_instruction_stats = function()
 {
+    if(this.worker_controller) return this.worker_controller.rpc("get_instruction_stats");
     return print_stats.stats_to_string(this.v86.cpu);
 };
 

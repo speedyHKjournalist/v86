@@ -3,7 +3,8 @@
 (function() {
     "use strict";
     self.onmessage = async event => {
-        const { buffer, length } = event.data;
+        const { buffer, length, measure } = event.data;
+        const start = measure ? performance.now() : 0;
         let data = buffer, codec = 0;
         try {
             const blob = new Blob([new Uint8Array(buffer, 0, length)]);
@@ -13,7 +14,8 @@
             // Compression is optional. Return the original owned page on failure.
         }
         if (data === buffer && length < buffer.byteLength) data = buffer.slice(0, length);
-        self.postMessage({ buffer: data, codec, length: codec ? data.byteLength : length }, [data]);
+        self.postMessage({ buffer: data, codec, length: codec ? data.byteLength : length,
+            compression_ms: measure ? performance.now() - start : null }, [data]);
     };
     self.postMessage({ ready: true });
 })();

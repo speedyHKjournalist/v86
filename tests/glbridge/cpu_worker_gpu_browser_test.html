@@ -1,0 +1,112 @@
+<!doctype html><meta charset="utf-8"><title>CPU Worker integration</title>
+<div id="screen"><div></div><canvas></canvas></div><pre id="result">RUNNING</pre>
+<script src="../../build/glbridge/libv86-webgpu.js"></script>
+<script type="module">
+import { V86 } from "../../build/libv86.mjs";
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const sleep = ms => new Promise(r => setTimeout(r,ms));
+const u32 = n => [n&255,n>>>8&255,n>>>16&255,n>>>24&255];
+let vm;
+try {
+    vm = new V86({ cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js",
+        wasm_path: "../../build/v86.wasm", bios: { url: "../../build/cpu-worker-test.bin" },
+        memory_size: 32 << 20, screen: { container: document.getElementById("screen") },
+        disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+        net_device: { type: "none" }, autostart: true, graphics_adapter: globalThis.installV86GLGraphicsAdapter });
+    await Promise.race([new Promise((resolve,reject) => { vm.add_listener("emulator-loaded",resolve); vm.add_listener("emulator-error",reject); }), sleep(15000).then(()=>{throw new Error("startup timeout");})]);
+    const word = async a => new DataView((await vm.read_memory(a,4)).buffer).getUint32(0,true);
+    const wait = async test => { const end=performance.now()+10000; while(!await test()) { if(performance.now()>end) throw new Error("guest timeout"); await sleep(5); } };
+    await wait(async()=>await word(0x500)===0xCAFE);
+    check(!vm.v86, "no CPU or guest RAM allocated on main thread");
+    let first=await word(0x504);
+    // Main-thread long task: worker must continue running during this interval.
+    const end=performance.now()+150; while(performance.now()<end) {}
+    check(await word(0x504)!==first,"CPU advances while main thread is blocked");
+    await vm.stop(); first=await word(0x504); await sleep(30);
+    check(await word(0x504)===first,"stop is acknowledged at a CPU boundary");
+    await vm.run();
+    async function program(bytes) {
+        await vm.write_memory(Uint8Array.from([...bytes,0xC3]),0x1200000);
+        await vm.write_memory(Uint8Array.from(u32(0x1200000)),0x600);
+        await wait(async()=>await word(0x600)===0);
+    }
+    const out = (port,value,size) => [0xBA,...u32(port),0xB8,...u32(value),...(size===1?[0xEE]:size===2?[0x66,0xEF]:[0xEF])];
+    // Establish the display mode in the guest, so it is part of the snapshot.
+    // Changing only the host adapter would save text-mode VGA and race its
+    // restoration against the GPU overlay visibility callbacks.
+    let vbe=[];
+    for(const [reg,value] of [[4,0],[1,64],[2,64],[3,32],[4,0x41]]) vbe.push(...out(0x1CE,reg,2),...out(0x1CF,value,2));
+    await program(vbe);
+    await wait(()=>vm.screen_adapter.is_graphical());
+    // Actual guest OUT instructions configure the real virtio PCI device.
+    let setup=[];
+    for(const [off,v,size] of [[20,0,1],[20,3,1],[8,0,4],[12,1,4],[8,1,4],[12,1,4],[20,11,1],[22,0,2],[24,8,2],[32,0x10000,4],[36,0,4],[40,0x10080,4],[44,0,4],[48,0x100A0,4],[52,0,4],[28,1,2],[20,15,1]]) setup.push(...out(0xF100+off,v,size));
+    const mem=new Uint8Array(320), view=new DataView(mem.buffer);
+    view.setUint32(0,0x10100,true);view.setUint32(8,24,true);view.setUint16(12,1,true);view.setUint16(14,1,true);
+    view.setUint32(16,0x10120,true);view.setUint32(24,16,true);view.setUint16(28,2,true);view.setUint16(128,1,true);
+    await vm.write_memory(mem,0x10000);await program(setup);
+    let idx=0;
+    async function request(op,addr,len) {
+        await vm.write_memory(Uint8Array.from([op,addr,0,len,0,0].flatMap(u32)),0x10100);
+        await vm.write_memory(new Uint8Array(4).fill(255),0x10120);
+        await vm.write_memory(Uint8Array.of(++idx&255,idx>>>8),0x10082);
+        await program(out(0xF200,0,2));
+        await wait(async()=>await word(0x10120)!==0xFFFFFFFF);
+        check(await word(0x10120)===0,"virtqueue request accepted "+op);
+    }
+    await request(1,0x100000,16<<20);
+    await vm.write_memory(Uint8Array.from([0x324c4756,1,0,42,1,4,0,0,0xFFF1].flatMap(u32)),0x100000);
+        const session = [0xd0090001,0x20260806];
+        const commands = [
+            [1,[32,0,...session]], // HELLO
+            [2,[1,0x1234,0,0,64,64,22,1,0x20,1,75,0,0]], // CREATE_DEVICE
+            [5,[1,1,0xffff0000,0x3f800000,0,0]], // CLEAR red
+            [4,[1,0x1234,0,0,64,64]], // PRESENT
+        ];
+        const sizes = commands.map(([,values]) => (16+values.length*4+7)&~7);
+        const batchBytes = 32 + sizes.reduce((a,b)=>a+b,0);
+        const wrapped = new Uint8Array(8 + batchBytes);
+        const d9 = new DataView(wrapped.buffer);
+        d9.setUint16(0,0xffe1,true); d9.setUint16(2,0xffff,true);
+        d9.setUint32(4,batchBytes,true);
+        d9.setUint32(8,0x47573944,true);
+        d9.setUint16(12,1,true); d9.setUint16(14,3,true);
+        [1,1,commands.length,batchBytes-32,...session].forEach((v,i)=>d9.setUint32(16+i*4,v,true));
+        let cursor = 40;
+        commands.forEach(([op,values],i)=>{
+            d9.setUint16(cursor,op,true); d9.setUint32(cursor+4,sizes[i],true);
+            d9.setUint32(cursor+8,i+1,true);
+            values.forEach((v,j)=>d9.setUint32(cursor+16+j*4,v,true));
+            cursor += sizes[i];
+        });
+
+    const header=Uint8Array.from([0x324c4756,1,0,1,1,wrapped.length,0x47573944,0].flatMap(u32));
+    await vm.write_memory(header,0x100000);
+    await vm.write_memory(wrapped,0x100020);
+    await request(2,0,32+wrapped.length);
+    await vm.stop();
+    const bridge=vm.graphics_adapter;
+    check(!bridge.failed && !bridge.d3d9Executor.failed,"real WebGPU D3D9 worker batch executes");
+    const color=async()=>{
+        await bridge.waitForIdle(false);
+        const shot=bridge.makeScreenshot();
+        if(!shot) throw new Error("missing GPU screenshot");
+        await shot.decode();
+        const c=document.createElement("canvas");c.width=c.height=64;
+        const ctx=c.getContext("2d");ctx.drawImage(shot,0,0);
+        return [...ctx.getImageData(32,32,1,1).data].join();
+    };
+    const actual=await color();
+    check(actual==="255,0,0,255","worker virtqueue produces real red GPU pixels: "+actual);
+    const saved=await vm.save_state();
+    await vm.restore_state(saved);
+    const restoredColor=await color();
+    check(restoredColor==="255,0,0,255","GPU checkpoint restores saved frame through worker barrier: "+restoredColor);
+    await vm.destroy();vm=null;
+    document.getElementById("result").textContent="PASS\n"+checks.join("\n");
+} catch(error) {
+    if(vm) await vm.destroy().catch(()=>{});
+    document.getElementById("result").textContent="FAIL\n"+error.stack+"\n"+checks.join("\n");
+}
+</script>

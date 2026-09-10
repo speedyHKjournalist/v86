@@ -24,6 +24,7 @@ mod page;
 mod prefix;
 mod regs;
 mod softfloat;
+mod simd_codegen;
 mod state_flags;
 mod wasmgen;
 mod zstd;

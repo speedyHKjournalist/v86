@@ -74,6 +74,9 @@ static mut JIT_USE_LOOP_SAFETY: bool = true;
 pub static mut MAX_EXTRA_BASIC_BLOCKS: u32 = 250;
 
 pub const JIT_THRESHOLD: u32 = 200 * 1000;
+static mut JIT_COMPILE_THRESHOLD: u32 = JIT_THRESHOLD;
+pub static mut JIT_LINK_EXITS: bool = false;
+pub static mut JIT_SIMD_CACHE: bool = true;
 
 // less branches will generate if-else, more will generate brtable
 pub const BRTABLE_CUTOFF: usize = 10;
@@ -81,7 +84,11 @@ pub const BRTABLE_CUTOFF: usize = 10;
 // needs to be synced to const.js
 pub const WASM_TABLE_SIZE: u32 = 900;
 
-pub const CHECK_JIT_STATE_INVARIANTS: bool = false;
+// Reclaim a small batch without flushing the working set or increasing the
+// table's memory bound. Publication order avoids writes on every JIT execution.
+const CAPACITY_EVICTION_BATCH: usize = 16;
+
+pub const CHECK_JIT_STATE_INVARIANTS: bool = cfg!(feature = "jit-invariants");
 
 const MAX_INSTRUCTION_LENGTH: u32 = 16;
 
@@ -136,6 +143,7 @@ struct JitState {
     entry_points: HashMap<Page, (u32, HashSet<u16>)>,
     pages: HashMap<Page, PageInfo>,
     wasm_table_index_free_list: Vec<WasmTableIndex>,
+    published_modules: VecDeque<WasmTableIndex>,
     compiling: Option<(WasmTableIndex, CompilingPageState)>,
     #[cfg(debug_assertions)]
     wasm_table_index_to_page: HashMap<WasmTableIndex, HashSet<Page>>,
@@ -168,6 +176,8 @@ fn check_jit_state_invariants(ctx: &mut JitState) {
         .collect();
     dbg_assert!(free.intersection(&hidden).next().is_none());
     dbg_assert!(hidden.is_subset(&used));
+    dbg_assert!(ctx.published_modules.len() == used.len());
+    dbg_assert!(ctx.published_modules.iter().all(|index| used.contains(index)));
 
     #[cfg(debug_assertions)]
     for (wasm_table_index, pages) in &ctx.wasm_table_index_to_page {
@@ -223,6 +233,7 @@ impl JitState {
             pages: HashMap::new(),
 
             wasm_table_index_free_list: Vec::from_iter(wasm_table_indices),
+            published_modules: VecDeque::new(),
             compiling: None,
 
             #[cfg(debug_assertions)]
@@ -341,12 +352,17 @@ pub struct JitContext<'a> {
     pub builder: &'a mut WasmBuilder,
     pub register_locals: &'a mut Vec<WasmLocal>,
     pub start_of_current_instruction: u32,
+    pub last_instruction_in_block: u32,
     pub exit_with_fault_label: Label,
     pub exit_label: Label,
     pub current_instruction: Instruction,
     pub previous_instruction: Instruction,
     pub instruction_counter: WasmLocal,
     pub wasm_table_index: WasmTableIndex,
+    pub simd_cache: Vec<(u32, crate::wasmgen::wasm_builder::WasmLocalV128, bool)>,
+    pub simd_cache_kind: Option<bool>,
+    pub ram_read_page: Option<u32>,
+    pub ram_read_cache: Option<WasmLocal>,
 }
 impl<'a> JitContext<'a> {
     pub fn reg(&self, i: u32) -> WasmLocal {
@@ -831,7 +847,7 @@ pub fn jit_force_generate_unsafe(virt_addr: i32) {
         cpu::translate_address_read(virt_addr).unwrap(),
         cpu::get_seg_cs() as u32,
         cpu::get_state_flags(),
-        JIT_THRESHOLD,
+        unsafe { JIT_COMPILE_THRESHOLD },
     );
     dbg_assert!(get_jit_state().compiling.is_some());
 }
@@ -878,6 +894,7 @@ fn jit_analyze_and_generate(
     //dbg_assert!(entry_points.union(&existing_entry_points).count() == entry_points.len());
 
     profiler::stat_increment(stat::COMPILE);
+    let generation_started = profiler::performance_codegen_start();
 
     let cpu = CpuContext {
         eip: 0,
@@ -982,23 +999,22 @@ fn jit_analyze_and_generate(
     }
 
     if ctx.wasm_table_index_free_list.is_empty() {
-        dbg_log!("wasm_table_index_free_list empty, clearing cache");
-
-        // When no free slots are available, delete all cached modules. We could increase the
-        // size of the table, but this way the initial size acts as an upper bound for the
-        // number of wasm modules that we generate, which we want anyway to avoid getting our
-        // tab killed by browsers due to memory constraints.
-        jit_clear_cache(ctx);
-
-        profiler::stat_increment(stat::INVALIDATE_ALL_MODULES_NO_FREE_WASM_INDICES);
-
-        dbg_log!(
-            "after jit_clear_cache: {} free",
-            ctx.wasm_table_index_free_list.len(),
-        );
-
-        // This assertion can fail if all entries are pending (not possible unless
-        // WASM_TABLE_SIZE is set very low)
+        profiler::performance_recording_add(3, 1);
+        // Only published modules enter this queue. In-flight compilation is
+        // never eligible, and invalidation removes an index before it is reused.
+        for _ in 0..CAPACITY_EVICTION_BATCH {
+            let Some(index) = ctx.published_modules.front().copied() else { break; };
+            let removed_pages = invalidate_module(ctx, index);
+            for removed in removed_pages {
+                // Keep entries needed by the module being generated, but do
+                // not accumulate metadata for every page ever evicted.
+                if !pages.contains(&removed) {
+                    ctx.entry_points.remove(&removed);
+                    cpu::tlb_set_has_code(removed, false);
+                }
+            }
+            profiler::performance_recording_add(4, 1);
+        }
         dbg_assert!(!ctx.wasm_table_index_free_list.is_empty());
     }
 
@@ -1057,6 +1073,8 @@ fn jit_analyze_and_generate(
     ));
 
     let phys_addr = page.to_address();
+
+    profiler::performance_codegen_finish(generation_started);
 
     // will call codegen_finalize_finished asynchronously when finished
     codegen_finalize(
@@ -1141,6 +1159,7 @@ pub fn codegen_finalize_finished(
         }
         ctx.pages.insert(page, info);
     }
+    ctx.published_modules.push_back(wasm_table_index);
 
     let unused: Vec<&WasmTableIndex> = check_for_unused_wasm_table_index
         .iter()
@@ -1252,12 +1271,17 @@ fn jit_generate_module(
         builder,
         register_locals: &mut register_locals,
         start_of_current_instruction: 0,
+        last_instruction_in_block: 0,
         exit_with_fault_label,
         exit_label,
         current_instruction: Instruction::Other,
         previous_instruction: Instruction::Other,
         instruction_counter,
         wasm_table_index,
+        simd_cache: Vec::new(),
+        simd_cache_kind: None,
+        ram_read_page: None,
+        ram_read_cache: None,
     };
 
     let entry_blocks = {
@@ -1395,10 +1419,7 @@ fn jit_generate_module(
                     },
                     BasicBlockType::AbsoluteEip => {
                         // Check if we can stay in this module, if not exit
-                        codegen::gen_get_eip(ctx.builder);
-                        ctx.builder.const_i32(wasm_table_index.to_u16() as i32);
-                        ctx.builder.const_i32(state_flags.to_u32() as i32);
-                        ctx.builder.call_fn3_ret("jit_find_cache_entry_in_page");
+                        codegen::gen_lookup_current_module_target(ctx, state_flags);
                         ctx.builder.tee_local(target_block);
                         ctx.builder.const_i32(0);
                         ctx.builder.ge_i32();
@@ -1406,7 +1427,12 @@ fn jit_generate_module(
                         ctx.builder.br_if(main_loop_label);
 
                         codegen::gen_debug_track_jit_exit(ctx.builder, block.last_instruction_addr);
-                        ctx.builder.br(ctx.exit_label);
+                        if unsafe { JIT_LINK_EXITS } && !cfg!(feature = "profiler") {
+                            codegen::gen_move_registers_from_locals_to_memory(ctx);
+                            codegen::gen_update_instruction_counter(ctx);
+                            ctx.builder.call_fn0("jit_link_once");
+                            ctx.builder.return_();
+                        } else { ctx.builder.br(ctx.exit_label); }
                     },
                     &BasicBlockType::Normal {
                         next_block_addr: None,
@@ -2086,10 +2112,13 @@ fn jit_generate_basic_block(ctx: &mut JitContext, block: &BasicBlock) {
     ctx.builder.set_local(&ctx.instruction_counter);
 
     ctx.cpu.eip = start_addr;
+    ctx.last_instruction_in_block = last_instruction_addr;
     ctx.current_instruction = Instruction::Other;
     ctx.previous_instruction = Instruction::Other;
 
     loop {
+        crate::simd_codegen::prepare_instruction(ctx);
+        codegen::prepare_ram_read(ctx);
         let mut instruction = 0;
         if cfg!(feature = "profiler") {
             instruction = memory::read32s(ctx.cpu.eip) as u32;
@@ -2130,6 +2159,8 @@ fn jit_generate_basic_block(ctx: &mut JitContext, block: &BasicBlock) {
         let end_addr = ctx.cpu.eip;
 
         if end_addr == stop_addr {
+            crate::simd_codegen::flush_cache(ctx);
+            codegen::clear_ram_read_cache(ctx);
             // no page was crossed
             dbg_assert!(Page::page_of(end_addr) == Page::page_of(start_addr));
             break;
@@ -2177,7 +2208,7 @@ pub fn jit_increase_hotness_and_maybe_compile(
     }
 
     *hotness += heat;
-    if *hotness >= JIT_THRESHOLD {
+    if *hotness >= unsafe { JIT_COMPILE_THRESHOLD } {
         if is_compiling {
             return;
         }
@@ -2234,10 +2265,65 @@ fn free_wasm_table_index(ctx: &mut JitState, wasm_table_index: WasmTableIndex) {
     ctx.wasm_table_index_to_page.remove(&wasm_table_index);
 
     ctx.wasm_table_index_free_list.push(wasm_table_index);
+    ctx.published_modules.retain(|&index| index != wasm_table_index);
 
     // It is not strictly necessary to clear the function, but it will fail more predictably if we
     // accidentally use the function and may garbage collect unused modules earlier
     jit_clear_func(wasm_table_index);
+}
+
+// Invalidate exactly one module, including cross-page and hidden references.
+fn invalidate_module(ctx: &mut JitState, wasm_table_index: WasmTableIndex) -> Vec<Page> {
+    let mut removed_pages = Vec::new();
+    ctx.pages.retain(|page, info| {
+        if info.wasm_table_index != wasm_table_index {
+            return true;
+        }
+        match info.hidden_wasm_table_indices.pop() {
+            Some(new_primary) => {
+                info.wasm_table_index = new_primary;
+                info.entry_points.clear();
+                true
+            },
+            None => {
+                removed_pages.push(*page);
+                false
+            },
+        }
+    });
+
+    for info in ctx.pages.values_mut() {
+        info.hidden_wasm_table_indices
+            .retain(|&w| w != wasm_table_index)
+    }
+
+    for i in 0..unsafe { cpu::valid_tlb_entries_count } {
+        let page = unsafe { cpu::valid_tlb_entries[i as usize] };
+        let entry = unsafe { cpu::tlb_data[page as usize] };
+        if 0 != entry {
+            let tlb_physical_page = Page::of_u32(
+                (entry as u32 >> 12 ^ page as u32) - (unsafe { memory::mem8 } as u32 >> 12),
+            );
+            match unsafe { cpu::tlb_code[page as usize] } {
+                None => {},
+                Some(c) => unsafe {
+                    let w = c.as_ref().wasm_table_index;
+                    if wasm_table_index == w {
+                        drop(Box::from_raw(c.as_ptr()));
+                        cpu::tlb_code[page as usize] = None;
+                        if !ctx.entry_points.contains_key(&tlb_physical_page)
+                            && !ctx.pages.contains_key(&tlb_physical_page)
+                        {
+                            cpu::tlb_data[page as usize] &= !cpu::TLB_HAS_CODE;
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    free_wasm_table_index(ctx, wasm_table_index);
+    removed_pages
 }
 
 /// Register a write in this page: Delete all present code
@@ -2254,57 +2340,9 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
         profiler::stat_increment(stat::INVALIDATE_PAGE_HAD_CODE);
         did_have_code = true;
 
-        free(ctx, wasm_table_index);
+        invalidate_module(ctx, wasm_table_index);
         for wasm_table_index in hidden_wasm_table_indices {
-            free(ctx, wasm_table_index);
-        }
-
-        fn free(ctx: &mut JitState, wasm_table_index: WasmTableIndex) {
-            ctx.pages.retain(|_, info| {
-                if info.wasm_table_index != wasm_table_index {
-                    return true;
-                }
-                match info.hidden_wasm_table_indices.pop() {
-                    Some(new_primary) => {
-                        info.wasm_table_index = new_primary;
-                        info.entry_points.clear();
-                        true
-                    },
-                    None => false,
-                }
-            });
-
-            for info in ctx.pages.values_mut() {
-                info.hidden_wasm_table_indices
-                    .retain(|&w| w != wasm_table_index)
-            }
-
-            for i in 0..unsafe { cpu::valid_tlb_entries_count } {
-                let page = unsafe { cpu::valid_tlb_entries[i as usize] };
-                let entry = unsafe { cpu::tlb_data[page as usize] };
-                if 0 != entry {
-                    let tlb_physical_page = Page::of_u32(
-                        (entry as u32 >> 12 ^ page as u32) - (unsafe { memory::mem8 } as u32 >> 12),
-                    );
-                    match unsafe { cpu::tlb_code[page as usize] } {
-                        None => {},
-                        Some(c) => unsafe {
-                            let w = c.as_ref().wasm_table_index;
-                            if wasm_table_index == w {
-                                drop(Box::from_raw(c.as_ptr()));
-                                cpu::tlb_code[page as usize] = None;
-                                if !ctx.entry_points.contains_key(&tlb_physical_page)
-                                    && !ctx.pages.contains_key(&tlb_physical_page)
-                                {
-                                    cpu::tlb_data[page as usize] &= !cpu::TLB_HAS_CODE;
-                                }
-                            }
-                        },
-                    }
-                }
-            }
-
-            free_wasm_table_index(ctx, wasm_table_index);
+            invalidate_module(ctx, wasm_table_index);
         }
     }
 
@@ -2504,13 +2542,18 @@ pub fn enter_basic_block(phys_eip: u32) {
     }
 }
 
+// Code-generation options affect newly compiled modules. Use a fresh VM
+// when comparing policies; changing a setting does not rebuild existing code.
 #[no_mangle]
 pub unsafe fn set_jit_config(index: u32, value: u32) {
     match index {
         0 => JIT_DISABLED = value != 0,
-        1 => MAX_PAGES = value,
+        1 => MAX_PAGES = value.clamp(1, 16),
         2 => JIT_USE_LOOP_SAFETY = value != 0,
-        3 => MAX_EXTRA_BASIC_BLOCKS = value,
+        3 => MAX_EXTRA_BASIC_BLOCKS = value.min(1024),
+        4 => JIT_COMPILE_THRESHOLD = value.clamp(1000, 2_000_000),
+        5 => JIT_LINK_EXITS = value != 0,
+        6 => JIT_SIMD_CACHE = value != 0,
         _ => dbg_assert!(false),
     }
 }
@@ -2522,6 +2565,9 @@ pub unsafe fn get_jit_config(index: u32) -> u32 {
         1 => MAX_PAGES as u32,
         2 => JIT_USE_LOOP_SAFETY as u32,
         3 => MAX_EXTRA_BASIC_BLOCKS as u32,
+        4 => JIT_COMPILE_THRESHOLD,
+        5 => JIT_LINK_EXITS as u32,
+        6 => JIT_SIMD_CACHE as u32,
         _ => 0,
     }
 }

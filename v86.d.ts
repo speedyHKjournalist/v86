@@ -346,6 +346,13 @@ type V86NetworkDevice =
  * Emulator instance constructor options.
  */
 export interface V86Options {
+    /** Keep CPU, JIT, RAM and synchronous devices in a dedicated browser Worker.
+     * Defaults to false for the library. The demo UI enables it by default.
+     * Requires serializable image descriptors; wasm_fn/handle9p callbacks stay in main-thread mode.
+     */
+    cpu_worker?: boolean;
+    /** Worker bundle URL, relative to the page. Default: build/cpu-worker.js. */
+    cpu_worker_url?: string;
     /** Optional custom virtio graphics device (historical option name); requires the virtio v86gl.sys driver. Automatically enabled by graphics_adapter. */
     v86gl_pci?: boolean | { port?: number; maxBatchBytes?: number };
     /** Factory exported as installV86GLGraphicsAdapter by build/glbridge/libv86-webgpu.js. */
@@ -649,6 +656,8 @@ export interface V86GraphicsAdapter {
     onPCIStateRestored(checkpoint?: Uint8Array): void;
     prepareSaveState(): Promise<{ entries: number; bytes: number }>;
     waitForIdle(flush?: boolean, allowFailure?: boolean): Promise<void>;
+    /** Worker batch completion, including asynchronous readbacks. */
+    waitForSubmittedBatches(): Promise<void>;
     beginStateRestore(): void;
     finishStateRestore(): Promise<{ hasGLState: boolean }>;
     cancelStateRestore(): void;
@@ -755,7 +764,7 @@ export class V86 {
     /**
      * Eject the first floppy drive.
      */
-    eject_fda(): void;
+    eject_fda(): void | Promise<void>;
 
     /**
      * Set the image inserted in the second floppy drive. Can be changed at runtime,
@@ -766,7 +775,7 @@ export class V86 {
     /**
      * Eject the second floppy drive.
      */
-    eject_fdb(): void;
+    eject_fdb(): void | Promise<void>;
 
     /**
      * Set the image inserted in the CD-ROM drive. Can be changed at runtime, as
@@ -777,7 +786,7 @@ export class V86 {
     /**
      * Eject the CD-ROM.
      */
-    eject_cdrom(): void;
+    eject_cdrom(): void | Promise<void>;
 
     /**
      * Send a sequence of scan codes to the emulated PS2 controller. A list of
@@ -903,7 +912,8 @@ export class V86 {
      * @param offset
      * @param length
      */
-    read_memory(offset: number, length: number): Uint8Array;
+    /** CPU Worker mode returns a Promise with a copied buffer. */
+    read_memory(offset: number, length: number): Uint8Array | Promise<Uint8Array>;
 
     /**
      * Writes data to memory at specified offset.
@@ -911,7 +921,8 @@ export class V86 {
      * @param blob
      * @param offset
      */
-    write_memory(blob: number[] | Uint8Array, offset: number): void;
+    /** Await in CPU Worker mode to observe completion. */
+    write_memory(blob: number[] | Uint8Array, offset: number): void | Promise<void>;
 
     /**
      * Wait until expected text is present on the VGA text screen.
@@ -954,5 +965,5 @@ export class V86 {
      *
      * @see {@link https://github.com/copy/v86/blob/master/docs/profiling.md} for more infos
      */
-    get_instruction_stats(): string;
+    get_instruction_stats(): string | Promise<string>;
 }

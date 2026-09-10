@@ -1,0 +1,153 @@
+<!doctype html><meta charset="utf-8"><title>CPU Worker integration</title>
+<div id="screen"><div></div><canvas></canvas></div><pre id="result">RUNNING</pre>
+<script type="module">
+import { V86 } from "../../build/libv86.mjs";
+import { WorkerPerformanceRecorder } from "../../src/browser/cpu_worker.js";
+const checks = [];
+const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
+const sleep = ms => new Promise(r => setTimeout(r,ms));
+const u32 = n => [n&255,n>>>8&255,n>>>16&255,n>>>24&255];
+let vm;
+try {
+    let pending = Promise.resolve(), lastEvent, batches = 0, delay = 0, restored;
+    const fakeGraphics = emulator => {
+        emulator.add_listener("v86gl-pci-frame", e => {
+            lastEvent = e; e.handled = true; ++batches;
+            const n = batches;
+            pending = pending.then(async () => { await sleep(delay); e.writeGuestMemory(4096, Uint8Array.of(n)); });
+        });
+        return { ready: Promise.resolve(), waitForSubmittedBatches: () => pending,
+            waitForIdle: () => pending, prepareSaveState: () => pending,
+            serializeCheckpoint: () => Uint8Array.of(1,2,3,4), releaseCheckpoint() {},
+            beginStateRestore() {}, onPCIStateRestored: data => { restored = data; },
+            finishStateRestore() {}, cancelStateRestore() {}, screenChanged() {}, destroy() {}, reset() {},
+        };
+    };
+    vm = new V86({ cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js",
+        wasm_path: "../../build/v86.wasm", bios: { url: "../../build/cpu-worker-test.bin" },
+        memory_size: 32 << 20, screen: { container: document.getElementById("screen") },
+        disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+        filesystem: {}, net_device: { type: "none" }, autostart: true, graphics_adapter: fakeGraphics });
+    await Promise.race([new Promise((resolve,reject) => { vm.add_listener("emulator-loaded",resolve); vm.add_listener("emulator-error",reject); }), sleep(15000).then(()=>{throw new Error("startup timeout");})]);
+    const word = async a => new DataView((await vm.read_memory(a,4)).buffer).getUint32(0,true);
+    const wait = async test => { const end=performance.now()+10000; while(!await test()) { if(performance.now()>end) throw new Error("guest timeout"); await sleep(5); } };
+    await wait(async()=>await word(0x500)===0xCAFE);
+    check(!vm.v86, "no CPU or guest RAM allocated on main thread");
+    let first=await word(0x504);
+    // Main-thread long task: worker must continue running during this interval.
+    const end=performance.now()+150; while(performance.now()<end) {}
+    check(await word(0x504)!==first,"CPU advances while main thread is blocked");
+    await vm.stop(); first=await word(0x504); await sleep(30);
+    check(await word(0x504)===first,"stop is acknowledged at a CPU boundary");
+    await vm.run();
+    async function program(bytes) {
+        await vm.write_memory(Uint8Array.from([...bytes,0xC3]),0x1200000);
+        await vm.write_memory(Uint8Array.from(u32(0x1200000)),0x600);
+        await wait(async()=>await word(0x600)===0);
+    }
+    const floppy=new Uint8Array(1440*1024);floppy[0]=95;
+    await vm.set_fda({buffer:floppy.buffer});
+    check((await vm.get_disk_fda())[0]===95 && (await vm.get_disk_fda())[0]===95,"floppy export never detaches the live disk");
+    check(new Uint8Array(await vm.worker_controller.rpc("disk",["fda"]))[0]===95 && (await vm.get_disk_fda())[0]===95,"disk download preserves worker backing storage");
+    await vm.eject_fda();
+    check(await vm.get_disk_fda()===null,"empty floppy preserves the public null result");
+    await vm.create_file("worker.txt",Uint8Array.of(4,5,6));
+    check((await vm.read_file("worker.txt")).join()==="4,5,6" && (await vm.read_file("worker.txt")).join()==="4,5,6","9p reads return copies without detaching filesystem data");
+    const out = (port,value,size) => [0xBA,...u32(port),0xB8,...u32(value),...(size===1?[0xEE]:size===2?[0x66,0xEF]:[0xEF])];
+    let vbe=[];
+    for(const [reg,value] of [[4,0],[1,64],[2,64],[3,32],[4,0x41]]) vbe.push(...out(0x1CE,reg,2),...out(0x1CF,value,2));
+    vbe.push(0xC7,0x05,...u32(0xE0000000),...u32(0x0000FF00));
+    await program(vbe);
+    await wait(()=>vm.screen_adapter.is_graphical() && vm.screen_adapter.get_graphics_canvas().getContext("2d").getImageData(0,0,1,1).data[1]===255);
+    check(true,"VGA dirty pixels cross worker boundary into the DOM canvas");
+    // Actual guest OUT instructions configure the real virtio PCI device.
+    let setup=[];
+    for(const [off,v,size] of [[20,0,1],[20,3,1],[8,0,4],[12,1,4],[8,1,4],[12,1,4],[20,11,1],[22,0,2],[24,8,2],[32,0x10000,4],[36,0,4],[40,0x10080,4],[44,0,4],[48,0x100A0,4],[52,0,4],[28,1,2],[20,15,1]]) setup.push(...out(0xF100+off,v,size));
+    const mem=new Uint8Array(320), view=new DataView(mem.buffer);
+    view.setUint32(0,0x10100,true);view.setUint32(8,24,true);view.setUint16(12,1,true);view.setUint16(14,1,true);
+    view.setUint32(16,0x10120,true);view.setUint32(24,16,true);view.setUint16(28,2,true);view.setUint16(128,1,true);
+    await vm.write_memory(mem,0x10000);await program(setup);
+    let idx=0;
+    async function request(op,addr,len) {
+        await vm.write_memory(Uint8Array.from([op,addr,0,len,0,0].flatMap(u32)),0x10100);
+        await vm.write_memory(new Uint8Array(4).fill(255),0x10120);
+        await vm.write_memory(Uint8Array.of(++idx&255,idx>>>8),0x10082);
+        await program(out(0xF200,0,2));
+        await wait(async()=>await word(0x10120)!==0xFFFFFFFF);
+        check(await word(0x10120)===0,"virtqueue request accepted "+op);
+    }
+    await request(1,0x100000,16<<20);
+    await vm.write_memory(Uint8Array.from([0x324c4756,1,0,42,1,4,0,0,0xFFF1].flatMap(u32)),0x100000);
+    delay=100;
+    await request(2,0,36);
+    // Burst inside one guest execution callback: descriptors must remain
+    // pending when the transport fills, then resume without lost commands.
+    const burst=[];
+    for(let n=0;n<12;n++) {
+        idx++;
+        burst.push(0x66,0xC7,0x05,...u32(0x10082),idx&255,idx>>>8,...out(0xF200,0,2));
+        // Wait for the used ring before reusing the request descriptors.
+        burst.push(0x66,0x81,0x3D,...u32(0x100A2),idx&255,idx>>>8,0x75,0xF5);
+    }
+    await program(burst);
+    const saved = await vm.save_state(); // Must wait for delayed GPU write.
+    check((await vm.read_memory(0x101000,1))[0]===13,"save drains GPU readback into worker-owned RAM");
+    check(vm.worker_controller.stats.graphics_peak_pending<=8 && vm.worker_controller.stats.graphics_peak_pending>1,"graphics backpressure bounds outstanding batches without loss");
+    const oldWrite=lastEvent.writeGuestMemory, oldEpoch=vm.worker_controller.epoch;
+    await vm.write_memory(Uint8Array.of(99),0x101000);
+    await vm.restore_state(saved);
+    check(vm.worker_controller.epoch>oldEpoch,"restore changes memory generation");
+    oldWrite(4096,Uint8Array.of(77));await sleep(30);
+    check((await vm.read_memory(0x101000,1))[0]===13,"late old-generation GPU writes cannot corrupt restored RAM");
+    check(restored.join(",")==="1,2,3,4","graphics checkpoint round-trips inside ordinary v86 state");
+    check(saved.byteLength>0,"save input remains owned by caller after restore");
+    let pcm, rate;
+    vm.add_listener("dac-send-data", data => { pcm=data; });
+    vm.add_listener("dac-tell-sampling-rate", value => { rate=value; });
+    await program([...out(0x22C,0x41,1),...out(0x22C,0x56,1),...out(0x22C,0x22,1),
+        ...out(0x22C,0x10,1),...out(0x22C,255,1)]);
+    vm.bus.send("dac-request-data");
+    await wait(()=>!!pcm);
+    check(rate===22050 && pcm[0][0]===1 && pcm[1][0]===1,"SB16 sample rate and PCM survive worker transfer");
+    const recorder=new WorkerPerformanceRecorder(vm,{metadata:{},on_stop(){}});
+    await recorder.start();await sleep(600);const report=await recorder.stop();
+    check(report.summary.main_loop_calls>0 && report.execution.jit_chunks>0,"performance recording runs on actual worker CPU/JIT");
+    check(report.metadata.cpu_thread==="dedicated-worker","report identifies CPU thread");
+    let rejected=false;
+    try { await vm.restore_state(new ArrayBuffer(8)); } catch(_) { rejected=true; }
+    check(rejected && !vm.is_running(),"failed restore leaves CPU stopped and rejects caller");
+    await vm.restore_state(saved);
+    check((await vm.read_memory(0x101000,1))[0]===13,"good checkpoint recovers after a rejected restore");
+    await vm.stop();
+    const state2=await vm.save_state();
+    await vm.destroy();vm=null;
+    // Boot directly from a saved state, including the graphics checkpoint.
+    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path:"../../build/v86.wasm",
+        bios:{url:"../../build/cpu-worker-test.bin"},initial_state:{buffer:state2},memory_size:32<<20,
+        screen:{container:document.getElementById("screen")},disable_keyboard:true,disable_mouse:true,disable_speaker:true,
+        filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
+    await new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);});
+    check(!vm.is_running(),"initial-state load preserves requested stopped mode");
+    check((await vm.read_memory(0x101000,1))[0]===13,"initial state restores worker RAM");
+    await vm.destroy();await vm.destroy();vm=null;
+    vm=new V86({wasm_path:"../../build/v86.wasm",bios:{url:"../../build/cpu-worker-test.bin"},
+        memory_size:32<<20,screen:{container:document.getElementById("screen")},
+        disable_keyboard:true,disable_mouse:true,disable_speaker:true,
+        filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
+    await new Promise(r=>vm.add_listener("emulator-loaded",r));
+    await vm.restore_state(state2);
+    check(vm.read_memory(0x101000,1)[0]===13,"main-thread mode loads a worker snapshot");
+    const legacy=await vm.save_state();await vm.destroy();vm=null;
+    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path:"../../build/v86.wasm",
+        bios:{url:"../../build/cpu-worker-test.bin"},initial_state:{buffer:legacy},memory_size:32<<20,
+        screen:{container:document.getElementById("screen")},disable_keyboard:true,disable_mouse:true,disable_speaker:true,
+        filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
+    await new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);});
+    check((await vm.read_memory(0x101000,1))[0]===13,"worker mode loads a main-thread snapshot");
+    await vm.destroy();vm=null;
+    document.getElementById("result").textContent="PASS\n"+checks.join("\n");
+} catch(error) {
+    if(vm) await vm.destroy().catch(()=>{});
+    document.getElementById("result").textContent="FAIL\n"+error.stack+"\n"+checks.join("\n");
+}
+</script>

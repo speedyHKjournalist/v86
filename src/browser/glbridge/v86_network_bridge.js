@@ -544,6 +544,18 @@
             }
         }
 
+        async waitForSubmittedBatches() {
+            // Drain JS continuations/readbacks without inserting a GPU fence for
+            // every transport batch. Checkpoint barriers still fence the GPU.
+            for (const executor of [this.glExecutor, this.d3d8Executor, this.d3d9Executor]) {
+                if (!executor) continue;
+                if (executor.checkpointIdle) await executor.checkpointIdle();
+                else if (executor.idle) await executor.idle();
+                else if (executor.work) await executor.work;
+                if (executor.failed) throw executor.failed;
+            }
+        }
+
         getPCIDevice() {
             const runtime = this.emulator && this.emulator.v86;
             const cpu = runtime && runtime.cpu;

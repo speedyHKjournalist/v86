@@ -156,6 +156,7 @@ unsafe fn string_instruction(
 
     let mut movs_into_svga_lfb = false;
     let mut movs_reenter_fast_path = false;
+    let mut movs_overlap = false;
 
     let count_until_end_of_page = if rep_fast {
         match instruction {
@@ -223,7 +224,11 @@ unsafe fn string_instruction(
                 else {
                     false
                 };
-                rep_fast = rep_fast && !overlap_interferes;
+                // LZ backreferences must observe earlier stores. Ordinary RAM
+                // can still use the page-bounded translation once, followed by
+                // ordered element copies. SVGA retains its original path.
+                movs_overlap = overlap_interferes && !movs_into_svga_lfb;
+                rep_fast = rep_fast && (!overlap_interferes || movs_overlap);
 
                 // In case the following page-boundary check fails, re-enter instruction after
                 // one iteration of the slow path
@@ -294,6 +299,22 @@ unsafe fn string_instruction(
                     Size::D => memory::write32_no_mmap_or_dirty_check(phys_dst, src_val),
                 },
                 Instruction::Movs => {
+                    if movs_overlap {
+                        for element in 0..count_until_end_of_page {
+                            let offset = element.wrapping_mul(increment as u32);
+                            let from = phys_src.wrapping_add(offset);
+                            let to = phys_dst.wrapping_add(offset);
+                            // Do not turn this into memmove: each element can
+                            // depend on the one written immediately before it.
+                            match size {
+                                Size::B => memory::write8_no_mmap_or_dirty_check(to, memory::read8_no_mmap_check(from)),
+                                Size::W => memory::write16_no_mmap_or_dirty_check(to, memory::read16_no_mmap_check(from)),
+                                Size::D => memory::write32_no_mmap_or_dirty_check(to, memory::read32_no_mmap_check(from)),
+                            }
+                        }
+                        i = count_until_end_of_page;
+                        break;
+                    }
                     if direction == -1 {
                         phys_src -= (count_until_end_of_page - 1) * size_bytes as u32;
                         phys_dst -= (count_until_end_of_page - 1) * size_bytes as u32;

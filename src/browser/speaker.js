@@ -543,8 +543,32 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
 
             // Interface
 
-            self.port.onmessage = (event) =>
+            self.cpu_audio_port = null;
+            self.cpu_audio_epoch = 0;
+            self.cpu_audio_enabled = false;
+            const receive = (event) =>
             {
+                if(event.data["cpu_port"])
+                {
+                    if(self.cpu_audio_port) self.cpu_audio_port.close();
+                    self.cpu_audio_port = event.data["cpu_port"];
+                    self.cpu_audio_port.onmessage = e => {
+                        const m = e.data, type = m["cpu_audio"];
+                        if(type === "reset")
+                        {
+                            self.cpu_audio_epoch = m["epoch"];
+                            receive({ data: { type: "reset", value: self.generation + 1 } });
+                            self.cpu_audio_port.postMessage({ "cpu_audio": "reset-done", "epoch": self.cpu_audio_epoch, "sequence": m["sequence"] });
+                        }
+                        else if(m["epoch"] === self.cpu_audio_epoch)
+                        {
+                            if(type === "queue") self.queue_push(m["value"]);
+                            if(type === "rate") self.source_samples_per_destination = m["value"] / sampleRate;
+                            if(type === "enabled") self.cpu_audio_enabled = m["value"];
+                        }
+                    };
+                    return;
+                }
                 switch(event.data.type)
                 {
                     case "reset":
@@ -562,6 +586,8 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
                         break;
                 }
             };
+
+            self.port.onmessage = receive;
 
             return self;
         }
@@ -710,7 +736,11 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
         {
             if(this.queued_samples / this.source_samples_per_destination < QUEUE_RESERVE)
             {
-                this.port.postMessage(
+                if(this.cpu_audio_port)
+                {
+                    if(this.cpu_audio_enabled) this.cpu_audio_port.postMessage({ "cpu_audio": "pump", "epoch": this.cpu_audio_epoch });
+                }
+                else this.port.postMessage(
                 {
                     type: "pump",
                     generation: this.generation,
@@ -785,7 +815,7 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
     // Placeholder pass-through node to connect to, when worklet node is not ready yet.
     this.node_output = this.audio_context.createGain();
 
-    this.audio_context
+    this.ready = this.audio_context
         .audioWorklet
         .addModule(worklet_url)
         .then(() =>
@@ -874,6 +904,15 @@ function SpeakerWorkletDAC(bus, audio_context, mixer)
         this.debugger = new SpeakerDACDebugger(this.audio_context, this.node_output);
     }
 }
+
+// The CPU worker and AudioWorklet exchange PCM without main-thread scheduling.
+SpeakerWorkletDAC.prototype.connect_cpu_worker = async function()
+{
+    await this.ready;
+    const channel = new globalThis.MessageChannel();
+    this.node_processor.port.postMessage({ "cpu_port": channel.port1 }, [channel.port1]);
+    return channel.port2;
+};
 
 SpeakerWorkletDAC.prototype.queue = function(data)
 {

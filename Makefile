@@ -20,9 +20,9 @@ endif
 WASM_OPT ?= false
 
 default: build/v86-debug.wasm
-all: build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm glbridge
-all-debug: build/libv86-debug.js build/libv86-debug.mjs build/v86-debug.wasm glbridge
-browser: build/v86_all.js
+all: build/cpu-worker.js build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm glbridge
+all-debug: build/cpu-worker.js build/libv86-debug.js build/libv86-debug.mjs build/v86-debug.wasm glbridge
+browser: build/cpu-worker.js build/v86_all.js
 
 .PHONY: glbridge test-glbridge
 glbridge:
@@ -94,9 +94,9 @@ CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.j
 	   elf.js kernel.js
 LIB_FILES=9p.js filesystem.js marshall.js
 BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
-	      network.js starter.js worker_bus.js dummy_screen.js ansi_screen.js \
+	      network.js starter.js worker_bus.js cpu_worker.js dummy_screen.js ansi_screen.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
-          print_stats.js filestorage.js modem.js
+          print_stats.js filestorage.js modem.js graphics_performance.js performance_recorder.js
 
 RUST_FILES=$(shell find src/rust/ -name '*.rs') \
 	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs \
@@ -372,6 +372,57 @@ rust-test: $(RUST_FILES)
 rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test
 
+build/softfloat-fast-test.wasm: tests/rust/softfloat_fast_path.rs src/rust/softfloat.rs build/softfloat.o
+	rustc --edition=2021 --target wasm32-unknown-unknown --crate-type cdylib -O \
+	    -C linker=tools/rust-lld-wrapper -C link-arg=build/softfloat.o \
+	    tests/rust/softfloat_fast_path.rs -o $@
+
+softfloat-fast-tests: build/softfloat-fast-test.wasm
+	node tests/rust/softfloat_fast_path.mjs
+
+build/x87-fast-test.bin: tests/rust/x87_fast_path.asm
+	nasm -f bin $< -o $@
+
+x87-fast-tests: build/x87-fast-test.bin build/v86.wasm build/libv86.mjs
+	node tests/rust/x87_fast_path.mjs
+
+.PHONY: cpu-optimization-tests cpu-optimization-benchmark
+cpu-optimization-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
+	node tests/rust/cpu_optimizations.mjs
+
+.PHONY: cpu-plan-tests jit-policy-benchmark
+cpu-plan-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
+	CACHE_CONTROL=1 node tests/rust/cpu_plan_sequences.mjs
+	SEQUENCE_FILTER=nonfloating node tests/rust/cpu_plan_sequences.mjs
+	JIT_LINKS=1 node tests/rust/cpu_optimizations.mjs
+
+jit-policy-benchmark: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
+	node tests/rust/jit_policy_benchmark.mjs
+
+.PHONY: mmx-fast-tests
+mmx-fast-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
+	node tests/rust/mmx_fast_path.mjs
+
+# Preserve a baseline before rebuilding, or pass paths directly to the script.
+cpu-optimization-benchmark: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
+	node tests/rust/cpu_optimizations_benchmark.mjs
+
+build/jit-capacity.bin: tests/rust/jit_capacity.asm
+	nasm -f bin $< -o $@
+
+build/v86-jit-test.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+	cargo rustc --features jit-invariants $(CARGO_FLAGS)
+	cp build/wasm32-unknown-unknown/debug/v86.wasm $@
+
+jit-capacity-tests: build/jit-capacity.bin build/v86-jit-test.wasm build/libv86.mjs
+	node tests/rust/jit_capacity.mjs
+
+build/performance-recording-test: tests/rust/performance_recording.rs src/rust/profiler.rs
+	rustc --edition=2021 --test -O $< -o $@
+
+performance-recording-tests: build/performance-recording-test
+	./build/performance-recording-test
+
 api-tests: build/v86-debug.wasm
 	./tests/api/clean-shutdown.js
 	./tests/api/state.js
@@ -425,3 +476,34 @@ denodoc:
 	deno doc --html --name="v86 API" --output=./docs/api ./v86.d.ts
 
 .PHONY: tests
+
+.PHONY: packed-simd-tests
+packed-simd-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
+	node tests/rust/packed_simd.mjs
+
+.PHONY: sse3-tests
+sse3-tests: build/libv86.mjs build/jit-capacity.bin build/v86.wasm build/v86-fallback.wasm build/v86-jit-test.wasm
+	node tests/rust/sse3.mjs
+	node tests/rust/sse3.mjs build/v86-fallback.wasm
+	node tests/rust/sse3.mjs build/v86-jit-test.wasm
+
+# Keep the worker's public option/event wire names stable across bundles.
+build/cpu-worker.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
+	mkdir -p build
+	java -jar $(CLOSURE) --js_output_file $@ --define=DEBUG=false $(CLOSURE_FLAGS) \
+		--compilation_level SIMPLE --jscomp_off=missingProperties \
+		--js $(CORE_FILES) --js $(LIB_FILES) --js $(BROWSER_FILES) \
+		--js src/browser/cpu_worker_runtime.js --js src/browser/cpu_worker_entry.js
+
+build/cpu-worker-test.bin: tests/rust/cpu_worker.asm
+	nasm -f bin $< -o $@
+
+.PHONY: cpu-worker-tests
+cpu-worker-tests: build/cpu-worker.js build/cpu-worker-test.bin build/libv86.mjs build/libv86.js build/v86_all.js build/v86.wasm glbridge
+	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_gpu_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_audio_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_ui_browser_test.html
+
+# A browser/library rebuild must ship the matching wire-protocol implementation.
+build/v86_all.js build/v86_all_debug.js build/libv86.js build/libv86.mjs build/libv86-debug.js build/libv86-debug.mjs: | build/cpu-worker.js

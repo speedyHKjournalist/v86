@@ -1,9 +1,11 @@
+import { WorkerPerformanceRecorder } from "./cpu_worker.js";
 import { V86 } from "./starter.js";
 import { LOG_NAMES } from "../const.js";
 import { SyncBuffer, SyncFileBuffer } from "../buffer.js";
 import { h, pad0, pads, hex_dump, dump_file, download, round_up_to_next_power_of_2 } from "../lib.js";
 import { log_data, LOG_LEVEL, set_log_level } from "../log.js";
 import * as iso9660 from "../iso9660.js";
+import { PerformanceRecorder } from "./performance_recorder.js";
 
 
 const ON_LOCALHOST = !location.hostname.endsWith("copy.sh");
@@ -162,6 +164,7 @@ function onload()
     }
 
     const query_args = new URLSearchParams(location.search);
+    if(query_args.has("cpu_worker")) $("cpu_worker").checked = bool_arg(query_args.get("cpu_worker"));
     if(query_args.has("graphics_proxy")) $("graphics_proxy").checked = bool_arg(query_args.get("graphics_proxy"));
     const host = query_args.get("cdn") || (ON_LOCALHOST ? "images/" : "//i.copy.sh/");
 
@@ -2109,6 +2112,8 @@ async function start_emulation(profile, query_args)
 {
     $("boot_options").style.display = "none";
 
+    const cpu_worker = query_args?.has("cpu_worker") ?
+        bool_arg(query_args.get("cpu_worker")) : $("cpu_worker").checked;
     const graphics_proxy = query_args?.has("graphics_proxy") ?
         bool_arg(query_args.get("graphics_proxy")) : $("graphics_proxy").checked;
     set_graphics_proxy_status("");
@@ -2130,6 +2135,7 @@ async function start_emulation(profile, query_args)
 
     const new_query_args = new Map();
     new_query_args.set("profile", profile?.id || "custom");
+    new_query_args.set("cpu_worker", cpu_worker ? "1" : "0");
     if(graphics_proxy) new_query_args.set("graphics_proxy", "1");
 
     const settings = {};
@@ -2450,6 +2456,8 @@ async function start_emulation(profile, query_args)
     }
 
     const emulator = new V86({
+        "cpu_worker": cpu_worker,
+        "cpu_worker_url": "build/cpu-worker.js" + query_append(),
         wasm_path: "build/" + (DEBUG ? "v86-debug.wasm" : "v86.wasm") + query_append(),
         "graphics_adapter": graphics_proxy ? window["installV86GLGraphicsAdapter"] : undefined,
         "graphics_options": {
@@ -2501,12 +2509,12 @@ async function start_emulation(profile, query_args)
 
     emulator.add_listener("emulator-ready", function()
     {
-        if(DEBUG)
+        if(DEBUG && !emulator.worker_controller)
         {
             debug_start(emulator);
         }
 
-        if(emulator.v86.cpu.wm.exports["profiler_is_enabled"]())
+        if(!emulator.worker_controller && emulator.v86.cpu.wm.exports["profiler_is_enabled"]())
         {
             const CLEAR_STATS = false;
 
@@ -2560,10 +2568,16 @@ async function start_emulation(profile, query_args)
 
     emulator.add_listener("emulator-loaded", function()
     {
-        if(!emulator.v86.cpu.devices.cdrom)
+        if(emulator.worker_controller ? !emulator.worker_controller.device_info["cdrom"] : !emulator.v86.cpu.devices.cdrom)
         {
             $("change_cdrom_image").style.display = "none";
         }
+    });
+
+    emulator.add_listener("emulator-error", function(error)
+    {
+        $("loading").style.display = "block";
+        $("loading").textContent = "Emulator failed: " + error.message;
     });
 
     emulator.add_listener("download-progress", function(e)
@@ -2589,6 +2603,48 @@ function init_ui(profile, settings, emulator)
     $("runtime_options").style.display = "block";
     $("runtime_infos").style.display = "block";
     $("screen_container").style.display = "block";
+
+    const performance_button = $("performance_record");
+    if(performance_button)
+    {
+        const export_button = $("performance_export");
+        const Recorder = emulator.worker_controller ? WorkerPerformanceRecorder : PerformanceRecorder;
+        const recorder = new Recorder(emulator, {
+            metadata: {
+                "user_agent": navigator.userAgent,
+                "version": $("version").textContent,
+                "memory_size": settings.memory_size,
+                "vga_memory_size": settings.vga_memory_size,
+                "graphics_revision": globalThis["V86GL_BUILD_REVISION"] || null,
+            },
+            on_stop: () => {
+                performance_button.textContent = "Record performance";
+                export_button.disabled = false;
+            },
+        });
+        performance_button.onclick = async () => {
+            performance_button.disabled = true;
+            try {
+            if(recorder.active)
+            {
+                await recorder.stop();
+            }
+            else
+            {
+                await recorder.start();
+                performance_button.textContent = "Stop recording";
+                export_button.disabled = true;
+            }
+            }
+            catch(error) { alert("Performance recording failed: " + error.message); }
+            finally { performance_button.disabled = false; }
+            performance_button.blur();
+        };
+        export_button.onclick = () => {
+            dump_file(new TextEncoder().encode(JSON.stringify(recorder.report, null, 2)), "v86-performance.json");
+            export_button.blur();
+        };
+    }
 
     var filesystem_is_enabled = false;
 
@@ -2955,8 +3011,15 @@ function init_ui(profile, settings, emulator)
             elem.style.display = "none";
         }
 
-        elem.onclick = function(e)
+        elem.onclick = async function(e)
         {
+            if(emulator.worker_controller)
+            {
+                const bytes = await emulator.worker_controller.rpc("disk", [type]);
+                dump_file(bytes, (profile?.id || "v86") + "-" + type + (type === "cdrom" ? ".iso" : ".img"));
+                elem.blur();
+                return;
+            }
             const buffer = get_buffer();
             const filename = buffer.file && buffer.file.name || ((profile?.id || "v86") + "-" + type + (type === "cdrom" ? ".iso" : ".img"));
 
@@ -3119,7 +3182,7 @@ function init_ui(profile, settings, emulator)
     $("change_cdrom_image").ondrop = function(e)
     {
         e.preventDefault();
-        if(emulator.v86.cpu.devices.cdrom.has_disk())
+        if(emulator.worker_controller ? emulator.worker_controller.device_info["cdrom_present"] : emulator.v86.cpu.devices.cdrom.has_disk())
         {
             emulator.eject_cdrom();
         }
@@ -3127,7 +3190,7 @@ function init_ui(profile, settings, emulator)
     };
     $("change_cdrom_image").onclick = async function()
     {
-        if(emulator.v86.cpu.devices.cdrom.has_disk())
+        if(emulator.worker_controller ? emulator.worker_controller.device_info["cdrom_present"] : emulator.v86.cpu.devices.cdrom.has_disk())
         {
             emulator.eject_cdrom();
             $("change_cdrom_image").textContent = "Insert CD image";
@@ -3141,8 +3204,13 @@ function init_ui(profile, settings, emulator)
         $("change_cdrom_image").blur();
     };
 
-    $("memory_dump").onclick = function()
+    $("memory_dump").onclick = async function()
     {
+        if(emulator.worker_controller)
+        {
+            dump_file(await emulator.worker_controller.rpc("memory_dump"), "v86memory.bin");
+            return;
+        }
         const mem8 = emulator.v86.cpu.mem8;
         dump_file(new Uint8Array(mem8.buffer, mem8.byteOffset, mem8.length), "v86memory.bin");
         $("memory_dump").blur();
