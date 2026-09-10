@@ -9,6 +9,7 @@
     "LICENSE",
     "v86.d.ts",
     "build/libv86*.js",
+    "build/cpu-worker.js",
     "build/libv86*.js.map",
     "build/*.mjs",
     "build/glbridge/",

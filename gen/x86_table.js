@@ -526,12 +526,12 @@ const encodings = [
     { sse: 1, opcode: 0x0F2B, reg_ud: 1, e: 1, custom: 1 },
     { sse: 1, opcode: 0x660F2B, reg_ud: 1, e: 1, custom: 1 },
 
-    { sse: 1, opcode: 0x0F2C, e: 1 },
-    { sse: 1, opcode: 0x660F2C, e: 1 },
+    { sse: 1, opcode: 0x0F2C, e: 1, custom: 1 },
+    { sse: 1, opcode: 0x660F2C, e: 1, custom: 1 },
     { sse: 1, opcode: 0xF20F2C, e: 1, custom: 1 },
     { sse: 1, opcode: 0xF30F2C, e: 1, custom: 1 },
-    { sse: 1, opcode: 0x0F2D, e: 1 },
-    { sse: 1, opcode: 0x660F2D, e: 1 },
+    { sse: 1, opcode: 0x0F2D, e: 1, custom: 1 },
+    { sse: 1, opcode: 0x660F2D, e: 1, custom: 1 },
     { sse: 1, opcode: 0xF20F2D, e: 1, custom: 1 },
     { sse: 1, opcode: 0xF30F2D, e: 1, custom: 1 },
 
@@ -540,8 +540,8 @@ const encodings = [
     { sse: 1, opcode: 0x0F2F, e: 1, custom: 1 },
     { sse: 1, opcode: 0x660F2F, e: 1, custom: 1 },
 
-    { sse: 1, opcode: 0x0F50, mem_ud: 1, e: 1 },
-    { sse: 1, opcode: 0x660F50, mem_ud: 1, e: 1 },
+    { sse: 1, opcode: 0x0F50, mem_ud: 1, e: 1, custom: 1 },
+    { sse: 1, opcode: 0x660F50, mem_ud: 1, e: 1, custom: 1 },
     { sse: 1, opcode: 0x0F51, e: 1, custom: 1 },
     { sse: 1, opcode: 0x660F51, e: 1, custom: 1 },
     { sse: 1, opcode: 0xF20F51, e: 1, custom: 1 },
@@ -667,7 +667,7 @@ const encodings = [
     { sse: 1, opcode: 0x660F75, e: 1, custom: 1 },
     { sse: 1, opcode: 0x0F76, e: 1, custom: 1 },
     { sse: 1, opcode: 0x660F76, e: 1, custom: 1 },
-    { sse: 1, opcode: 0x0F77, skip: 1 }, // emms (skip as it breaks gdb printing of float registers)
+    { sse: 1, opcode: 0x0F77, custom: 1, skip: 1 }, // emms (skip as it breaks gdb printing of float registers)
 
     // vmx instructions
     { opcode: 0x0F78, skip: 1, block_boundary: 1 },
@@ -706,7 +706,9 @@ const encodings = [
     { sse: 1, opcode: 0x0FC6, e: 1, imm8: 1, custom: 1 },
     { sse: 1, opcode: 0x660FC6, e: 1, imm8: 1, custom: 1 },
 
-    { sse: 1, opcode: 0x0FD0, skip: 1, block_boundary: 1 }, // sse3
+    { sse: 1, opcode: 0x660FD0, e: 1, custom: 1 }, // addsubpd (sse3)
+    { sse: 1, opcode: 0xF20FD0, e: 1, custom: 1 }, // addsubps (sse3)
+    { opcode: 0x0FD0, skip: 1, block_boundary: 1 }, // ud without mandatory prefix
 
     { sse: 1, opcode: 0x0FD1, e: 1, custom: 1 },
     { sse: 1, opcode: 0x660FD1, e: 1, custom: 1 },
@@ -720,8 +722,8 @@ const encodings = [
     { sse: 1, opcode: 0x660FD5, e: 1, custom: 1 },
 
     { sse: 1, opcode: 0x660FD6, e: 1, custom: 1 },
-    { sse: 1, opcode: 0xF20FD6, mem_ud: 1, e: 1 },
-    { sse: 1, opcode: 0xF30FD6, mem_ud: 1, e: 1 },
+    { sse: 1, opcode: 0xF20FD6, mem_ud: 1, e: 1, custom: 1 },
+    { sse: 1, opcode: 0xF30FD6, mem_ud: 1, e: 1, custom: 1 },
     { sse: 1, opcode: 0x0FD6, e: 1, block_boundary: 1 }, // ud
 
     { sse: 1, opcode: 0x0FD7, e: 1, mem_ud: 1, custom: 1 },
@@ -761,7 +763,7 @@ const encodings = [
     { sse: 1, opcode: 0xF20FE6, e: 1, custom: 1 },
     { sse: 1, opcode: 0xF30FE6, e: 1, custom: 1 },
     { sse: 1, opcode: 0x0FE6, e: 1, block_boundary: 1 }, // ud
-    { sse: 1, opcode: 0x0FE7, e: 1, reg_ud: 1 },
+    { sse: 1, opcode: 0x0FE7, e: 1, reg_ud: 1, custom: 1 },
     { sse: 1, opcode: 0x660FE7, e: 1, reg_ud: 1, custom: 1 },
 
     { sse: 1, opcode: 0x0FE8, e: 1, custom: 1 },
@@ -781,7 +783,8 @@ const encodings = [
     { sse: 1, opcode: 0x0FEF, e: 1, custom: 1 },
     { sse: 1, opcode: 0x660FEF, e: 1, custom: 1 },
 
-    { sse: 1, opcode: 0x0FF0, skip: 1, block_boundary: 1 }, // sse3
+    { sse: 1, opcode: 0xF20FF0, e: 1, reg_ud: 1, custom: 1 }, // lddqu (sse3)
+    { opcode: 0x0FF0, skip: 1, block_boundary: 1 }, // ud without mandatory prefix
 
     { sse: 1, opcode: 0x0FF1, e: 1, custom: 1 },
     { sse: 1, opcode: 0x660FF1, e: 1, custom: 1 },

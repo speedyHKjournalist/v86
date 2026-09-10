@@ -124,6 +124,27 @@ else if(globalThis["scheduler"] && typeof globalThis["scheduler"]["postTask"] ==
     v86.prototype.register_yield = function() {};
     v86.prototype.unregister_yield = function() {};
 }
+else if(typeof window === "undefined" && typeof MessageChannel !== "undefined")
+{
+    // The CPU is already in a dedicated worker. A local task queue yields to
+    // input/GPU replies without a second worker and without timer clamping.
+    v86.prototype.register_yield = function()
+    {
+        this.tick_channel = new globalThis.MessageChannel();
+        this.tick_channel.port1.onmessage = e => this.yield_callback(e.data);
+    };
+    v86.prototype.yield = function(t, tick)
+    {
+        if(t < 1) this.tick_channel.port2.postMessage(tick);
+        else this.tick_timeout = setTimeout(() => this.yield_callback(tick), t);
+    };
+    v86.prototype.unregister_yield = function()
+    {
+        clearTimeout(this.tick_timeout);
+        this.tick_channel.port1.close();
+        this.tick_channel.port2.close();
+    };
+}
 else if(typeof Worker !== "undefined")
 {
     // XXX: This has a slightly lower throughput compared to window.postMessage

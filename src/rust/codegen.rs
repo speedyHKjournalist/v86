@@ -24,6 +24,67 @@ pub fn gen_get_eip(builder: &mut WasmBuilder) {
     builder.load_fixed_i32(global_pointers::instruction_pointer as u32);
 }
 
+pub fn gen_lookup_current_module_target(ctx: &mut JitContext, flags: crate::state_flags::CachedStateFlags) {
+    use crate::cpu::cpu::{tlb_code, Code};
+    // Read the live code TLB on every lookup. Do not embed a Code pointer:
+    // clearing a mapping or evicting a module may free or replace that object.
+    // Option<NonNull<Code>> uses a null pointer for None.
+    debug_assert_eq!(std::mem::size_of_val(unsafe { &tlb_code[0] }), 4);
+    gen_profiler_stat_increment(ctx.builder, profiler::stat::INDIRECT_JUMP);
+    ctx.builder.const_i32(-1);
+    let result = ctx.builder.set_new_local();
+    gen_get_eip(ctx.builder);
+    let address = ctx.builder.set_new_local();
+    let done = ctx.builder.block_void();
+    ctx.builder.get_local(&address);
+    ctx.builder.const_i32(12);
+    ctx.builder.shr_u_i32();
+    ctx.builder.const_i32(2);
+    ctx.builder.shl_i32();
+    ctx.builder.load_aligned_i32(std::ptr::addr_of!(tlb_code) as u32);
+    let entry = ctx.builder.tee_new_local();
+    ctx.builder.eqz_i32();
+    ctx.builder.br_if(done);
+    ctx.builder.get_local(&entry);
+    ctx.builder.load_u8(std::mem::offset_of!(Code, state_flags) as u32);
+    ctx.builder.const_i32(flags.to_u32() as i32);
+    ctx.builder.ne_i32();
+    ctx.builder.br_if(done);
+    ctx.builder.get_local(&entry);
+    ctx.builder.load_aligned_u16(std::mem::offset_of!(Code, wasm_table_index) as u32);
+    ctx.builder.const_i32(ctx.wasm_table_index.to_u16() as i32);
+    ctx.builder.ne_i32();
+    ctx.builder.br_if(done);
+    ctx.builder.get_local(&entry);
+    ctx.builder.get_local(&address);
+    ctx.builder.const_i32(0xFFF);
+    ctx.builder.and_i32();
+    ctx.builder.const_i32(1);
+    ctx.builder.shl_i32();
+    ctx.builder.add_i32();
+    ctx.builder.load_aligned_u16(std::mem::offset_of!(Code, state_table) as u32);
+    let state = ctx.builder.tee_new_local();
+    ctx.builder.const_i32(u16::MAX as i32);
+    ctx.builder.eq_i32();
+    ctx.builder.br_if(done);
+    ctx.builder.get_local(&state);
+    ctx.builder.set_local(&result);
+    ctx.builder.block_end();
+    if cfg!(feature = "profiler") {
+        ctx.builder.get_local(&result);
+        ctx.builder.const_i32(-1);
+        ctx.builder.eq_i32();
+        ctx.builder.if_void();
+        gen_profiler_stat_increment(ctx.builder, profiler::stat::INDIRECT_JUMP_NO_ENTRY);
+        ctx.builder.block_end();
+    }
+    ctx.builder.get_local(&result);
+    ctx.builder.free_local(state);
+    ctx.builder.free_local(entry);
+    ctx.builder.free_local(address);
+    ctx.builder.free_local(result);
+}
+
 pub fn gen_set_eip_to_after_current_instruction(ctx: &mut JitContext) {
     ctx.builder
         .const_i32(global_pointers::instruction_pointer as i32);
@@ -540,6 +601,21 @@ pub fn gen_modrm_resolve_safe_read128(
     });
 }
 
+/// Legacy packed arithmetic requires a 16-byte aligned memory operand.
+pub fn gen_modrm_resolve_safe_read128_aligned(
+    ctx: &mut JitContext, modrm_byte: ModrmByte, where_to_write: u32,
+) {
+    gen_modrm_resolve_with_local(ctx, modrm_byte, &|ctx, addr| {
+        ctx.builder.get_local(addr);
+        ctx.builder.const_i32(15);
+        ctx.builder.and_i32();
+        ctx.builder.if_void();
+        gen_trigger_gp(ctx, 0);
+        ctx.builder.block_end();
+        gen_safe_read128(ctx, addr, where_to_write);
+    });
+}
+
 pub fn gen_safe_read8(ctx: &mut JitContext, address_local: &WasmLocal) {
     gen_safe_read(ctx, BitSize::BYTE, address_local, None);
 }
@@ -639,6 +715,33 @@ pub fn gen_safe_write128(
     )
 }
 
+/// Reuse a checked RAM translation for adjacent absolute MOV reads. Every
+/// other instruction (including stores and helpers) ends the region. A slow
+/// read returns an entry with VALID clear, so MMIO scratch is never reused.
+pub fn clear_ram_read_cache(ctx: &mut JitContext) {
+    if let Some(local) = ctx.ram_read_cache.take() { ctx.builder.free_local(local); }
+    ctx.ram_read_page = None;
+}
+pub fn prepare_ram_read(ctx: &mut JitContext) {
+    let a = ctx.cpu.eip;
+    let mut page = None;
+    if ctx.cpu.state_flags.is_32() && ctx.cpu.has_flat_segmentation() && !cfg!(feature = "profiler") {
+        let op = memory::read8(a);
+        let operand = match op {
+            0xA0 | 0xA1 => Some((a + 1, if op == 0xA0 { 1 } else { 4 })),
+            0x8A | 0x8B if memory::read8(a + 1) & 0xC7 == 5 =>
+                Some((a + 2, if op == 0x8A { 1 } else { 4 })),
+            _ => None,
+        };
+        if let Some((operand, bytes)) = operand {
+            let addr = memory::read32s(operand) as u32;
+            if addr & 0xFFF <= 0x1000 - bytes { page = Some(addr >> 12); }
+        }
+    }
+    if page.is_none() || page != ctx.ram_read_page { clear_ram_read_cache(ctx); }
+    ctx.ram_read_page = page;
+}
+
 fn gen_safe_read(
     ctx: &mut JitContext,
     bits: BitSize,
@@ -655,39 +758,48 @@ fn gen_safe_read(
     //   fast: mem[(entry & ~0xFFF) ^ addr]
 
     let cont = ctx.builder.block_void();
-    ctx.builder.get_local(&address_local);
-
-    ctx.builder.const_i32(12);
-    ctx.builder.shr_u_i32();
-    ctx.builder.const_i32(2);
-    ctx.builder.shl_i32();
-
-    ctx.builder
-        .load_aligned_i32(unsafe { &tlb_data[0] as *const i32 as u32 });
-    let entry_local = ctx.builder.tee_new_local();
-
-    ctx.builder.const_i32(
-        (0xFFF
-            & !TLB_READONLY
-            & !TLB_GLOBAL
-            & !TLB_HAS_CODE
-            & !(if ctx.cpu.cpl3() { 0 } else { TLB_NO_USER })) as i32,
-    );
-    ctx.builder.and_i32();
-
-    ctx.builder.const_i32(TLB_VALID as i32);
-    ctx.builder.eq_i32();
-
-    if bits != BitSize::BYTE {
+    let entry_local = if let Some(local) = ctx.ram_read_cache.take() {
+        // The previous access validated the page and permissions. No helper
+        // can have run on this branch, and all known offsets fit in the page.
+        ctx.builder.get_local(&local);
+        ctx.builder.const_i32(TLB_VALID);
+        ctx.builder.and_i32();
+        local
+    } else {
         ctx.builder.get_local(&address_local);
-        ctx.builder.const_i32(0xFFF);
-        ctx.builder.and_i32();
-        ctx.builder.const_i32(0x1000 - bits.bytes() as i32);
-        ctx.builder.le_i32();
 
-        ctx.builder.and_i32();
-    }
+        ctx.builder.const_i32(12);
+        ctx.builder.shr_u_i32();
+        ctx.builder.const_i32(2);
+        ctx.builder.shl_i32();
 
+        ctx.builder
+            .load_aligned_i32(unsafe { &tlb_data[0] as *const i32 as u32 });
+        let local = ctx.builder.tee_new_local();
+
+        ctx.builder.const_i32(
+            (0xFFF
+                & !TLB_READONLY
+                & !TLB_GLOBAL
+                & !TLB_HAS_CODE
+                & !(if ctx.cpu.cpl3() { 0 } else { TLB_NO_USER })) as i32,
+        );
+        ctx.builder.and_i32();
+
+        ctx.builder.const_i32(TLB_VALID as i32);
+        ctx.builder.eq_i32();
+
+        if bits != BitSize::BYTE {
+            ctx.builder.get_local(&address_local);
+            ctx.builder.const_i32(0xFFF);
+            ctx.builder.and_i32();
+            ctx.builder.const_i32(0x1000 - bits.bytes() as i32);
+            ctx.builder.le_i32();
+
+            ctx.builder.and_i32();
+        }
+        local
+    };
     ctx.builder.br_if(cont);
 
     if cfg!(feature = "profiler") {
@@ -775,7 +887,8 @@ fn gen_safe_read(
         },
     }
 
-    ctx.builder.free_local(entry_local);
+    if ctx.ram_read_page.is_some() { ctx.ram_read_cache = Some(entry_local); }
+    else { ctx.builder.free_local(entry_local); }
 }
 
 pub fn gen_get_phys_eip_plus_mem(ctx: &mut JitContext, address_local: &WasmLocal) {
@@ -2485,14 +2598,68 @@ pub fn gen_test_jcxz(ctx: &mut JitContext, is_asize_32: bool) {
 }
 
 pub fn gen_fpu_get_sti(ctx: &mut JitContext, i: u32) {
-    ctx.builder
-        .const_i32(global_pointers::sse_scratch_register as i32);
-    ctx.builder.const_i32(i as i32);
-    ctx.builder.call_fn2("fpu_get_sti_jit");
-    ctx.builder
-        .load_fixed_i64(global_pointers::sse_scratch_register as u32);
-    ctx.builder
-        .load_fixed_u16(global_pointers::sse_scratch_register as u32 + 8);
+    ctx.builder.load_fixed_u8(global_pointers::fpu_stack_ptr as u32);
+    if i != 0 { ctx.builder.const_i32(i as i32); ctx.builder.add_i32(); }
+    ctx.builder.const_i32(7); ctx.builder.and_i32();
+    let index = ctx.builder.set_new_local();
+    ctx.builder.load_fixed_u8(global_pointers::fpu_stack_empty as u32);
+    ctx.builder.get_local(&index); ctx.builder.shr_u_i32();
+    ctx.builder.const_i32(1); ctx.builder.and_i32();
+    ctx.builder.if_i32();
+    // Underflow must retain the original status-word/indefinite-NaN behavior.
+    ctx.builder.const_i32(global_pointers::sse_scratch_register as i32);
+    ctx.builder.const_i32(i as i32); ctx.builder.call_fn2("fpu_get_sti_jit");
+    ctx.builder.const_i32(global_pointers::sse_scratch_register as i32);
+    ctx.builder.else_();
+    ctx.builder.get_local(&index); ctx.builder.const_i32(4); ctx.builder.shl_i32();
+    ctx.builder.const_i32(global_pointers::fpu_st as i32); ctx.builder.add_i32();
+    ctx.builder.block_end();
+    let address = ctx.builder.set_new_local();
+    ctx.builder.get_local(&address); ctx.builder.load_aligned_i64(0);
+    ctx.builder.get_local(&address); ctx.builder.load_aligned_u16(8);
+    ctx.builder.free_local(address); ctx.builder.free_local(index);
+}
+
+pub fn gen_fpu_pop(ctx: &mut JitContext) {
+    ctx.builder.load_fixed_u8(global_pointers::fpu_stack_ptr as u32);
+    let top = ctx.builder.set_new_local();
+    ctx.builder.const_i32(global_pointers::fpu_stack_empty as i32);
+    ctx.builder.load_fixed_u8(global_pointers::fpu_stack_empty as u32);
+    ctx.builder.const_i32(1); ctx.builder.get_local(&top); ctx.builder.shl_i32(); ctx.builder.or_i32();
+    ctx.builder.store_u8(0);
+    ctx.builder.const_i32(global_pointers::fpu_stack_ptr as i32);
+    ctx.builder.get_local(&top); ctx.builder.const_i32(1); ctx.builder.add_i32();
+    ctx.builder.const_i32(7); ctx.builder.and_i32(); ctx.builder.store_u8(0);
+    ctx.builder.free_local(top);
+}
+
+pub fn gen_fpu_push(ctx: &mut JitContext) {
+    let exponent = ctx.builder.set_new_local();
+    let mantissa = ctx.builder.set_new_local_i64();
+    ctx.builder.load_fixed_u8(global_pointers::fpu_stack_ptr as u32);
+    ctx.builder.const_i32(1); ctx.builder.sub_i32(); ctx.builder.const_i32(7); ctx.builder.and_i32();
+    let top = ctx.builder.set_new_local();
+    ctx.builder.load_fixed_u8(global_pointers::fpu_stack_empty as u32);
+    ctx.builder.get_local(&top); ctx.builder.shr_u_i32(); ctx.builder.const_i32(1); ctx.builder.and_i32();
+    ctx.builder.if_void();
+    ctx.builder.const_i32(global_pointers::fpu_stack_ptr as i32); ctx.builder.get_local(&top); ctx.builder.store_u8(0);
+    ctx.builder.const_i32(global_pointers::fpu_stack_empty as i32);
+    ctx.builder.load_fixed_u8(global_pointers::fpu_stack_empty as u32);
+    ctx.builder.const_i32(1); ctx.builder.get_local(&top); ctx.builder.shl_i32();
+    ctx.builder.const_i32(-1); ctx.builder.xor_i32(); ctx.builder.and_i32(); ctx.builder.store_u8(0);
+    ctx.builder.const_i32(global_pointers::fpu_status_word as i32);
+    ctx.builder.load_fixed_u16(global_pointers::fpu_status_word as u32);
+    ctx.builder.const_i32(!0x200); ctx.builder.and_i32(); ctx.builder.store_aligned_u16(0);
+    ctx.builder.get_local(&top); ctx.builder.const_i32(4); ctx.builder.shl_i32();
+    ctx.builder.const_i32(global_pointers::fpu_st as i32); ctx.builder.add_i32();
+    let address = ctx.builder.set_new_local();
+    ctx.builder.get_local(&address); ctx.builder.get_local_i64(&mantissa); ctx.builder.store_aligned_i64(0);
+    ctx.builder.get_local(&address); ctx.builder.get_local(&exponent); ctx.builder.store_aligned_u16(8);
+    ctx.builder.free_local(address);
+    ctx.builder.else_();
+    ctx.builder.get_local_i64(&mantissa); ctx.builder.get_local(&exponent); ctx.builder.call_fn2_i64_i32("fpu_push");
+    ctx.builder.block_end();
+    ctx.builder.free_local(top); ctx.builder.free_local_i64(mantissa); ctx.builder.free_local(exponent);
 }
 
 pub fn gen_fpu_load_m32(ctx: &mut JitContext, modrm_byte: ModrmByte) {

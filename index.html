@@ -305,6 +305,10 @@
             </tr>
 
             <tr>
+                <td><label for="cpu_worker">Run CPU in a dedicated Worker</label></td>
+                <td><input id="cpu_worker" type="checkbox" checked></td>
+            </tr>
+            <tr>
                 <td><label for="graphics_proxy">Enable graphics proxy (WebGPU)</label></td>
                 <td>
                     <input id="graphics_proxy" type="checkbox" aria-describedby="graphics_proxy_help"><br>
@@ -361,6 +365,8 @@
         <button id="change_cdrom_image" title="Either a single .iso file or multiple files of any type">Insert CD image</button>
         <button id="save_state">Save State</button>
         <button id="load_state">Load State</button>
+        <button id="performance_record" title="Record disk reads, CPU execution and JIT activity for up to 10 minutes">Record performance</button>
+        <button id="performance_export" disabled>Download performance</button>
         <button id="memory_dump">Memory Dump</button>
         <button id="capture_network_traffic" title="In wireshark: file -> import from hex -> tick direction indication, timestamp %s.%f">Capture network traffic</button>
         <button id="toggle_mouse">Disable mouse</button>

@@ -39,23 +39,27 @@
             });
             return this.ready;
         }
-        async compress(buffer, length) {
+        async compress(buffer, length, measure = false) {
             await this.initialize();
             if (this.worker) {
                 const result = await new Promise((resolve, reject) => {
                     this.pending = { resolve, reject };
-                    try { this.worker.postMessage({ buffer: buffer.buffer, length }, [buffer.buffer]); }
+                    try { this.worker.postMessage({ buffer: buffer.buffer, length, measure }, [buffer.buffer]); }
                     catch (error) { this.pending = null; reject(error); }
                 });
-                return { data: new Uint8Array(result.buffer, 0, result.length), codec: result.codec };
+                return { data: new Uint8Array(result.buffer, 0, result.length), codec: result.codec,
+                    compression_backend: "worker", compression_ms: result.compression_ms };
             }
+            const start = measure ? global.performance.now() : 0;
             const raw = buffer.subarray(0, length);
             if (typeof global.CompressionStream === "function") {
                 const blob = new Blob([raw]);
                 const compressed = await new Response(blob.stream().pipeThrough(new global.CompressionStream("gzip"))).arrayBuffer();
-                if (compressed.byteLength < length) return { data: new Uint8Array(compressed), codec: 1 };
+                if (compressed.byteLength < length) return { data: new Uint8Array(compressed), codec: 1,
+                    compression_backend: "local-stream", compression_ms: measure ? global.performance.now() - start : null };
             }
-            return { data: length === buffer.length ? raw : raw.slice(), codec: 0 };
+            return { data: length === buffer.length ? raw : raw.slice(), codec: 0,
+                compression_backend: "local-raw", compression_ms: measure ? global.performance.now() - start : null };
         }
         destroy() { if (this.worker) this.worker.terminate(); this.worker = null; }
     }
@@ -130,6 +134,7 @@
 
     class GraphicsJournal {
         constructor(options = {}) {
+            this["performanceTimingVersion"] = 1;
             this.budget = options.budget ?? 64 * 1024 * 1024;
             this.pageBytes = options.pageBytes || PAGE_BYTES;
             this.store = options.store === undefined ?
@@ -175,10 +180,16 @@
         seal() {
             if (!this.partCount) return;
             const buffer = this.buffer, rawBytes = this.partBytes, count = this.partCount;
+            const timing = this["performanceTiming"]?.["page"](rawBytes);
             this.buffer = this.view = null;
             this.partBytes = this.partCount = 0;
             this.work = this.work.then(async () => {
-                const { data, codec } = await this.compressor.compress(buffer, rawBytes);
+                if (timing) timing["start"]();
+                let result;
+                try { result = await this.compressor.compress(buffer, rawBytes, !!timing); }
+                catch (error) { if (timing) timing["finish"](null); throw error; }
+                if (timing) timing["finish"](result);
+                const { data, codec } = result;
                 const page = { data, bytes: data.length, rawBytes, count, codec };
                 this.pages.push(page);
                 this.residentBytes += page.bytes;

@@ -1,0 +1,84 @@
+<!doctype html><meta charset="utf-8"><title>Performance recorder UI integration</title>
+<pre id="result">RUNNING</pre>
+<iframe id="app" src="../../index.html?cpu_worker=1&graphics_proxy=0&mute=1&net_device_type=none"></iframe>
+<script type="module">
+(async () => {
+    const frame = document.getElementById("app");
+    const win = frame.contentWindow;
+    const checks = [];
+    const check = (ok, label) => { if (!ok) throw new Error(label); checks.push(label); };
+    const waitFor = async predicate => {
+        const deadline = performance.now() + 20000;
+        while (!predicate()) {
+            if (performance.now() > deadline) throw new Error("UI readiness timeout");
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+    };
+    const get = id => win.document.getElementById(id);
+    await waitFor(() => get("start_emulation")?.onclick);
+    const bios = new Uint8Array(65536).fill(0xf4);
+    bios.set([0xea, 0x00, 0x01, 0x00, 0xf0], 0xfff0);
+    bios.set([0x40, 0xeb, 0xfd], 0x100);
+    const files = new win.DataTransfer();
+    files.items.add(new win.File([bios], "test-bios.bin"));
+    get("bios").files = files.files;
+    get("memory_size").value = "32";
+    get("start_emulation").click();
+    await waitFor(() => get("performance_record").onclick);
+    const record = get("performance_record"), download = get("performance_export");
+    check(download.disabled, "recording controls initially idle");
+    record.click();
+    await waitFor(() => !record.disabled);
+    check(record.textContent === "Stop recording" && download.disabled,
+        "compiled application starts recorder from button");
+    await new Promise(resolve => setTimeout(resolve, 600));
+    record.click();
+    await waitFor(() => !record.disabled);
+    check(record.textContent === "Record performance" && !download.disabled,
+        "stop enables JSON export");
+    let exported;
+    // Inspect the exact download Blob without opening Chrome's download flow,
+    // which can keep the isolated browser alive after the test has finished.
+    const dispatch = win.HTMLAnchorElement.prototype.dispatchEvent;
+    win.HTMLAnchorElement.prototype.dispatchEvent = function(event) {
+        if (this.download === "v86-performance.json") return true;
+        return dispatch.call(this, event);
+    };
+    const createURL = win.URL.createObjectURL;
+    win.URL.createObjectURL = blob => { exported = blob; return createURL.call(win.URL, blob); };
+    download.click();
+    check(!!exported, "download produces a Blob");
+    const report = JSON.parse(await exported.text());
+    check(report.metadata.cpu_thread === "dedicated-worker", "advanced compiled UI executes CPU in worker");
+    check(report.format === "v86-performance" && report.execution_counters_available,
+        "export contains release Wasm counters through advanced compiled UI");
+    check(report.version === 5 && report.graphics.host.raf_available &&
+        report.graphics.streams.some(row => row.api === "browser-raf" && row.events > 0),
+        "compiled UI exports host frame timing in format v5");
+    check(report.graphics.available === false, "disabled graphics is reported unavailable, not zero GPU cost");
+    check(report.execution.jit_steps > 0 && report.summary.main_loop_calls > 0,
+        "compiled property names preserve CPU hooks");
+    // The auto-starting UI may compile this tiny loop before recording begins.
+    check(report.counter_version === 4 && report.execution.sync_codegen_ms >= 0,
+        "compiled UI exports versioned code-generation timing");
+    check(report.hotspots.length > 0, "compiled UI exports entry hotspots");
+    check(report.execution.execution_batch_ms > 0 && report.execution.sampled_jit_chunks > 0 &&
+        report.execution_hotspots.some(row => row.jit === 1 && row.samples > 0),
+        "compiled UI preserves v3 execution timing and exported Wasm hotspot accessors");
+    check(/^[a-f0-9]{64}$/.test(report.metadata.wasm_sha256), "export identifies actual Wasm bytes by SHA-256");
+    check(report.duration_ms >= 600 && report.reason === "user",
+        "export covers the interval between start and stop clicks");
+    record.click();
+    await waitFor(() => !record.disabled);
+    record.click();
+    await waitFor(() => !record.disabled);
+    download.click();
+    const next = JSON.parse(await exported.text());
+    check(next.markers.length === 1, "next recording starts with fresh markers");
+    frame.remove();
+    return { status: "PASS", checks };
+})().catch(error => ({ status: "FAIL", error: error.stack })).then(result => {
+    document.getElementById("result").textContent = JSON.stringify(result);
+    fetch("/__test_result", { method: "POST", body: JSON.stringify(result) });
+});
+</script>

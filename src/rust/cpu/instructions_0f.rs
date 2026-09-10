@@ -969,6 +969,7 @@ pub unsafe fn instr_660F2B_mem(addr: i32, r: i32) {
     mov_r_m128(addr, r);
 }
 
+#[no_mangle]
 pub unsafe fn instr_0F2C(source: u64, r: i32) {
     // cvttps2pi mm, xmm/m64
     let low = f32::from_bits(source as u32);
@@ -987,6 +988,7 @@ pub unsafe fn instr_0F2C_mem(addr: i32, r: i32) {
 #[no_mangle]
 pub unsafe fn instr_0F2C_reg(r1: i32, r2: i32) { instr_0F2C(read_xmm64s(r1), r2); }
 
+#[no_mangle]
 pub unsafe fn instr_660F2C(source: reg128, r: i32) {
     // cvttpd2pi mm, xmm/m128
     write_mmx_reg64(
@@ -1026,6 +1028,7 @@ pub unsafe fn instr_F30F2C_mem(addr: i32, r: i32) {
 #[no_mangle]
 pub unsafe fn instr_F30F2C_reg(r1: i32, r2: i32) { instr_F30F2C(read_xmm_f32(r1), r2); }
 
+#[no_mangle]
 pub unsafe fn instr_0F2D(source: u64, r: i32) {
     // cvtps2pi mm, xmm/m64
     let source: [f32; 2] = std::mem::transmute(source);
@@ -1043,6 +1046,7 @@ pub unsafe fn instr_0F2D_mem(addr: i32, r: i32) {
     instr_0F2D(return_on_pagefault!(safe_read64s(addr)), r);
 }
 
+#[no_mangle]
 pub unsafe fn instr_660F2D(source: reg128, r: i32) {
     // cvtpd2pi mm, xmm/m128
     let result = [
@@ -3983,7 +3987,39 @@ pub unsafe fn instr_0FCE() { bswap(ESI); }
 #[no_mangle]
 pub unsafe fn instr_0FCF() { bswap(EDI); }
 #[no_mangle]
-pub unsafe fn instr_0FD0() { unimplemented_sse(); }
+pub unsafe fn instr_0FD0() { trigger_ud(); }
+
+#[no_mangle]
+pub unsafe fn instr_660FD0(source: reg128, r: i32) {
+    // addsubpd: subtract even lanes, add odd lanes.
+    let destination = read_xmm128s(r);
+    write_xmm_reg128(r, reg128 { f64: [
+                destination.f64[0] - source.f64[0],
+                destination.f64[1] + source.f64[1],
+    ] });
+}
+pub unsafe fn instr_660FD0_reg(r1: i32, r2: i32) { instr_660FD0(read_xmm128s(r1), r2); }
+pub unsafe fn instr_660FD0_mem(addr: i32, r: i32) {
+    if addr & 15 != 0 { trigger_gp(0); return; }
+    instr_660FD0(return_on_pagefault!(safe_read128s(addr)), r);
+}
+#[no_mangle]
+pub unsafe fn instr_F20FD0(source: reg128, r: i32) {
+    // addsubps: subtract even lanes, add odd lanes.
+    let destination = read_xmm128s(r);
+    write_xmm_reg128(r, reg128 { f32: [
+                destination.f32[0] - source.f32[0],
+                destination.f32[1] + source.f32[1],
+                destination.f32[2] - source.f32[2],
+                destination.f32[3] + source.f32[3],
+    ] });
+}
+pub unsafe fn instr_F20FD0_reg(r1: i32, r2: i32) { instr_F20FD0(read_xmm128s(r1), r2); }
+pub unsafe fn instr_F20FD0_mem(addr: i32, r: i32) {
+    if addr & 15 != 0 { trigger_gp(0); return; }
+    instr_F20FD0(return_on_pagefault!(safe_read128s(addr)), r);
+}
+
 #[no_mangle]
 pub unsafe fn instr_0FD1(source: u64, r: i32) {
     // psrlw mm, mm/m64
@@ -4841,7 +4877,14 @@ pub unsafe fn instr_660FEF_mem(addr: i32, r: i32) {
     instr_660FEF(return_on_pagefault!(safe_read128s(addr)), r);
 }
 #[no_mangle]
-pub unsafe fn instr_0FF0() { unimplemented_sse(); }
+pub unsafe fn instr_0FF0() { trigger_ud(); }
+
+pub unsafe fn instr_F20FF0_reg(_r1: i32, _r2: i32) { trigger_ud(); }
+pub unsafe fn instr_F20FF0_mem(addr: i32, r: i32) {
+    // LDDQU is a memory-only, unaligned 128-bit load.
+    write_xmm_reg128(r, return_on_pagefault!(safe_read128s(addr)));
+}
+
 #[no_mangle]
 pub unsafe fn instr_0FF1(source: u64, r: i32) {
     // psllw mm, mm/m64
