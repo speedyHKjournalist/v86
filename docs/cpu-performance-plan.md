@@ -67,7 +67,7 @@ Worker 使用与兼容：页面通过 `cpu_worker=1` 启用，`cpu_worker=0` 回
 | [cpu/cpu.rs](../src/rust/cpu/cpu.rs)、[main.js](../src/main.js) | `TIME_PER_FRAME=1.0` ms；浏览器的一个 Worker 分支负责唤醒计时 | 这不等于 CPU 已迁入 Worker；时间片也不是硬实时上限 |
 | [graphics_journal.js](../src/browser/glbridge/graphics_journal.js) | 连续页缓冲、Worker 压缩、IndexedDB 暂存 | 仍占用内存带宽、后台 CPU 与存储；“不阻塞主线程”不等于“无开销” |
 
-具体决策以当前代码和 profile 为准，避免把历史描述当成现状。
+仓库的 [how-it-works.md](how-it-works.md) 可帮助理解结构，但具体决策以当前代码和 profile 为准，避免把历史描述当成现状。
 
 ## 3. P0：先建立能定位问题的基准
 
