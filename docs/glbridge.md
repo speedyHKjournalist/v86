@@ -1,0 +1,131 @@
+# Graphics proxy quick start
+
+## 1. What is `v86gl_pci.js`?
+
+[`src/v86gl_pci.js`](../src/v86gl_pci.js) implements a custom virtio PCI device
+in v86. It receives graphics commands from the Windows guest driver and passes
+them to the browser graphics renderer, which uses WebGPU.
+
+Enable **Enable graphics proxy (WebGPU)** in `index.html` or `debug.html`.
+
+## 2. Get the driver and DLLs
+
+Sources and binaries are in
+[retro-gaming-site/glbridge](https://github.com/speedyHKjournalist/retro-gaming-site/tree/main/glbridge):
+
+- `v86gl_driver/v86gl-virtio.sys`
+- `openglproxy/opengl32.dll`
+- `ddrawproxy/ddraw.dll`
+- `d3d8proxy/d3d8.dll`
+- `d3d9proxy/d3d9.dll`
+
+## 3. Install the driver in Windows 2000/XP
+
+Rename `v86gl-virtio.sys` to `v86gl.sys` and copy it to
+`C:\WINDOWS\system32\drivers`. When updating, close the game and run
+`sc stop v86gl` before replacing the file.
+
+Run these commands as Administrator:
+
+```bat
+sc create v86gl type= kernel start= demand binPath= C:\WINDOWS\system32\drivers\v86gl.sys
+
+sc qc v86gl
+sc start v86gl
+```
+
+The current build scripts target XP; Windows 2000 compatibility is unverified.
+
+## 4. Install the graphics DLLs
+
+Copy the DLLs needed by the game into the same folder as its `.exe`:
+`opengl32.dll` for OpenGL, `ddraw.dll` for DirectDraw, `d3d8.dll` for Direct3D 8,
+or `d3d9.dll` for Direct3D 9.
+
+## 5. Build the driver and DLLs
+
+Install the 32-bit MinGW-w64 toolchain (`i686-w64-mingw32-gcc`, `objdump`, and
+`windres`), including its DDK headers and kernel import libraries.
+From the `retro-gaming-site` repository root, run:
+
+```sh
+sh glbridge/v86gl_driver/build.sh
+sh glbridge/openglproxy/build.sh
+sh glbridge/ddrawproxy/build.sh
+sh glbridge/d3d8proxy/build.sh
+sh glbridge/d3d9proxy/build.sh
+```
+
+
+## 6. Tested games and applications
+
+The following games and applications have been tested with the graphics proxy:
+
+- **OpenGL:** GLView 2.6.0, Warcraft III (OpenGL mode), Cube 2 Sauerbraten.
+- **DirectDraw:** 3DMark 99 MAX, Diablo II.
+- **Direct3D 7:** 3DMark 2000.
+- **Direct3D 8:** 3DMark 2001 SE, MapleStory v083.
+- **Direct3D 9:** 3DMark06, KartRider, Warcraft III, Grand Theft Auto: San Andreas, Need for Speed: Most Wanted (2005).
+
+![Graphics proxy test screenshot](3dmark06_result.png)
+
+## 7. Save and restore graphics state
+
+Use `await emulator.save_state()` and `await emulator.restore_state(state)`.
+The graphics adapter pauses a running guest while saving or restoring, waits
+for accepted GPU work and readbacks, and resumes it after success. Saves and
+restores on the same instance are serialized. A failed restore leaves the guest
+stopped. `initial_state` also restores graphics before `emulator-loaded`.
+Historical graphics surfaces stay hidden during reconstruction; the final
+surface is revealed after replay completes. Loading still takes time proportional
+to the history. Browser audio is paused during the operation. Restoring clears
+audio from the discarded timeline and reapplies the saved SB16 sampling rate
+before playback resumes.
+
+Checkpoint version 3 records OpenGL, Direct3D 8, Direct3D 9 and DirectDraw batches
+in order, including Present and checkpoint flush boundaries. On restore the
+adapter rebuilds clean executors and replays the history. This reconstructs
+resource handles, shaders, render state, palettes, queries and GPU-rendered
+contents, rather than relying only on CPU upload shadows. Historical readbacks
+never write to the restored guest memory. D3D8 uses an owned back buffer so
+unfinished frames survive browser frame boundaries and checkpoint flushes.
+
+Commands are copied directly into contiguous pages, avoiding allocations per
+batch. In browsers, completed page buffers are transferred to a dedicated
+`graphics_journal_worker.js` worker for compression, keeping that work off the
+emulation thread. Deploy this file beside `libv86-webgpu.js`; `make glbridge`
+generates both. Environments without workers use local compression. There is no 512 MiB raw
+history cutoff. `graphics_options.graphicsJournalMemoryBytes` sets the compressed
+RAM cache budget (default 64 MiB); older `maxGraphicsJournalBytes` and
+`maxGLJournalBytes` options are aliases for this budget. Excess pages are stored
+temporarily in IndexedDB and deleted when the emulator resets or is destroyed.
+If disk caching is unavailable or its quota is exhausted, pages stay in RAM;
+commands are never discarded to enforce the cache budget. Pending compression
+and the current page also use memory outside this cache budget.
+
+Saving packs all pages into a portable checkpoint; loading needs no original
+browser database. It decompresses and replays one page at a time. Saving still
+needs memory for the complete output, and the emulator's overall state format
+uses signed 32-bit offsets. History size and restore time grow with the recorded
+workload. This remains a replay checkpoint, rather than a compact snapshot of
+only live resources, and GPU results need the same supported features.
+
+Version 2 checkpoints remain readable. A running session that already exceeded
+the old history cutoff must be restarted with the new code: commands discarded
+by the old implementation cannot be recovered.
+
+Version 1 checkpoints can restore only their original OpenGL/D3D8 payloads.
+They never stored D3D9/DirectDraw resources or GL query lifetimes, so missing
+state in those old files cannot be recovered retroactively.
+
+Regression checks:
+
+```sh
+make test-glbridge
+node tests/glbridge/gl_multipass_browser_runner.js graphics_checkpoint_browser_test.html
+node tests/glbridge/gl_multipass_browser_runner.js graphics_vga_browser_test.html
+node tests/glbridge/gl_multipass_browser_runner.js graphics_journal_perf_test.html
+```
+
+The browser test checks actual GPU pixels for all four APIs after restoring in
+both the same and a new emulator instance, including unfinished D3D8 drawing.
