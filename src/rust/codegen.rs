@@ -35,7 +35,24 @@ pub fn gen_lookup_current_module_target(ctx: &mut JitContext, flags: crate::stat
     let result = ctx.builder.set_new_local();
     gen_get_eip(ctx.builder);
     let address = ctx.builder.set_new_local();
+    let cached = ctx.target_caches.get(&ctx.start_of_current_instruction).map(|(key, epoch, state)|
+        (key.unsafe_clone(), epoch.unsafe_clone(), state.unsafe_clone()));
     let done = ctx.builder.block_void();
+    if let Some((key, epoch, state)) = cached.as_ref() {
+        ctx.builder.get_local(&address);
+        ctx.builder.get_local(key);
+        ctx.builder.eq_i32();
+        ctx.builder.load_fixed_i64(std::ptr::addr_of!(crate::jit::CODE_LOOKUP_EPOCH) as u32);
+        ctx.builder.get_local_i64(epoch);
+        ctx.builder.eq_i64();
+        ctx.builder.and_i32();
+        ctx.builder.if_void();
+        ctx.builder.get_local(state);
+        ctx.builder.set_local(&result);
+        ctx.builder.br(done);
+        ctx.builder.block_end();
+    }
+    let miss = ctx.builder.block_void();
     ctx.builder.get_local(&address);
     ctx.builder.const_i32(12);
     ctx.builder.shr_u_i32();
@@ -44,17 +61,17 @@ pub fn gen_lookup_current_module_target(ctx: &mut JitContext, flags: crate::stat
     ctx.builder.load_aligned_i32(std::ptr::addr_of!(tlb_code) as u32);
     let entry = ctx.builder.tee_new_local();
     ctx.builder.eqz_i32();
-    ctx.builder.br_if(done);
+    ctx.builder.br_if(miss);
     ctx.builder.get_local(&entry);
     ctx.builder.load_u8(std::mem::offset_of!(Code, state_flags) as u32);
     ctx.builder.const_i32(flags.to_u32() as i32);
     ctx.builder.ne_i32();
-    ctx.builder.br_if(done);
+    ctx.builder.br_if(miss);
     ctx.builder.get_local(&entry);
     ctx.builder.load_aligned_u16(std::mem::offset_of!(Code, wasm_table_index) as u32);
     ctx.builder.const_i32(ctx.wasm_table_index.to_u16() as i32);
     ctx.builder.ne_i32();
-    ctx.builder.br_if(done);
+    ctx.builder.br_if(miss);
     ctx.builder.get_local(&entry);
     ctx.builder.get_local(&address);
     ctx.builder.const_i32(0xFFF);
@@ -66,10 +83,17 @@ pub fn gen_lookup_current_module_target(ctx: &mut JitContext, flags: crate::stat
     let state = ctx.builder.tee_new_local();
     ctx.builder.const_i32(u16::MAX as i32);
     ctx.builder.eq_i32();
-    ctx.builder.br_if(done);
+    ctx.builder.br_if(miss);
     ctx.builder.get_local(&state);
     ctx.builder.set_local(&result);
-    ctx.builder.block_end();
+    ctx.builder.block_end(); // miss
+    if let Some((key, epoch, state)) = cached.as_ref() {
+        ctx.builder.get_local(&address); ctx.builder.set_local(key);
+        ctx.builder.load_fixed_i64(std::ptr::addr_of!(crate::jit::CODE_LOOKUP_EPOCH) as u32);
+        ctx.builder.set_local_i64(epoch);
+        ctx.builder.get_local(&result); ctx.builder.set_local(state);
+    }
+    ctx.builder.block_end(); // done
     if cfg!(feature = "profiler") {
         ctx.builder.get_local(&result);
         ctx.builder.const_i32(-1);
@@ -83,6 +107,15 @@ pub fn gen_lookup_current_module_target(ctx: &mut JitContext, flags: crate::stat
     ctx.builder.free_local(entry);
     ctx.builder.free_local(address);
     ctx.builder.free_local(result);
+}
+
+pub fn gen_link_or_exit(ctx: &mut JitContext) {
+    if unsafe { crate::jit::JIT_LINK_EXITS } && !cfg!(feature = "profiler") {
+        gen_move_registers_from_locals_to_memory(ctx);
+        gen_update_instruction_counter(ctx);
+        ctx.builder.call_fn0("jit_link_once");
+        ctx.builder.return_();
+    } else { ctx.builder.br(ctx.exit_label); }
 }
 
 pub fn gen_set_eip_to_after_current_instruction(ctx: &mut JitContext) {
@@ -397,7 +430,7 @@ pub fn gen_get_ss_offset(ctx: &mut JitContext) {
 }
 
 pub fn gen_get_flags(builder: &mut WasmBuilder) {
-    builder.load_fixed_i32(global_pointers::flags as u32);
+    gen_load_flag_value(builder, global_pointers::flags as u32);
 }
 fn gen_get_flags_changed(builder: &mut WasmBuilder) {
     builder.load_fixed_i32(global_pointers::flags_changed as u32);
@@ -715,16 +748,193 @@ pub fn gen_safe_write128(
     )
 }
 
-/// Reuse a checked RAM translation for adjacent absolute MOV reads. Every
-/// other instruction (including stores and helpers) ends the region. A slow
+/// Reuse a checked RAM translation for nearby integer MOV reads. Audited
+/// register operations may intervene; stores and helpers end the region. A slow
 /// read returns an entry with VALID clear, so MMIO scratch is never reused.
 pub fn clear_ram_read_cache(ctx: &mut JitContext) {
     if let Some(local) = ctx.ram_read_cache.take() { ctx.builder.free_local(local); }
+    if let Some(local) = ctx.ram_read_base.take() { ctx.builder.free_local(local); }
     ctx.ram_read_page = None;
+    ctx.ram_read_dynamic = false;
+    ctx.ram_read_continue = false;
 }
+
+fn peek_integer_read(
+    cpu: &crate::cpu_context::CpuContext,
+) -> Option<(ModrmByte, u32, crate::cpu_context::CpuContext)> {
+    let mut cpu = cpu.clone();
+    cpu.prefixes = 0;
+    let mut op = cpu.read_imm8();
+    if op == 0x66 { op = cpu.read_imm8(); }
+    let byte_destination = match op {
+        0x8A => true,
+        0x8B => false,
+        0x0F if matches!(cpu.read_imm8(), 0xB6 | 0xB7 | 0xBE | 0xBF) => false,
+        _ => return None,
+    };
+    let byte = cpu.read_imm8();
+    if byte >= 0xC0 { return None; }
+    let dest = (byte as u32 >> 3) & if byte_destination { 3 } else { 7 };
+    let operand = modrm::decode(&mut cpu, byte);
+    Some((operand, dest, cpu))
+}
+
+/// A deliberately small nonfaulting, register-only set. The returned mask
+/// includes full-register aliases; no memory access or helper can hide here.
+fn peek_ram_read_gap(cpu: &crate::cpu_context::CpuContext)
+    -> Option<(u8, crate::cpu_context::CpuContext)> {
+    let mut cpu = cpu.clone();
+    cpu.prefixes = 0;
+    let op = cpu.read_imm8();
+    let writes = match op {
+        0x90 => 0,
+        0x40..=0x4F => 1 << (op & 7),
+        0xB8..=0xBF => { cpu.read_imm32(); 1 << (op & 7) },
+        0x05 | 0x0D | 0x25 | 0x2D | 0x35 | 0x3D | 0xA9 => {
+            cpu.read_imm32();
+            if matches!(op, 0x3D | 0xA9) { 0 } else { 1 }
+        },
+        0x01 | 0x03 | 0x09 | 0x0B | 0x21 | 0x23 | 0x29 | 0x2B |
+        0x31 | 0x33 | 0x39 | 0x3B | 0x85 | 0x89 | 0x8B => {
+            let m = cpu.read_imm8();
+            if m < 0xC0 { return None; }
+            if matches!(op, 0x39 | 0x3B | 0x85) { 0 }
+            else { 1 << (if op & 2 != 0 { (m >> 3) & 7 } else { m & 7 }) }
+        },
+        0x81 | 0x83 => {
+            let m = cpu.read_imm8();
+            if m < 0xC0 || matches!((m >> 3) & 7, 2 | 3) { return None; }
+            if op == 0x81 { cpu.read_imm32(); } else { cpu.read_imm8(); }
+            if m & 0x38 == 0x38 { 0 } else { 1 << (m & 7) }
+        },
+        0x8D => {
+            let m = cpu.read_imm8();
+            if m >= 0xC0 { return None; }
+            modrm::decode(&mut cpu, m);
+            1 << ((m >> 3) & 7)
+        },
+        _ => return None,
+    };
+    Some((writes, cpu))
+}
+
+/// Defer audited full flag writers; helpers and other observers materialize.
+pub fn prepare_deferred_flags(ctx: &mut JitContext) {
+    let mut a = ctx.cpu.eip;
+    let word = memory::read8(a) == 0x66;
+    if word { a += 1; }
+    let op = memory::read8(a);
+    let arithmetic = if !unsafe { crate::jit::JIT_EXTENDED_FLAGS } {
+        // Original narrow policy: only register ADD/SUB32 defer flag writes.
+        !word && match op {
+            0x01 | 0x03 | 0x29 | 0x2B => memory::read8(a + 1) >= 0xC0,
+            0x05 | 0x2D => true,
+            0x81 | 0x83 => memory::read8(a + 1) >= 0xC0
+                && matches!(memory::read8(a + 1) >> 3 & 7, 0 | 5),
+            _ => false,
+        }
+    } else if word {
+        // Word arithmetic still calls helpers; CMP/TEST are emitted directly.
+        matches!(op, 0x39 | 0x3B | 0x85) && memory::read8(a + 1) >= 0xC0
+            || matches!(op, 0x3D | 0xA9)
+            || matches!(op, 0x81 | 0x83) && memory::read8(a + 1) >= 0xF8
+            || op == 0xF7 && memory::read8(a + 1) & 0xF8 == 0xC0
+    } else {
+        match op {
+            0x00..=0x03 | 0x08..=0x0B | 0x20..=0x23 | 0x28..=0x2B
+            | 0x30..=0x33 | 0x38..=0x3B | 0x84 | 0x85 => memory::read8(a + 1) >= 0xC0,
+            0x04 | 0x05 | 0x0C | 0x0D | 0x24 | 0x25 | 0x2C | 0x2D
+            | 0x34 | 0x35 | 0x3C | 0x3D | 0xA8 | 0xA9 => true,
+            0x80 | 0x81 | 0x83 => memory::read8(a + 1) >= 0xC0
+                && matches!(memory::read8(a + 1) >> 3 & 7, 0 | 1 | 4 | 5 | 6 | 7),
+            0xF6 | 0xF7 => memory::read8(a + 1) & 0xF8 == 0xC0,
+            _ => false,
+        }
+    };
+    let neutral = match op {
+        0x90 | 0xB0..=0xBF => true,
+        0x88..=0x8B => memory::read8(a + 1) >= 0xC0,
+        0x8D => memory::read8(a + 1) < 0xC0,
+        _ => false,
+    } || peek_integer_read(ctx.cpu).is_some();
+    if !ctx.cpu.state_flags.is_32() || !ctx.cpu.has_flat_segmentation()
+        || cfg!(feature = "profiler") || !(arithmetic || neutral) {
+        ctx.builder.flush_deferred_stores();
+    } else {
+        ctx.builder.defer_flags = arithmetic;
+    }
+}
+
+// Stack traffic and ordinary RAM RMWs have dynamic addresses; locality is
+// only a hint. Every reuse still guards page identity and the full width.
+fn peek_memory_run(cpu: &crate::cpu_context::CpuContext, write: bool)
+    -> Option<crate::cpu_context::CpuContext> {
+    let mut next = cpu.clone();
+    next.prefixes = 0;
+    let mut op = next.read_imm8();
+    let word = op == 0x66;
+    if word { op = next.read_imm8(); }
+    if if write { matches!(op, 0x50..=0x57 | 0x68 | 0x6A | 0xE8) }
+        else { matches!(op, 0x58..=0x5F | 0xC2 | 0xC3) } {
+        if !unsafe { crate::jit::JIT_STACK_CACHE } { return None; }
+        if op == 0x68 || op == 0xE8 { if word { next.read_imm16(); } else { next.read_imm32(); } }
+        if op == 0x6A { next.read_imm8(); }
+        if op == 0xC2 { next.read_imm16(); }
+        return Some(next);
+    }
+    if !write {
+        if !unsafe { crate::jit::JIT_STACK_CACHE } { return None; }
+        let (operand, _, next) = peek_integer_read(cpu)?;
+        return if operand.uses_register_mask((1 << regs::ESP) | (1 << regs::EBP)) { Some(next) } else { None };
+    }
+    if let Some((operand, next)) = peek_integer_write(cpu) {
+        if !unsafe { crate::jit::JIT_STACK_CACHE } { return None; }
+        return if operand.uses_register_mask((1 << regs::ESP) | (1 << regs::EBP)) { Some(next) } else { None };
+    }
+    // 16-bit RMW arithmetic invokes helpers; retain the original path there.
+    if word || !unsafe { crate::jit::JIT_RMW_CACHE } { return None; }
+    let m = next.read_imm8();
+    if m >= 0xC0 { return None; }
+    let group = m >> 3 & 7;
+    if !(matches!(op, 0x00 | 0x01 | 0x08 | 0x09 | 0x20 | 0x21 | 0x28 | 0x29 | 0x30 | 0x31)
+        || matches!(op, 0x80 | 0x81 | 0x83) && matches!(group, 0 | 1 | 4 | 5 | 6)
+        || matches!(op, 0xFE | 0xFF) && group <= 1) { return None; }
+    modrm::decode(&mut next, m);
+    if op == 0x81 { next.read_imm32(); }
+    if op == 0x80 || op == 0x83 { next.read_imm8(); }
+    Some(next)
+}
+
+fn prepare_memory_run(ctx: &mut JitContext, write: bool) -> bool {
+    if !unsafe { crate::jit::JIT_STACK_CACHE || crate::jit::JIT_RMW_CACHE } { return false; }
+    if !ctx.cpu.state_flags.is_32() || !ctx.cpu.has_flat_segmentation() || cfg!(feature = "profiler") { return false; }
+    let Some(mut next) = peek_memory_run(ctx.cpu, write) else { return false; };
+    let mut keep = false;
+    for _ in 0..=8 {
+        if next.eip > ctx.last_instruction_in_block || crate::jit::is_near_end_of_page(next.eip) { break; }
+        if peek_memory_run(&next, write).is_some() { keep = true; break; }
+        if let Some((_, after)) = peek_ram_read_gap(&next) { next = after; } else { break; }
+    }
+    if write {
+        ctx.ram_write_active = keep || ctx.ram_write_active && ctx.ram_write_continue;
+        ctx.ram_write_continue = keep;
+    } else {
+        if !ctx.ram_read_dynamic { clear_ram_read_cache(ctx); }
+        ctx.ram_read_dynamic = keep || ctx.ram_read_continue;
+        ctx.ram_read_continue = keep;
+    }
+    true
+}
+
 pub fn prepare_ram_read(ctx: &mut JitContext) {
+    if prepare_memory_run(ctx, false) { return; }
+    if ctx.ram_read_dynamic && ctx.ram_read_continue && peek_ram_read_gap(ctx.cpu).is_some() {
+        return;
+    }
     let a = ctx.cpu.eip;
     let mut page = None;
+    let mut dynamic = false;
+    let mut keep_dynamic = false;
     if ctx.cpu.state_flags.is_32() && ctx.cpu.has_flat_segmentation() && !cfg!(feature = "profiler") {
         let op = memory::read8(a);
         let operand = match op {
@@ -737,9 +947,86 @@ pub fn prepare_ram_read(ctx: &mut JitContext) {
             let addr = memory::read32s(operand) as u32;
             if addr & 0xFFF <= 0x1000 - bytes { page = Some(addr >> 12); }
         }
+        if page.is_none() {
+            if let Some((operand, dest, next_cpu)) = peek_integer_read(ctx.cpu) {
+                // Do not penalize unrelated loads or pointer chasing with a
+                // speculative cache lookup that is unlikely to hit. Decode
+                // with a cloned context, bounded to this basic block/page.
+                let mut next_cpu = next_cpu;
+                let mut writes = 0;
+                for _ in 0..=8 {
+                    if next_cpu.eip > ctx.last_instruction_in_block
+                        || crate::jit::is_near_end_of_page(next_cpu.eip) { break; }
+                    if let Some((next, _, _)) = peek_integer_read(&next_cpu) {
+                        keep_dynamic = operand.has_nearby_read(&next, dest)
+                            && !operand.uses_register_mask(writes);
+                        break;
+                    }
+                    if let Some((mask, after)) = peek_ram_read_gap(&next_cpu) {
+                        writes |= mask;
+                        next_cpu = after;
+                    } else { break; }
+                }
+                dynamic = keep_dynamic || ctx.ram_read_dynamic && ctx.ram_read_continue;
+            }
+        }
     }
-    if page.is_none() || page != ctx.ram_read_page { clear_ram_read_cache(ctx); }
+    if (!dynamic && page.is_none()) || dynamic != ctx.ram_read_dynamic || page != ctx.ram_read_page {
+        clear_ram_read_cache(ctx);
+    }
     ctx.ram_read_page = page;
+    ctx.ram_read_dynamic = dynamic;
+    ctx.ram_read_continue = keep_dynamic;
+}
+
+// Only straight-line MOV stores participate. Reads, RMWs, helpers and all
+// other instructions end the region; slow writes never seed a valid entry.
+pub fn clear_ram_write_cache(ctx: &mut JitContext) {
+    if let Some(local) = ctx.ram_write_cache.take() { ctx.builder.free_local(local); }
+    if let Some(local) = ctx.ram_write_base.take() { ctx.builder.free_local(local); }
+    ctx.ram_write_active = false;
+    ctx.ram_write_continue = false;
+}
+
+fn peek_integer_write(cpu: &crate::cpu_context::CpuContext)
+    -> Option<(ModrmByte, crate::cpu_context::CpuContext)> {
+    let mut cpu = cpu.clone();
+    cpu.prefixes = 0;
+    let mut op = cpu.read_imm8();
+    let word = op == 0x66;
+    if word { op = cpu.read_imm8(); }
+    if !matches!(op, 0x88 | 0x89 | 0xC6 | 0xC7) { return None; }
+    let byte = cpu.read_imm8();
+    if byte >= 0xC0 || matches!(op, 0xC6 | 0xC7) && byte & 0x38 != 0 { return None; }
+    let operand = modrm::decode(&mut cpu, byte);
+    match op {
+        0xC6 => { cpu.read_imm8(); },
+        0xC7 if word => { cpu.read_imm16(); },
+        0xC7 => { cpu.read_imm32(); },
+        _ => {},
+    }
+    Some((operand, cpu))
+}
+
+pub fn prepare_ram_write(ctx: &mut JitContext) {
+    if prepare_memory_run(ctx, true) { return; }
+    if ctx.ram_write_active && ctx.ram_write_continue && peek_ram_read_gap(ctx.cpu).is_some() { return; }
+    let mut active = false;
+    let mut keep = false;
+    if ctx.cpu.state_flags.is_32() && ctx.cpu.has_flat_segmentation() && !cfg!(feature = "profiler") {
+        if let Some((operand, next_cpu)) = peek_integer_write(ctx.cpu) {
+            if next_cpu.eip <= ctx.last_instruction_in_block
+                && !crate::jit::is_near_end_of_page(next_cpu.eip) {
+                if let Some((next, _)) = peek_integer_write(&next_cpu) {
+                    keep = operand.has_nearby_read(&next, 8);
+                }
+            }
+            active = keep || ctx.ram_write_active && ctx.ram_write_continue;
+        }
+    }
+    if !active { clear_ram_write_cache(ctx); }
+    ctx.ram_write_active = active;
+    ctx.ram_write_continue = keep;
 }
 
 fn gen_safe_read(
@@ -758,7 +1045,30 @@ fn gen_safe_read(
     //   fast: mem[(entry & ~0xFFF) ^ addr]
 
     let cont = ctx.builder.block_void();
-    let entry_local = if let Some(local) = ctx.ram_read_cache.take() {
+    let mut cached = ctx.ram_read_cache.take();
+    let mut dynamic_entry = None;
+    if ctx.ram_read_dynamic {
+        if let Some(local) = cached.as_ref() {
+            // Unsigned subtraction checks both page identity and the entire
+            // operand range, including address wraparound. VALID excludes
+            // MMIO and cross-page scratch returned by the slow helper.
+            ctx.builder.get_local(address_local);
+            ctx.builder.get_local(ctx.ram_read_base.as_ref().unwrap());
+            ctx.builder.sub_i32();
+            ctx.builder.const_i32(0x1000 - bits.bytes() as i32);
+            ctx.builder.leu_i32();
+            ctx.builder.get_local(local);
+            ctx.builder.const_i32(TLB_VALID);
+            ctx.builder.and_i32();
+            dbg_assert!(TLB_VALID == 1);
+            ctx.builder.and_i32();
+            ctx.builder.br_if(cont);
+        }
+        dynamic_entry = cached.take();
+    }
+    let translated = if ctx.ram_read_dynamic { ctx.builder.block_void() } else { cont };
+    let entry_local = if !ctx.ram_read_dynamic && cached.is_some() {
+        let local = cached.unwrap();
         // The previous access validated the page and permissions. No helper
         // can have run on this branch, and all known offsets fit in the page.
         ctx.builder.get_local(&local);
@@ -775,7 +1085,10 @@ fn gen_safe_read(
 
         ctx.builder
             .load_aligned_i32(unsafe { &tlb_data[0] as *const i32 as u32 });
-        let local = ctx.builder.tee_new_local();
+        let local = if let Some(local) = dynamic_entry {
+            ctx.builder.tee_local(&local);
+            local
+        } else { ctx.builder.tee_new_local() };
 
         ctx.builder.const_i32(
             (0xFFF
@@ -800,7 +1113,7 @@ fn gen_safe_read(
         }
         local
     };
-    ctx.builder.br_if(cont);
+    ctx.builder.br_if(translated);
 
     if cfg!(feature = "profiler") {
         ctx.builder.get_local(&address_local);
@@ -808,6 +1121,7 @@ fn gen_safe_read(
         ctx.builder.call_fn2("report_safe_read_jit_slow");
     }
 
+    ctx.builder.materialize_deferred_stores();
     ctx.builder.get_local(&address_local);
     ctx.builder
         .const_i32(ctx.start_of_current_instruction as i32 & 0xFFF);
@@ -844,6 +1158,15 @@ fn gen_safe_read(
 
     ctx.builder.br_if(ctx.exit_with_fault_label);
 
+    if ctx.ram_read_dynamic {
+        ctx.builder.block_end(); // translated
+        ctx.builder.get_local(address_local);
+        ctx.builder.const_i32(!0xFFF);
+        ctx.builder.and_i32();
+        if let Some(local) = ctx.ram_read_base.as_ref() {
+            ctx.builder.set_local(local);
+        } else { ctx.ram_read_base = Some(ctx.builder.set_new_local()); }
+    }
     ctx.builder.block_end();
 
     gen_profiler_stat_increment(ctx.builder, profiler::stat::SAFE_READ_FAST); // XXX: Both fast and slow
@@ -887,8 +1210,12 @@ fn gen_safe_read(
         },
     }
 
-    if ctx.ram_read_page.is_some() { ctx.ram_read_cache = Some(entry_local); }
-    else { ctx.builder.free_local(entry_local); }
+    if ctx.ram_read_page.is_some() || ctx.ram_read_continue {
+        ctx.ram_read_cache = Some(entry_local);
+    } else {
+        ctx.builder.free_local(entry_local);
+        clear_ram_read_cache(ctx);
+    }
 }
 
 pub fn gen_get_phys_eip_plus_mem(ctx: &mut JitContext, address_local: &WasmLocal) {
@@ -984,6 +1311,19 @@ fn gen_safe_write(
     //   fast: mem[(entry & ~0xFFF) ^ addr] <- value
 
     let cont = ctx.builder.block_void();
+    if let Some(entry) = ctx.ram_write_cache.as_ref() {
+        ctx.builder.get_local(address_local);
+        ctx.builder.get_local(ctx.ram_write_base.as_ref().unwrap());
+        ctx.builder.sub_i32();
+        ctx.builder.const_i32(0x1000 - bits.bytes() as i32);
+        ctx.builder.leu_i32();
+        ctx.builder.get_local(entry);
+        ctx.builder.const_i32(TLB_VALID);
+        ctx.builder.and_i32();
+        ctx.builder.and_i32();
+        ctx.builder.br_if(cont);
+    }
+    let translated = if ctx.ram_write_active { ctx.builder.block_void() } else { cont };
     ctx.builder.get_local(&address_local);
 
     ctx.builder.const_i32(12);
@@ -993,7 +1333,10 @@ fn gen_safe_write(
 
     ctx.builder
         .load_aligned_i32(unsafe { &tlb_data[0] as *const i32 as u32 });
-    let entry_local = ctx.builder.tee_new_local();
+    let entry_local = if let Some(entry) = ctx.ram_write_cache.take() {
+        ctx.builder.tee_local(&entry);
+        entry
+    } else { ctx.builder.tee_new_local() };
 
     ctx.builder
         .const_i32((0xFFF & !TLB_GLOBAL & !(if ctx.cpu.cpl3() { 0 } else { TLB_NO_USER })) as i32);
@@ -1012,7 +1355,7 @@ fn gen_safe_write(
         ctx.builder.and_i32();
     }
 
-    ctx.builder.br_if(cont);
+    ctx.builder.br_if(translated);
 
     if cfg!(feature = "profiler") {
         ctx.builder.get_local(&address_local);
@@ -1071,6 +1414,14 @@ fn gen_safe_write(
 
     ctx.builder.br_if(ctx.exit_with_fault_label);
 
+    if ctx.ram_write_active {
+        ctx.builder.block_end(); // translated
+        ctx.builder.get_local(address_local);
+        ctx.builder.const_i32(!0xFFF);
+        ctx.builder.and_i32();
+        if let Some(base) = ctx.ram_write_base.as_ref() { ctx.builder.set_local(base); }
+        else { ctx.ram_write_base = Some(ctx.builder.set_new_local()); }
+    }
     ctx.builder.block_end();
 
     gen_profiler_stat_increment(ctx.builder, profiler::stat::SAFE_WRITE_FAST); // XXX: Both fast and slow
@@ -1113,7 +1464,11 @@ fn gen_safe_write(
         BitSize::DQWORD => {}, // handled above
     }
 
-    ctx.builder.free_local(entry_local);
+    if ctx.ram_write_continue { ctx.ram_write_cache = Some(entry_local); }
+    else {
+        ctx.builder.free_local(entry_local);
+        clear_ram_write_cache(ctx);
+    }
 }
 
 pub fn gen_safe_read_write(
@@ -1136,6 +1491,21 @@ pub fn gen_safe_read_write(
     //   mem[(entry & ~0xFFF) ^ addr] <- value
 
     let cont = ctx.builder.block_void();
+    ctx.builder.const_i32(1);
+    let can_use_fast_path_local = ctx.builder.set_new_local();
+    if let Some(entry) = ctx.ram_write_cache.as_ref() {
+        ctx.builder.get_local(address_local);
+        ctx.builder.get_local(ctx.ram_write_base.as_ref().unwrap());
+        ctx.builder.sub_i32();
+        ctx.builder.const_i32(0x1000 - bits.bytes() as i32);
+        ctx.builder.leu_i32();
+        ctx.builder.get_local(entry);
+        ctx.builder.const_i32(TLB_VALID);
+        ctx.builder.and_i32();
+        ctx.builder.and_i32();
+        ctx.builder.br_if(cont);
+    }
+    let translated = if ctx.ram_write_active { ctx.builder.block_void() } else { cont };
     ctx.builder.get_local(address_local);
 
     ctx.builder.const_i32(12);
@@ -1145,7 +1515,10 @@ pub fn gen_safe_read_write(
 
     ctx.builder
         .load_aligned_i32(unsafe { &tlb_data[0] as *const i32 as u32 });
-    let entry_local = ctx.builder.tee_new_local();
+    let entry_local = if let Some(entry) = ctx.ram_write_cache.take() {
+        ctx.builder.tee_local(&entry);
+        entry
+    } else { ctx.builder.tee_new_local() };
 
     ctx.builder
         .const_i32((0xFFF & !TLB_GLOBAL & !(if ctx.cpu.cpl3() { 0 } else { TLB_NO_USER })) as i32);
@@ -1163,9 +1536,9 @@ pub fn gen_safe_read_write(
         ctx.builder.and_i32();
     }
 
-    let can_use_fast_path_local = ctx.builder.tee_new_local();
+    ctx.builder.tee_local(&can_use_fast_path_local);
 
-    ctx.builder.br_if(cont);
+    ctx.builder.br_if(translated);
 
     if cfg!(feature = "profiler") {
         ctx.builder.get_local(&address_local);
@@ -1214,6 +1587,14 @@ pub fn gen_safe_read_write(
 
     ctx.builder.br_if(ctx.exit_with_fault_label);
 
+    if ctx.ram_write_active {
+        ctx.builder.block_end(); // translated
+        ctx.builder.get_local(address_local);
+        ctx.builder.const_i32(!0xFFF);
+        ctx.builder.and_i32();
+        if let Some(base) = ctx.ram_write_base.as_ref() { ctx.builder.set_local(base); }
+        else { ctx.ram_write_base = Some(ctx.builder.set_new_local()); }
+    }
     ctx.builder.block_end();
 
     gen_profiler_stat_increment(ctx.builder, profiler::stat::SAFE_READ_WRITE_FAST); // XXX: Also slow
@@ -1224,7 +1605,8 @@ pub fn gen_safe_read_write(
     ctx.builder.get_local(&address_local);
     ctx.builder.xor_i32();
 
-    ctx.builder.free_local(entry_local);
+    if ctx.ram_write_continue { ctx.ram_write_cache = Some(entry_local); }
+    else { ctx.builder.free_local(entry_local); clear_ram_write_cache(ctx); }
     let phys_addr_local = ctx.builder.tee_new_local();
 
     match bits {
@@ -1759,13 +2141,38 @@ pub fn gen_get_real_eip(ctx: &mut JitContext) {
     }
 }
 
+pub fn gen_store_flag_value(builder: &mut WasmBuilder, address: u32) {
+    if builder.defer_flags { builder.defer_fixed_i32(address); }
+    else {
+        let value = builder.set_new_local();
+        builder.const_i32(address as i32);
+        builder.get_local(&value);
+        builder.store_aligned_i32(0);
+        builder.free_local(value);
+    }
+}
+
+pub fn gen_load_flag_value(builder: &mut WasmBuilder, address: u32) {
+    if !builder.load_deferred_i32(address) { builder.load_fixed_i32(address); }
+}
+
 pub fn gen_set_last_op1(builder: &mut WasmBuilder, source: &WasmLocal) {
+    if builder.defer_flags {
+        builder.get_local(source);
+        builder.defer_fixed_i32(global_pointers::last_op1 as u32);
+        return;
+    }
     builder.const_i32(global_pointers::last_op1 as i32);
     builder.get_local(&source);
     builder.store_aligned_i32(0);
 }
 
 pub fn gen_set_last_result(builder: &mut WasmBuilder, source: &WasmLocal) {
+    if builder.defer_flags {
+        builder.get_local(source);
+        builder.defer_fixed_i32(global_pointers::last_result as u32);
+        return;
+    }
     builder.const_i32(global_pointers::last_result as i32);
     builder.get_local(&source);
     builder.store_aligned_i32(0);
@@ -1784,6 +2191,13 @@ pub fn gen_set_last_op_size_and_flags_changed(
     last_op_size: i32,
     flags_changed: i32,
 ) {
+    if builder.defer_flags {
+        builder.const_i32(last_op_size);
+        builder.defer_fixed_i32(global_pointers::last_op_size as u32);
+        builder.const_i32(flags_changed);
+        builder.defer_fixed_i32(global_pointers::flags_changed as u32);
+        return;
+    }
     dbg_assert!(last_op_size == OPSIZE_8 || last_op_size == OPSIZE_16 || last_op_size == OPSIZE_32);
     dbg_assert!(global_pointers::last_op_size as i32 % 8 == 0);
     dbg_assert!(global_pointers::last_op_size as i32 + 4 == global_pointers::flags_changed as i32);
@@ -1801,11 +2215,10 @@ pub fn gen_set_flags_bits(builder: &mut WasmBuilder, bits_to_set: i32) {
 }
 
 pub fn gen_clear_flags_bits(builder: &mut WasmBuilder, bits_to_clear: i32) {
-    builder.const_i32(global_pointers::flags as i32);
     gen_get_flags(builder);
     builder.const_i32(!bits_to_clear);
     builder.and_i32();
-    builder.store_aligned_i32(0);
+    gen_store_flag_value(builder, global_pointers::flags as u32);
 }
 
 #[derive(PartialEq)]
@@ -2827,6 +3240,40 @@ pub fn gen_condition_fn(ctx: &mut JitContext, condition: u8) {
         else if condition == 0xE3 {
             gen_test_jcxz(ctx, ctx.cpu.asize_32());
         }
+    }
+}
+
+/// Contracts for helpers whose only GPR effects have been audited. Partial
+/// writes include the old full register in reads so its upper bits survive.
+/// Fault-returning divisions defer exception delivery until the JIT exit.
+fn helper_gpr_effects(name: &str, register: Option<u32>) -> (u8, u8) {
+    let ax_dx = (1 << regs::EAX) | (1 << regs::EDX);
+    match name {
+        "mul16" | "imul16" | "div16_without_fault" | "idiv16_without_fault"
+        | "idiv32_without_fault" => (ax_dx, ax_dx),
+        "cmpxchg16" => ((1 << regs::EAX) | (1 << register.unwrap()), 1 << regs::EAX),
+        "xadd16" => (1 << register.unwrap(), 1 << register.unwrap()),
+        _ => (0xFF, 0xFF),
+    }
+}
+
+pub fn gen_helper_registers_before(ctx: &mut JitContext, name: &str, register: Option<u32>) {
+    ctx.builder.flush_deferred_stores();
+    let (reads, _) = helper_gpr_effects(name, register);
+    for i in 0..8 {
+        if reads & (1 << i) == 0 { continue; }
+        ctx.builder.const_i32(global_pointers::get_reg32_offset(i) as i32);
+        ctx.builder.get_local(&ctx.register_locals[i as usize]);
+        ctx.builder.store_aligned_i32(0);
+    }
+}
+
+pub fn gen_helper_registers_after(ctx: &mut JitContext, name: &str, register: Option<u32>) {
+    let (_, writes) = helper_gpr_effects(name, register);
+    for i in 0..8 {
+        if writes & (1 << i) == 0 { continue; }
+        ctx.builder.load_fixed_i32(global_pointers::get_reg32_offset(i));
+        ctx.builder.set_local(&ctx.register_locals[i as usize]);
     }
 }
 

@@ -239,6 +239,10 @@ fn scc(edges: &Graph, rev_edges: &Graph) -> Vec<Vec<u32>> {
 }
 
 pub fn loopify(nodes: &Graph) -> Vec<WasmStructure> {
+    loopify_with_budget(nodes, unsafe { MAX_EXTRA_BASIC_BLOCKS } as usize)
+}
+
+pub fn loopify_with_budget(nodes: &Graph, max_extra_basic_blocks: usize) -> Vec<WasmStructure> {
     let rev_nodes = rev_graph_edges(nodes);
     let groups = scc(nodes, &rev_nodes);
 
@@ -281,7 +285,7 @@ pub fn loopify(nodes: &Graph) -> Vec<WasmStructure> {
                 //);
             }
 
-            let max_extra_basic_blocks = unsafe { MAX_EXTRA_BASIC_BLOCKS } as usize;
+
 
             if entries_to_group.len() * group.len() > max_extra_basic_blocks {
                 let mut subgroup_edges: Graph = Graph::new();
@@ -303,7 +307,7 @@ pub fn loopify(nodes: &Graph) -> Vec<WasmStructure> {
                     );
                 }
 
-                let mut loop_nodes = loopify(&subgroup_edges);
+                let mut loop_nodes = loopify_with_budget(&subgroup_edges, max_extra_basic_blocks);
 
                 if entries_to_group.len() > 1 {
                     loop_nodes.insert(0, WasmStructure::Dispatcher(entries_to_group));
@@ -333,7 +337,7 @@ pub fn loopify(nodes: &Graph) -> Vec<WasmStructure> {
                                     .collect(),
                             );
                         }
-                        let loop_nodes = loopify(&subgroup_edges);
+                        let loop_nodes = loopify_with_budget(&subgroup_edges, max_extra_basic_blocks);
                         WasmStructure::Loop(loop_nodes)
                     })
                     .collect();

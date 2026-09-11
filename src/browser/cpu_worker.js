@@ -175,7 +175,12 @@ export class CPUWorkerController
                 }
                 else this.emulator.emulator_bus.send(m["name"], m["value"]);
                 break;
-            case "screen": this.screen_queue.push(...m["commands"]); this.flush_screen(); break;
+            case "screen":
+                // Guest text redraws can exceed the host's argument limit.
+                // Append individually so even large bursts remain lossless.
+                for(const command of m["commands"]) this.screen_queue.push(command);
+                this.flush_screen();
+                break;
             case "frame": this.frame_pending = false; this.draw_frame(m["layers"]); break;
             case "stats":
                 this.instructions = m["value"]["instructions"];

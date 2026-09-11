@@ -241,6 +241,36 @@ pub unsafe fn memset_no_mmap_or_dirty_check(addr: u32, value: u8, count: u32) {
     ptr::write_bytes(mem8.offset(addr as isize), value, count as usize);
 }
 
+/// The caller has checked the entire, page-bounded writable RAM range and
+/// invalidated generated code if necessary. Repeat an x86 word/dword pattern.
+#[inline]
+pub unsafe fn memset_pattern_no_mmap_or_dirty_check(addr: u32, value: u32, size: u32, count: u32) {
+    dbg_assert!(size == 2 || size == 4);
+    let pattern = if size == 2 { (value & 0xFFFF) * 0x10001 } else { value };
+    let bytes = count * size;
+    if pattern == (pattern & 255) * 0x01010101 {
+        memset_no_mmap_or_dirty_check(addr, pattern as u8, bytes);
+        return;
+    }
+    let mut offset = 0;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        use core::arch::wasm32::{i32x4_splat, v128_store};
+        let vector = i32x4_splat(pattern as i32);
+        while offset + 16 <= bytes {
+            v128_store(mem8.add((addr + offset) as usize).cast(), vector);
+            offset += 16;
+        }
+    }
+    while offset + 4 <= bytes {
+        write32_no_mmap_or_dirty_check(addr + offset, pattern as i32);
+        offset += 4;
+    }
+    if offset < bytes {
+        write16_no_mmap_or_dirty_check(addr + offset, pattern as i32);
+    }
+}
+
 pub unsafe fn memcpy_no_mmap_or_dirty_check(src_addr: u32, dst_addr: u32, count: u32) {
     dbg_assert!(src_addr < *memory_size);
     dbg_assert!(dst_addr < *memory_size);

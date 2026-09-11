@@ -277,7 +277,7 @@ clean:
 	-rm build/*.o
 	$(MAKE) -C $(NASM_TEST_DIR) clean
 
-run: build/v86_all.js glbridge
+run: browser glbridge
 	python3 -m http.server 2> /dev/null
 
 update_version:
@@ -390,14 +390,27 @@ x87-fast-tests: build/x87-fast-test.bin build/v86.wasm build/libv86.mjs
 cpu-optimization-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
 	node tests/rust/cpu_optimizations.mjs
 
+.PHONY: flags-provenance-tests
+flags-provenance-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
+	node tests/rust/flags_provenance.mjs
+
 .PHONY: cpu-plan-tests jit-policy-benchmark
 cpu-plan-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
 	CACHE_CONTROL=1 node tests/rust/cpu_plan_sequences.mjs
 	SEQUENCE_FILTER=nonfloating node tests/rust/cpu_plan_sequences.mjs
-	JIT_LINKS=1 node tests/rust/cpu_optimizations.mjs
+	JIT_RMW_CACHE=1 SEQUENCE_FILTER="rmw cache" node tests/rust/cpu_plan_sequences.mjs
+	JIT_LINKS=1 JIT_RMW_CACHE=1 node tests/rust/cpu_optimizations.mjs
+
+.PHONY: cpu-experimental-policy-tests
+cpu-experimental-policy-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
+	JIT_TARGET_CACHE=1 JIT_EXTENDED_FLAGS=1 JIT_STACK_CACHE=1 JIT_LINEAR_REGIONS=1 SEQUENCE_FILTER=nonfloating node tests/rust/cpu_plan_sequences.mjs
 
 jit-policy-benchmark: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
 	node tests/rust/jit_policy_benchmark.mjs
+
+.PHONY: jit-tiers-tests
+jit-tiers-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
+	node tests/rust/jit_tiers.mjs
 
 .PHONY: mmx-fast-tests
 mmx-fast-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
@@ -457,10 +470,17 @@ build/libwabt.cjs:
 	mv build/libwabt.js build/libwabt.cjs
 	rm build/1.0.6.zip
 
+# The page always loads the serial terminal; its CSS is included in v86.css.
+# Never leave an empty/partial target behind when a download fails.
 build/xterm.js:
-	curl https://cdn.jsdelivr.net/npm/xterm@5.2.1/lib/xterm.min.js > build/xterm.js
-	curl https://cdn.jsdelivr.net/npm/xterm@5.2.1/lib/xterm.js.map > build/xterm.js.map
-	curl https://cdn.jsdelivr.net/npm/xterm@5.2.1/css/xterm.css > build/xterm.css
+	mkdir -p build
+	curl --fail --location --retry 2 https://cdn.jsdelivr.net/npm/xterm@5.2.1/lib/xterm.min.js --output $@.tmp
+	mv $@.tmp $@
+
+build/xterm.js.map:
+	mkdir -p build
+	curl --fail --location --retry 2 https://cdn.jsdelivr.net/npm/xterm@5.2.1/lib/xterm.js.map --output $@.tmp
+	mv $@.tmp $@
 
 update-package-json-version:
 	git describe --tags --exclude latest | sed 's/-/./' | tr - + | tee build/version
@@ -500,6 +520,7 @@ build/cpu-worker-test.bin: tests/rust/cpu_worker.asm
 
 .PHONY: cpu-worker-tests
 cpu-worker-tests: build/cpu-worker.js build/cpu-worker-test.bin build/libv86.mjs build/libv86.js build/v86_all.js build/v86.wasm glbridge
+	node tests/glbridge/cpu_worker_screen_test.mjs
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_gpu_browser_test.html
 	node tests/glbridge/gl_multipass_browser_runner.js cpu_worker_audio_browser_test.html
@@ -507,3 +528,6 @@ cpu-worker-tests: build/cpu-worker.js build/cpu-worker-test.bin build/libv86.mjs
 
 # A browser/library rebuild must ship the matching wire-protocol implementation.
 build/v86_all.js build/v86_all_debug.js build/libv86.js build/libv86.mjs build/libv86-debug.js build/libv86-debug.mjs: | build/cpu-worker.js
+
+# Keep the terminal available even when building the page bundle directly.
+build/v86_all.js build/v86_all_debug.js: | build/xterm.js

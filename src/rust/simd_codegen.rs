@@ -163,6 +163,7 @@ pub fn prepare_instruction(ctx: &mut JitContext) {
     use crate::cpu::memory::read8;
     let mut a = ctx.cpu.eip;
     let mut kind = None;
+    let mut scalar_width = None;
     if cfg!(target_feature = "simd128") && !cfg!(feature = "profiler") && unsafe { crate::jit::JIT_SIMD_CACHE } {
         let prefix = match read8(a) {
             p @ (0x66 | 0xF2 | 0xF3) => {
@@ -180,8 +181,11 @@ pub fn prepare_instruction(ctx: &mut JitContext) {
                 format!("instr_{:02X}0F{:02X}", prefix, opcode)
             };
             let op = operation(&name, mmx);
-            // Scalar stores are cheaper than reconstructing the untouched
-            // upper lanes on every operation; measured caching regressed SS/SD.
+            if let Some(Op::Float(double, true, 0x51 | 0x58 | 0x59 | 0x5C | 0x5D | 0x5E | 0x5F)) = op {
+                scalar_width = Some(if double { 8 } else { 4 });
+            }
+            // Scalar operations use the separate low-lane cache above. The
+            // full-vector cache would reconstruct untouched lanes each time.
             // Mixed-precision ADDSUB chains quickly reach NaNs; materializing
             // the entire cache at each helper call was slower than direct stores.
             if !matches!(op, Some(Op::Float(_, true, _) | Op::Float(_, _, 0xD0))) && matches!(
@@ -204,13 +208,48 @@ pub fn prepare_instruction(ctx: &mut JitContext) {
             }
         }
     }
+    if scalar_width.is_some() {
+        if ctx.simd_cache_kind.is_some() { flush_cache(ctx); }
+        if scalar_width != ctx.scalar_cache_width { flush_scalar_cache(ctx); }
+        ctx.scalar_cache_width = scalar_width;
+        return;
+    }
+    flush_scalar_cache(ctx);
     if kind.is_none() || kind != ctx.simd_cache_kind {
         flush_cache(ctx);
     }
     ctx.simd_cache_kind = kind;
 }
-fn write_cache(ctx: &mut JitContext) {
+// Only low lanes are dirty; untouched upper lanes remain authoritative in
+// memory. This avoids reconstructing a full XMM on every scalar operation.
+fn write_scalar_subset(ctx: &mut JitContext, operands: Option<(u32, u32)>) {
+    for (addr, local, bytes) in &ctx.scalar_cache {
+        if operands.map_or(false, |(src, dst)| *addr != src && *addr != dst) { continue; }
+        ctx.builder.const_i32(*addr as i32);
+        ctx.builder.get_local_v128(local);
+        ctx.builder.simd_lane(if *bytes == 4 { 0x1B } else { 0x1D }, 0);
+        if *bytes == 4 { ctx.builder.store_aligned_i32(0); }
+        else { ctx.builder.store_aligned_i64(0); }
+    }
+}
+fn flush_scalar_cache(ctx: &mut JitContext) {
+    write_scalar_subset(ctx, None);
+    for (_, local, _) in ctx.scalar_cache.drain(..) { ctx.builder.free_local_v128(local); }
+    ctx.scalar_cache_width = None;
+}
+fn cache_scalar(ctx: &mut JitContext, addr: u32, bytes: u32) {
+    let value = ctx.builder.set_new_local_v128();
+    if let Some(index) = ctx.scalar_cache.iter().position(|(a, _, _)| *a == addr) {
+        let (_, old, _) = ctx.scalar_cache.swap_remove(index);
+        ctx.builder.free_local_v128(old);
+    }
+    ctx.scalar_cache.push((addr, value, bytes));
+}
+
+fn write_cache(ctx: &mut JitContext) { write_cache_subset(ctx, None); }
+fn write_cache_subset(ctx: &mut JitContext, operands: Option<(u32, u32)>) {
     for (addr, local, mmx) in &ctx.simd_cache {
+        if operands.map_or(false, |(src, dst)| *addr != src && *addr != dst) { continue; }
         ctx.builder.const_i32(*addr as i32);
         ctx.builder.get_local_v128(local);
         if *mmx {
@@ -222,6 +261,7 @@ fn write_cache(ctx: &mut JitContext) {
     }
 }
 pub fn flush_cache(ctx: &mut JitContext) {
+    flush_scalar_cache(ctx);
     write_cache(ctx);
     for (_, local, _) in ctx.simd_cache.drain(..) {
         ctx.builder.free_local_v128(local);
@@ -237,6 +277,10 @@ fn cache_value(ctx: &mut JitContext, dst: u32, mmx: bool) {
     ctx.simd_cache.push((dst, value, mmx));
 }
 fn load(ctx: &mut JitContext, address: u32, bytes: u32) {
+    if let Some((_, local, _)) = ctx.scalar_cache.iter().find(|(a, _, b)| *a == address && *b == bytes) {
+        ctx.builder.get_local_v128(local);
+        return;
+    }
     if let Some((_, local, _)) = ctx.simd_cache.iter().find(|(a, _, _)| *a == address) {
         ctx.builder.get_local_v128(local);
         return;
@@ -700,11 +744,15 @@ fn finish_float(
         ctx.builder.const_i32(1);
         ctx.builder.and_i32();
     }
-    if ctx.simd_cache_kind.is_some() {
+    if ctx.scalar_cache_width.is_some() {
+        ctx.builder.if_v128();
+        write_scalar_subset(ctx, Some((src, dst)));
+    } else if ctx.simd_cache_kind.is_some() {
         ctx.builder.if_v128();
         // Only the exceptional branch materializes registers for the original
-        // pure arithmetic helper. It cannot change mapping or other XMMs.
-        write_cache(ctx);
+        // pure arithmetic helper. It reads only these operands and writes dst;
+        // unrelated cached registers remain in locals, even on the cold path.
+        write_cache_subset(ctx, Some((src, dst)));
     } else {
         ctx.builder.if_void();
     }
@@ -734,7 +782,14 @@ fn finish_float(
             ctx.builder.call_fn2(name);
         },
     }
-    if ctx.simd_cache_kind.is_some() {
+    if ctx.scalar_cache_width.is_some() {
+        ctx.builder.const_i32(dst as i32);
+        ctx.builder.simd_memory(if bytes == 4 { 0x5C } else { 0x5D }, 2);
+        ctx.builder.else_();
+        ctx.builder.get_local_v128(&result);
+        ctx.builder.block_end();
+        cache_scalar(ctx, dst, bytes);
+    } else if ctx.simd_cache_kind.is_some() {
         // Bypass the compile-time cache after the helper changed the target.
         ctx.builder.const_i32(dst as i32);
         ctx.builder.simd_memory(0, 2);

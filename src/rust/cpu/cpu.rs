@@ -3094,6 +3094,7 @@ pub unsafe fn cycle_internal() {
         {
             in_jit = false;
         }
+        jit::jit_maybe_promote(initial_eip, initial_state_flags, wasm_table_index);
         profiler::stat_increment_by(
             stat::RUN_FROM_CACHE_STEPS,
             (*instruction_counter - initial_instruction_counter) as u64,
@@ -3338,9 +3339,41 @@ pub unsafe fn main_loop() -> f64 {
     return profiler::performance_main_loop_exit(0.0, false);
 }
 
-// A link is allowed only inside a hardware-timer batch and at most one
-// additional module deep. Never retain Code pointers or table slots across it.
+#[derive(Clone, Copy)]
+struct LinkedTarget { epoch: u64, eip: u32, flags: u32, function: i32, state: u16 }
+static mut LINKED_TARGETS: [LinkedTarget; 32] = [LinkedTarget {
+    epoch: 0, eip: 0, flags: 0, function: 0, state: 0,
+}; 32];
+static mut target_cache_hits: u32 = 0;
+#[no_mangle]
+pub unsafe fn get_jit_target_cache_hits() -> u32 { target_cache_hits }
+
+unsafe fn lookup_linked_target(eip: u32) -> Option<(i32, u16)> {
+    let cached_flags = (*state_flags).to_u32();
+    let index = ((eip >> 1 ^ eip >> 12) & 31) as usize;
+    if jit::JIT_TARGET_CACHE {
+        let cached = LINKED_TARGETS[index];
+        if cached.epoch == jit::CODE_LOOKUP_EPOCH && cached.eip == eip && cached.flags == cached_flags {
+            if cfg!(debug_assertions) { target_cache_hits = target_cache_hits.wrapping_add(1); }
+            return Some((cached.function, cached.state));
+        }
+    }
+    let code = tlb_code[(eip >> 12) as usize]?.as_ref();
+    if code.state_flags != *state_flags { return None; }
+    let state = code.state_table[eip as usize & 0xFFF];
+    if state == u16::MAX { return None; }
+    let function = code.wasm_table_index.to_u16() as i32 + WASM_TABLE_OFFSET as i32;
+    if jit::JIT_TARGET_CACHE {
+        LINKED_TARGETS[index] = LinkedTarget { epoch: jit::CODE_LOOKUP_EPOCH, eip, flags: cached_flags, function, state };
+    }
+    Some((function, state))
+}
+
+// Iterative chaining keeps host stack depth constant. A child explicitly
+// requests continuation only from a plain control-flow exit; faults, HLT,
+// system instructions and budget exits return to the outer CPU loop.
 static mut jit_link_active: bool = false;
+static mut jit_link_requested: bool = false;
 static mut jit_link_count: u32 = 0;
 #[no_mangle]
 pub unsafe fn get_jit_link_count() -> u32 { jit_link_count }
@@ -3348,21 +3381,22 @@ static mut jit_link_batch: bool = false;
 static mut jit_link_batch_start: u32 = 0;
 #[no_mangle]
 pub unsafe fn jit_link_once() {
-    if jit_link_active || !jit_link_batch || !jit::JIT_LINK_EXITS || *in_hlt
-        || profiler::performance_recording_enabled()
-        || (*instruction_counter).wrapping_sub(jit_link_batch_start) >= LOOP_COUNTER as u32 {
-        return;
-    }
-    let eip = *instruction_pointer as u32;
-    let Some(code) = tlb_code[(eip >> 12) as usize] else { return; };
-    let code = code.as_ref();
-    if code.state_flags != *state_flags { return; }
-    let state = code.state_table[eip as usize & 0xFFF];
-    if state == u16::MAX { return; }
-    let function = code.wasm_table_index.to_u16() as i32 + WASM_TABLE_OFFSET as i32;
+    if jit_link_active { jit_link_requested = true; return; }
+    if !jit_link_batch || !jit::JIT_LINK_EXITS || profiler::performance_recording_enabled() { return; }
+    let control = *flags & (FLAG_INTERRUPT | FLAG_TRAP | FLAG_VM);
     jit_link_active = true;
-    jit_link_count = jit_link_count.wrapping_add(1);
-    wasm::call_indirect1(function, state);
+    for _ in 0..64 {
+        if *in_hlt || *flags & (FLAG_INTERRUPT | FLAG_TRAP | FLAG_VM) != control
+            || (*instruction_counter).wrapping_sub(jit_link_batch_start) >= LOOP_COUNTER as u32 { break; }
+        let eip = *instruction_pointer as u32;
+        let Some((function, state)) = lookup_linked_target(eip) else { break; };
+        // Epoch guards invalidate cached slots before any subsequent use.
+        let before = *instruction_counter;
+        jit_link_requested = false;
+        jit_link_count = jit_link_count.wrapping_add(1);
+        wasm::call_indirect1(function, state);
+        if !jit_link_requested || *instruction_counter == before { break; }
+    }
     jit_link_active = false;
 }
 
@@ -4414,6 +4448,7 @@ pub unsafe fn get_opstats_buffer() -> f64 { 0.0 }
 pub fn clear_tlb_code(page: i32) {
     unsafe {
         if let Some(c) = tlb_code[page as usize] {
+            jit::invalidate_target_caches();
             drop(Box::from_raw(c.as_ptr()));
         }
         tlb_code[page as usize] = None;
