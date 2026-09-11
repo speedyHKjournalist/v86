@@ -25,6 +25,15 @@
     get("memory_size").value = "32";
     get("start_emulation").click();
     await waitFor(() => get("performance_record").onclick);
+    await waitFor(() => typeof win.Terminal === "function" && get("terminal").querySelector(".xterm"));
+    check(true, "serial terminal asset loads and initializes");
+    const icon = new win.Image();
+    await new Promise((resolve, reject) => {
+        icon.onload = resolve;
+        icon.onerror = () => reject(new Error("application icon failed to load"));
+        icon.src = win.document.querySelector('link[rel="apple-touch-icon"]').href;
+    });
+    check(icon.naturalWidth === 192 && icon.naturalHeight === 192, "application icon is a valid 192px image");
     const record = get("performance_record"), download = get("performance_export");
     check(download.disabled, "recording controls initially idle");
     record.click();

@@ -17,6 +17,22 @@ pub struct ModrmByte {
     is_16: bool,
 }
 impl ModrmByte {
+    /// A locality hint, never a replacement for the runtime page/range check.
+    pub fn has_nearby_read(&self, next: &Self, written_register: u32) -> bool {
+        !self.is_16 && !next.is_16
+            && (self.first_reg.is_some() || self.second_reg.is_some())
+            && self.first_reg != Some(written_register)
+            && self.second_reg != Some(written_register)
+            && self.first_reg == next.first_reg && self.second_reg == next.second_reg
+            && self.shift == next.shift && self.segment == next.segment
+            && self.immediate.abs_diff(next.immediate) <= 128
+    }
+
+    pub fn uses_register_mask(&self, mask: u8) -> bool {
+        self.first_reg.map_or(false, |r| mask & (1 << r) != 0)
+            || self.second_reg.map_or(false, |r| mask & (1 << r) != 0)
+    }
+
     pub fn is_nop(&self, reg: u32) -> bool {
         self.first_reg == Some(reg)
             && self.second_reg.is_none()

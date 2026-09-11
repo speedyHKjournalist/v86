@@ -49,7 +49,13 @@ try {
         e.set_jit_config(index,previous);
     }
     assert.equal(e.get_jit_config(2),1,"experiments keep loop safety enabled");
+    for(const [index, option] of [[8, "JIT_TARGET_CACHE"], [10, "JIT_EXTENDED_FLAGS"],
+        [11, "JIT_STACK_CACHE"], [12, "JIT_LINEAR_REGIONS"]]) {
+        assert.equal(e.get_jit_config(index), 0, "recent JIT policies default off");
+        if(process.env[option] !== undefined) e.set_jit_config(index, Number(process.env[option]));
+    }
     if(process.env.JIT_LINKS) e.set_jit_config(5, Number(process.env.JIT_LINKS));
+    if(process.env.JIT_RMW_CACHE !== undefined) e.set_jit_config(9, Number(process.env.JIT_RMW_CACHE));
     const patterns = new Uint8Array(512);
     let seed = 0x9132913;
     for(let i = 0; i < patterns.length; i++) {
@@ -125,6 +131,8 @@ try {
         assert.equal(word(RESULT), 1100, "indirect targets after save/restore");
     }
     if(process.env.JIT_LINKS === "1") assert(e.get_jit_link_count() > 0, "actual cross-module links executed");
+    if(process.env.JIT_LINKS === "1" && e.get_jit_config(8) && wasm.includes("debug") && e.get_jit_target_cache_hits)
+        assert(e.get_jit_target_cache_hits() > 0, "actual cached cross-module targets executed");
     console.log("PASS: same/cross-module indirect CALL/RET, SMC and save/restore");
     const arith = [[0x01, 0xD8, false, true], [0x03, 0xC3, false, true],
         [0x29, 0xD8, true, true], [0x2B, 0xC3, true, true],
@@ -206,6 +214,26 @@ try {
     assert(word(RESULT + 4) > 0, "SSE still raises #NM with TS set");
     assert.deepEqual(Uint8Array.from(vm.read_memory(RESULT + 16, 16)), patterns.slice(0, 16), "faulting XORPS did not change XMM");
     console.log("PASS: optimized SSE retains guest #NM and precise fault EIP");
+    // Selectively synchronized division helpers must leave every register
+    // intact on #DE; the exception is delivered after locals are materialized.
+    const de_handler=0x38C000,de_code=0x38D000;
+    vm.write_memory(Uint8Array.from([de_handler&255,de_handler>>>8&255,8,0,0,0x8E,de_handler>>>16&255,de_handler>>>24]),idt);
+    for(const instruction of [[0x66,0xF7,0xF3],[0x66,0xF7,0xFB],[0xF7,0xFB]]) {
+        const regs=[[0,0x11223344],[1,0xABCDEF01],[2,0x77880000],[3,0],[5,0x10101010],[6,0x12345678],[7,0x99887766]];
+        const handler=[];
+        for(const [r] of regs) handler.push(0x89,5|r<<3,...u32(RESULT+r*4));
+        handler.push(0x8B,0x04,0x24,0xA3,...u32(RESULT+32),0x83,0x04,0x24,instruction.length,0xCF);
+        vm.write_memory(Uint8Array.from(handler),de_handler);
+        const p=[];
+        for(const [r,v] of regs) p.push(0xB8+r,...u32(v));
+        const fault=de_code+p.length;
+        p.push(...instruction,...done,0xE9,...u32(-p.length-instruction.length-done.length-5));
+        vm.write_memory(Uint8Array.from(p),de_code);
+        await compile(de_code);await run(de_code);
+        for(const [r,v] of regs) assert.equal(word(RESULT+r*4),v,"#DE preserves register "+r);
+        assert.equal(word(RESULT+32),fault,"#DE preserves fault EIP");
+    }
+    console.log("PASS: helper register contracts retain precise division faults");
     // Flags before a faulting memory access must remain observable in the
     // hardware exception frame, even when later arithmetic overwrites them.
     const pf_handler = 0x383000, pf_address = 0x382000;
@@ -216,9 +244,13 @@ try {
         0x8B, 0x44, 0x24, 4, 0xA3, ...u32(RESULT + 4),
         0x83, 0x44, 0x24, 4, 6, 0x83, 0xC4, 4, 0xCF,
     ]), pf_handler);
-    const pf_program = [0xB8, ...u32(0xFFFFFFFF), 0xBB, ...u32(1), 0x01, 0xD8];
+    const pf_program = [0xB8, ...u32(0xFFFFFFFF), 0xBB, ...u32(1), 0x01, 0xD8,
+        // Carry flag provenance through MOV/LEA, overwriting both aliases,
+        // before the fault observes the original ADD's architectural flags.
+        0xB8, ...u32(7), 0x8D, 0x58, 4,
+        0xBE, ...u32(0x801FFC), 0x8B, 0x0E]; // seed a valid relative-read cache
     const pf_eip = pf_address + pf_program.length;
-    pf_program.push(0x8B, 0x15, ...u32(0x900000), 0x9C, 0x59, 0x89, 0x0D, ...u32(RESULT + 8),
+    pf_program.push(0x8B, 0x96, ...u32(4), 0x9C, 0x59, 0x89, 0x0D, ...u32(RESULT + 8),
         0x03, 0xC3, ...done);
     pf_program.push(0xE9, ...u32(-pf_program.length - 5));
     vm.write_memory(Uint8Array.from(pf_program), pf_address);
@@ -233,14 +265,141 @@ try {
     let device_reads = 0;
     cpu.memory_map_read32[0xA0000 >>> 17] = () => ++device_reads;
     try {
-        const p = [0xA1,...u32(0xA0000),0x8B,0x1D,...u32(0xA0004),0x29,0xC3,
-            0x89,0x1D,...u32(RESULT),...done];
-        p.push(0xE9,...u32(-p.length-5));
-        vm.write_memory(Uint8Array.from(p),0x384000);
-        await compile(0x384000); await run(0x384000);
-        assert(device_reads > 2);
-        assert.equal(word(RESULT),1,"each MMIO read observes a fresh device value");
+        for(const loads of [
+            [0xA1,...u32(0xA0000),0x8B,0x1D,...u32(0xA0004)],
+            [0xBE,...u32(0xA0000),0x8B,0x06,0x8B,0x5E,4],
+            [0xBE,...u32(0xA0000),0x8B,0x06,0x31,0xC9,0x41,0x8B,0x5E,4],
+        ]) {
+            const p = [...loads,0x29,0xC3,
+                0x89,0x1D,...u32(RESULT),...done];
+            p.push(0xE9,...u32(-p.length-5));
+            vm.write_memory(Uint8Array.from(p),0x384000);
+            await compile(0x384000); await run(0x384000);
+            assert(device_reads > 2);
+            assert.equal(word(RESULT),1,"each MMIO read observes a fresh device value");
+        }
     } finally { cpu.memory_map_read32[0xA0000 >>> 17] = old_mmio; }
+    // Every mapped store must reach the device even after a nearby store.
+    const write_index = 0xA0000 >>> 17, old_write = cpu.memory_map_write32[write_index];
+    const device_writes = [];
+    cpu.memory_map_write32[write_index] = (address,value) => device_writes.push([address,value >>> 0]);
+    try {
+        const p=[0xBE,...u32(0xA0000),0xB8,...u32(0x12345678),
+            0x89,0x06,0x89,0x46,4,...done];
+        p.push(0xE9,...u32(-p.length-5));
+        vm.write_memory(Uint8Array.from(p),0x386000);
+        await compile(0x386000); device_writes.length=0; await run(0x386000);
+        assert(device_writes.length >= 2 && device_writes.length % 2 === 0);
+        for(let i=0;i<device_writes.length;i++) assert.deepEqual(device_writes[i],
+            [0xA0000+(i%2)*4,0x12345678]);
+    } finally { cpu.memory_map_write32[write_index]=old_write; }
+    // RMW cache misses must retain both device reads and writes.
+    let rmw_reads=0;
+    cpu.memory_map_read32[write_index]=()=>++rmw_reads;
+    cpu.memory_map_write32[write_index]=(address,value)=>device_writes.push([address,value>>>0]);
+    try {
+        const p=[0xBE,...u32(0xA0000),0xB8,...u32(17),0x01,0x06,0x01,0x46,4,...done];
+        p.push(0xE9,...u32(-p.length-5));
+        vm.write_memory(Uint8Array.from(p),0x386000);
+        await compile(0x386000); rmw_reads=0; device_writes.length=0; await run(0x386000);
+        assert(rmw_reads>=2 && device_writes.length===rmw_reads);
+        for(let i=0;i<rmw_reads;i++) assert.deepEqual(device_writes[i],[0xA0000+(i%2)*4,i+18]);
+    } finally { cpu.memory_map_read32[write_index]=old_mmio; cpu.memory_map_write32[write_index]=old_write; }
+    // Cached POP crosses upward into a missing page; the exception frame can
+    // still use the mapped stack below it. Resume restores the original ESP.
+    {
+        const base=0x38B000;
+        const p=[0x89,0xE5,0xBC,...u32(0x801FFC),0x58];
+        const faultEip=base+p.length; p.push(0x5A);
+        const resume=base+p.length; p.push(0x89,0xEC,...done);
+        p.push(0xE9,...u32(-p.length-5));
+        vm.write_memory(Uint8Array.from([
+            0xA3,...u32(RESULT),0x8B,0x44,0x24,4,0xA3,...u32(RESULT+4),
+            0xC7,0x44,0x24,4,...u32(resume),0x83,0xC4,4,0xCF,
+        ]),pf_handler);
+        vm.write_memory(Uint8Array.from(p),base);
+        await compile(base);
+        vm.write_memory(Uint8Array.from(u32(0x76543210)),0x101FFC);
+        // Subsequent fault frames overwrite the popped stack slot, so the
+        // precise fault address is the invariant across repeated execution.
+        await run(base);
+        assert.equal(word(RESULT+4),faultEip,"cached POP retains precise page fault EIP");
+    }
+    // Warm writers against RAM, then redirect the same compiled code to a
+    // previously compiled target. Cached stores/copies must invalidate it.
+    const smc_target=0x388000, writer=0x389000, pointer=DATA+768;
+    const targetBytes=value => {
+        const p=[0xB8,...u32(value),0xA3,...u32(RESULT+32),...done];
+        p.push(0xE9,...u32(-p.length-5));
+        while(p.length<64) p.push(0x90);
+        return p;
+    };
+    for(const copy of [false,true]) {
+        vm.write_memory(Uint8Array.from(targetBytes(1)),smc_target);
+        await compile(smc_target); await run(smc_target);
+        assert.equal(word(RESULT+32),1);
+        vm.write_memory(Uint8Array.from(targetBytes(777)),DATA+1024);
+        vm.write_memory(Uint8Array.from(u32(DATA+4096)),pointer);
+        const p=[0x8B,0x3D,...u32(pointer)];
+        if(copy) p.push(0xBE,...u32(DATA+1024),0xB9,...u32(64),
+            0x8A,0x06,0x88,0x07,0x46,0x47,0x49,0x75,0xF7);
+        else p.push(0xB8,...u32(777),0x89,0x07,0x89,0x47,64);
+        p.push(...done,0xE9,...u32(-p.length-done.length-5));
+        vm.write_memory(Uint8Array.from(p),writer);
+        await compile(writer);
+        vm.write_memory(Uint8Array.from(u32(smc_target+(copy ? 0 : 1))),pointer);
+        await run(writer); await run(smc_target);
+        assert.equal(word(RESULT+32),777,copy ? "copy into compiled code invalidates JIT" : "cached stores invalidate JIT");
+    }
+    console.log("PASS: cached stores and ordinary copies preserve code-page invalidation");
+    // Capture architectural state at a write fault and leave the failing
+    // loop. Tests include a cached store, both batched loops and REP fills.
+    for(const kind of ["stores","rmw-stores","byte-loop","dword-loop","stosw","stosd","rmw-add","rmw-xor"]) {
+        const base=0x387000;
+        const p=[...(kind.startsWith("rmw") ? [0xFC,0xBF,...u32(0x801FD0),0xB9,...u32(12),0x31,0xC0,0xF3,0xAB] : []),
+            0xFC,0xBE,...u32(DATA),0xBF,...u32(0x801FD0),
+            0xB9,...u32(64),0xB8,...u32(0x12345678),0xF9];
+        let faultEip, copied, size;
+        if(kind === "stores" || kind === "rmw-stores") {
+            p.push(0xBF,...u32(0x801FFC));
+            if(kind === "rmw-stores") p.push(0xC7,0x07,...u32(0));
+            const op=kind === "stores" ? 0x89 : 0x01;
+            p.push(op,0x07);
+            faultEip=base+p.length; p.push(op,0x87,...u32(4)); size=4; copied=1;
+        } else if(kind.startsWith("rmw")) {
+            size=4;copied=12;faultEip=base+p.length;
+            p.push(kind === "rmw-add" ? 0x01 : 0x31,0x07,0x83,0xC7,4,0x49,0x75,0xF8);
+        } else if(kind.endsWith("loop")) {
+            size=kind === "byte-loop" ? 1 : 4; copied=48/size;
+            faultEip=base+p.length+2;
+            p.push(...(size === 1 ? [0x8A,0x06,0x88,0x07,0x46,0x47,0x49,0x75,0xF7] :
+                [0x8B,0x06,0x89,0x07,0x83,0xC6,4,0x83,0xC7,4,0x49,0x75,0xF3]));
+        } else {
+            size=kind === "stosw" ? 2 : 4; copied=48/size;
+            faultEip=base+p.length; p.push(0xF3,...(size === 2 ? [0x66] : []),0xAB);
+        }
+        const resume=base+p.length;
+        p.push(...done,0xE9,...u32(-p.length-done.length-5));
+        vm.write_memory(Uint8Array.from([
+            0x89,0x0D,...u32(RESULT),0x89,0x35,...u32(RESULT+4),0x89,0x3D,...u32(RESULT+8),
+            0xA3,...u32(RESULT+16),0x8B,0x44,0x24,4,0xA3,...u32(RESULT+12),
+            0xC7,0x44,0x24,4,...u32(resume),0x83,0xC4,4,0xCF,
+        ]),pf_handler);
+        vm.write_memory(Uint8Array.from(p),base);
+        await compile(base); await run(base);
+        assert.equal(word(RESULT+12),faultEip,kind+" precise fault EIP");
+        if(kind === "stores" || kind === "rmw-stores") {
+            assert.equal(word(0x101FFC),0x12345678,"first cached store committed");
+        } else {
+            assert.equal(word(RESULT),64-copied,kind+" remaining count");
+            assert.equal(word(RESULT+8),0x802000,kind+" destination progress");
+            assert.equal(word(RESULT+4),DATA+(kind.endsWith("loop") ? 48 : 0),kind+" source progress");
+            const expected = kind.endsWith("loop") ? Uint8Array.from(vm.read_memory(DATA,48)) :
+                Uint8Array.from({length:48},(_,i)=>(0x12345678 >>> (i%size*8))&255);
+            assert.deepEqual(Uint8Array.from(vm.read_memory(0x101FD0,48)),expected,kind+" partial writes");
+        }
+    }
+    console.log("PASS: cached MMIO stores and batched copies/fills retain precise partial write faults");
     // Overlap ends at an unmapped virtual page. The first 47 byte stores must
     // complete, and the fault frame/registers must describe the remaining 17.
     vm.write_memory(Uint8Array.from([

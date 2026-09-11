@@ -91,6 +91,9 @@ pub struct WasmBuilder {
     free_locals_v128: Vec<WasmLocalV128>,
     local_count: u8,
     pub arg_local_initial_state: WasmLocal,
+    // Explicitly audited fixed-address state writes, materialized at observers.
+    pub defer_flags: bool,
+    deferred_stores: Vec<(u32, WasmLocal)>,
 }
 
 #[derive(Eq, PartialEq)]
@@ -104,6 +107,7 @@ impl WasmLocal {
 
 pub struct WasmLocalI64(u8);
 impl WasmLocalI64 {
+    pub fn unsafe_clone(&self) -> Self { Self(self.0) }
     pub fn idx(&self) -> u8 { self.0 }
 }
 
@@ -140,6 +144,8 @@ impl WasmBuilder {
             free_locals_v128: Vec::with_capacity(4),
             local_count: 0,
             arg_local_initial_state: WasmLocal(0),
+            defer_flags: false,
+            deferred_stores: Vec::new(),
         };
         b.init();
         b
@@ -161,7 +167,47 @@ impl WasmBuilder {
         self.initial_static_size = self.output.len();
     }
 
+    pub fn defer_fixed_i32(&mut self, address: u32) {
+        if let Some((_, local)) = self.deferred_stores.iter().find(|(a, _)| *a == address) {
+            let local = local.unsafe_clone();
+            self.set_local(&local);
+        } else {
+            let local = self.set_new_local();
+            self.deferred_stores.push((address, local));
+        }
+    }
+
+    pub fn load_deferred_i32(&mut self, address: u32) -> bool {
+        if let Some((_, local)) = self.deferred_stores.iter().find(|(a, _)| *a == address) {
+            let local = local.unsafe_clone();
+            self.get_local(&local);
+            true
+        } else { false }
+    }
+
+    // Does not clear compile-time state: a cold branch may materialize state
+    // while the hot branch keeps it exclusively in locals.
+    pub fn materialize_deferred_stores(&mut self) {
+        for i in 0..self.deferred_stores.len() {
+            let (address, local) = &self.deferred_stores[i];
+            let address = *address;
+            let local = local.unsafe_clone();
+            self.const_i32(address as i32);
+            self.get_local(&local);
+            self.store_aligned_i32(0);
+        }
+    }
+
+    pub fn flush_deferred_stores(&mut self) {
+        self.materialize_deferred_stores();
+        let stores = std::mem::take(&mut self.deferred_stores);
+        for (_, local) in stores { self.free_local(local); }
+        self.defer_flags = false;
+    }
+
     pub fn reset(&mut self) {
+        dbg_assert!(self.deferred_stores.is_empty());
+        self.defer_flags = false;
         self.output.drain(self.initial_static_size..);
         self.set_import_table_size(2);
         self.set_import_count(0);
@@ -640,6 +686,10 @@ impl WasmBuilder {
         self.instruction_body.push(op::OP_TEELOCAL);
         self.instruction_body.push(local.idx());
         local
+    }
+    pub fn set_local_i64(&mut self, local: &WasmLocalI64) {
+        self.instruction_body.push(op::OP_SETLOCAL);
+        self.instruction_body.push(local.idx());
     }
     pub fn get_local_i64(&mut self, local: &WasmLocalI64) {
         self.instruction_body.push(op::OP_GETLOCAL);

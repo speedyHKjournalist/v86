@@ -22,12 +22,12 @@ try {
         await vm.stop();
         if(machines.length === 1 && process.env.BASELINE_SIMD_CACHE !== undefined)
             vm.v86.cpu.wm.exports.set_jit_config(6,Number(process.env.BASELINE_SIMD_CACHE));
-        if(machines.length === 2) for(const [index, name] of [[1, "JIT_PAGES"], [3, "JIT_BLOCKS"], [4, "JIT_THRESHOLD"], [5, "JIT_LINKS"], [6, "JIT_SIMD_CACHE"]]) {
+        if(machines.length === 2) for(const [index, name] of [[1, "JIT_PAGES"], [3, "JIT_BLOCKS"], [4, "JIT_THRESHOLD"], [5, "JIT_LINKS"], [6, "JIT_SIMD_CACHE"], [8, "JIT_TARGET_CACHE"], [9, "JIT_RMW_CACHE"], [10, "JIT_EXTENDED_FLAGS"], [11, "JIT_STACK_CACHE"], [12, "JIT_LINEAR_REGIONS"]]) {
             if(process.env[name] !== undefined) vm.v86.cpu.wm.exports.set_jit_config(index, Number(process.env[name]));
         }
     }
     const address = 0x100000;
-    const kinds = ["sse3-duplicate-chain", "sse3-addsub", "sse-register-logic", "integer-flags", "indirect-call-ret", "short-cross-page",
+    const kinds = ["stack-burst", "rmw-straight", "flags-mixed-read", "flags-linear-region", "sse-scalar-double", "bulk-add-array", "bulk-xor-array", "helper-mul16", "helper-xadd16", "sse-float-nan", "ram-relative-read-lea", "ram-relative-read-alu", "copy-byte-loop", "copy-dword-loop", "ram-relative-writes", "ram-write-pages", "fill-word-pattern", "fill-dword-pattern", "fill-dword-zero", "ram-relative-reads", "ram-relative-pages", "ram-pointer-chase", "flags-mov-setcc", "flags-lea-cmov", "flags-alias-setcc", "flags-mov-jcc", "sse3-duplicate-chain", "sse3-addsub", "sse-register-logic", "integer-flags", "indirect-call-ret", "short-cross-page",
         "x87-add-hit", "x87-add-fallback", "x87-f32-load-store", "x87-f32-rounded-store", "x87-f32-subnormal-store",
         "mmx-movq", "mmx-paddd", "mmx-pmaddwd", "mmx-packed", "sse-packed", "sse-float", "sse-scalar-float", "x87-f64-load-store", "x87-f64-rounded-store", "x87-f64-subnormal-store", "integer-flags-separated", "ram-reads", "rep-overlap", "x87-round", "x87-scale"];
     for(const kind of kinds.filter(kind => !process.env.BENCH_KINDS || process.env.BENCH_KINDS.split(",").includes(kind))) {
@@ -35,15 +35,61 @@ try {
         if(kind === "sse-register-logic") {
             for(let r = 0; r < 8; r++) program.push(0x66, 0x0F, 0x6E, 0xC0 | r << 3);
         }
-        if(kind === "sse-float" || kind === "sse-scalar-float") {
+        if(kind === "sse-float" || kind === "sse-float-nan" || kind === "sse-scalar-float" || kind === "sse-scalar-double") {
             for(let r = 0; r < 8; r++) program.push(0x0F,0x10,0x05 | r << 3,...u32(0x220000));
         }
         if(kind.startsWith("x87")) program.push(0xDB, 0xE3);
         if(kind.startsWith("sse3")) {
             for(let r = 0; r < 8; r++) program.push(0xF3,0x0F,0x6F,5 | r << 3,...u32(0x220000));
         }
+        if(kind.startsWith("ram-relative") || kind === "ram-write-pages" || kind === "ram-pointer-chase") program.push(0xBE, ...u32(0x220000));
         const loop = program.length;
-        if(kind.startsWith("sse3")) {
+        if(kind === "stack-burst") {
+            for(let i=0;i<32;i++) program.push(0x50);
+            for(let i=0;i<32;i++) program.push(0x58);
+        } else if(kind === "rmw-straight") {
+            program.push(0xBE,...u32(0x220000));
+            for(let i=0;i<32;i++) program.push(0x01,0x5E,i*4);
+        } else if(kind === "flags-mixed-read" || kind === "flags-linear-region") {
+            program.push(0xBE,...u32(0x220000));
+            for(let i=0;i<24;i++) {
+                program.push(...[[0x39,0xD8],[0x85,0xD8],[0x30,0xD8],[0x66,0x39,0xD8]][i%4]);
+                if(kind === "flags-linear-region") program.push(0xEB,0);
+                program.push(0x8B,0x56,i*4,0x8D,0x1C,0x13);
+            }
+        } else if(kind.startsWith("bulk-")) {
+            program.push(0xBF,...u32(0x220000),0xB9,...u32(1024),0xB8,...u32(17),
+                kind === "bulk-add-array" ? 0x01 : 0x31,0x07,0x83,0xC7,4,0x49,0x75,0xF8);
+        } else if(kind.startsWith("helper-")) {
+            for(let i=0;i<32;i++) program.push(...(kind === "helper-mul16" ? [0x66,0xF7,0xE3] : [0x66,0x0F,0xC1,0xD8]));
+        } else if(kind.startsWith("copy-")) {
+            program.push(0xBE,...u32(0x220000),0xBF,...u32(0x230000),0xB9,...u32(1024),
+                ...(kind === "copy-byte-loop" ? [0x8A,0x06,0x88,0x07,0x46,0x47,0x49,0x75,0xF7] :
+                [0x8B,0x06,0x89,0x07,0x83,0xC6,4,0x83,0xC7,4,0x49,0x75,0xF3]));
+        } else if(kind.startsWith("fill-")) {
+            program.push(0xFC, 0xBF, ...u32(0x220000), 0xB9, ...u32(1024),
+                0xB8, ...u32(kind.endsWith("zero") ? 0 : 0x12345678),
+                0xF3, ...(kind === "fill-word-pattern" ? [0x66] : []), 0xAB);
+        } else if(kind === "ram-relative-writes" || kind === "ram-write-pages") {
+            for(let i=0;i<32;i++) program.push(0x89,0x86 | (i&3)<<3,
+                ...u32(kind === "ram-write-pages" ? (i&1)*4096 : i*4));
+        } else if(kind.startsWith("flags-")) {
+            for(let i = 0; i < 32; i++) {
+                // Keep a data dependency through the conditions, rather than
+                // timing comparisons whose results can be discarded by Wasm.
+                program.push(0x39, 0xD8); // cmp eax, ebx
+                if(kind === "flags-lea-cmov") {
+                    program.push(0x8D, 0x48, 1, 0x0F, 0x4C, 0xC1); // lea ecx,[eax+1]; cmovl eax,ecx
+                } else if(kind === "flags-mov-jcc") {
+                    program.push(0xB9, ...u32(1), 0x7D, 3, 0x8D, 0x04, 0x08); // mov ecx,1; jge +3; lea eax,[eax+ecx]
+                } else {
+                    program.push(0xB9, ...u32(1), 0xBA, ...u32(0));
+                    if(kind === "flags-alias-setcc") program.push(0x89, 0xC8); // overwrite cmp destination
+                    program.push(0x0F, 0x9C, 0xC2, 0x01, 0xD0); // setl dl; add eax,edx
+                }
+                program.push(0x01, 0xCB); // add ebx,ecx
+            }
+        } else if(kind.startsWith("sse3")) {
             for(let i = 0; i < 32; i++) {
                 const [prefix,op] = kind === "sse3-addsub" ? [i&1 ? 0xF2 : 0x66,0xD0] :
                     [[0xF2,0x12],[0xF3,0x12],[0xF3,0x16],[0xF2,0x7D]][i&3];
@@ -54,8 +100,8 @@ try {
         } else if(kind === "sse-packed" || kind === "mmx-packed") {
             for(let i = 0; i < 32; i++) program.push(...(kind === "sse-packed" ? [0x66] : []),
                 0x0F, [0xEC,0xD5,0xE4,0xF6][i & 3], 0xC0 | (i & 7) << 3 | ((i + 1) & 7));
-        } else if(kind === "sse-float" || kind === "sse-scalar-float") {
-            for(let i = 0; i < 32; i++) program.push(...(kind === "sse-scalar-float" ? [0xF3] : []),
+        } else if(kind === "sse-float" || kind === "sse-float-nan" || kind === "sse-scalar-float" || kind === "sse-scalar-double") {
+            for(let i = 0; i < 32; i++) program.push(...(kind === "sse-scalar-float" ? [0xF3] : kind === "sse-scalar-double" ? [0xF2] : []),
                 0x0F, [0x5D,0x5F,0x59,0x51][i & 3], 0xC0 | (i & 7) << 3 | ((i + 1) & 7));
         } else if(kind === "x87-f64-load-store") {
             for(let i = 0; i < 16; i++) program.push(0xDD,0x05,...u32(0x220030),0xDD,0x1D,...u32(0x220020));
@@ -63,6 +109,14 @@ try {
             for(let i = 0; i < 16; i++) program.push(0xDB,0x2D,...u32(0x220000),0xDD,0x1D,...u32(0x220020));
         } else if(kind === "integer-flags-separated") {
             for(let i = 0; i < 16; i++) program.push(0x01, 0xD8, 0x89, 0xDA, 0x90, 0x29, 0xD8);
+        } else if(kind === "ram-relative-read-alu" || kind === "ram-relative-read-lea") {
+            for(let i=0;i<32;i++) program.push(0x8B,0x86,...u32(i*4),
+                ...(kind.endsWith("lea") ? [0x8D,0x1C,0x03] : [0x01,0xC3]));
+        } else if(kind.startsWith("ram-relative")) {
+            for(let i = 0; i < 32; i++) program.push(0x8B, 0x86 | (i & 3) << 3,
+                ...u32(kind === "ram-relative-pages" ? (i & 1) * 4096 : i * 4));
+        } else if(kind === "ram-pointer-chase") {
+            for(let i = 0; i < 32; i++) program.push(0x8B, 0x36);
         } else if(kind === "ram-reads") {
             for(let i = 0; i < 32; i++) program.push(0x8B, 5 | (i & 3) << 3, ...u32(0x220000 + i * 4));
         } else if(kind === "rep-overlap") {
@@ -108,9 +162,12 @@ try {
             view.setBigUint64(16, 0x8800000000000000n | low, true); view.setUint16(24, 0x3FFF, true);
             view.setUint32(48, 0x3FC12345, true);
             if(kind === "x87-f64-load-store") view.setFloat64(48, 1.23456789, true);
-            if(kind === "sse-float" || kind === "sse-scalar-float" || kind.startsWith("sse3")) {
+            if(kind === "sse-float" || kind === "sse-float-nan" || kind === "sse-scalar-float" || kind === "sse-scalar-double" || kind.startsWith("sse3")) {
                 for(let j = 0; j < 4; j++) view.setFloat32(j * 4, 1, true);
             }
+            if(kind === "sse-scalar-double") for(let j=0;j<2;j++) view.setFloat64(j*8,1,true);
+            if(kind === "sse-float-nan") for(let j=0;j<4;j++) view.setUint32(j*4,0x7FC12345,true);
+            if(kind === "ram-pointer-chase") view.setUint32(0, 0x220000, true);
             vm.write_memory(operands, 0x220000);
             vm.write_memory(Uint8Array.from(program), address);
             vm.v86.cpu.instruction_pointer[0] = address;
