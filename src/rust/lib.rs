@@ -24,6 +24,8 @@ mod page;
 mod prefix;
 mod regs;
 mod softfloat;
+mod x87_profiler;
+mod x87_codegen;
 mod simd_codegen;
 mod state_flags;
 mod wasmgen;

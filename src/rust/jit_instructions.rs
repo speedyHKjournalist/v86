@@ -3729,8 +3729,8 @@ pub fn instr_D8_7_reg_jit(ctx: &mut JitContext, r: u32) {
 }
 
 pub fn instr16_D9_0_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte) {
-    codegen::gen_fpu_load_m32(ctx, modrm_byte);
-    codegen::gen_fpu_push(ctx);
+    codegen::gen_modrm_resolve_safe_read32(ctx, modrm_byte);
+    ctx.builder.call_fn1("fpu_push_m32_bits");
 }
 pub fn instr16_D9_0_reg_jit(ctx: &mut JitContext, r: u32) {
     codegen::gen_fpu_get_sti(ctx, r);
@@ -4070,8 +4070,8 @@ pub fn instr_DC_7_reg_jit(ctx: &mut JitContext, r: u32) {
 }
 
 pub fn instr16_DD_0_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte) {
-    codegen::gen_fpu_load_m64(ctx, modrm_byte);
-    codegen::gen_fpu_push(ctx);
+    codegen::gen_modrm_resolve_safe_read64(ctx, modrm_byte);
+    ctx.builder.call_fn1_i64("fpu_push_m64_bits");
 }
 pub fn instr16_DD_0_reg_jit(ctx: &mut JitContext, r: u32) {
     codegen::gen_fn1_const(ctx.builder, "fpu_ffree", r);
@@ -4103,8 +4103,7 @@ pub fn instr32_DD_1_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte) {
 pub fn instr16_DD_2_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte) {
     codegen::gen_modrm_resolve(ctx, modrm_byte);
     let address_local = ctx.builder.set_new_local();
-    codegen::gen_fpu_get_sti(ctx, 0);
-    ctx.builder.call_fn2_i64_i32_ret_i64("f80_to_f64");
+    ctx.builder.call_fn0_ret_i64("fpu_store_m64_bits");
     let value_local = ctx.builder.set_new_local_i64();
     codegen::gen_safe_write64(ctx, &address_local, &value_local);
     ctx.builder.free_local(address_local);
@@ -4121,8 +4120,7 @@ pub fn instr32_DD_2_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte) {
 pub fn instr16_DD_3_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte) {
     codegen::gen_modrm_resolve(ctx, modrm_byte);
     let address_local = ctx.builder.set_new_local();
-    codegen::gen_fpu_get_sti(ctx, 0);
-    ctx.builder.call_fn2_i64_i32_ret_i64("f80_to_f64");
+    ctx.builder.call_fn0_ret_i64("fpu_store_m64_bits");
     let value_local = ctx.builder.set_new_local_i64();
     codegen::gen_safe_write64(ctx, &address_local, &value_local);
     codegen::gen_fpu_pop(ctx);

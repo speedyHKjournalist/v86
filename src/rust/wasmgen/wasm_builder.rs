@@ -31,6 +31,7 @@ impl SafeToU16 for usize {
 enum FunctionType {
     FN0,
     FN1,
+    FN1_I64,
     FN2,
     FN3,
 
@@ -88,6 +89,7 @@ pub struct WasmBuilder {
 
     free_locals_i32: Vec<WasmLocal>,
     free_locals_i64: Vec<WasmLocalI64>,
+    free_locals_f64: Vec<WasmLocalF64>,
     free_locals_v128: Vec<WasmLocalV128>,
     local_count: u8,
     pub arg_local_initial_state: WasmLocal,
@@ -112,6 +114,7 @@ impl WasmLocalI64 {
 }
 
 pub struct WasmLocalV128(u8);
+pub struct WasmLocalF64(u8);
 
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
 pub struct Label(u32);
@@ -141,6 +144,7 @@ impl WasmBuilder {
 
             free_locals_i32: Vec::with_capacity(8),
             free_locals_i64: Vec::with_capacity(8),
+            free_locals_f64: Vec::with_capacity(8),
             free_locals_v128: Vec::with_capacity(4),
             local_count: 0,
             arg_local_initial_state: WasmLocal(0),
@@ -214,6 +218,7 @@ impl WasmBuilder {
         self.instruction_body.clear();
         self.free_locals_i32.clear();
         self.free_locals_i64.clear();
+        self.free_locals_f64.clear();
         self.free_locals_v128.clear();
         self.local_count = 0;
 
@@ -249,17 +254,19 @@ impl WasmBuilder {
         self.output.push(0);
 
         dbg_assert!(
-            self.local_count as usize == self.free_locals_i32.len() + self.free_locals_i64.len() + self.free_locals_v128.len(),
+            self.local_count as usize == self.free_locals_i32.len() + self.free_locals_i64.len() + self.free_locals_f64.len() + self.free_locals_v128.len(),
             "All locals should have been freed"
         );
 
         let free_locals_i32 = &self.free_locals_i32;
         let free_locals_i64 = &self.free_locals_i64;
+        let free_locals_f64 = &self.free_locals_f64;
         let free_locals_v128 = &self.free_locals_v128;
 
         let locals = (0..self.local_count).map(|i| {
             let local_index = WASM_MODULE_ARGUMENT_COUNT + i;
             if free_locals_v128.iter().any(|v| v.0 == local_index) { 0x7B }
+            else if free_locals_f64.iter().any(|v| v.0 == local_index) { op::TYPE_F64 }
             else if free_locals_i64.iter().any(|v| v.idx() == local_index) {
                 op::TYPE_I64
             }
@@ -325,6 +332,9 @@ impl WasmBuilder {
                     self.output.push(1);
                     self.output.push(op::TYPE_I32);
                     self.output.push(0);
+                },
+                FunctionType::FN1_I64 => {
+                    self.output.extend_from_slice(&[op::TYPE_FUNC, 1, op::TYPE_I64, 0]);
                 },
                 FunctionType::FN2 => {
                     self.output.push(op::TYPE_FUNC);
@@ -696,6 +706,50 @@ impl WasmBuilder {
         self.instruction_body.push(local.idx());
     }
 
+    pub fn set_new_local_f64(&mut self) -> WasmLocalF64 {
+        let local = self.free_locals_f64.pop().unwrap_or_else(|| {
+            let index = self.local_count + WASM_MODULE_ARGUMENT_COUNT;
+            self.local_count += 1;
+            WasmLocalF64(index)
+        });
+        self.set_local_f64(&local);
+        local
+    }
+    pub fn free_local_f64(&mut self, local: WasmLocalF64) { self.free_locals_f64.push(local); }
+    pub fn set_local_f64(&mut self, local: &WasmLocalF64) {
+        self.instruction_body.push(op::OP_SETLOCAL);
+        self.instruction_body.push(local.0);
+    }
+    pub fn get_local_f64(&mut self, local: &WasmLocalF64) {
+        self.instruction_body.push(op::OP_GETLOCAL);
+        self.instruction_body.push(local.0);
+    }
+    pub fn unary_f64(&mut self, negative: bool) {
+        self.instruction_body.push(if negative { op::OP_F64NEG } else { op::OP_F64ABS });
+    }
+
+    pub fn round_f64(&mut self, rc: u8) {
+        self.instruction_body.push(match rc {
+            0 => op::OP_F64NEAREST, 1 => op::OP_F64FLOOR,
+            2 => op::OP_F64CEIL, 3 => op::OP_F64TRUNC, _ => unreachable!(),
+        });
+    }
+
+    pub fn compare_f64(&mut self, operation: u8) {
+        self.instruction_body.push(match operation {
+            0 => op::OP_F64GT, 1 => op::OP_F64LT, 2 => op::OP_F64EQ, _ => unreachable!(),
+        });
+    }
+
+    pub fn arithmetic_f64(&mut self, operation: u8) {
+        self.instruction_body.push(match operation {
+            0 => op::OP_F64ADD, 1 => op::OP_F64SUB,
+            2 => op::OP_F64MUL, 3 => op::OP_F64DIV,
+            _ => unreachable!(),
+        });
+    }
+    pub fn reinterpret_f64_as_i64(&mut self) { self.instruction_body.push(op::OP_I64REINTERPRETF64); }
+
     pub fn set_new_local_v128(&mut self) -> WasmLocalV128 {
         let local = self.free_locals_v128.pop().unwrap_or_else(|| {
             let index = self.local_count + WASM_MODULE_ARGUMENT_COUNT;
@@ -1042,6 +1096,7 @@ impl WasmBuilder {
     pub fn call_fn0_ret(&mut self, name: &str) { self.call_fn(name, FunctionType::FN0_RET) }
     pub fn call_fn0_ret_i64(&mut self, name: &str) { self.call_fn(name, FunctionType::FN0_RET_I64) }
     pub fn call_fn1(&mut self, name: &str) { self.call_fn(name, FunctionType::FN1) }
+    pub fn call_fn1_i64(&mut self, name: &str) { self.call_fn(name, FunctionType::FN1_I64) }
     pub fn call_fn1_ret(&mut self, name: &str) { self.call_fn(name, FunctionType::FN1_RET) }
     pub fn call_fn1_f32_ret(&mut self, name: &str) { self.call_fn(name, FunctionType::FN1_F32_RET) }
     pub fn call_fn1_f64_ret(&mut self, name: &str) { self.call_fn(name, FunctionType::FN1_F64_RET) }

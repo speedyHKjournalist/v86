@@ -39,6 +39,44 @@ pub enum RoundingMode {
     Floor,
     Ceil,
 }
+
+// Host execution policy, deliberately outside the serialized guest FPU state.
+// CPU.init selects the browser/API option; standalone arithmetic tests start
+// in compatible mode. Changing this helper policy does not invalidate JIT code.
+static mut X87_FAST_MATH: bool = false;
+
+#[no_mangle]
+pub unsafe fn set_x87_fast_math(enabled: bool) { X87_FAST_MATH = enabled; }
+
+// State snapshots use SoftFloat's codes: precision 32/64/80 and rounding
+// nearest-even/toward-zero/down/up (0/1/2/3), not x87 control-word RC bits.
+#[no_mangle]
+pub unsafe fn performance_recording_x87_state(index: u32) -> u32 {
+    match index {
+        0 => extF80_roundingPrecision as u32,
+        1 => softfloat_roundingMode as u32,
+        2 => X87_FAST_MATH as u32,
+        _ => 0,
+    }
+}
+
+#[inline(always)]
+fn record_x87_arithmetic(op: usize, path: usize) {
+    if crate::x87_profiler::enabled() {
+        unsafe { crate::x87_profiler::record(op, path, extF80_roundingPrecision, softfloat_roundingMode); }
+    }
+}
+
+pub fn record_cached_arithmetic(op: usize) { record_x87_arithmetic(op, 2); }
+
+pub fn record_x87_jit_arithmetic(counts: u32) {
+    if crate::x87_profiler::enabled() {
+        for op in 0..4 {
+            unsafe { crate::x87_profiler::record_count(op, 2, extF80_roundingPrecision,
+                softfloat_roundingMode, ((counts >> (op * 8)) & 255) as u64); }
+        }
+    }
+}
 pub enum Precision {
     P80,
     P64,
@@ -338,6 +376,11 @@ impl F80 {
         // translate softfloat's flags to x87 status flags
         f >> 4 & 1 | f >> 1 & 4 | f << 3 & 16
     }
+    // JIT-generated ordered comparisons update the same sticky state as helpers.
+    pub(crate) fn exception_flags_address() -> u32 {
+        std::ptr::addr_of_mut!(softfloat_exceptionFlags) as u32
+    }
+
     pub fn clear_exception_flags() { unsafe { softfloat_exceptionFlags = 0 } }
 
     // These paths do integer significand arithmetic, not a conversion to f64.
@@ -539,7 +582,15 @@ impl std::ops::Add for F80 {
     type Output = F80;
     #[inline(always)]
     fn add(self, other: Self) -> Self {
-        if let Some(result) = self.exact_add(other) { return result; }
+        if unsafe { X87_FAST_MATH } {
+            record_x87_arithmetic(0, 2);
+            return F80::of_f64x(self.to_f64x() + other.to_f64x());
+        }
+        if let Some(result) = self.exact_add(other) {
+            record_x87_arithmetic(0, 0);
+            return result;
+        }
+        record_x87_arithmetic(0, 1);
         let mut result = F80::ZERO;
         unsafe { extF80M_add(&self, &other, &mut result) };
         result
@@ -549,7 +600,15 @@ impl std::ops::Sub for F80 {
     type Output = F80;
     #[inline(always)]
     fn sub(self, other: Self) -> Self {
-        if let Some(result) = self.exact_add(-other) { return result; }
+        if unsafe { X87_FAST_MATH } {
+            record_x87_arithmetic(1, 2);
+            return F80::of_f64x(self.to_f64x() - other.to_f64x());
+        }
+        if let Some(result) = self.exact_add(-other) {
+            record_x87_arithmetic(1, 0);
+            return result;
+        }
+        record_x87_arithmetic(1, 1);
         let mut result = F80::ZERO;
         unsafe { extF80M_sub(&self, &other, &mut result) };
         result
@@ -567,9 +626,15 @@ impl std::ops::Mul for F80 {
     type Output = F80;
     #[inline(always)]
     fn mul(self, other: Self) -> Self {
+        if unsafe { X87_FAST_MATH } {
+            record_x87_arithmetic(2, 2);
+            return F80::of_f64x(self.to_f64x() * other.to_f64x());
+        }
         if let Some(result) = self.exact_mul(other) {
+            record_x87_arithmetic(2, 0);
             return result;
         }
+        record_x87_arithmetic(2, 1);
         let mut result = F80::ZERO;
         unsafe { extF80M_mul(&self, &other, &mut result) };
         result
@@ -579,13 +644,22 @@ impl std::ops::Div for F80 {
     type Output = F80;
     #[inline(always)]
     fn div(self, other: Self) -> Self {
+        if unsafe { X87_FAST_MATH } {
+            record_x87_arithmetic(3, 2);
+            return F80::of_f64x(self.to_f64x() / other.to_f64x());
+        }
         if let Some(result) = self.exact_div(other) {
+            record_x87_arithmetic(3, 0);
             return result;
         }
         let mut result = F80::ZERO;
         if unsafe { extF80_roundingPrecision } != 80 {
-            if let Some(value) = self.native_div(other) { return value; }
+            if let Some(value) = self.native_div(other) {
+                record_x87_arithmetic(3, 0);
+                return value;
+            }
         }
+        record_x87_arithmetic(3, 1);
         unsafe { extF80M_div(&self, &other, &mut result) };
         result
     }

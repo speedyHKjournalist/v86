@@ -2139,6 +2139,15 @@ async function start_emulation(profile, query_args)
     if(graphics_proxy) new_query_args.set("graphics_proxy", "1");
 
     const settings = {};
+    // Manual starts pass no query_args; keep the arithmetic policy from the
+    // page URL for that path as well as auto-started profiles.
+    const arithmetic_args = query_args || new URLSearchParams(window.location.search);
+    settings["x87_fast_math"] = !arithmetic_args.has("x87_fast_math") ||
+        bool_arg(arithmetic_args.get("x87_fast_math"));
+    new_query_args.set("x87_fast_math", settings["x87_fast_math"] ? "1" : "0");
+    settings["x87_jit_cache"] = !arithmetic_args.has("x87_jit_cache") ||
+        bool_arg(arithmetic_args.get("x87_jit_cache"));
+    new_query_args.set("x87_jit_cache", settings["x87_jit_cache"] ? "1" : "0");
 
     if(profile)
     {
@@ -2498,6 +2507,8 @@ async function start_emulation(profile, query_args)
         bzimage_initrd_from_filesystem: settings.bzimage_initrd_from_filesystem,
         acpi: settings.acpi,
         disable_jit: settings.disable_jit,
+        "x87_fast_math": settings["x87_fast_math"],
+        "x87_jit_cache": settings["x87_jit_cache"],
         initial_state: settings.initial_state,
         filesystem: settings.filesystem || {},
         disable_speaker: settings.disable_audio,

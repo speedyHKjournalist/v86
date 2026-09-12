@@ -1,8 +1,51 @@
 #![allow(dead_code)]
+#[path = "../../src/rust/x87_profiler.rs"]
+mod x87_profiler;
 include!("../../src/rust/softfloat.rs");
 
 static mut FAILURE: [u64; 10] = [0; 10];
 static mut HITS: [u32; 4] = [0; 4];
+
+#[no_mangle]
+pub unsafe fn fast_math_result(op: u32, a: u64, b: u64, precision: u8, rounding: u8) -> u64 {
+    extF80_roundingPrecision = precision;
+    softfloat_roundingMode = rounding;
+    accelerated(op, F80::of_f64(a), F80::of_f64(b)).to_f64()
+}
+
+// Bounded Mandelbrot-style recurrence through the production F80 operators.
+// Inputs/results stay in binary64 range; PC=53, nearest-even, so both policies
+// must produce identical checksums. This is not the EVEREST benchmark.
+#[no_mangle]
+pub unsafe fn benchmark_fast_math(fast: bool, points: u32) -> u64 {
+    set_x87_fast_math(fast);
+    extF80_roundingPrecision = 64;
+    softfloat_roundingMode = 0;
+    let mut sum = 0u64;
+    for i in 0..points {
+        let cx = F80::of_f64x(std::hint::black_box(-0.2 + (i % 101) as f64 * 0.0001));
+        let cy = F80::of_f64x(0.65);
+        let mut x = F80::of_f64x(0.1);
+        let mut y = F80::of_f64x(0.1);
+        for _ in 0..32 {
+            let next_x = x * x - y * y + cx;
+            y = (x + x) * y + cy;
+            x = next_x;
+        }
+        sum = sum.wrapping_add(x.mantissa ^ y.mantissa);
+    }
+    sum
+}
+
+// Exercise the production trait hooks, with known exact/fallback operands.
+#[no_mangle]
+pub unsafe fn recording_arithmetic(op: u32, fallback: bool, precision: u8, rounding: u8) -> bool {
+    extF80_roundingPrecision = precision;
+    softfloat_roundingMode = rounding;
+    let mut a = F80::of_f64(1.5f64.to_bits());
+    if fallback { a.mantissa |= 1; }
+    check(op, a, F80::of_f64(1.25f64.to_bits()), 0)
+}
 
 #[inline(always)]
 unsafe fn reference(op: u32, a: F80, b: F80) -> F80 {
