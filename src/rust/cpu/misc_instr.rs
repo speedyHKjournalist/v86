@@ -367,6 +367,7 @@ pub unsafe fn setcc_mem(condition: bool, addr: i32) {
 }
 
 pub unsafe fn fxsave(addr: i32) {
+    crate::cpu::fpu::fpu_sync_all();
     dbg_assert!(addr & 0xF == 0, "TODO: #gp");
     return_on_pagefault!(writable_or_pagefault(addr, 288));
 
@@ -419,7 +420,7 @@ pub unsafe fn fxrstor(addr: i32) {
 
     for i in 0..8 {
         let reg_index = *fpu_stack_ptr as i32 + i & 7;
-        *fpu_st.offset(reg_index as isize) = fpu_load_m80(addr + 32 + (i << 4)).unwrap();
+        crate::cpu::fpu::fpu_write_st(reg_index, fpu_load_m80(addr + 32 + (i << 4)).unwrap());
     }
 
     for i in 0..8 {

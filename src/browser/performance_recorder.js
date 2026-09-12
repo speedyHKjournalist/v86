@@ -34,6 +34,9 @@ export class PerformanceRecorder
         this.stats = {};
         this.has_counters = false;
         this.counter_version = 0;
+        this.has_x87_counters = false;
+        this.x87_counter_version = 0;
+        this.x87_initial_state = null;
         this.hotspots = new Map();
         this.hotspots_dropped = 0;
         this.next_hotspot = 0;
@@ -83,6 +86,11 @@ export class PerformanceRecorder
         this.has_counters = !!exports["performance_recording_enable"] && !!exports["performance_recording_get"];
         this.counter_version = this.has_counters ? exports["performance_recording_version"]?.() || 1 : 0;
         if(this.has_counters) exports["performance_recording_enable"](1);
+        this.has_x87_counters = !!exports["performance_recording_x87_enable"] &&
+            !!exports["performance_recording_x87_get"] && !!exports["performance_recording_x87_state"];
+        this.x87_counter_version = this.has_x87_counters ? exports["performance_recording_x87_version"]?.() || 1 : 0;
+        this.x87_initial_state = this.has_x87_counters ? this.x87_state() : null;
+        if(this.has_x87_counters) exports["performance_recording_x87_enable"](1);
 
         const main_loop = cpu.main_loop;
         const timed_loop = () => {
@@ -305,6 +313,68 @@ export class PerformanceRecorder
         return result;
     }
 
+    x87_state()
+    {
+        const get = this.emulator.v86.cpu.wm.exports["performance_recording_x87_state"];
+        const precision = get(0), rounding = get(1);
+        return { "arithmetic_mode": this.x87_counter_version >= 2 ? (get(2) ? "fast_f64" : "compatible") : "compatible",
+            "jit_cache_enabled": !!this.emulator.v86.cpu.wm.exports["get_x87_jit_cache"]?.(),
+            "softfloat_precision": precision,
+            "significand_bits": ({ 32: 24, 64: 53, 80: 64 })[precision] || null,
+            "rounding": ["nearest_even", "toward_zero", "down", "up"][rounding] || "unknown" };
+    }
+
+    x87_counters()
+    {
+        if(!this.has_x87_counters) return null;
+        const get = this.emulator.v86.cpu.wm.exports["performance_recording_x87_get"];
+        const operations = {};
+        const names = this.x87_counter_version >= 2 ? ["add", "sub", "mul", "div"] : ["add", "sub", "mul"];
+        for(const [op, name] of names.entries())
+        {
+            let fast = 0, fallback = 0, approximate = 0;
+            const modes = [];
+            for(let precision = 0; precision < 3; precision++) for(let rounding = 0; rounding < 4; rounding++)
+            {
+                const hits = get(op, 0, precision, rounding), misses = get(op, 1, precision, rounding);
+                const native = this.x87_counter_version >= 2 ? get(op, 2, precision, rounding) : 0;
+                fast += hits + native;
+                fallback += misses;
+                approximate += native;
+                if(hits + misses + native) modes.push({ "softfloat_precision": [32, 64, 80][precision],
+                    "significand_bits": [24, 53, 64][precision],
+                    "rounding": ["nearest_even", "toward_zero", "down", "up"][rounding],
+                    "total": hits + misses + native, "fast_path": hits + native,
+                    "compatible_fast_path": hits, "approximate_f64": native, "softfloat_fallback": misses });
+            }
+            const total = fast + fallback;
+            operations[name] = { "total": total, "fast_path": fast, "softfloat_fallback": fallback,
+                "compatible_fast_path": fast - approximate, "approximate_f64": approximate,
+                "approximate_f64_ratio": total ? approximate / total : null,
+                "fast_path_ratio": total ? fast / total : null,
+                "softfloat_fallback_ratio": total ? fallback / total : null, "modes": modes };
+        }
+        let cache = null;
+        if(this.x87_counter_version >= 3)
+        {
+            const get_cache = this.emulator.v86.cpu.wm.exports["performance_recording_x87_cache_get"];
+            cache = {};
+            ["accepted_regions", "rejected_regions", "arithmetic_ops", "initial_conversions", "writebacks", "local_reads"]
+                .forEach((field, index) => { cache[field] = get_cache(index); });
+            if(this.x87_counter_version >= 4)
+            {
+                cache["comparison_ops"] = get_cache(6);
+                cache["comparison_regions"] = get_cache(7);
+                if(this.x87_counter_version >= 5) {
+                    cache["persistent_hits"] = get_cache(8);
+                    cache["cached_writes"] = get_cache(9);
+                }
+            }
+        }
+        return { "version": this.x87_counter_version, "jit_cache": cache, "initial_state": this.x87_initial_state,
+            "current_state": this.x87_state(), "operations": operations };
+    }
+
     execution_hotspots()
     {
         if(this.counter_version < 3) return null;
@@ -352,6 +422,7 @@ export class PerformanceRecorder
         const execution = this.counters();
         this.samples.push({ "elapsed_ms": now - this.started, "running": this.emulator.is_running(),
             "instruction_steps": this.total_instructions, ...this.stats, "execution": execution,
+            "x87": this.x87_counters(),
             "graphics": this.graphics ? this.graphics.snapshot() : null,
             "main_loop_without_codegen_ms": this.counter_version >= 2 ?
                 Math.max(0, this.stats["main_loop_wall_ms"] - execution["sync_codegen_ms"]) : null,
@@ -376,6 +447,7 @@ export class PerformanceRecorder
         if(!this.active) return this.report;
         this.sample();
         const counters = this.counters();
+        const x87 = this.x87_counters();
         const execution_hotspots = this.execution_hotspots();
         const graphics = this.graphics ? this.graphics.stop() : null;
         this.graphics = null;
@@ -383,10 +455,11 @@ export class PerformanceRecorder
         clearInterval(this.timer);
         this.timer = null;
         if(this.has_counters) this.emulator.v86.cpu.wm.exports["performance_recording_enable"](0);
+        if(this.has_x87_counters) this.emulator.v86.cpu.wm.exports["performance_recording_x87_enable"](0);
         for(const pending of this.pending_reads.values()) pending.detach();
         for(const cleanup of this.cleanup.reverse()) cleanup();
         this.cleanup = [];
-        this.report = { "format": "v86-performance", "version": 5, "reason": reason,
+        this.report = { "format": "v86-performance", "version": 6, "reason": reason,
             "recorded_at": new Date().toISOString(), "metadata": { ...this.metadata },
             "duration_ms": this.now() - this.started, "sample_interval_ms": 500,
             "counter_version": this.counter_version,
@@ -398,10 +471,17 @@ export class PerformanceRecorder
             "hotspot_interval_ms": 10, "hotspots_dropped_samples": this.hotspots_dropped,
             "hotspots": Array.from(this.hotspots.values()).sort((a, b) => b["sampled_main_loop_ms"] - a["sampled_main_loop_ms"]),
             "execution_counters_available": this.has_counters, "execution": counters,
+            "x87_counters_available": this.has_x87_counters, "x87": x87,
             "summary": this.stats, "disks": this.disks, "markers": this.markers,
             "pending_reads_at_stop": this.pending_reads.size, "pending_jit_at_stop": this.pending_jit.size,
             "slowest_reads": this.slow_reads, "slowest_jit": this.slow_jit, "samples": this.samples,
             "definitions": {
+                "x87": "Cumulative arithmetic operations: F80 implementation calls plus v3 native cached arithmetic, including internal helper arithmetic and all guest processes; not decoded instruction counts or CPU time. v1 counts add/sub/mul; v2 also counts div and distinguishes compatible_fast_path from approximate_f64. fast_path is their sum; total also includes softfloat_fallback. Fallback counts arithmetic calls only, not operand/result conversions. Ratios are 0..1, or null for no calls. Comparisons are counted separately in v4 jit_cache.comparison_ops; stack operations, sqrt and SSE are not arithmetic counts. Old Wasm reports null, not zero.",
+                "x87_precision": "SoftFloat precision codes 32/64/80 mean 24/53/64 significand bits. modes records the guest settings at each call, not the effective precision of approximate arithmetic. initial_state/current_state are boundary snapshots. Counts are not time weights.",
+                "x87_fast_math": "fast_f64 uses Wasm f64 add/sub/mul/div (53-bit significand, binary64 exponent range, nearest-even), ignoring guest arithmetic precision/rounding and not synthesizing full arithmetic exception flags. Existing F80 conversions, stack, comparisons, integer conversions and saved guest state are retained; conversions may still call SoftFloat and honor guest rounding. Host policy is not serialized. Default enabled; x87_fast_math=0 selects compatible mode. Other F80 helpers that use these arithmetic operators inherit the policy.",
+                "x87_jit_cache": "v3/v4 use bounded register regions; v5 retains authoritative f64 values across regions, branches and module returns. Register arithmetic, ordered/quiet comparisons, FLD/FXCH/FST/FSTP, FLD1/FLDZ, FCHS/FABS, FRNDINT, FFREE and TOP rotation can execute in native regions of 1..32 instructions. Memory loads/stores and selected math helpers share the persistent cache. Legacy F80 observers synchronize required slots; MMX and full-state observers use explicit barriers. Entry guards retain wide-value and stack-fault fallback. initial_conversions counts F80-to-f64 cache fills; v5 writebacks counts actual F80 materializations, persistent_hits counts reused physical slots and cached_writes counts logical f64 slot writes. local_reads counts native operand uses. Arithmetic is included in approximate_f64; comparison_ops and comparison_regions count native comparisons. These are counts, not CPU time. x87_jit_cache=0 disables native regions and persistent helper caching.",
+                "x87_observer_overhead": "Only integer counters are updated in arithmetic paths while recording, with no per-operation clocks or logs. Disabled paths retain an enable check. Recording also uses the existing execution sampler, which disables JIT module chaining; recorded speed is not an uninstrumented baseline. Function self time requires a separate host CPU profile.",
+                "duration_ms": "Host monotonic elapsed time for the recording window; not guest benchmark time. Per-sample elapsed_ms and cumulative x87 counts allow interval deltas. The recorder does not automatically identify benchmark start/end or read its displayed score.",
                 "main_loop_wall_ms": "Synchronous CPU main_loop wall time, including hardware callbacks and code generation; not pure x86 execution time.",
                 "disk_callback_latency_ms": "Sum of buffer.get to data-callback latency. Concurrent requests overlap; includes host scheduling. Not CPU stall time.",
                 "disk_any_request_pending_ms": "Union of observed outstanding-read intervals; overlaps CPU/GPU work. Not I/O-only time.",

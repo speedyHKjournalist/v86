@@ -2321,6 +2321,8 @@ fn jit_generate_basic_block(ctx: &mut JitContext, block: &BasicBlock) {
             continue;
         }
         codegen::prepare_deferred_flags(ctx);
+        if crate::x87_codegen::try_region(ctx) { continue; }
+        crate::x87_codegen::prepare_instruction(ctx);
         crate::simd_codegen::prepare_instruction(ctx);
         codegen::prepare_ram_read(ctx);
         codegen::prepare_ram_write(ctx);

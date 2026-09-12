@@ -606,6 +606,10 @@ export interface V86Options {
      * @default false
      */
     disable_jit?: boolean;
+    /** Use approximate f64 x87 add/sub/mul/div (default true). False selects compatible arithmetic. */
+    x87_fast_math?: boolean;
+    /** Cache bounded register-only x87 regions in Wasm f64 locals (default true, requires x87_fast_math). */
+    x87_jit_cache?: boolean;
 
     /**
      * The URL of a server running network relay.

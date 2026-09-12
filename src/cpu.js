@@ -459,6 +459,7 @@ CPU.prototype.jit_clear_all_funcs = function()
 
 CPU.prototype.get_state = function()
 {
+    this.wm.exports["fpu_sync_all"]?.();
     var state = [];
 
     state[0] = this.memory_size[0];
@@ -630,6 +631,7 @@ CPU.prototype.get_state_ioapic = function()
 
 CPU.prototype.set_state = function(state)
 {
+    this.wm.exports["fpu_discard_cache"]?.();
     this.memory_size[0] = state[0];
 
     if(this.mem8.length !== this.memory_size[0])
@@ -999,6 +1001,8 @@ CPU.prototype.create_memory = function(size, minimum_size)
  */
 CPU.prototype.init = function(settings, device_bus)
 {
+    this.wm.exports["set_x87_fast_math"]?.(settings["x87_fast_math"] !== false);
+    this.wm.exports["set_x87_jit_cache"]?.(settings["x87_jit_cache"] !== false);
     this.create_memory(
         settings.memory_size || 64 * 1024 * 1024,
         settings.initrd ? 64 * 1024 * 1024 : 1024 * 1024,

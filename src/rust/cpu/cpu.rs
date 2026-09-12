@@ -4149,11 +4149,12 @@ pub unsafe fn write_reg32(index: i32, value: i32) {
     *reg32.offset(index as isize) = value;
 }
 
-pub unsafe fn read_mmx32s(r: i32) -> i32 { (*fpu_st.offset(r as isize)).mantissa as i32 }
+pub unsafe fn read_mmx32s(r: i32) -> i32 { crate::cpu::fpu::fpu_sync_slot(r as u32); (*fpu_st.offset(r as isize)).mantissa as i32 }
 
-pub unsafe fn read_mmx64s(r: i32) -> u64 { (*fpu_st.offset(r as isize)).mantissa }
+pub unsafe fn read_mmx64s(r: i32) -> u64 { crate::cpu::fpu::fpu_sync_slot(r as u32); (*fpu_st.offset(r as isize)).mantissa }
 
 pub unsafe fn write_mmx_reg64(r: i32, data: u64) {
+    crate::cpu::fpu::fpu_invalidate_slot(r as u32);
     *fpu_st.offset(r as isize) = softfloat::F80 {
         mantissa: data,
         sign_exponent: 0xFFFF,
@@ -4660,6 +4661,7 @@ pub unsafe fn check_page_switch(block_addr: u32, next_block_addr: u32) {
 
 #[no_mangle]
 pub unsafe fn reset_cpu() {
+    crate::cpu::fpu::fpu_discard_cache();
     for i in 0..8 {
         *segment_is_null.offset(i) = false;
         *segment_limits.offset(i) = 0;

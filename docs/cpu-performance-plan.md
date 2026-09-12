@@ -1,10 +1,18 @@
 # v86 游戏 CPU 性能优化方案
 
-初始日期：2026-09-08；更新日期：2026-09-11。初始代码基线：`2d7ce25d`（`add save/load gpu journal, fix sound issue`）。目标负载：MapleStory v083、跑跑卡丁车和 Warcraft III。
+初始日期：2026-09-08；更新日期：2026-09-12。初始代码基线：`2d7ce25d`（`add save/load gpu journal, fix sound issue`）。目标负载：MapleStory v083、跑跑卡丁车和 Warcraft III。
 
 冻结基线：保留 2026-09-11 20:56 之前的实现，后续诊断和寄存器写回实验已删除。清理后的源码构建产物与用户确认帧率恢复的旧核心逐字节一致，`v86.wasm` SHA-256 为 `3cdb893529103f33f01de47cc888fd62e4997c6c95f228ed270b6cc3ef48f8d1`。默认页面直接加载该核心，不依赖历史备份或额外 URL 开关。后续优化另行开展，以同场景游戏回归为验收条件。
 
 当前实现状态：
+
+- 2026-09-12，x87 持续缓存（组件版本 5，以下 v3/v4 段落为历史实现）：物理栈槽现在维护 `f64` 权威值、有效位和脏位。Wasm 局部变量仍限于寄存器区域，但区域结束、普通跳转和模块返回不再自动转换回 F80。旧 helper 读取单槽时按需同步；MMX 别名访问、FXSAVE/FSAVE 和宿主存档有明确同步边界，恢复/覆盖寄存器时使旧缓存失效。FINIT 只重置标签、控制字和 TOP，保留物理槽缓存；普通 SSE 运算不触发 MMX 屏障。
+  - 扩大原生区域到 1～32 条指令，增加 `FUCOM/FUCOMP/FUCOMPP/FUCOMI/FUCOMIP`、`FST/FSTP ST(i)`、`FLD1/FLDZ`、`FCHS/FABS`、`FFREE`、`FINCSTP/FDECSTP`、`FNOP`。`FRNDINT` 直接生成 Wasm nearest/floor/ceil/trunc，遵循客户机 RC，保留既有整数舍入语义。
+  - m32/m64 浮点加载、m64 存储以及算术 helper 共享持续缓存；sin/cos/sincos/tan/atan2 的有限值路径直接使用缓存中的 f64。超越函数仍调用 Wasm 核心中的数学函数，Wasm 没有对应的单条 sin/log 指令。原始 NaN、宽 F80、栈错误等保留兼容入口。
+  - **尚未做到整个 x87 都直接生成 Wasm 指令**：平方根、余数、缩放、对数、FXTRACT、条件移动、BCD、整数及 m32/m80 转换等仍有旧 helper/F80 桥接。它们只同步需要的槽，不会无条件清空整个缓存；状态保存本身仍需生成完整 F80 格式。以上是当前覆盖边界，不能用“所有 x87 已原生化”描述。
+  - 报告 `x87.version=5` 增加 `persistent_hits`（区域/helper 复用物理缓存槽）和 `cached_writes`（逻辑缓存写入，原生区域按最终脏槽计）。`initial_conversions` 为 F80→f64 填充，`writebacks` 从旧版本的区域出口写回改为实际 F80 物化次数；累计值和样本同时提供。不同版本的回写字段不能直接按原定义比较。
+  - 回归覆盖新增栈操作、quiet NaN、四种 RC 的 FRNDINT、m32/m64 特殊值及 NaN payload、MMX/SSE 前缀转换、环境/完整状态保存、跨跳转缓存、#NM 和读/写/加载 #PF，以及宿主脏缓存存档恢复。验证入口仍为 `make x87-jit-cache-tests`；主线程和 Worker 页面测试同时检查新增报告字段。
+  - 同机未录制的对照微基准：跨回边保留栈的循环相对 v4 约 1.27×；每轮重新初始化并 FSAVE 的循环约 0.92×，有约 8% 退化。不能把前者当 Mandel/游戏加速，也不能据此承诺 1500 分。旧核心 `/tmp/v86-before-persistent-x87.wasm` 可用 `X87_COMPARE_BASELINE` 环境变量进行相同客户机代码对照；真实 Mandel/3DMark 和游戏结果仍待实测。
 
 - 2026-09-11 晚间回退：用户报告 18:26 之后的三项优化使跑跑卡丁车持续掉帧。扩展 flags、同页线性合并、栈翻译复用及两层间接目标缓存现在全部默认关闭，分别保留内部开关 10、12、11、8，用于后续逐项游戏对照。保留上一轮 ADD/SUB32 延迟 flags、Worker、迭代链接、分级 JIT，以及重叠指令路径的 Wasm 类型修复。以下微基准数字是历史实验结果，不能代表跑跑性能；目前尚未确认哪一项造成退化。
 
@@ -20,6 +28,31 @@
 - JIT 容量耗尽时改为局部淘汰，保留表大小上限；增加 MMX/SSE/x87 快路径、SIMD 寄存器缓存、块内无用 flags 写入消除、受限的同页 RAM 翻译复用和重叠 REP MOVS 优化。
 - 已补齐 SSE3 的 ADDSUBPS/PD、LDDQU，优化复制指令及 x87 格式转换，并修复 binary64 存储的异常状态更新。特殊值、舍入和异常边界仍需遵守各实现的兼容路径，不能将快路径覆盖等同于完整硬件语义。
 - 已提供 CPU/JIT/磁盘、图形及主线程帧时间记录。操作为 **Record performance → Stop recording → Export**。不同线程和嵌套计时可重叠，不能相加作为总执行时间。
+- 报告格式 v6 增加 `x87_counters_available`、`x87` 和 `samples[].x87`，兼容主线程和 CPU Worker。先开始录制，再运行 Mandel，测试结束后停止并导出 `v86-performance.json`。
+  - `x87.operations.add/sub/mul`：F80 实现调用总次数、`fast_path`、`softfloat_fallback` 及 0～1 的比例；无调用时比例为 `null`。包含 helper 内部运算及其他客户机进程，不等同于解码指令数。`x87.version=2` 增加 `div`、`compatible_fast_path` 和 `approximate_f64`；后两者之和为 `fast_path`。
+  - 每项的 `modes` 按运算时客户机请求的精度和舍入方式累计；`initial_state/current_state` 是录制边界状态。SoftFloat 精度代码 32/64/80 对应有效尾数 24/53/64 位；快速模式的实际四则运算固定为 f64 最近偶数舍入，不能把客户机设置当作实际计算精度。
+  - `duration_ms` 是宿主录制窗口耗时；`samples[].elapsed_ms` 和累计计数可作区间差分。不会自动读取 EVEREST 分数或识别测试起止。
+  - 每次开始清零，停止后冻结；未录制时只检查开关，不计数、不逐次读时钟或打印日志。旧 Wasm 无此能力时 `x87` 为 `null`。
+  - 这些是次数诊断，SoftFloat 耗时占比仍需宿主 CPU 采样确认。现有 Record performance 执行采样会关闭 JIT 模块串联，录制速度不能作为未插桩性能基线。
+  - 验证：`make x87-recording-tests`，`node tests/glbridge/performance_recorder_test.js`，`make x87-fast-tests`；两个 `*_ui_browser_test.html` 覆盖主线程和 Worker 按钮导出的实际数据。
+- 2026-09-12：性能优先的 `x87_fast_math` 模式默认启用。F80 加减乘除使用现有转换函数转成 f64、执行 Wasm 算术后写回 F80；栈、比较、整数转换、状态格式及平方根实现保留。F80 算子调用者（例如 FSCALE/余数等 helper 内部算术）同样受该策略影响。
+  - 页面 `?x87_fast_math=0` 或 API `x87_fast_math: false` 切回原兼容路径；`1`/`true` 启用快速路径。主线程、Worker、手动启动和自动 profile 启动均透传。重启或加载存档保留当前宿主策略，该策略不写入客户机存档。
+  - 快速模式不保持 x87 扩展精度、指数范围、算术舍入控制和完整算术异常标志。现有输入/输出转换继续遵循各自语义，特殊值转换仍可能调用 SoftFloat；报告的零算术回退不代表完全没有 SoftFloat 转换或比较调用。
+  - 对照测试应确认报告 `x87.current_state.arithmetic_mode` 分别为 `fast_f64` / `compatible`。快速模式的四则运算应全部计入 `approximate_f64`，而不是 `compatible_fast_path`。
+  - `make x87-fast-math-tests` 检查 f64 结果、12 种客户机控制组合、特殊值、零算术回退及模式切换，并运行非 EVEREST 的连续迭代微基准。`make x87-fast-tests` 检查两种模式的解释器/JIT一致性、比较与转换不变及存档恢复。
+  - 本机一次未录制的连续迭代微基准（8192 点，每点 32 次迭代，预热后取中位数）为兼容路径 29.45 ms、快速路径 9.97 ms，约 2.95 倍，两者校验和一致。这不是 EVEREST/3DMark 或游戏帧率结果。
+- 2026-09-12：新增基本块内 x87 原生 Wasm 运算与 f64 局部变量缓存，`x87_jit_cache` 默认启用，沿用已启用的近似算术策略。
+  - 首批覆盖连续寄存器形式的加减乘除、反向减除、带 pop 的运算、`FLD ST(i)` 和 `FXCH`。每段最多 32 条指令、至少 3 次算术；内存访问、比较、其他 helper 和块出口之前写回，不跨这些边界缓存。带详细指令 profiler 的构建保留原生成路径。
+  - 每段入口检查 x87 可用性、栈标签及所需输入。仅接收可精确表示为普通 f64 的值和带符号零；宽精度、特殊值、非正规输入和栈异常走现有 helper。段内直接生成 `f64.add/sub/mul/div`，修改的栈槽在出口转换回 F80。保持当前快速 helper 的结果及状态语义，不恢复严格 x87 算术精度。
+  - `?x87_jit_cache=0`（已有查询参数时使用 `&x87_jit_cache=0`）或 API `x87_jit_cache: false` 对照原 f64 helper；`x87_fast_math=0` 同时使缓存入口回退。每次执行检查策略，暖 JIT 代码也响应开关；加载存档保留宿主配置。
+  - Record performance 的 `x87.version=3` 新增 `jit_cache`：`accepted_regions`、`rejected_regions`、`arithmetic_ops`、`initial_conversions`、`writebacks`、`local_reads`。`current_state.jit_cache_enabled` 记录配置；累计值和样本均可导出，旧 v1/v2 核心仍可读取。`operations` 现在也包含直接生成的运算，按段批量计数，因此不再仅代表 helper 调用次数。缓存转换和读取次数只覆盖成功进入的缓存段，拒绝次数也包含开关关闭。
+  - 验证入口：`make x87-jit-cache-tests`；同一测试可用 `node tests/rust/x87_jit_cache.mjs build/v86-fallback.wasm` 验证兼容 Wasm 构建。覆盖 96 种精度/舍入/TOP 组合、全部 18 种算术编码形式、栈复制交换弹出、宽值/特殊值/空满栈回退、中间结果溢出/非正规数、#NM/#PF 的 EIP 和可见状态、段长度限制、开关、SMC 与存档恢复。
+  - 本机未录制的实际客户机 x87 循环，使用同一暖 JIT 代码切换缓存，首轮中位吞吐从约 1741 提高到 3163 loops/ms（约 1.82 倍）。这是专用循环结果，不是 Mandel、3DMark 或游戏成绩。下一次实测应同时比较完成耗时与 `jit_cache.arithmetic_ops` 占全部算术的比例；录制会改变执行开销，游戏帧率另做未录制对照。
+- 2026-09-12：在上述缓存基础上，寄存器形式的 `FCOM/FCOMP/FCOMPP/FCOMI/FCOMIP` 直接生成 Wasm 比较，比较后的算术和栈操作可继续使用同段 f64 局部变量。保留每段至少 3 次算术、最多 32 条指令的范围，内存形式、FUCOM 系列及分支仍是同步边界。
+  - FCOM 系列更新 x87 C0/C1/C2/C3；FCOMI 系列更新 EFLAGS 并清除延迟标志状态；按指令更新弹栈标签。入口继续拒绝宽值、NaN/Inf、非正规数及无效栈状态；段内运算产生的 NaN 直接设置 unordered 和 ordered-compare invalid 标志，SoftFloat 标志按比较与 ADD/DIV 的先后顺序更新，保持当前 helper 语义。
+  - 报告 `x87.version=4` 新增 `jit_cache.comparison_ops`（直接执行的比较次数）和 `comparison_regions`（包含比较的成功缓存段次数）。算术次数不混入比较，`local_reads` 包含比较操作数；旧 v3 报告没有这两项，不当作零。主线程和 Worker 的按钮导出均验证通过。
+  - `make x87-jit-cache-tests` 增加 7 种比较编码、大小/相等/负数及四种舍入设置、既有 EFLAGS/C 位、NaN 与后续算术、比较后继续缓存、条件跳转、初始 QNaN/SNaN 回退，以及比较后 #PF 和入口 #NM 状态。原算术、兼容模式、存档恢复和报告生命周期测试继续通过。
+  - 可用 `X87_COMPARE_BASELINE=/path/to/previous.wasm node tests/rust/x87_jit_cache.mjs` 与上一版缓存核心对照。此次未录制的相同客户机循环，预热交替测试的中位吞吐约从 2704 到 3321 loops/ms（1.23 倍）；相同 42000 次被计数算术的诊断窗口内，缓存段从 6000 降到 2000，输入转换和写回各从 18000 降到 6000。仅为专用循环结果，Mandel 仍需与用户上一版 64.21 秒对照。
 - 跨模块链接已改为最多 64 次的迭代执行并默认启用；新启用的分级 JIT 对冷的 32 位平坦地址代码采用默认 50k 热度、1 页和最多 32 个额外基本块，一级模块经 64 次外层执行返回后尝试提升至默认最多 6 页、250 个额外基本块。常规非分级策略仍为 200k/3 页/250。尚未实现通用跨块整数数据流优化或持久化 JIT 缓存。
 
 最新用户实测反馈：**CPU Worker 没有带来明显的跑跑卡丁车 FPS 增幅，但声音卡顿现象消失。** 这是该游戏场景的使用反馈，不代表所有游戏或 CPU 基准的加速比。后续需要分别评估指令吞吐、帧间隔和音频连续性。

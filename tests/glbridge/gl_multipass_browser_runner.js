@@ -48,7 +48,7 @@ function finish(code) {
 }
 server.listen(0, "127.0.0.1", () => {
     const page = process.argv[2] || "gl_multipass_browser_test.html";
-    const url = `http://127.0.0.1:${server.address().port}/tests/glbridge/${page}?report=1`;
+    const url = `http://127.0.0.1:${server.address().port}/tests/glbridge/${page}${page.includes("?") ? "&" : "?"}report=1`;
     browser = spawn(process.env.GL_CHROME ||
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", [
         "--headless=new", "--enable-unsafe-webgpu", "--no-first-run",

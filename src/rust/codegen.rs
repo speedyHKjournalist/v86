@@ -3015,6 +3015,8 @@ pub fn gen_fpu_get_sti(ctx: &mut JitContext, i: u32) {
     if i != 0 { ctx.builder.const_i32(i as i32); ctx.builder.add_i32(); }
     ctx.builder.const_i32(7); ctx.builder.and_i32();
     let index = ctx.builder.set_new_local();
+    ctx.builder.get_local(&index);
+    ctx.builder.call_fn1("fpu_sync_slot");
     ctx.builder.load_fixed_u8(global_pointers::fpu_stack_empty as u32);
     ctx.builder.get_local(&index); ctx.builder.shr_u_i32();
     ctx.builder.const_i32(1); ctx.builder.and_i32();
@@ -3063,6 +3065,7 @@ pub fn gen_fpu_push(ctx: &mut JitContext) {
     ctx.builder.const_i32(global_pointers::fpu_status_word as i32);
     ctx.builder.load_fixed_u16(global_pointers::fpu_status_word as u32);
     ctx.builder.const_i32(!0x200); ctx.builder.and_i32(); ctx.builder.store_aligned_u16(0);
+    ctx.builder.get_local(&top); ctx.builder.call_fn1("fpu_invalidate_slot");
     ctx.builder.get_local(&top); ctx.builder.const_i32(4); ctx.builder.shl_i32();
     ctx.builder.const_i32(global_pointers::fpu_st as i32); ctx.builder.add_i32();
     let address = ctx.builder.set_new_local();

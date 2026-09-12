@@ -372,13 +372,22 @@ rust-test: $(RUST_FILES)
 rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test
 
-build/softfloat-fast-test.wasm: tests/rust/softfloat_fast_path.rs src/rust/softfloat.rs build/softfloat.o
+build/softfloat-fast-test.wasm: tests/rust/softfloat_fast_path.rs src/rust/softfloat.rs src/rust/x87_profiler.rs build/softfloat.o
 	rustc --edition=2021 --target wasm32-unknown-unknown --crate-type cdylib -O \
 	    -C linker=tools/rust-lld-wrapper -C link-arg=build/softfloat.o \
 	    tests/rust/softfloat_fast_path.rs -o $@
 
 softfloat-fast-tests: build/softfloat-fast-test.wasm
 	node tests/rust/softfloat_fast_path.mjs
+
+x87-recording-tests: build/softfloat-fast-test.wasm
+	node tests/rust/x87_recording.mjs
+
+x87-fast-math-tests: build/softfloat-fast-test.wasm
+	node tests/rust/x87_fast_math.mjs
+
+x87-jit-cache-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
+	node tests/rust/x87_jit_cache.mjs
 
 build/x87-fast-test.bin: tests/rust/x87_fast_path.asm
 	nasm -f bin $< -o $@
