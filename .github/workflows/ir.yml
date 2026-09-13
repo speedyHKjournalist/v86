@@ -1,0 +1,99 @@
+name: IR compiler
+
+on:
+  push:
+    branches: [ir]
+  pull_request:
+    branches: [ir]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compiler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: -D warnings
+      RUST_TEST_THREADS: '4'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Install native test tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          sudo apt-get update -y
+          sudo apt-get install -y nasm
+      - name: Rust compiler and generated Wasm execution
+        run: |
+          set -o pipefail
+          make src/rust/gen/jit.rs src/rust/gen/jit0f.rs \
+               src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs \
+               src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
+          cargo test 2>&1 | tee ir-rust.log
+          node tests/ir/wasm/run.mjs 2>&1 | tee ir-wasm.log
+          node tests/rust/verify-wasmgen-dummy-output.js
+          cargo check --features ir-experimental
+      - name: Decoder oracle and unchanged coverage catalogue
+        run: |
+          set -o pipefail
+          node gen/generate_ir_decoder.js --check
+          node tests/ir/decode/oracle.mjs 2>&1 | tee ir-decoder.log
+          node tests/ir/coverage.mjs 2>&1 | tee ir-coverage.log
+          git diff --exit-code
+      - name: Preserve diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-compiler-${{ github.sha }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            ir-*.log
+            build/ir-licm/*.wasm
+
+  cpu-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Install CPU build tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -y
+          sudo apt-get install -y nasm clang lld
+      - name: Control flow, memory and SIMD regressions
+        run: |
+          set -o pipefail
+          make ir-cfg-tests ir-loop-tests ir-memory-tests ir-stack-tests \
+               ir-simd-integer-tests ir-simd-shuffle-tests 2>&1 | tee ir-semantics.log
+      - name: Live compiler, cache and Tier scheduling regressions
+        run: |
+          set -o pipefail
+          make ir-live-tests ir-cache-tests ir-auto-tests \
+               ir-backend-integration-tests 2>&1 | tee ir-runtime.log
+      - name: Preserve diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-cpu-${{ github.sha }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: ir-*.log

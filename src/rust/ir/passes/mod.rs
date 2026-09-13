@@ -2,6 +2,7 @@
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
 #[derive(Clone, Copy)]

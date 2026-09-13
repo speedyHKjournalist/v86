@@ -8,7 +8,7 @@ use crate::ir::{
         region::lift_cpu_cfg,
     },
     lowering::{lower, CompileError},
-    passes::{run, PassConfig, PassStats},
+    passes::{licm, run, PassConfig, PassStats},
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Backend {
@@ -84,6 +84,7 @@ pub struct CompiledArtifact {
     pub code: Artifact,
     pub passes: PassStats,
     pub mir_folds: usize,
+    pub licm: licm::Stats,
     pub guest_bytes: usize,
     pub entry: EntryContract,
     pub mappings: Vec<CodeMapping>,
@@ -207,6 +208,11 @@ fn compile_inner(
     } else {
         PassStats::default()
     };
+    let licm = if config.optimize && request.tier == Tier::Two {
+        licm::run(&mut region, licm::Config::default()).map_err(CompileError::InvalidIr)?
+    } else {
+        licm::Stats::default()
+    };
     let mut mir = lower(&region)?;
     drop(region);
     let mir_folds = if config.optimize { mir.fold_constants()? } else { 0 };
@@ -222,6 +228,7 @@ fn compile_inner(
         code,
         passes,
         mir_folds,
+        licm,
         guest_bytes: snapshot.bytes.len(),
         mappings: snapshot.mappings.clone(),
         entry: if cpu {
