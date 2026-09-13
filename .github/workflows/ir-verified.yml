@@ -1,0 +1,78 @@
+name: IR verified
+
+on:
+  pull_request:
+    branches: [ir]
+  push:
+    branches: ['chat/ir11-*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-verified-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compiler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Compiler and independent decoder oracle
+        run: |
+          rustup toolchain install stable --profile minimal
+          sudo apt-get update -y
+          sudo apt-get install -y nasm
+      - name: Generate and validate dispatch tables
+        run: |
+          mkdir -p build
+          make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs ir-generated-check
+      - name: Native compiler regressions
+        run: |
+          set -o pipefail
+          env RUSTFLAGS="-D warnings" cargo +stable test 2>&1 | tee build/ir-native.log
+      - name: Execute Wasm and independent decoder oracle
+        run: |
+          set -o pipefail
+          node tests/ir/wasm/run.mjs 2>&1 | tee build/ir-wasm.log
+          node tests/rust/verify-wasmgen-dummy-output.js
+          node tests/ir/decode/oracle.mjs 2>&1 | tee build/ir-decoder.log
+      - name: Check generated sources
+        run: git diff --exit-code
+      - name: Preserve diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-verified-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: build/ir-*.log
+
+  workbench:
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, 'workbench')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Prepare native assembler and Wasm standard library
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown --toolchain stable
+          sudo apt-get update -y
+          sudo apt-get install -y nasm
+          tar -czf /tmp/ir-wasm-support.tar.gz -C "$(rustc +stable --print sysroot)" lib/rustlib/wasm32-unknown-unknown
+          tar -czf /tmp/ir-assembler.tar.gz -C /usr bin/nasm bin/ndisasm
+      - name: Preserve development support
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-verified-support-${{ github.sha }}
+          retention-days: 1
+          compression-level: 0
+          path: |
+            /tmp/ir-wasm-support.tar.gz
+            /tmp/ir-assembler.tar.gz
