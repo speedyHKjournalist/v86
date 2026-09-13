@@ -2,8 +2,10 @@
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
+mod simd;
 #[derive(Clone, Copy)]
 pub struct PassConfig {
     pub prune: bool,
@@ -11,6 +13,8 @@ pub struct PassConfig {
     pub phis: bool,
     pub fold: bool,
     pub gvn: bool,
+    pub licm: bool,
+    pub simd: bool,
     pub dce: bool,
     pub rounds: usize,
 }
@@ -22,6 +26,8 @@ impl Default for PassConfig {
             phis: true,
             fold: true,
             gvn: true,
+            licm: true,
+            simd: true,
             dce: true,
             rounds: 2,
         }
@@ -37,6 +43,8 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub hoisted: usize,
+    pub simd_simplified: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -51,6 +59,10 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
         }
         if config.phis {
             trivial_phis(region, &mut stats);
+            verify(region).map_err(|e| e.0)?;
+        }
+        if config.simd {
+            simd::run(region, &mut stats)?;
             verify(region).map_err(|e| e.0)?;
         }
         if config.fold {
@@ -68,6 +80,20 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
         if config.dce {
             dce(region, &mut stats);
             verify(region).map_err(|e| e.0)?;
+        }
+    }
+    if config.licm && config.rounds != 0 {
+        let moved = licm::run(region, licm::LicmConfig::default())?;
+        stats.hoisted += moved.hoisted;
+        if moved.hoisted != 0 {
+            if config.gvn {
+                gvn::run(region, &mut stats)?;
+                verify(region).map_err(|e| e.0)?;
+            }
+            if config.dce {
+                dce(region, &mut stats);
+                verify(region).map_err(|e| e.0)?;
+            }
         }
     }
     Ok(stats)

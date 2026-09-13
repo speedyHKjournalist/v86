@@ -1,0 +1,76 @@
+name: IR core
+
+on:
+  pull_request:
+    branches: [ir]
+  push:
+    branches: ['chat/ir-*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-core-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  optimizations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Native Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: LICM and SIMD compiler and execution checks
+        run: |
+          set -o pipefail
+          python3 tests/ir/run_regressions.py --optimizations-only 2>&1 | tee ir-optimizations.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ir-optimizations-${{ github.sha }}
+          path: ir-optimizations.log
+          retention-days: 7
+
+  cpu-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # The REP and task-register oracles read a pinned pre-refactor commit.
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: CPU build tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld default-jre-headless
+      - name: IR differential, runtime and legacy publication regressions
+        run: |
+          set -o pipefail
+          python3 tests/ir/run_regressions.py 2>&1 | tee ir-regressions.log
+      - name: Ensure generated tracked files remain unchanged
+        run: git diff --exit-code
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ir-cpu-regressions-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ir-regressions.log
+            build/rep-reference.json
+            build/task-reference.json

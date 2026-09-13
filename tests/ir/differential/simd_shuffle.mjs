@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {shuffle} from "./shuffle_model.mjs";
 import {V86} from "../../../build/libv86.mjs";
-const cases=JSON.parse(fs.readFileSync("build/ir-simd-shuffle/cases.json"));
-const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-simd-shuffle/${i}-${opt}.wasm`))));
+import {shardCorpus} from "./corpus_shards.mjs";
+const corpus=JSON.parse(fs.readFileSync("build/ir-simd-shuffle/cases.json"));
+const required=corpus.findIndex(c=>c[1]&&c[2]===32&&c[3]===0x0FC6&&c[6]===0&&c[7]===8);
+const {cases,indices}=shardCorpus(corpus,import.meta.url,required);
+const modules=indices.map(i=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-simd-shuffle/${i}-${opt}.wasm`))));
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 for(const release of [false,true]){
  const vm=new V86({wasm_path:release?"build/v86-ir-test-release.wasm":"build/v86-ir-test.wasm",memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});

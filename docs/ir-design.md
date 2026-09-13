@@ -90,10 +90,16 @@ FLAGS are six I1 SSA values plus the incoming system flags. Narrow arithmetic
 is explicitly masked. ADC/SBB use two carry/borrow checks, INC/DEC preserve CF,
 and logical AF follows the baseline's zero result. No undefined flags use poison.
 
-The bounded pass pipeline provides pure constant folding, block-local GVN,
-trivial non-effect parameters, and DCE rooted in terminators, effects and active
-recovery maps. It verifies after each transformation stage. It does not yet provide
-region-wide GVN, memory forwarding, LICM, SIMD optimization or state-sync pruning.
+The bounded pass pipeline provides pure constant folding, dominance-based GVN,
+trivial non-effect parameters, CFG simplification, bit-exact vector identities and
+shuffle composition, and DCE rooted in terminators, effects and active recovery
+maps. It verifies after each transformation stage. After canonicalization, bounded
+transactional LICM can move only total CPU-independent SSA expressions to existing
+unconditional preheaders; runtime compilation enables it only for Tier 2. It never
+moves memory, helpers, CPU observations, guards or budget polls. Memory forwarding,
+proof-based access reuse, induction-variable transforms and state-sync pruning
+remain unimplemented. See [IR-11 implementation and validation](ir-optimizations.md)
+for budgets, opt-outs and the distinction between implementation and acceptance.
 
 ## WasmBuilder audit
 

@@ -203,7 +203,11 @@ fn compile_inner(
         )?
     };
     let passes = if config.optimize {
-        run(&mut region, config.passes).map_err(CompileError::InvalidIr)?
+        let mut selected = config.passes;
+        // Speculative pure code motion is a Tier 2 optimization. Keep the
+        // latency-oriented Tier 1 pipeline unchanged.
+        selected.licm &= request.tier == Tier::Two;
+        run(&mut region, selected).map_err(CompileError::InvalidIr)?
     } else {
         PassStats::default()
     };

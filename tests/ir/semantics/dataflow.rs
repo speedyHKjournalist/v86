@@ -20,6 +20,8 @@ fn config() -> PassConfig {
         phis: false,
         fold: false,
         gvn: true,
+        licm: false,
+        simd: false,
         dce: false,
         rounds: 1,
     }
@@ -236,6 +238,8 @@ fn pruning_removes_dead_memory_and_rewrites_all_arenas() {
         PassConfig {
             merge: false,
             gvn: false,
+            licm: false,
+            simd: false,
             dce: false,
             ..PassConfig::default()
         },
