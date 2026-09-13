@@ -24,10 +24,12 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '24.17.0'
-      - name: Native Rust toolchain
+      - name: Native Rust toolchain and decoder oracle
         run: |
           rustup toolchain install stable --profile minimal
           rustup component add rustfmt --toolchain stable
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm
       - name: Generate baseline dispatch tables and check IR decoder
         run: |
           mkdir -p build
@@ -42,6 +44,36 @@ jobs:
           node tests/rust/verify-wasmgen-dummy-output.js
           node tests/ir/decode/oracle.mjs
       - name: Check formatting and tracked generated sources
+        if: always()
         run: |
           rustup run stable rustfmt --edition 2021 src/rust/ir/passes/licm.rs
           git diff --exit-code
+
+  ir-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: CPU Wasm toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld
+      - name: Live compile, cache, tier scheduling and backend regressions
+        run: |
+          set -o pipefail
+          make ir-live-tests ir-cache-tests ir-auto-tests ir-backend-integration-tests 2>&1 | tee ir-runtime.log
+      - name: Keep runtime diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-runtime-${{ github.sha }}
+          path: ir-runtime.log
+          retention-days: 7
