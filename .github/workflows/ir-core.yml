@@ -55,6 +55,10 @@ jobs:
         run: |
           set -o pipefail
           tools/ir-forwarding-tests.sh 2>&1 | tee build/ir-forwarding-cpu.log
+      - name: Guarded scalar store continuation and recovery
+        run: |
+          set -o pipefail
+          sh tools/ir-store-continuation-tests.sh 2>&1 | tee build/ir-store-continuation-cpu.log
       - name: Generated sources and whitespace
         run: |
           git diff --exit-code
