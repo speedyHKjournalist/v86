@@ -114,3 +114,6 @@ fn actual_lifted_polls_memory_fault_maps_and_commit_maps_are_not_moved() {
         lower(&region).unwrap();
     }
 }
+
+#[path = "licm_pipeline.rs"]
+mod pipeline;
