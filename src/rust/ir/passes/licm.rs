@@ -165,6 +165,9 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
     verify(region).map_err(|e| e.0)?;
     let cfg = Cfg::compute(region)?;
     let loops = discover(region, &cfg, &mut work)?;
+    if loops.is_empty() {
+        return Ok(Stats { work: work.used, ..Stats::default() });
+    }
     let mut staged = region.clone();
     let mut stats = Stats::default();
     for natural in loops {

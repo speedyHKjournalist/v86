@@ -65,16 +65,15 @@ fn counted_loop() -> (Region, ValueId, ValueId, ValueId) {
     let next_sum = b.binary(Binary::Add, sum, dependent);
     let one = b.constant(1, Type::I32);
     let next_count = b.binary(Binary::Sub, count, one);
-    // Unordered CPU reads must never be classified as loop-invariant.
-    let cpu_read = b.node(Op::ReadGpr(7), vec![], Type::I32);
-    b.binary(Binary::Add, cpu_read, input[2]);
+    // This depends on a loop-carried parameter and must remain in the body.
+    let variant = b.binary(Binary::Add, count, input[2]);
     b.region.terminate(body, Terminator::Branch(Edge {
         target: header,
         args: vec![be, next_count, next_sum],
     }));
     let state = snapshot(&mut b.region, b.gpr, &flags, 0x3000);
     b.region.terminate(exit, Terminator::Exit(state));
-    (b.region, invariant, dependent, cpu_read)
+    (b.region, invariant, dependent, variant)
 }
 
 fn owner(region: &Region, value: ValueId) -> BlockId {
@@ -85,8 +84,8 @@ fn owner(region: &Region, value: ValueId) -> BlockId {
 }
 
 #[test]
-fn hoists_transitive_invariants_but_not_loop_state_or_cpu_reads() {
-    let (mut r, invariant, dependent, cpu_read) = counted_loop();
+fn hoists_transitive_invariants_but_not_loop_state() {
+    let (mut r, invariant, dependent, variant) = counted_loop();
     verify(&r).unwrap();
     let maps = format!("{:?}", r.states);
     let before = r.instructions.len();
@@ -95,7 +94,7 @@ fn hoists_transitive_invariants_but_not_loop_state_or_cpu_reads() {
     assert_eq!(stats.hoisted, 3); // add, multiply, constant one
     assert_eq!(owner(&r, invariant), BlockId(0));
     assert_eq!(owner(&r, dependent), BlockId(0));
-    assert_eq!(owner(&r, cpu_read), BlockId(3));
+    assert_eq!(owner(&r, variant), BlockId(3));
     assert_eq!(r.instructions.len(), before);
     assert_eq!(format!("{:?}", r.states), maps);
     verify(&r).unwrap();
@@ -229,4 +228,18 @@ fn emits_optimized_and_unoptimized_budgeted_loops() {
             ).unwrap();
         }
     }
+}
+
+#[test]
+fn malformed_cpu_read_in_loop_is_rejected_without_weakening_verifier() {
+    let (mut r, _, _, _) = counted_loop();
+    let body = BlockId(3);
+    let term = r.blocks[body.index()].terminator.take().unwrap();
+    r.append(body, Op::ReadGpr(7), vec![], &[Type::I32], None);
+    r.terminate(body, term);
+    let before = format!("{r:?}");
+    assert!(run(&mut r, DEFAULT_WORK_LIMIT)
+        .unwrap_err()
+        .contains("GPR initialization outside entry"));
+    assert_eq!(format!("{r:?}"), before);
 }

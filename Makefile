@@ -574,6 +574,14 @@ ir-tests: ir-generated-check build/v86.wasm build/libv86.mjs build/jit-capacity.
 	node tests/rust/verify-wasmgen-dummy-output.js
 	node tests/ir/differential/registers.mjs
 
+# Focused IR-11 regression: native pass proof checks, standalone Wasm, then
+# artifacts compiled inside the real CPU Wasm and compared with its interpreter.
+.PHONY: ir-licm-tests
+ir-licm-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs build/jit-capacity.bin
+	env RUSTFLAGS="-D warnings" cargo test ir::passes::licm
+	node tests/ir/wasm/licm.mjs
+	node tests/ir/differential/licm.mjs
+
 .PHONY: ir-coverage ir-default-gate
 ir-coverage: ir-generated-check
 	node tests/ir/coverage.mjs
