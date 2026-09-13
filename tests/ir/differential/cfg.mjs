@@ -67,7 +67,7 @@ try {
     const HANDLER=0x180000, set32=(a,v)=>view.setUint32(a,v,true);
     for(let i=0;i<cases.length;i++) {
         const c=cases[i];
-        if(![12,13].includes(c[0]) || c[3]!==0x1000 || c[4]!==100) continue;
+        if(![12,13,17,18].includes(c[0]) || c[3]!==0x1000 || c[4]!==100) continue;
         for(const initialCount of [100,0xFFFFFFFC]) for(const lazy of [false,true]) {
             const configure=()=>{
                 reset(c,7,0x8D7,lazy,initialCount,false);
@@ -82,8 +82,9 @@ try {
                 frame:Array.from(mem.slice(STACK-32,STACK))});
             configure(); instances[i].exports.f(0); const actual=faultState();
             assert.equal(actual.ip,HANDLER); assert.equal(actual.cr2,DATA+4096);
-            assert.equal(words[664>>2],(initialCount+5)>>>0,"only completed instructions retire before second-iteration fault");
-            configure(); for(let j=0;j<6;j++) e.ir_test_step();
+            const retired = c[0] >= 17 ? 6 : 5;
+            assert.equal(words[664>>2],(initialCount+retired)>>>0,"only completed instructions retire before second-iteration fault");
+            configure(); for(let j=0;j<retired+1;j++) e.ir_test_step();
             assert.deepEqual(actual,faultState(),`second-iteration #PF, CFG ${i}`);
             set32(0x13000+((DATA+4096)>>>12)*4,(DATA+4096)|3); e.full_clear_tlb();
             faults++;

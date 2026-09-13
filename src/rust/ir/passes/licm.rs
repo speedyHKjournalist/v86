@@ -211,10 +211,12 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
             }
         }
         for block in order {
+            work.spend(staged.blocks[block].instructions.len())?;
             staged.blocks[block]
                 .instructions
                 .retain(|id| !moved[id.index()]);
         }
+        work.spend(hoisted.len())?;
         staged.blocks[natural.preheader]
             .instructions
             .extend(hoisted);
