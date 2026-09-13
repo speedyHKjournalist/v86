@@ -39,9 +39,13 @@ jobs:
           env RUSTFLAGS="-D warnings" cargo +stable test 2>&1 | tee build/ir-native.log
       - name: Execute emitted Wasm
         run: |
-          node tests/ir/wasm/run.mjs
-          node tests/rust/verify-wasmgen-dummy-output.js
-          node tests/ir/decode/oracle.mjs
+          set -o pipefail
+          {
+            node tests/ir/wasm/run.mjs
+            node tests/ir/wasm/licm.mjs
+            node tests/rust/verify-wasmgen-dummy-output.js
+            node tests/ir/decode/oracle.mjs
+          } 2>&1 | tee build/ir-wasm.log
       - name: Check tracked generated sources
         run: git diff --exit-code
       - name: Preserve diagnostics
@@ -51,19 +55,6 @@ jobs:
           name: ir-diagnostics-${{ github.sha }}
           retention-days: 7
           if-no-files-found: ignore
-          path: build/ir-native.log
-      - name: Package reproducible source and native compiler
-        if: always() && github.event_name == 'push'
-        run: |
-          git archive --format=tar.gz --output=/tmp/ir-source.tar.gz HEAD
-          tar -czf /tmp/ir-native-toolchain.tar.gz -C "$(rustc +stable --print sysroot)" bin/rustc bin/cargo bin/rustfmt lib
-      - name: Preserve development kit
-        if: always() && github.event_name == 'push'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ir-devkit-${{ github.sha }}
-          retention-days: 1
-          compression-level: 0
           path: |
-            /tmp/ir-source.tar.gz
-            /tmp/ir-native-toolchain.tar.gz
+            build/ir-native.log
+            build/ir-wasm.log
