@@ -1,0 +1,35 @@
+name: IR core
+
+on:
+  pull_request:
+    branches: [ir]
+  push:
+    branches: ['chat/ir-*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-core-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ir-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Native Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Check generated decoder
+        run: make ir-generated-check
+      - name: Native compiler regressions
+        run: env RUSTFLAGS="-D warnings" cargo +stable test
+      - name: Execute emitted Wasm
+        run: |
+          node tests/ir/wasm/run.mjs
+          node tests/rust/verify-wasmgen-dummy-output.js
+          node tests/ir/decode/oracle.mjs
