@@ -8,6 +8,10 @@ edition = "2021"
 default = []
 profiler = []
 jit-invariants = []
+# Standalone experimental compiler; does not switch the production CPU backend.
+ir-experimental = []
+# Exports differential oracles only in the dedicated test Wasm artifact.
+ir-test-hooks = ["ir-experimental"]
 
 [lib]
 crate-type = ["cdylib"]

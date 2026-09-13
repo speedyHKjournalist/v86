@@ -4,20 +4,21 @@ const assert = require("node:assert/strict");
     const { PerformanceRecorder } = await import("../../src/browser/performance_recorder.js");
     let time = 0, instructions = 0, counterEnabled = false;
     let counters = [0, 0, 0];
-    const reads = [];
+    const reads = [], publicationCalls = [];
     const buffer = { get(offset, length, callback) {
         if (offset === 0) callback(new Uint8Array(length));
         else if (offset === 999) throw new Error("disk failed");
         else reads.push(() => callback(new Uint8Array(length)));
     } };
     const cpu = {
+        get_jit_info: () => ({ backend: "ir" }),
         devices: { ide: { primary: { master: { buffer } } } },
         wm: { exports: {
             performance_recording_enable(value) { counterEnabled = !!value; if (value) counters = [0, 0, 0]; },
             performance_recording_get(index) { return counters[index]; },
         }, wasm_table: { get() { return null; } } },
         main_loop() { time += 4; instructions = instructions + 100 >>> 0; counters[0] += 25; counters[1] += 75; return 0; },
-        codegen_finalize() {}, codegen_finalize_finished() {}, jit_clear_all_funcs() {}, jit_clear_func() {},
+        codegen_finalize(...args) { publicationCalls.push(args); }, codegen_finalize_finished(...args) { publicationCalls.push(args); }, jit_clear_all_funcs() {}, jit_clear_func() {},
     };
     const runtime = { cpu, restore_state() {}, restart() {}, destroy() {} };
     const emulator = { v86: runtime, is_running: () => true, get_instruction_counter: () => instructions };
@@ -39,6 +40,7 @@ const assert = require("node:assert/strict");
     counters[2]++;
     recorder.mark("scene_ready");
     const report = recorder.stop();
+    assert.equal(report.metadata.jit_backend, "ir", "report records the actual selected backend");
     assert.equal(report.disks[0].callback_latency_ms, 30, "overlapping read latencies are summed separately");
     assert.equal(report.samples.at(-1).disk_any_request_pending_ms, 20, "union of outstanding reads does not double count overlap");
     assert.equal(report.disks[0].synchronous_completions, 1);
@@ -49,6 +51,15 @@ const assert = require("node:assert/strict");
     assert.equal(buffer.get, originalGet);
     assert.equal(counterEnabled, false);
     assert.equal(recorder.timer, null);
+
+    recorder.start();
+    cpu.codegen_finalize(1, 4096, 0, 0, 200, 7, 1);
+    cpu.codegen_finalize(1, 4096, 0, 0, 200, 8, 1);
+    cpu.codegen_finalize_finished(1, 4096, 0, 7, 1);
+    assert.equal(recorder.pending_jit.size, 1, "old ticket cannot finish the reused slot's measurement");
+    cpu.codegen_finalize_finished(1, 4096, 0, 8, 1);
+    assert.equal(recorder.stop().summary.jit_finished, 1);
+    assert.deepEqual(publicationCalls.slice(-4).map(args => args.slice(-2)), [[7,1],[8,1],[7,1],[8,1]], "wrappers forward both ticket words");
 
     recorder.start();
     const abort = new AbortController();

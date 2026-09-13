@@ -6,7 +6,7 @@ use crate::modrm;
 use crate::prefix::{PREFIX_66, PREFIX_67, PREFIX_F2, PREFIX_F3, PREFIX_MASK_SEGMENT};
 use crate::regs::{CS, DS, ES, FS, GS, SS};
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum AnalysisType {
     Normal,
     BlockBoundary,
@@ -18,13 +18,38 @@ pub enum AnalysisType {
     STI,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct Analysis {
     pub no_next_instruction: bool,
     pub absolute_jump: bool,
     pub ty: AnalysisType,
 }
 
-pub fn analyze_step(mut cpu: &mut CpuContext) -> Analysis {
+/// Known complete instructions share the IR decoder. Reserved/unknown forms
+/// retain the pinned legacy analyzer until their explicit invalid-decode model lands.
+pub fn analyze_step(cpu: &mut CpuContext, linear_pc: u32) -> Analysis {
+    use crate::decode::{decode, GuestEip, LinearAddress};
+    if let Some(snapshot) = cpu.instruction_snapshot() {
+        if let Ok(instruction) = decode(
+            &snapshot.bytes[..snapshot.length],
+            GuestEip(linear_pc.wrapping_sub(cpu.cs_offset)),
+            LinearAddress(linear_pc),
+            cpu.state_flags.is_32(),
+        ) {
+            cpu.eip = cpu.eip.wrapping_add(instruction.length as u32);
+            let p = instruction.prefixes;
+            cpu.prefixes = p.segment.map_or(0, |s| s + 1)
+                | if p.operand { PREFIX_66 } else { 0 }
+                | if p.address { PREFIX_67 } else { 0 }
+                | if p.repne { PREFIX_F2 } else { 0 }
+                | if p.rep { PREFIX_F3 } else { 0 };
+            return analyze_decoded(&instruction);
+        }
+    }
+    analyze_step_legacy(cpu)
+}
+
+pub fn analyze_step_legacy(mut cpu: &mut CpuContext) -> Analysis {
     let mut analysis = Analysis {
         no_next_instruction: false,
         absolute_jump: false,
@@ -98,4 +123,34 @@ pub fn instr_F3_analyze(cpu: &mut CpuContext, analysis: &mut Analysis) {
     analyze_step_handle_prefix(cpu, analysis)
 }
 
-pub fn modrm_analyze(ctx: &mut CpuContext, modrm_byte: u8) { modrm::skip(ctx, modrm_byte); }
+pub fn modrm_analyze(ctx: &mut CpuContext, modrm_byte: u8) {
+    modrm::skip(ctx, modrm_byte);
+}
+
+/// Consume decoded facts without reading memory or decoding opcode bytes again.
+pub fn analyze_decoded(instruction: &crate::decode::DecodedInstruction) -> Analysis {
+    use crate::decode::Flow;
+    let encoding = instruction.encoding;
+    Analysis {
+        no_next_instruction: encoding.no_next_instruction,
+        absolute_jump: encoding.absolute_jump,
+        ty: match instruction.flow {
+            Flow::Next => AnalysisType::Normal,
+            Flow::Boundary | Flow::Stop => AnalysisType::BlockBoundary,
+            Flow::Sti => AnalysisType::STI,
+            Flow::Relative {
+                displacement,
+                conditional,
+                ..
+            } => AnalysisType::Jump {
+                offset: displacement,
+                is_32: instruction.operand_size == 32,
+                condition: if conditional { Some(encoding.opcode as u8) } else { None },
+            },
+        },
+    }
+}
+
+#[cfg(feature = "ir-test-hooks")]
+#[path = "../../tests/ir/decode/legacy_oracle.rs"]
+mod legacy_oracle;

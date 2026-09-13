@@ -40,6 +40,8 @@ mod unsafe_jit {
             state_flags: CachedStateFlags,
             ptr: u32,
             len: u32,
+            ticket_low: u32,
+            ticket_high: u32,
         );
         pub fn jit_clear_func(wasm_table_index: WasmTableIndex);
     }
@@ -51,8 +53,9 @@ fn codegen_finalize(
     state_flags: CachedStateFlags,
     ptr: u32,
     len: u32,
+    ticket: u64,
 ) {
-    unsafe { unsafe_jit::codegen_finalize(wasm_table_index, phys_addr, state_flags, ptr, len) }
+    unsafe { unsafe_jit::codegen_finalize(wasm_table_index, phys_addr, state_flags, ptr, len, ticket as u32, (ticket >> 32) as u32) }
 }
 
 pub fn jit_clear_func(wasm_table_index: WasmTableIndex) {
@@ -115,6 +118,8 @@ pub const CHECK_JIT_STATE_INVARIANTS: bool = cfg!(feature = "jit-invariants");
 
 const MAX_INSTRUCTION_LENGTH: u32 = 16;
 
+// Monotonic within this Wasm instance, including rust_init/reset; never wrap into an old callback.
+static mut PUBLICATION_SERIAL: u64 = 0;
 static JIT_STATE: Mutex<MaybeUninit<JitState>> = Mutex::new(MaybeUninit::uninit());
 fn get_jit_state() -> JitStateRef { JitStateRef(JIT_STATE.try_lock().unwrap()) }
 
@@ -130,6 +135,12 @@ impl DerefMut for JitStateRef {
 
 #[no_mangle]
 pub fn rust_init() {
+    #[cfg(feature = "ir-experimental")]
+    {
+        crate::ir::runtime::live::invalidate();
+        crate::ir::runtime::cache::invalidate();
+        crate::ir::runtime::schedule::invalidate();
+    }
     dbg_assert!(std::mem::size_of::<[Option<NonNull<cpu::Code>>; 0x100000]>() == 0x100000 * 4);
 
     let _ = JIT_STATE
@@ -156,6 +167,12 @@ enum CompilingPageState {
     CompilingWritten,
 }
 
+struct FailedCompilation {
+    entry: Page,
+    state_flags: CachedStateFlags,
+    dependencies: HashSet<Page>,
+}
+
 struct JitState {
     wasm_builder: WasmBuilder,
 
@@ -166,8 +183,17 @@ struct JitState {
     entry_points: HashMap<Page, (u32, HashSet<u16>)>,
     pages: HashMap<Page, PageInfo>,
     wasm_table_index_free_list: Vec<WasmTableIndex>,
+    #[cfg(feature = "ir-experimental")]
+    ir_slots: HashMap<WasmTableIndex, (u64, HashSet<Page>)>,
     published_modules: VecDeque<WasmTableIndex>,
     compiling: Option<(WasmTableIndex, CompilingPageState)>,
+    compiling_ticket: u64,
+    compiling_start: u32,
+    compiling_flags: CachedStateFlags,
+    compiling_validated: bool,
+    failed_compilations: VecDeque<FailedCompilation>,
+    publication_failures: u32,
+    publication_rejections: u32,
     #[cfg(debug_assertions)]
     wasm_table_index_to_page: HashMap<WasmTableIndex, HashSet<Page>>,
 }
@@ -190,7 +216,12 @@ fn check_jit_state_invariants(ctx: &mut JitState) {
     let compiling = HashSet::from_iter(ctx.compiling.as_ref().map(|&(index, _)| index));
     dbg_assert!(free.intersection(&used).next().is_none());
     dbg_assert!(used.intersection(&compiling).next().is_none());
-    dbg_assert!(free.len() + used.len() + compiling.len() == (WASM_TABLE_SIZE - 1) as usize);
+    #[cfg(feature = "ir-experimental")]
+    let ir: HashSet<WasmTableIndex> = ctx.ir_slots.keys().copied().collect();
+    #[cfg(not(feature = "ir-experimental"))]
+    let ir: HashSet<WasmTableIndex> = HashSet::new();
+    dbg_assert!(ir.is_disjoint(&free) && ir.is_disjoint(&used) && ir.is_disjoint(&compiling));
+    dbg_assert!(free.len() + used.len() + compiling.len() + ir.len() == (WASM_TABLE_SIZE - 1) as usize);
 
     let hidden: HashSet<WasmTableIndex> = ctx
         .pages
@@ -256,8 +287,17 @@ impl JitState {
             pages: HashMap::new(),
 
             wasm_table_index_free_list: Vec::from_iter(wasm_table_indices),
+            #[cfg(feature = "ir-experimental")]
+            ir_slots: HashMap::new(),
             published_modules: VecDeque::new(),
             compiling: None,
+            compiling_ticket: 0,
+            compiling_start: 0,
+            compiling_flags: CachedStateFlags::EMPTY,
+            compiling_validated: false,
+            failed_compilations: VecDeque::new(),
+            publication_failures: 0,
+            publication_rejections: 0,
 
             #[cfg(debug_assertions)]
             wasm_table_index_to_page: HashMap::new(),
@@ -624,7 +664,8 @@ fn jit_find_basic_blocks(
                 eip: current_address,
                 ..cpu
             };
-            let analysis = analysis::analyze_step(&mut cpu);
+            let instruction_linear_pc = to_visit as u32 & !0xFFF | current_address & 0xFFF;
+            let analysis = analysis::analyze_step(&mut cpu, instruction_linear_pc);
             let has_next_instruction = !analysis.no_next_instruction;
             current_address = cpu.eip;
 
@@ -919,8 +960,8 @@ fn jit_find_basic_blocks(
 }
 
 #[no_mangle]
-#[cfg(debug_assertions)]
-pub fn jit_force_generate_unsafe(virt_addr: i32) {
+#[cfg(any(debug_assertions, feature = "jit-invariants"))]
+pub fn jit_force_generate_unsafe(virt_addr: i32) -> bool {
     dbg_assert!(
         !is_near_end_of_page(virt_addr as u32),
         "cannot force compile near end of page"
@@ -932,7 +973,7 @@ pub fn jit_force_generate_unsafe(virt_addr: i32) {
         cpu::get_state_flags(),
         unsafe { JIT_COMPILE_THRESHOLD },
     );
-    dbg_assert!(get_jit_state().compiling.is_some());
+    get_jit_state().compiling.is_some()
 }
 
 #[inline(never)]
@@ -947,6 +988,9 @@ fn jit_analyze_and_generate(
     let page = Page::page_of(phys_entry_point);
 
     dbg_assert!(ctx.compiling.is_none());
+    if unsafe { PUBLICATION_SERIAL == u64::MAX } || ctx.failed_compilations.iter().any(|failed| failed.entry == page && failed.state_flags == state_flags) {
+        return;
+    }
 
     let (_, entry_points) = match ctx.entry_points.get(&page) {
         None => return,
@@ -1084,6 +1128,9 @@ fn jit_analyze_and_generate(
         }
     }
 
+    let Some(ticket) = (unsafe { PUBLICATION_SERIAL.checked_add(1) }) else { return; };
+    unsafe { PUBLICATION_SERIAL = ticket; }
+
     if ctx.wasm_table_index_free_list.is_empty() {
         profiler::performance_recording_add(3, 1);
         // Only published modules enter this queue. In-flight compilation is
@@ -1096,12 +1143,13 @@ fn jit_analyze_and_generate(
                 // not accumulate metadata for every page ever evicted.
                 if !pages.contains(&removed) {
                     ctx.entry_points.remove(&removed);
-                    cpu::tlb_set_has_code(removed, false);
+                    cpu::tlb_set_has_code(removed, jit_page_has_code_ctx(ctx, removed));
                 }
             }
             profiler::performance_recording_add(4, 1);
         }
-        dbg_assert!(!ctx.wasm_table_index_free_list.is_empty());
+        // Experimental IR reservations are not legacy eviction candidates.
+        if ctx.wasm_table_index_free_list.is_empty() { return; }
     }
 
     // allocate an index in the wasm table
@@ -1167,6 +1215,10 @@ fn jit_analyze_and_generate(
     ));
 
     let phys_addr = page.to_address();
+    ctx.compiling_ticket = ticket;
+    ctx.compiling_start = phys_addr;
+    ctx.compiling_flags = state_flags;
+    ctx.compiling_validated = false;
 
     profiler::performance_codegen_finish(generation_started);
 
@@ -1177,18 +1229,79 @@ fn jit_analyze_and_generate(
         state_flags,
         ctx.wasm_builder.get_output_ptr() as u32,
         ctx.wasm_builder.get_output_len(),
+        ticket,
     );
 
     check_jit_state_invariants(ctx);
 }
 
+fn publication_matches(ctx: &JitState, index: u32, start: u32, flags: u32, low: u32, high: u32) -> bool {
+    let ticket = low as u64 | (high as u64) << 32;
+    ticket != 0 && ctx.compiling_ticket == ticket && ctx.compiling_start == start && ctx.compiling_flags.to_u32() == flags
+        && ctx.compiling.as_ref().is_some_and(|(slot, _)| slot.to_u16() as u32 == index)
+}
+
+/// Check the active task and every pending code dependency BEFORE JS writes the table.
+#[no_mangle]
+pub fn codegen_finalize_validate(index: u32, start: u32, flags: u32, low: u32, high: u32) -> bool {
+    let mut ctx = get_jit_state();
+    let valid = publication_matches(&ctx, index, start, flags, low, high)
+        && matches!(&ctx.compiling, Some((_, CompilingPageState::Compiling { .. })));
+    if valid { ctx.compiling_validated = true; }
+    else { ctx.publication_rejections = ctx.publication_rejections.wrapping_add(1); }
+    valid
+}
+
+/// Instantiation/table errors release only their own reservation. Retry is suppressed
+/// for unchanged dependencies; a write to any dependency or cache reset re-enables it.
+#[no_mangle]
+pub fn codegen_finalize_failed(index: u32, start: u32, flags: u32, low: u32, high: u32) -> bool {
+    let mut ctx = get_jit_state();
+    if !publication_matches(&ctx, index, start, flags, low, high) { return false; }
+    let (index, pending) = ctx.compiling.take().unwrap();
+    ctx.compiling_validated = false;
+    if let CompilingPageState::Compiling { pages } = pending {
+        if ctx.failed_compilations.len() == 128 { ctx.failed_compilations.pop_front(); }
+        ctx.failed_compilations.push_back(FailedCompilation {
+            entry: Page::page_of(start), state_flags: CachedStateFlags::of_u32(flags), dependencies: pages.into_keys().collect(),
+        });
+    }
+    ctx.publication_failures = ctx.publication_failures.wrapping_add(1);
+    free_wasm_table_index(&mut ctx, index);
+    check_jit_state_invariants(&mut ctx);
+    true
+}
+
+#[cfg(feature = "jit-invariants")]
+#[no_mangle]
+pub fn jit_test_publication_serial(low: u32, high: u32) -> bool {
+    let ctx = get_jit_state();
+    let serial = low as u64 | (high as u64) << 32;
+    if ctx.compiling.is_some() || serial < unsafe { PUBLICATION_SERIAL } { return false; }
+    unsafe { PUBLICATION_SERIAL = serial; }
+    true
+}
+
+#[no_mangle]
+pub fn jit_publication_stat(which: u32) -> u32 {
+    let ctx = get_jit_state();
+    match which { 0 => ctx.publication_failures, 1 => ctx.publication_rejections, 2 => ctx.failed_compilations.len() as u32, _ => 0 }
+}
+
 #[no_mangle]
 pub fn codegen_finalize_finished(
-    wasm_table_index: WasmTableIndex,
+    wasm_table_index: u32,
     phys_addr: u32,
-    state_flags: CachedStateFlags,
+    state_flags: u32,
+    ticket_low: u32,
+    ticket_high: u32,
 ) {
     let mut ctx = get_jit_state();
+    if !publication_matches(&ctx, wasm_table_index, phys_addr, state_flags, ticket_low, ticket_high) { return; }
+    if matches!(&ctx.compiling, Some((_, CompilingPageState::Compiling { .. }))) && !ctx.compiling_validated { return; }
+    ctx.compiling_validated = false;
+    let wasm_table_index = WasmTableIndex(wasm_table_index as u16);
+    let state_flags = CachedStateFlags::of_u32(state_flags);
 
     dbg_assert!(wasm_table_index != WasmTableIndex(0));
 
@@ -2449,7 +2562,7 @@ pub fn jit_increase_hotness_and_maybe_compile(
 /// are visited only after 64 tier-1 entries. All metadata dies with its slot.
 #[inline]
 pub unsafe fn jit_maybe_promote(virtual_eip: i32, flags: CachedStateFlags, index: u16) {
-    if !JIT_TIERED || !TIER1_MODULE[index as usize] { return; }
+    if JIT_DISABLED || !JIT_TIERED || !TIER1_MODULE[index as usize] { return; }
     TIER_HITS[index as usize] = TIER_HITS[index as usize].saturating_add(1);
     if TIER_HITS[index as usize] < 64 { return; }
     TIER_HITS[index as usize] = 0;
@@ -2555,9 +2668,7 @@ fn invalidate_module(ctx: &mut JitState, wasm_table_index: WasmTableIndex) -> Ve
                     if wasm_table_index == w {
                         drop(Box::from_raw(c.as_ptr()));
                         cpu::tlb_code[page as usize] = None;
-                        if !ctx.entry_points.contains_key(&tlb_physical_page)
-                            && !ctx.pages.contains_key(&tlb_physical_page)
-                        {
+                        if !jit_page_has_code_ctx(ctx, tlb_physical_page) {
                             cpu::tlb_data[page as usize] &= !cpu::TLB_HAS_CODE;
                         }
                     }
@@ -2572,6 +2683,18 @@ fn invalidate_module(ctx: &mut JitState, wasm_table_index: WasmTableIndex) -> Ve
 
 /// Register a write in this page: Delete all present code
 fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
+    #[cfg(feature = "ir-experimental")]
+    let mut ir_unwatched = HashSet::new();
+    #[cfg(feature = "ir-experimental")]
+    {
+        crate::ir::runtime::live::dirty_page(page.to_address());
+        crate::ir::runtime::cache::dirty_page(page.to_address());
+        crate::ir::runtime::schedule::dirty_page(page.to_address());
+        for (_, pages) in ctx.ir_slots.values_mut() {
+            if pages.contains(&page) { ir_unwatched.extend(pages.drain()); }
+        }
+    }
+    ctx.failed_compilations.retain(|failed| !failed.dependencies.contains(&page));
     let mut did_have_code = false;
 
     if let Some(PageInfo {
@@ -2625,6 +2748,8 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
     if !did_have_code {
         profiler::stat_increment(stat::DIRTY_PAGE_DID_NOT_HAVE_CODE);
     }
+    #[cfg(feature = "ir-experimental")]
+    for page in ir_unwatched { cpu::tlb_set_has_code(page, jit_page_has_code_ctx(ctx, page)); }
 }
 
 #[no_mangle]
@@ -2665,6 +2790,14 @@ pub fn jit_clear_cache_js() { jit_clear_cache(&mut get_jit_state()) }
 
 fn jit_clear_cache(ctx: &mut JitState) {
     let mut pages_with_code = HashSet::new();
+    #[cfg(feature = "ir-experimental")]
+    {
+        crate::ir::runtime::live::invalidate();
+        crate::ir::runtime::cache::invalidate();
+        crate::ir::runtime::schedule::invalidate();
+        for (_, pages) in ctx.ir_slots.values_mut() { pages_with_code.extend(pages.drain()); }
+    }
+    ctx.failed_compilations.clear();
 
     for &p in ctx.entry_points.keys() {
         pages_with_code.insert(p);
@@ -2675,13 +2808,53 @@ fn jit_clear_cache(ctx: &mut JitState) {
 
     for page in pages_with_code {
         jit_dirty_page_ctx(ctx, page);
+        #[cfg(feature = "ir-experimental")]
+        cpu::tlb_set_has_code(page, jit_page_has_code_ctx(ctx, page));
+    }
+    // Reset/restore need not wait for browser compilation. The ticket prevents
+    // a late callback from installing into or retiring the newly reused slot.
+    if let Some((index, _)) = ctx.compiling.take() {
+        ctx.compiling_validated = false;
+        profiler::stat_increment(stat::INVALIDATE_MODULE_WRITTEN_WHILE_COMPILED);
+        free_wasm_table_index(ctx, index);
+        check_jit_state_invariants(ctx);
     }
 }
 
 pub fn jit_page_has_code(page: Page) -> bool { jit_page_has_code_ctx(&mut get_jit_state(), page) }
 
 fn jit_page_has_code_ctx(ctx: &mut JitState, page: Page) -> bool {
+    #[cfg(feature = "ir-experimental")]
+    if ctx.ir_slots.values().any(|(_, pages)| pages.contains(&page)) { return true; }
     ctx.pages.contains_key(&page) || ctx.entry_points.contains_key(&page)
+}
+
+/// Reservations share the bounded legacy pool, but never appear in legacy entry/link tables.
+#[cfg(feature = "ir-experimental")]
+pub fn ir_cache_quiescent() -> bool { JIT_STATE.try_lock().is_ok() }
+
+#[cfg(feature = "ir-experimental")]
+pub fn ir_reserve_slot(id: u64, pages: HashSet<Page>) -> Option<u32> {
+    let mut ctx = get_jit_state();
+    let index = ctx.wasm_table_index_free_list.pop()?;
+    ctx.ir_slots.insert(index, (id, pages.clone()));
+    cpu::tlb_set_has_code_multiple(&pages, true);
+    check_jit_state_invariants(&mut ctx);
+    Some(index.to_u16() as u32)
+}
+
+/// Called only at a cold/quiescent point. The owner protects a reused slot from old callbacks.
+#[cfg(feature = "ir-experimental")]
+pub fn ir_release_slot(index: u32, id: u64) -> bool {
+    if index == 0 || index >= WASM_TABLE_SIZE { return false; }
+    let mut ctx = get_jit_state();
+    let index = WasmTableIndex(index as u16);
+    if !ctx.ir_slots.get(&index).is_some_and(|(owner, _)| *owner == id) { return false; }
+    let (_, pages) = ctx.ir_slots.remove(&index).unwrap();
+    for page in pages { cpu::tlb_set_has_code(page, jit_page_has_code_ctx(&mut ctx, page)); }
+    free_wasm_table_index(&mut ctx, index);
+    check_jit_state_invariants(&mut ctx);
+    true
 }
 
 pub fn jit_page_has_wasm_table_index(page: Page, wasm_table_index: u16) -> bool {
@@ -2700,7 +2873,7 @@ pub fn jit_page_has_wasm_table_index(page: Page, wasm_table_index: u16) -> bool 
 
 #[no_mangle]
 pub fn jit_get_wasm_table_index_free_list_count() -> u32 {
-    if cfg!(feature = "profiler") {
+    if cfg!(any(feature = "profiler", feature = "ir-experimental")) {
         get_jit_state().wasm_table_index_free_list.len() as u32
     }
     else {

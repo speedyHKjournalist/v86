@@ -39,8 +39,8 @@ try {
     vm.write_memory(program(0xBEEF), base + 4096 + 32);
     let pending = null;
     const finish = cpu.codegen_finalize_finished;
-    cpu.codegen_finalize_finished = (index, address, flags) => {
-        finish(index, address, flags);
+    cpu.codegen_finalize_finished = (index, address, flags, ...ticket) => {
+        finish(index, address, flags, ...ticket);
         const done = pending;
         pending = null;
         done({ index, address, fn: table.get(offset + index) });
@@ -61,7 +61,13 @@ try {
         assert.equal(word(0x600), expected, "execution must never call a reused stale slot");
         if(compiled) assert(e.performance_recording_get(1) > jit_before, "retained module still executes through JIT");
     };
+    // Cross-page discovery needs a registered cold entry on the second page;
+    // Tier 1 intentionally admits only one page and cannot exercise hidden A.
+    e.set_jit_config(7, 0);
+    await execute(base + 4096, 2, false);
+    assert.equal(e.performance_recording_get(7), 0, "secondary entry is warmed without compiling it");
     const entries = [await compile(base)];
+    await execute(base + 4096, 2, true); // Only A is installed: proves A owns both pages.
     await execute(0x800000, 2, true);
     for(let i = 2; i < 102; i++) entries.push(await compile(base + i * 4096));
     const b = await compile(base + 4096 + 32);

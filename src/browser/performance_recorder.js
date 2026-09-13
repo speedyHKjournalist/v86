@@ -57,6 +57,7 @@ export class PerformanceRecorder
         if(this.active) throw new Error("Performance recording is already active");
         const cpu = this.emulator.v86.cpu;
         const exports = cpu.wm.exports;
+        this.metadata["jit_backend"] = cpu.get_jit_info?.()["backend"] || "legacy";
         this.active = true;
         this.started = this.now();
         this.cleanup = [];
@@ -122,21 +123,22 @@ export class PerformanceRecorder
         this.cleanup.push(() => { if(cpu.main_loop === timed_loop) cpu.main_loop = main_loop; });
 
         const finalize = cpu.codegen_finalize;
-        const timed_finalize = (index, address, flags, ptr, bytes) => {
+        const timed_finalize = (index, address, flags, ptr, bytes, ticket_low, ticket_high) => {
             if(live())
             {
                 run["jit_requests"]++;
                 run["jit_wasm_bytes"] += bytes;
-                this.pending_jit.set(index, { address, flags, bytes, start: this.now() });
+                this.pending_jit.set(index, { address, flags, bytes, ticket_low, ticket_high, start: this.now() });
             }
-            return finalize.call(cpu, index, address, flags, ptr, bytes);
+            return finalize.call(cpu, index, address, flags, ptr, bytes, ticket_low, ticket_high);
         };
         cpu.codegen_finalize = timed_finalize;
         this.cleanup.push(() => { if(cpu.codegen_finalize === timed_finalize) cpu.codegen_finalize = finalize; });
         const finished = cpu.codegen_finalize_finished;
-        const timed_finished = (index, address, flags) => {
+        const timed_finished = (index, address, flags, ticket_low, ticket_high) => {
             const entry = live() && this.pending_jit.get(index);
-            if(entry && entry.address === address && entry.flags === flags)
+            if(entry && entry.address === address && entry.flags === flags &&
+                entry.ticket_low === ticket_low && entry.ticket_high === ticket_high)
             {
                 const ms = this.now() - entry.start;
                 this.pending_jit.delete(index);
@@ -146,7 +148,7 @@ export class PerformanceRecorder
                 this.keep_slowest(this.slow_jit, { "start_ms": entry.start - this.started,
                     "duration_ms": ms, "physical_entry": address >>> 0, "wasm_bytes": entry.bytes });
             }
-            return finished.call(cpu, index, address, flags);
+            return finished.call(cpu, index, address, flags, ticket_low, ticket_high);
         };
         cpu.codegen_finalize_finished = timed_finished;
         this.cleanup.push(() => { if(cpu.codegen_finalize_finished === timed_finished) cpu.codegen_finalize_finished = finished; });

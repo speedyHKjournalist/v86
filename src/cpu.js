@@ -67,6 +67,9 @@ export function CPU(bus, wm, stop_idling)
 {
     this.stop_idling = stop_idling;
     this.wm = wm;
+    this.jit_backend = "legacy";
+    this.legacy_compile_requests = 0;
+    this.ir_region_budget = null;
     this.wasm_patch();
     this.create_jit_imports();
 
@@ -408,6 +411,8 @@ CPU.prototype.wasm_patch = function()
     this.jit_clear_cache = get_import("jit_clear_cache_js");
     this.jit_dirty_cache = get_import("jit_dirty_cache");
     this.codegen_finalize_finished = get_import("codegen_finalize_finished");
+    this.codegen_finalize_validate = get_import("codegen_finalize_validate");
+    this.codegen_finalize_failed = get_import("codegen_finalize_failed");
 
     this.allocate_memory = get_import("allocate_memory");
     this.zero_memory = get_import("zero_memory");
@@ -996,22 +1001,78 @@ CPU.prototype.create_memory = function(size, minimum_size)
     this.mem32s = view(Uint32Array, this.wasm_memory, memory_offset, size >> 2);
 };
 
+// Constructor policy only; runtime backend switching is not a public API.
+CPU.prototype.configure_jit_backend = function(settings)
+{
+    const backend = settings["jit_backend"] === undefined ? "legacy" : settings["jit_backend"];
+    if(backend !== "legacy" && backend !== "ir") throw new Error("jit_backend must be legacy or ir");
+    const exports = this.wm.exports;
+    if(backend === "ir" && !exports["ir_auto_config"])
+        throw new Error("jit_backend ir requires a core built with ir-experimental");
+    const requested = settings["ir_region_budget"];
+    if(requested !== undefined && (backend !== "ir" || !requested || typeof requested !== "object" || Array.isArray(requested)))
+        throw new Error("ir_region_budget requires jit_backend ir and an object");
+    const limits = {
+        "hot_threshold": [16, 1, 1000000], "promotion_threshold": [64, 1, 1000000],
+        "max_source_bytes": [192, 15, 960], "execution_budget": [256, 1, 4096],
+        "rep_iterations": [64, 1, 4096],
+    };
+    const budget = {};
+    for(const key of Object.keys(requested || {}))
+        if(!Object.prototype.hasOwnProperty.call(limits, key)) throw new Error("Unknown ir_region_budget option: " + key);
+    for(const key of Object.keys(limits))
+    {
+        const [fallback, min, max] = limits[key];
+        const value = requested?.[key] === undefined ? fallback : requested[key];
+        if(!Number.isInteger(value) || value < min || value > max)
+            throw new Error("Invalid ir_region_budget." + key + ": expected integer " + min + ".." + max);
+        budget[key] = value;
+    }
+    const enabled = backend === "ir" && !settings.disable_jit;
+    if(exports["ir_auto_config"] && !exports["ir_auto_config"](enabled ? 1 : 0,
+        budget["hot_threshold"], budget["promotion_threshold"], budget["max_source_bytes"],
+        budget["execution_budget"], budget["rep_iterations"]))
+        throw new Error("Cannot configure IR while a CPU compilation or execution is active");
+    this.set_jit_config(0, backend === "ir" || settings.disable_jit ? 1 : 0);
+    this.jit_backend = backend;
+    this.ir_region_budget = backend === "ir" ? budget : null;
+};
+
+CPU.prototype.get_jit_info = function()
+{
+    const exports = this.wm.exports;
+    const available = !!exports["ir_auto_config"];
+    const ir = available ? {} : null;
+    if(ir)
+    {
+        const fields = ["visits", "linked_visits", "tier1_attempts", "tier2_attempts", "tier1_published",
+            "tier2_published", "compile_stops", "publication_failures", "suppressed", "hot_entries", "pending", "enabled"];
+        fields.forEach((name, index) => { ir[name] = exports["ir_auto_stat"](index) >>> 0; });
+        ir["cache_entries"] = exports["ir_cache_stat"](0) >>> 0;
+        ir["cache_hits"] = exports["ir_cache_stat"](2) >>> 0;
+    }
+    return {
+        "backend": this.jit_backend,
+        "legacy_generation_enabled": !exports["get_jit_config"](0),
+        "legacy_compile_requests": this.legacy_compile_requests,
+        "ir_available": available,
+        "ir_region_budget": this.ir_region_budget && { ...this.ir_region_budget },
+        "ir": ir,
+    };
+};
+
 /**
  * @param {BusConnector} device_bus
  */
 CPU.prototype.init = function(settings, device_bus)
 {
+    this.configure_jit_backend(settings);
     this.wm.exports["set_x87_fast_math"]?.(settings["x87_fast_math"] !== false);
     this.wm.exports["set_x87_jit_cache"]?.(settings["x87_jit_cache"] !== false);
     this.create_memory(
         settings.memory_size || 64 * 1024 * 1024,
         settings.initrd ? 64 * 1024 * 1024 : 1024 * 1024,
     );
-
-    if(settings.disable_jit)
-    {
-        this.set_jit_config(0, 1);
-    }
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
@@ -1773,14 +1834,64 @@ CPU.prototype.load_bios = function()
         }.bind(this));
 };
 
-CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, ptr, len)
+// Experimental explicit compilation policy. Successful entries are selected by
+// the normal CPU dispatcher; publication remains asynchronous and owner-checked.
+CPU.prototype.ir_compile_cached = function(length, tier, optimize, cfg, budget, rep_budget)
 {
+    const wasm = this.wm, exports = wasm.exports, table = wasm.wasm_table;
+    if(!exports["ir_compile_live"] || !exports["ir_cache_reserve"]) return Promise.resolve(false);
+    const id = exports["ir_compile_live"](length, tier, optimize, cfg, budget, rep_budget);
+    if(!id) return Promise.resolve(false);
+    const code = new Uint8Array(exports["memory"].buffer,
+        exports["ir_live_info"](id, 0) >>> 0, exports["ir_live_info"](id, 1) >>> 0).slice();
+    const slot = exports["ir_cache_reserve"](id);
+    if(!slot) { exports["ir_live_release"](id); return Promise.resolve(false); }
+    return this.ir_publish_cached({ wasm, exports, table }, id, slot, code, false);
+};
+
+CPU.prototype.ir_auto_publish = function(id, slot, ptr, len)
+{
+    const wasm = this.wm, exports = wasm.exports, table = wasm.wasm_table;
+    const code = new Uint8Array(exports["memory"].buffer, ptr >>> 0, len >>> 0).slice();
+    return this.ir_publish_cached({ wasm, exports, table }, id, slot, code, true);
+};
+
+CPU.prototype.ir_publish_cached = function(owner, id, slot, code, automatic)
+{
+    const { wasm, exports, table } = owner;
+    const current = () => this.wm === wasm && this.wm.exports === exports && this.wm.wasm_table === table;
+    const failed = () => {
+        if(current()) { exports["ir_cache_cancel"](id, slot); exports["ir_cache_collect"](); }
+        return false;
+    };
+    let task;
+    try { task = WebAssembly.instantiate(code, { "e": this.jit_imports }); }
+    catch(error) { task = Promise.reject(error); }
+    return task.then(result => {
+        if(!current()) return false;
+        const f = result.instance.exports["f"];
+        if(typeof f !== "function") return failed();
+        if(!exports["ir_cache_validate"](id, slot)) return failed();
+        table.set(slot + WASM_TABLE_OFFSET, f);
+        if(!exports["ir_cache_finish"](id, slot)) return failed();
+        exports["ir_cache_collect"]();
+        return true;
+    }).catch(failed).then(success => {
+        if(automatic && current()) exports["ir_auto_complete"](id, success ? 1 : 0);
+        return success;
+    });
+};
+
+CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, ptr, len, ticket_low, ticket_high)
+{
+    this.legacy_compile_requests++;
     ptr >>>= 0;
     len >>>= 0;
 
     dbg_assert(wasm_table_index >= 0 && wasm_table_index < WASM_TABLE_SIZE);
 
-    const code = new Uint8Array(this.wasm_memory.buffer, ptr, len);
+    // The builder and Wasm memory can change while the browser compiles asynchronously.
+    const code = new Uint8Array(this.wasm_memory.buffer, ptr, len).slice();
 
     if(DEBUG)
     {
@@ -1821,45 +1932,49 @@ CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, 
         }
     }
 
+    const wasm = this.wm, exports = wasm.exports, table = wasm.wasm_table;
+    const current = () => this.wm === wasm && this.wm.exports === exports && this.wm.wasm_table === table;
+    const publish = instance => {
+        if(!current()) return false;
+        const f = instance.exports["f"];
+        if(typeof f !== "function") throw new TypeError("JIT artifact missing function export f");
+        const valid = this.codegen_finalize_validate(wasm_table_index, start, state_flags, ticket_low, ticket_high);
+        if(valid)
+        {
+            this.wm.wasm_table.set(wasm_table_index + WASM_TABLE_OFFSET, f);
+        }
+        // Written reservations are retired here without ever installing their function.
+        // Mismatched/duplicate callbacks cannot consume a newer task's reservation.
+        this.codegen_finalize_finished(wasm_table_index, start, state_flags, ticket_low, ticket_high);
+        return !!valid;
+    };
+    const failed = error => {
+        if(!current()) return false;
+        this.codegen_finalize_failed(wasm_table_index, start, state_flags, ticket_low, ticket_high);
+        if(this.test_hook_did_fail_wasm) this.test_hook_did_fail_wasm(code, error);
+        if(DEBUG) dbg_log("Wasm JIT compilation/publication failed: " + error, LOG_CPU);
+        return false;
+    };
+    const finished = valid => {
+        if(current() && this.test_hook_did_finalize_wasm) this.test_hook_did_finalize_wasm(code);
+        return valid;
+    };
     const SYNC_COMPILATION = false;
-
-    if(SYNC_COMPILATION)
-    {
-        const module = new WebAssembly.Module(code);
-        const result = new WebAssembly.Instance(module, { "e": this.jit_imports });
-        const f = result.exports["f"];
-
-        this.wm.wasm_table.set(wasm_table_index + WASM_TABLE_OFFSET, f);
-        this.codegen_finalize_finished(wasm_table_index, start, state_flags);
-
-        if(this.test_hook_did_finalize_wasm)
-        {
-            this.test_hook_did_finalize_wasm(code);
-        }
-
-        return;
+    let task;
+    try {
+        task = SYNC_COMPILATION ? Promise.resolve({ instance:
+            new WebAssembly.Instance(new WebAssembly.Module(code), { "e": this.jit_imports }) }) :
+            WebAssembly.instantiate(code, { "e": this.jit_imports });
     }
-
-    const result = WebAssembly.instantiate(code, { "e": this.jit_imports }).then(result => {
-        const f = result.instance.exports["f"];
-
-        this.wm.wasm_table.set(wasm_table_index + WASM_TABLE_OFFSET, f);
-        this.codegen_finalize_finished(wasm_table_index, start, state_flags);
-
-        if(this.test_hook_did_finalize_wasm)
-        {
-            this.test_hook_did_finalize_wasm(code);
-        }
-    });
-
-    if(DEBUG)
-    {
-        result.catch(e => {
-            console.log(e);
-            debugger;
-            throw e;
-        });
-    }
+    // The generating Rust frame still holds the JIT lock. Even a synchronous
+    // browser failure must retire its reservation only after that frame returns.
+    catch(error) { task = Promise.reject(error); }
+    return task.then(result => {
+        let valid;
+        try { valid = publish(result.instance); }
+        catch(error) { return failed(error); }
+        return finished(valid);
+    }, failed);
 };
 
 CPU.prototype.log_uncompiled_code = function(start, end)

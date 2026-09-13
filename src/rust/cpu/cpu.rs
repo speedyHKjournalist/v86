@@ -2697,11 +2697,17 @@ pub unsafe fn switch_seg(reg: i32, selector_raw: i32) -> bool {
 }
 
 pub unsafe fn load_tr(selector: i32) {
+    let _ = load_tr_checked(selector);
+}
+
+// Explicit read-fault status for terminal IR callers. The legacy wrapper keeps
+// its original void ABI and all panic/partial-commit behavior is unchanged.
+pub unsafe fn load_tr_checked(selector: i32) -> OrPageFault<()> {
     let selector = SegmentSelector::of_u16(selector as u16);
     dbg_assert!(selector.is_gdt(), "TODO: TR can only be loaded from GDT");
 
     let (descriptor, descriptor_address) =
-        match return_on_pagefault!(lookup_segment_selector(selector)) {
+        match lookup_segment_selector(selector)? {
             Ok((desc, addr)) => (desc, addr),
             Err(SelectorNullOrInvalid::IsNull) => {
                 panic!("TODO: null TR");
@@ -2748,6 +2754,7 @@ pub unsafe fn load_tr(selector: i32) {
         translate_address_system_write(descriptor_address + 5).unwrap(),
         descriptor.set_busy().access_byte() as i32,
     );
+    Ok(())
 }
 
 pub unsafe fn load_ldt(selector: i32) -> OrPageFault<()> {
@@ -3024,6 +3031,11 @@ pub unsafe fn run_instruction0f_32(opcode: i32) { gen::interpreter0f::run(opcode
 
 pub unsafe fn cycle_internal() {
     profiler::stat_increment(stat::CYCLE_INTERNAL);
+    #[cfg(feature = "ir-experimental")]
+    {
+        crate::ir::runtime::schedule::visit();
+        if crate::ir::runtime::cache::execute() { return; }
+    }
     let mut jit_entry = None;
     let initial_eip = *instruction_pointer;
     let initial_state_flags = *state_flags;
@@ -3079,7 +3091,7 @@ pub unsafe fn cycle_internal() {
         }
         profiler::stat_increment(stat::RUN_FROM_CACHE);
         let initial_instruction_counter = *instruction_counter;
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "ir-experimental"))]
         {
             in_jit = true;
         }
@@ -3090,7 +3102,7 @@ pub unsafe fn cycle_internal() {
         else {
             wasm::call_indirect1(function, initial_state);
         }
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "ir-experimental"))]
         {
             in_jit = false;
         }
@@ -3296,6 +3308,8 @@ pub unsafe fn segment_prefix_op(seg: i32) {
 #[no_mangle]
 pub unsafe fn main_loop() -> f64 {
     profiler::stat_increment(stat::MAIN_LOOP);
+    #[cfg(feature = "ir-experimental")]
+    crate::ir::runtime::schedule::begin_frame();
 
     let start = js::microtick();
 
@@ -3390,6 +3404,8 @@ pub unsafe fn jit_link_once() {
             || (*instruction_counter).wrapping_sub(jit_link_batch_start) >= LOOP_COUNTER as u32 { break; }
         let eip = *instruction_pointer as u32;
         let Some((function, state)) = lookup_linked_target(eip) else { break; };
+        #[cfg(feature = "ir-experimental")]
+        crate::ir::runtime::schedule::note();
         // Epoch guards invalidate cached slots before any subsequent use.
         let before = *instruction_counter;
         jit_link_requested = false;

@@ -309,7 +309,11 @@ try {
     // still use the mapped stack below it. Resume restores the original ESP.
     {
         const base=0x38B000;
-        const p=[0x89,0xE5,0xBC,...u32(0x801FFC),0x58];
+        const original_stack=cpu.reg32[4] >>> 0;
+        // compile()/run() may stop in a later iteration while ESP still points
+        // into the fault-test page. Do not capture that borrowed ESP as the
+        // original stack on replay, or later fault frames corrupt copy output.
+        const p=[0xBD,...u32(original_stack),0xBC,...u32(0x801FFC),0x58];
         const faultEip=base+p.length; p.push(0x5A);
         const resume=base+p.length; p.push(0x89,0xEC,...done);
         p.push(0xE9,...u32(-p.length-5));
@@ -324,6 +328,7 @@ try {
         // precise fault address is the invariant across repeated execution.
         await run(base);
         assert.equal(word(RESULT+4),faultEip,"cached POP retains precise page fault EIP");
+        cpu.reg32[4]=original_stack;
     }
     // Warm writers against RAM, then redirect the same compiled code to a
     // previously compiled target. Cached stores/copies must invalidate it.

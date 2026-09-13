@@ -606,6 +606,21 @@ export interface V86Options {
      * @default false
      */
     disable_jit?: boolean;
+    /** Compiler selection. IR requires an ir-experimental core; default legacy. */
+    jit_backend?: "legacy" | "ir";
+    /** Bounded automatic IR policy. Only accepted with jit_backend: "ir". */
+    ir_region_budget?: {
+        /** Entry visits before Tier 1; integer 1..1000000, default 16. */
+        hot_threshold?: number;
+        /** Further visits before Tier 2; integer 1..1000000, default 64. */
+        promotion_threshold?: number;
+        /** Tier 1 byte window; integer 15..960, default 192. Tier 2 doubles it, capped at 960. */
+        max_source_bytes?: number;
+        /** Region execution budget; integer 1..4096, default 256. */
+        execution_budget?: number;
+        /** REP helper iteration limit; integer 1..4096, default 64. */
+        rep_iterations?: number;
+    };
     /** Use approximate f64 x87 add/sub/mul/div (default true). False selects compatible arithmetic. */
     x87_fast_math?: boolean;
     /** Cache bounded register-only x87 regions in Wasm f64 locals (default true, requires x87_fast_math). */
@@ -970,4 +985,23 @@ export class V86 {
      * @see {@link https://github.com/copy/v86/blob/master/docs/profiling.md} for more infos
      */
     get_instruction_stats(): string | Promise<string>;
+
+    /** Runtime snapshot. Counters are per core lifetime; IR counters wrap at 2^32. */
+    get_jit_info(): V86JitInfo | Promise<V86JitInfo>;
+}
+
+export interface V86JitInfo {
+    backend: "legacy" | "ir";
+    legacy_generation_enabled: boolean;
+    legacy_compile_requests: number;
+    ir_available: boolean;
+    ir_region_budget: Required<NonNullable<V86Options["ir_region_budget"]>> | null;
+    ir: {
+        visits: number; linked_visits: number;
+        tier1_attempts: number; tier2_attempts: number;
+        tier1_published: number; tier2_published: number;
+        compile_stops: number; publication_failures: number; suppressed: number;
+        hot_entries: number; pending: number; enabled: number;
+        cache_entries: number; cache_hits: number;
+    } | null;
 }

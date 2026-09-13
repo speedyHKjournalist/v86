@@ -21,6 +21,7 @@ export function encode_worker_options(o)
         "wasm_path": new URL(o.wasm_path || "build/v86.wasm", location.href).href,
         "memory_size": o.memory_size, "vga_memory_size": o.vga_memory_size,
         "boot_order": o.boot_order, "acpi": o.acpi, "disable_jit": o.disable_jit,
+        "jit_backend": o["jit_backend"], "ir_region_budget": o["ir_region_budget"],
         "x87_fast_math": o["x87_fast_math"],
         "x87_jit_cache": o["x87_jit_cache"],
         "fastboot": o.fastboot, "bootmenu": o.bootmenu, "cmdline": o.cmdline,

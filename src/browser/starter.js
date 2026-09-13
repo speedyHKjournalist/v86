@@ -106,9 +106,10 @@ export function V86(options)
             dbg_trace(LOG_CPU);
         },
 
-        "codegen_finalize": (wasm_table_index, start, state_flags, ptr, len) => {
-            cpu.codegen_finalize(wasm_table_index, start, state_flags, ptr, len);
+        "codegen_finalize": (wasm_table_index, start, state_flags, ptr, len, ticket_low, ticket_high) => {
+            cpu.codegen_finalize(wasm_table_index, start, state_flags, ptr, len, ticket_low, ticket_high);
         },
+        "ir_codegen_finalize": (id, slot, ptr, len) => { cpu.ir_auto_publish(id, slot, ptr, len); },
         "jit_clear_func": (wasm_table_index) => cpu.jit_clear_func(wasm_table_index),
         "jit_clear_all_funcs": () => cpu.jit_clear_all_funcs(),
 
@@ -180,7 +181,7 @@ export function V86(options)
         };
     }
 
-    wasm_fn({ "env": wasm_shared_funcs })
+    Promise.resolve().then(() => wasm_fn({ "env": wasm_shared_funcs }))
         .then((exports) => {
             if(this.destroyed) return;
             wasm_memory = exports.memory;
@@ -189,7 +190,9 @@ export function V86(options)
             const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table });
             cpu = emulator.cpu;
 
-            this.continue_init(emulator, options);
+            return this.continue_init(emulator, options);
+        }).catch(error => {
+            if(!this.destroyed) this.emulator_bus.send("emulator-error", error);
         });
 
     this.zstd_worker = null;
@@ -236,6 +239,8 @@ V86.prototype.continue_init = async function(emulator, options)
 
     settings.acpi = options.acpi;
     settings.disable_jit = options.disable_jit;
+    settings["jit_backend"] = options["jit_backend"];
+    settings["ir_region_budget"] = options["ir_region_budget"];
     settings["x87_fast_math"] = options["x87_fast_math"];
     settings["x87_jit_cache"] = options["x87_jit_cache"];
     settings.load_devices = true;
@@ -568,12 +573,17 @@ V86.prototype.continue_init = async function(emulator, options)
 
     var starter = this;
     var total = files_to_load.length;
+    let resolve_initialized, reject_initialized;
+    const initialized = new Promise((resolve, reject) => {
+        resolve_initialized = resolve;
+        reject_initialized = reject;
+    });
 
     var cont = function(index)
     {
         if(index === total)
         {
-            setTimeout(done.bind(this), 0);
+            setTimeout(() => done.call(this).then(resolve_initialized, reject_initialized), 0);
             return;
         }
 
@@ -631,6 +641,7 @@ V86.prototype.continue_init = async function(emulator, options)
         }
     }.bind(this);
     cont(0);
+    return initialized;
 
     async function done()
     {
@@ -771,7 +782,7 @@ V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
                         "io_port_write8", "io_port_write16", "io_port_write32",
                         "mmap_read8", "mmap_read32",
                         "mmap_write8", "mmap_write16", "mmap_write32", "mmap_write64", "mmap_write128",
-                        "codegen_finalize",
+                        "codegen_finalize", "ir_codegen_finalize",
                         "jit_clear_func", "jit_clear_all_funcs",
                     ].map(f => [f, () => console.error("zstd worker unexpectedly called " + f)]));
 
@@ -1715,6 +1726,14 @@ V86.prototype.get_instruction_stats = function()
     if(this.worker_controller) return this.worker_controller.rpc("get_instruction_stats");
     return print_stats.stats_to_string(this.v86.cpu);
 };
+
+/** Returns a copied runtime snapshot; in CPU Worker mode returns a Promise. */
+V86.prototype.get_jit_info = function()
+{
+    if(this.worker_controller) return this.worker_controller.rpc("get_jit_info");
+    return this.v86.cpu.get_jit_info();
+};
+V86.prototype["get_jit_info"] = V86.prototype.get_jit_info;
 
 /**
  * @ignore

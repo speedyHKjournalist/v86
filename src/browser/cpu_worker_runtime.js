@@ -235,6 +235,7 @@ export function start_cpu_worker()
         "read_file": async name => (await emulator.read_file(name))?.slice(),
         "audio-info": () => ({ ...audio_stats, "direct": !!audio_port, "sample_rate": audio_rate }),
         "get_instruction_stats": () => emulator.get_instruction_stats(),
+        "get_jit_info": () => emulator.get_jit_info(),
         "record-start": metadata => {
             if(recorder?.active) throw new Error("Already recording");
             for(const key of Object.keys(audio_stats)) audio_stats[key] = 0;
