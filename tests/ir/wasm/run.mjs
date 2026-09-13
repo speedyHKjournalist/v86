@@ -10,6 +10,7 @@ import "./owned.mjs";
 import "./licm.mjs";
 import "./simd_peephole.mjs";
 import "./scalar.mjs";
+import "./sccp.mjs";
 for(const n of [127, 128, 255, 256, 1023, 1024]) {
     for(const kind of ["locals", "groups", "imports", "depth"]) {
         const bytes = fs.readFileSync(`build/ir-wasm/${kind}-${n}.wasm`);

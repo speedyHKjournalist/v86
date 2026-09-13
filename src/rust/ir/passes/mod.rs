@@ -6,6 +6,7 @@ pub mod licm;
 mod merge;
 mod prune;
 pub mod scalar;
+pub mod sccp;
 pub mod simd;
 #[derive(Clone, Copy)]
 pub struct PassConfig {
@@ -46,6 +47,8 @@ pub struct PassStats {
     pub simd_shuffled: usize,
     pub scalar_aliases: usize,
     pub scalar_constants: usize,
+    pub sccp_constants: usize,
+    pub sccp_parameters: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -73,6 +76,15 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
             stats.simd_shuffled += vector.shuffled;
             verify(region).map_err(|e| e.0)?;
         }
+        // Executable-edge facts require folding, phi analysis AND permission
+        // to prune control flow. Do not silently bypass a disabled pass family.
+        if config.fold && config.phis && config.prune {
+            let propagated = sccp::run(region, sccp::DEFAULT_WORK_LIMIT)?;
+            stats.sccp_constants += propagated.constants;
+            stats.sccp_parameters += propagated.parameters;
+            stats.branches += propagated.branches;
+            stats.unreachable += propagated.unreachable;
+        }
         if config.prune {
             prune::run(region, &mut stats)?;
             verify(region).map_err(|e| e.0)?;
@@ -97,6 +109,71 @@ fn constant(region: &Region, value: ValueId) -> Option<u64> {
         _ => None,
     }
 }
+/// Shared integer semantics for literal folding and executable-edge analysis.
+/// The callers verify arity/types and restrict replacements to pure results.
+fn evaluate_integer(region: &Region, inst: &Instruction, args: &[u64]) -> Option<u64> {
+    let bits = region.values[inst.results[0].index()].ty.bits()?;
+    let input_bits = inst
+        .args
+        .first()
+        .and_then(|v| region.values[v.index()].ty.bits())
+        .unwrap_or(bits);
+    let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+    let signed = |v: u64| ((v << (64 - input_bits)) as i64) >> (64 - input_bits);
+    let value = match inst.op {
+        Op::Const(n) => n,
+        Op::Binary(op) => match op {
+            Binary::Add => args[0].wrapping_add(args[1]),
+            Binary::Sub => args[0].wrapping_sub(args[1]),
+            Binary::Mul => args[0].wrapping_mul(args[1]),
+            Binary::And => args[0] & args[1],
+            Binary::Or => args[0] | args[1],
+            Binary::Xor => args[0] ^ args[1],
+            Binary::Shl => {
+                args[0].wrapping_shl((args[1] & if bits == 64 { 63 } else { 31 }) as u32)
+            },
+            Binary::Shr => args[0] >> (args[1] & if bits == 64 { 63 } else { 31 }),
+            Binary::Sar => {
+                (signed(args[0]) >> (args[1] & if bits == 64 { 63 } else { 31 })) as u64
+            },
+            Binary::Eq => (args[0] == args[1]) as u64,
+            Binary::Ult => (args[0] < args[1]) as u64,
+            Binary::Slt => (signed(args[0]) < signed(args[1])) as u64,
+        },
+        Op::CountLeadingZeros => {
+            if bits == 64 {
+                args[0].leading_zeros() as u64
+            } else {
+                (args[0] as u32).leading_zeros() as u64
+            }
+        },
+        Op::CountTrailingZeros => {
+            if bits == 64 {
+                args[0].trailing_zeros() as u64
+            } else {
+                (args[0] as u32).trailing_zeros() as u64
+            }
+        },
+        Op::PopulationCount => args[0].count_ones() as u64,
+        Op::Select => {
+            if args[0] != 0 {
+                args[1]
+            } else {
+                args[2]
+            }
+        },
+        Op::Extend { signed: true } => signed(args[0]) as u64,
+        Op::Extend { signed: false } | Op::Truncate => args[0],
+        Op::Extract { lsb } => args[0] >> lsb,
+        Op::Insert { lsb } => {
+            let width = region.values[inst.args[1].index()].ty.bits().unwrap();
+            let part = if width == 64 { u64::MAX } else { ((1u64 << width) - 1) << lsb };
+            (args[0] & !part) | args[1] << lsb
+        },
+        _ => return None,
+    } & mask;
+    Some(value)
+}
 fn fold(region: &mut Region, stats: &mut PassStats) {
     for block in region.blocks.clone() {
         for id in block.instructions {
@@ -108,67 +185,9 @@ fn fold(region: &mut Region, stats: &mut PassStats) {
             let Some(args) = args else {
                 continue;
             };
-            let Some(bits) = region.values[inst.results[0].index()].ty.bits() else {
+            let Some(value) = evaluate_integer(region, inst, &args) else {
                 continue;
             };
-            let input_bits = inst
-                .args
-                .first()
-                .and_then(|v| region.values[v.index()].ty.bits())
-                .unwrap_or(bits);
-            let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
-            let signed = |v: u64| ((v << (64 - input_bits)) as i64) >> (64 - input_bits);
-            let value = match inst.op {
-                Op::Binary(op) => match op {
-                    Binary::Add => args[0].wrapping_add(args[1]),
-                    Binary::Sub => args[0].wrapping_sub(args[1]),
-                    Binary::Mul => args[0].wrapping_mul(args[1]),
-                    Binary::And => args[0] & args[1],
-                    Binary::Or => args[0] | args[1],
-                    Binary::Xor => args[0] ^ args[1],
-                    Binary::Shl => {
-                        args[0].wrapping_shl((args[1] & if bits == 64 { 63 } else { 31 }) as u32)
-                    },
-                    Binary::Shr => args[0] >> (args[1] & if bits == 64 { 63 } else { 31 }),
-                    Binary::Sar => {
-                        (signed(args[0]) >> (args[1] & if bits == 64 { 63 } else { 31 })) as u64
-                    },
-                    Binary::Eq => (args[0] == args[1]) as u64,
-                    Binary::Ult => (args[0] < args[1]) as u64,
-                    Binary::Slt => (signed(args[0]) < signed(args[1])) as u64,
-                },
-                Op::CountLeadingZeros => {
-                    if bits == 64 {
-                        args[0].leading_zeros() as u64
-                    } else {
-                        (args[0] as u32).leading_zeros() as u64
-                    }
-                },
-                Op::CountTrailingZeros => {
-                    if bits == 64 {
-                        args[0].trailing_zeros() as u64
-                    } else {
-                        (args[0] as u32).trailing_zeros() as u64
-                    }
-                },
-                Op::PopulationCount => args[0].count_ones() as u64,
-                Op::Select => {
-                    if args[0] != 0 {
-                        args[1]
-                    } else {
-                        args[2]
-                    }
-                },
-                Op::Extend { signed: true } => signed(args[0]) as u64,
-                Op::Extend { signed: false } | Op::Truncate => args[0],
-                Op::Extract { lsb } => args[0] >> lsb,
-                Op::Insert { lsb } => {
-                    let width = region.values[inst.args[1].index()].ty.bits().unwrap();
-                    let part = if width == 64 { u64::MAX } else { ((1u64 << width) - 1) << lsb };
-                    (args[0] & !part) | args[1] << lsb
-                },
-                _ => continue,
-            } & mask;
             let inst = &mut region.instructions[id.index()];
             inst.op = Op::Const(value);
             inst.args.clear();
