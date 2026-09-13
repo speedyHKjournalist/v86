@@ -14,7 +14,7 @@ jobs:
           fetch-depth: 0
       - name: Verify and publish isolated code branch
         env:
-          BASE: 372ccdc42cc8cb66c61c283295ab7ab673b73f2f
+          BASE: 04b3de9af6da7067f0fe05410853ca283b8797b4
           EXPECTED_TREE: f838e9b5658a902e8f8ed5fcdd3d5a863e18db7e
           TARGET: chat/ir-dataflow-20260913
         run: |
@@ -22,6 +22,7 @@ jobs:
           cat transfer/ir-part-0.gz transfer/ir-part-1.gz transfer/ir-part-2-0.gz transfer/ir-part-2-1.gz transfer/ir-part-2-2.gz | gzip -d > "$RUNNER_TEMP/ir.patch"
           echo "1035f0dc91d370ad4706e696bccbc6c297be031abdad57c379cc7acea9a39a1e  $RUNNER_TEMP/ir.patch" | sha256sum --check
           test "$(git rev-parse origin/ir)" = "$BASE"
+          test "$(git rev-parse "$BASE^{tree}")" = b90aa889ef9bbd43fc75874d8a464dda50acd3ad
           test -z "$(git ls-remote --heads origin "refs/heads/$TARGET")"
           git switch --detach "$BASE"
           git apply --index "$RUNNER_TEMP/ir.patch"
