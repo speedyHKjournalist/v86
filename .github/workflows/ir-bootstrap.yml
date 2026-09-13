@@ -1,0 +1,54 @@
+name: IR workspace bootstrap
+on:
+  push:
+    branches: ['chat/ir-11-licm-20260913']
+    paths: ['.github/workflows/ir-bootstrap.yml']
+permissions:
+  contents: read
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Prepare compiler
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          rustup component add rustfmt
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm
+      - name: Package source and public toolchain
+        run: |
+          mkdir -p bootstrap
+          git archive --format=tar HEAD | gzip -1 > bootstrap/source.tar.gz
+          rustc --version > bootstrap/toolchain.txt
+          tar -C "$(rustc --print sysroot)" -czf bootstrap/rust-toolchain.tar.gz bin lib
+          cp /usr/bin/nasm bootstrap/nasm
+          sha256sum bootstrap/* > bootstrap/SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-offline-workspace
+          path: bootstrap/
+          retention-days: 1
+          compression-level: 0
+      - name: Prepare CPU artifacts
+        run: make build/v86.wasm build/libv86.mjs build/jit-capacity.bin build/cpu-worker-test.bin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-baseline-build
+          retention-days: 1
+          path: |
+            build/v86.wasm
+            build/libv86.mjs
+            build/cpu-worker.js
+            build/softfloat.o
+            build/zstddeclib.o
+            build/jit-capacity.bin
+            build/cpu-worker-test.bin
