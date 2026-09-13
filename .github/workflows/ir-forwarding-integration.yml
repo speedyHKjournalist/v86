@@ -33,8 +33,18 @@ jobs:
             '90bdaf5bfd1a54ca8c45944877f03705be7bb271070e769f8fa95282ee9bdb46  tools/ir-forwarding-core.patch' \
             '0e2705974aac1c67562d5011ddda7cc899963f3cbcf859ec92df538aadf0ae51  tools/ir-forwarding-tests.patch' \
             'db5c07d3dc09bdc16d48309226ab6c0434c1cf2bb482b8c807036579a95cbf1d  tools/ir-forwarding-docs.patch' | sha256sum --check
-          git apply --check --index tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
-          git apply --index tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
+          git apply --check --index --exclude=src/rust/ir/passes/mod.rs tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
+          git apply --index --exclude=src/rust/ir/passes/mod.rs tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/rust/ir/passes/mod.rs')
+          text = path.read_text()
+          anchor = '    pub loop_hoisted: usize,\n'
+          assert text.count(anchor) == 1 and 'pub ram_forwarded:' not in text
+          # Preserve the independently added SIMD module, counters and calls.
+          path.write_text(text.replace(anchor, anchor + '    pub ram_forwarded: usize,\n'))
+          PY
+          git add src/rust/ir/passes/mod.rs
           git rm -- .github/workflows/ir-forwarding-integration.yml tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
           git diff --cached --check
           mkdir -p build
