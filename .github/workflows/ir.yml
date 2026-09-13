@@ -1,0 +1,73 @@
+name: IR compiler
+
+on:
+  push:
+    branches: [ir, 'chat/ir-*']
+  pull_request:
+    branches: [ir]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record exact validation source
+        run: git archive --format=tar.gz --prefix=v86/ HEAD > ir-source.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-source-${{ github.sha }}
+          path: ir-source.tar.gz
+          retention-days: 1
+  compiler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Install toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          rustup component add rustfmt
+          sudo apt-get update -y
+          sudo apt-get install -y nasm clang lld
+      - name: Compiler and Wasm differential tests
+        run: |
+          set -o pipefail
+          make ir-tests 2>&1 | tee ir-compiler.log
+      - name: Control flow, SIMD, memory and exception tests
+        run: |
+          set -o pipefail
+          make ir-cfg-tests ir-loop-tests ir-memory-tests ir-stack-tests ir-simd-integer-tests ir-simd-shuffle-tests 2>&1 | tee ir-semantics.log
+      - name: Live compilation, cache and tier scheduling
+        run: |
+          set -o pipefail
+          make ir-live-tests ir-cache-tests ir-auto-tests ir-backend-integration-tests 2>&1 | tee ir-runtime.log
+      - name: Verify generated files were not changed
+        run: git diff --exit-code
+      - name: Preserve compiler diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-validation-${{ github.sha }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            ir-*.log
+            build/ir-*.wasm
