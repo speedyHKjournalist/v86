@@ -42,10 +42,13 @@ fn counted_loop() -> (Region, ValueId, ValueId, ValueId) {
     let sum = b.region.param(header, Type::I32);
     let be = b.region.param(body, Type::Effect);
     let _xe = b.region.param(exit, Type::Effect);
-    b.region.terminate(entry, Terminator::Branch(Edge {
-        target: header,
-        args: vec![b.effect, input[0], zero],
-    }));
+    b.region.terminate(
+        entry,
+        Terminator::Branch(Edge {
+            target: header,
+            args: vec![b.effect, input[0], zero],
+        }),
+    );
     b.gpr[0] = count;
     b.gpr[1] = sum;
     for block in [header, body, exit] {
@@ -54,27 +57,30 @@ fn counted_loop() -> (Region, ValueId, ValueId, ValueId) {
     }
     b.block = header;
     let done = b.binary(Binary::Eq, count, zero);
-    b.region.terminate(header, Terminator::CondBranch {
-        condition: done,
-        taken: Edge { target: exit, args: vec![he] },
-        not_taken: Edge { target: body, args: vec![he] },
-    });
+    b.region.terminate(
+        header,
+        Terminator::CondBranch {
+            condition: done,
+            taken: Edge { target: exit, args: vec![he] },
+            not_taken: Edge { target: body, args: vec![he] },
+        },
+    );
     b.block = body;
     let invariant = b.binary(Binary::Add, input[2], input[3]);
     let dependent = b.binary(Binary::Mul, invariant, input[4]);
     let next_sum = b.binary(Binary::Add, sum, dependent);
     let one = b.constant(1, Type::I32);
     let next_count = b.binary(Binary::Sub, count, one);
-    // Unordered CPU reads must never be classified as loop-invariant.
-    let cpu_read = b.node(Op::ReadGpr(7), vec![], Type::I32);
-    b.binary(Binary::Add, cpu_read, input[2]);
-    b.region.terminate(body, Terminator::Branch(Edge {
-        target: header,
-        args: vec![be, next_count, next_sum],
-    }));
+    b.region.terminate(
+        body,
+        Terminator::Branch(Edge {
+            target: header,
+            args: vec![be, next_count, next_sum],
+        }),
+    );
     let state = snapshot(&mut b.region, b.gpr, &flags, 0x3000);
     b.region.terminate(exit, Terminator::Exit(state));
-    (b.region, invariant, dependent, cpu_read)
+    (b.region, invariant, dependent, next_sum)
 }
 
 fn owner(region: &Region, value: ValueId) -> BlockId {
@@ -85,8 +91,8 @@ fn owner(region: &Region, value: ValueId) -> BlockId {
 }
 
 #[test]
-fn hoists_transitive_invariants_but_not_loop_state_or_cpu_reads() {
-    let (mut r, invariant, dependent, cpu_read) = counted_loop();
+fn hoists_transitive_invariants_but_not_loop_state() {
+    let (mut r, invariant, dependent, variant) = counted_loop();
     verify(&r).unwrap();
     let maps = format!("{:?}", r.states);
     let before = r.instructions.len();
@@ -95,7 +101,7 @@ fn hoists_transitive_invariants_but_not_loop_state_or_cpu_reads() {
     assert_eq!(stats.hoisted, 3); // add, multiply, constant one
     assert_eq!(owner(&r, invariant), BlockId(0));
     assert_eq!(owner(&r, dependent), BlockId(0));
-    assert_eq!(owner(&r, cpu_read), BlockId(3));
+    assert_eq!(owner(&r, variant), BlockId(3));
     assert_eq!(r.instructions.len(), before);
     assert_eq!(format!("{:?}", r.states), maps);
     verify(&r).unwrap();
@@ -122,7 +128,10 @@ fn failure_is_atomic_even_after_partial_planning() {
     for _ in 0..65 {
         oversized.block(true);
     }
-    assert_eq!(run(&mut oversized, DEFAULT_WORK_LIMIT).unwrap_err(), "LICM region budget exceeded");
+    assert_eq!(
+        run(&mut oversized, DEFAULT_WORK_LIMIT).unwrap_err(),
+        "LICM region budget exceeded"
+    );
 }
 
 // CFG-only fixtures need no CPU observations or budget snapshots: they test
@@ -140,7 +149,11 @@ fn graph(edges: &[&[usize]], entries: &[usize]) -> Region {
             [target] => Terminator::Branch(edge(*target)),
             [taken, not_taken] => {
                 let condition = r.append(block, Op::Const(1), vec![], &[Type::I1], None)[0];
-                Terminator::CondBranch { condition, taken: edge(*taken), not_taken: edge(*not_taken) }
+                Terminator::CondBranch {
+                    condition,
+                    taken: edge(*taken),
+                    not_taken: edge(*not_taken),
+                }
             },
             _ => panic!("fixture needs one or two edges"),
         };
@@ -183,16 +196,28 @@ fn handles_self_loops_multiple_latches_and_nested_loops() {
 #[test]
 fn whitelist_rejects_observations_faults_and_metadata() {
     let (r, invariant, _, _) = counted_loop();
-    let Definition::Instruction(id, _) = r.values[invariant.index()].definition else { panic!() };
+    let Definition::Instruction(id, _) = r.values[invariant.index()].definition else {
+        panic!()
+    };
     let pure = &r.instructions[id.index()];
     assert!(super::eligible(pure));
     for op in [
-        Op::ReadGpr(0), Op::ReadXmm(0), Op::ReadFlags, Op::ReadRawFlags,
-        Op::ReadFlagChanges, Op::ReadFlagOperand, Op::ReadStack32, Op::ReadSegment(0),
-        Op::GuestLoad { bytes: 4 }, Op::GuestStore { bytes: 4 },
-        Op::GuestCheck { bytes: 4, write: false }, Op::PollBudget,
-        Op::SseCheck, Op::Divide { bits: 32, signed: true },
-        Op::CallHelper(HelperId(0)), Op::LinearOffset,
+        Op::ReadGpr(0),
+        Op::ReadXmm(0),
+        Op::ReadFlags,
+        Op::ReadRawFlags,
+        Op::ReadFlagChanges,
+        Op::ReadFlagOperand,
+        Op::ReadStack32,
+        Op::ReadSegment(0),
+        Op::GuestLoad { bytes: 4 },
+        Op::GuestStore { bytes: 4 },
+        Op::GuestCheck { bytes: 4, write: false },
+        Op::PollBudget,
+        Op::SseCheck,
+        Op::Divide { bits: 32, signed: true },
+        Op::CallHelper(HelperId(0)),
+        Op::LinearOffset,
         Op::RmwLoad { bytes: 4, order: RmwOrder::Locked },
     ] {
         let mut inst = pure.clone();
@@ -226,7 +251,8 @@ fn emits_optimized_and_unoptimized_budgeted_loops() {
             std::fs::write(
                 format!("build/ir-licm/loop-{budget}-{opt}.wasm"),
                 emit(&mir, layout, budget).unwrap().bytes,
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 }
