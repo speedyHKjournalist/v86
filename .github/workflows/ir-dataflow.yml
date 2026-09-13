@@ -1,0 +1,67 @@
+name: IR dataflow regression
+on:
+  pull_request:
+    branches: [ir]
+  push:
+    branches: [ir]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ir-dataflow-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Install toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld
+          rustc --version
+          node --version
+          ndisasm -v
+      - name: Compiler, independent Wasm oracles and decoder
+        run: |
+          set -o pipefail
+          mkdir -p build
+          make ir-tests 2>&1 | tee build/ir-dataflow-core.log
+      - name: Memory, control, SIMD and CPU differential matrix
+        run: |
+          set -o pipefail
+          make ir-analyzer-tests ir-memory-tests ir-stack-tests ir-control-tests \
+            ir-shift-tests ir-multiply-tests ir-bit-tests ir-exchange-tests \
+            ir-enter-tests ir-misc-tests ir-loop-tests ir-cfg-tests \
+            ir-system-stack-tests ir-segment-tests ir-string-tests ir-io-tests \
+            ir-cpu-info-tests ir-cpu-system-tests ir-control-regs-tests \
+            ir-descriptor-tests ir-task-regs-tests ir-selector-query-tests \
+            ir-verr-tests ir-flags-observer-tests ir-cmpxchg8b-tests \
+            ir-simd-move-tests ir-simd-integer-tests ir-simd-immediate-tests \
+            ir-simd-shuffle-tests ir-simd-transfer-tests ir-simd-lane-tests \
+            ir-simd-masked-tests ir-entry-tests 2>&1 | tee build/ir-dataflow-cpu.log
+      - name: REP, publication, cache and public backend
+        run: |
+          set -o pipefail
+          make ir-rep-engine-tests ir-rep-tests ir-live-tests ir-cache-tests \
+            ir-auto-tests ir-backend-integration-tests 2>&1 | tee build/ir-dataflow-runtime.log
+      - name: Generated source isolation
+        run: git diff --exit-code
+      - name: Preserve validation logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-dataflow-${{ github.sha }}
+          path: build/ir-dataflow-*.log
+          if-no-files-found: ignore
+          retention-days: 7
