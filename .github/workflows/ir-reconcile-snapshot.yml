@@ -1,0 +1,31 @@
+name: IR reconciliation snapshot
+on:
+  push:
+    branches: ['chat/ir-11-typed-validation-20260913']
+    paths: ['.github/workflows/ir-reconcile-snapshot.yml']
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Capture public code and PR ancestry only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/speedyHKjournalist/v86.git '+refs/heads/ir:refs/heads/review-base' '+refs/pull/*/head:refs/remotes/review/*'
+          mkdir -p review-export
+          git bundle create review-export/ir-review.bundle --all
+          git show-ref > review-export/refs.txt
+          git bundle verify review-export/ir-review.bundle
+          sha256sum review-export/ir-review.bundle > review-export/SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-reconciliation-source
+          path: review-export/
+          retention-days: 1
