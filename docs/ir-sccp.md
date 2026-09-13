@@ -71,19 +71,36 @@ node tests/ir/wasm/sccp.mjs
 node tests/ir/wasm/run.mjs
 ```
 
-The editing container has Node but no Rust toolchain or repository clone access.
-Only Node syntax checks were available locally when preparing this change.
-Actual results for the initial implementation at `1b66da3` are recorded in
-[IR-core run 34745211129](https://github.com/speedyHKjournalist/v86/actions/runs/34745211129):
-169 native tests passed under `-D warnings`, all 144 CFG modules and 8,640 new
-executions passed, as did the existing 3,840 CPU LICM comparisons, 43,008 CFG
-comparisons, 21,504 exact budget exits, real page faults and guarded RAM/MMIO
-callback recovery. The additional typed-phi suite must pass on the final PR
-head; the initial run does not validate tests added afterward.
+## Observed validation
 
-The separate CI initially reported rustfmt differences in the new Rust files;
-these were corrected without weakening the check. Its ESLint job reported
-1,048 errors in unchanged files. Complete repository CI is not asserted green.
+The editing container has Node but no Rust toolchain or repository clone access.
+Local checks were Node syntax and whitespace; actual Rust/Wasm/CPU execution
+was performed by the repository's existing GitHub Actions workflows.
+
+[IR-core run 34745721650](https://github.com/speedyHKjournalist/v86/actions/runs/34745721650)
+passed completely at `a9ab08ec0e64b4114d7cb221fb9c766f153c7771`:
+
+- 171 native tests under `RUSTFLAGS="-D warnings"`, including all 11 new tests.
+- 144 CFG modules / 8,640 executions and 480 typed-phi modules / 960 independent
+  BigInt executions. Invalid-entry checks and complete StateMaps also passed.
+- Existing 78,888 scalar execution comparisons and 80 cross-block FLAGS/budget
+  regressions, 3,840 real CPU LICM comparisons, 43,008 reachable bytecode CFG
+  comparisons and 21,504 exact optimized/unoptimized budget exits passed.
+- 32 second-iteration scalar/vector page-fault comparisons and 16 branches
+  skipping absent-page reads passed.
+- 48 guarded-read RAM differentials, 22 real fault cases, 18 MMIO/callback
+  remapping differentials, 60 merged-block budget exits and CPL guards passed.
+- Generated-source checks and whitespace checks passed.
+
+The final follow-up only formats the native test source and records these
+results; it does not modify compiler logic or test semantics. Current-head CI
+is authoritative for that follow-up, rather than retroactively attributing the
+completed run above to a later SHA.
+
+The separate general CI reported rustfmt differences in the new test source;
+the follow-up applies its exact formatting changes without weakening checks.
+Its initial ESLint job reported 1,048 errors in unchanged files. Complete
+repository CI is not asserted green. No workflow or lint rule is changed here.
 
 ## Remaining work
 

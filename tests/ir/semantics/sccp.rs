@@ -246,11 +246,7 @@ fn equal_phi_literals_fold_flags_and_branch_without_rewriting_entry_state() {
     assert_eq!(stats.parameters, 1);
     assert_eq!(stats.branches, 1);
     assert_eq!(stats.unreachable, 1);
-    assert_eq!(
-        conditions(&r),
-        1,
-        "the input-dependent entry branch survives"
-    );
+    assert_eq!(conditions(&r), 1, "the input-dependent entry branch survives");
     let param = r.blocks[1].params[1];
     let state = r.blocks[1].entry_state.unwrap();
     assert_eq!(r.states[state.index()].gpr[0], param);
@@ -430,10 +426,7 @@ fn ordered_helpers_and_unused_arena_slots_remain_safe() {
             .find(|i| matches!(i.op, Op::CallHelper(_)))
             .unwrap();
         assert_eq!(format!("{after:?}"), format!("{call:?}"));
-        assert_eq!(
-            format!("{:?}", r.states[after.state.unwrap().index()]),
-            state
-        );
+        assert_eq!(format!("{:?}", r.states[after.state.unwrap().index()]), state);
         verify(&r).unwrap();
     }
 }
@@ -469,11 +462,8 @@ fn emit_conditional_constant_propagation_differentials() {
             verify(&r).unwrap();
             for budget in [1, 2, 3, 4, 8, 100] {
                 let bytes = emit(&lower(&r).unwrap(), layout, budget).unwrap().bytes;
-                std::fs::write(
-                    format!("build/ir-sccp/{name}-{mode}-{budget}.wasm"),
-                    bytes,
-                )
-                .unwrap();
+                std::fs::write(format!("build/ir-sccp/{name}-{mode}-{budget}.wasm"), bytes)
+                    .unwrap();
             }
         }
     }
@@ -485,7 +475,8 @@ fn a_late_predecessor_revokes_optimistic_phi_and_branch_facts() {
     let delayed = r.block(false);
     let e = r.param(delayed, Type::Effect);
     let v = r.param(delayed, Type::I32);
-    let Some(Terminator::Branch(mut edge)) = r.blocks[3].terminator.take() else {
+    let Some(Terminator::Branch(mut edge)) = r.blocks[3].terminator.take()
+    else {
         panic!("right predecessor must branch to the join")
     };
     let target = edge.target;
@@ -590,26 +581,22 @@ fn integer_phi_widths_emit_independent_arithmetic_oracles() {
         for op in ops {
             for (a, rhs) in [(0, 0), (1, 1), (mask, mask), (sign, 63 & mask)] {
                 let id = manifest.len();
-                manifest.push(format!("[{},\"{:?}\",\"{}\",\"{}\"]", bits, op, a, rhs));
+                manifest.push(format!(
+                    "[{},\"{:?}\",\"{}\",\"{}\"]",
+                    bits, op, a, rhs
+                ));
                 for optimized in [false, true] {
                     let mut r = width_phi(ty, a, rhs, op);
                     if optimized {
                         assert!(run(&mut r, DEFAULT_WORK_LIMIT).unwrap().constants > 0);
                     }
                     let bytes = emit(&lower(&r).unwrap(), layout, 100).unwrap().bytes;
-                    std::fs::write(
-                        format!("build/ir-sccp/width-{id}-{optimized}.wasm"),
-                        bytes,
-                    )
-                    .unwrap();
+                    std::fs::write(format!("build/ir-sccp/width-{id}-{optimized}.wasm"), bytes)
+                        .unwrap();
                 }
             }
         }
     }
     assert_eq!(manifest.len(), 240);
-    std::fs::write(
-        "build/ir-sccp/widths.json",
-        format!("[{}]", manifest.join(",")),
-    )
-    .unwrap();
+    std::fs::write("build/ir-sccp/widths.json", format!("[{}]", manifest.join(","))).unwrap();
 }
