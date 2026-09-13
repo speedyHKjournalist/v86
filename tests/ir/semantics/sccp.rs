@@ -582,8 +582,7 @@ fn integer_phi_widths_emit_independent_arithmetic_oracles() {
             for (a, rhs) in [(0, 0), (1, 1), (mask, mask), (sign, 63 & mask)] {
                 let id = manifest.len();
                 manifest.push(format!(
-                    "[{},\"{:?}\",\"{}\",\"{}\"]",
-                    bits, op, a, rhs
+                    "[{},\"{:?}\",\"{}\",\"{}\"]", bits, op, a, rhs
                 ));
                 for optimized in [false, true] {
                     let mut r = width_phi(ty, a, rhs, op);
