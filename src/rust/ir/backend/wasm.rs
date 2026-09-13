@@ -40,6 +40,7 @@ struct Emitter<'a> {
     accounted: Option<WasmLocal>,
     tlb: Option<WasmLocal>,
     read_cache: Option<(WasmLocal, WasmLocal)>,
+    code_pages: &'a [u32],
 }
 impl Emitter<'_> {
     fn get(&mut self, value: ValueId) {
@@ -231,6 +232,34 @@ impl Emitter<'_> {
         self.w.ltu_i32();
         self.w.and_i32();
         entry
+    }
+    fn finish_scalar_store(&mut self, commit: StateId, pointer: &WasmLocal) {
+        // Materialize the completed instruction before either returning or
+        // continuing. A later fault therefore observes the store as retired.
+        self.state(commit);
+        if self.code_pages.is_empty() {
+            // Standalone/test emitters without an immutable code snapshot keep
+            // the historical conservative boundary.
+            self.w.return_();
+            return;
+        }
+        // TLB_HAS_CODE only describes this virtual translation. A second virtual
+        // address can alias a physical page backing the currently executing IR
+        // region, so compare the translated physical pointer against every page
+        // captured by the immutable compilation snapshot before continuing.
+        for (index, page) in self.code_pages.iter().enumerate() {
+            self.w.get_local(pointer);
+            self.w.const_i32(!4095);
+            self.w.and_i32();
+            self.w.const_i32(*page as i32);
+            self.w.eq_i32();
+            if index != 0 {
+                self.w.or_i32();
+            }
+        }
+        self.w.if_void();
+        self.w.return_();
+        self.w.block_end();
     }
     fn compare_exchange8b(&mut self, plan: &CompareExchange) {
         self.prepare_memory_call(plan.before);
@@ -453,6 +482,11 @@ impl Emitter<'_> {
                 self.set(*result);
             },
             NativeMemory::ScalarStore { value, commit } => {
+                let pointer = commit.map(|_| {
+                    let pointer = self.w.set_new_local();
+                    self.w.get_local(&pointer);
+                    pointer
+                });
                 self.get(*value);
                 match bytes {
                     1 => self.w.store_u8(0),
@@ -461,8 +495,9 @@ impl Emitter<'_> {
                     _ => unreachable!(),
                 }
                 if let Some(commit) = commit {
-                    self.state(*commit);
-                    self.w.return_();
+                    let pointer = pointer.unwrap();
+                    self.finish_scalar_store(*commit, &pointer);
+                    self.w.free_local(pointer);
                 }
             },
             NativeMemory::VectorStore {
@@ -874,29 +909,39 @@ impl Emitter<'_> {
 }
 
 pub fn emit(mir: &MirRegion, layout: StateLayout, budget: u32) -> Result<Artifact, CompileError> {
-    emit_inner(mir, layout, budget, false, None)
+    emit_inner(mir, layout, budget, false, None, &[])
 }
 /// Cold CPU entry, outside the legacy JIT frame. Uses actual CPU globals and MMU.
 pub fn emit_cpu(mir: &MirRegion, budget: u32) -> Result<Artifact, CompileError> {
-    emit_cpu_inner(mir, budget, None)
+    emit_cpu_inner(mir, budget, None, &[])
+}
+/// CPU ABI fixture with an explicit immutable physical code dependency set.
+pub(crate) fn emit_cpu_with_code_pages(
+    mir: &MirRegion,
+    budget: u32,
+    code_pages: &[u32],
+) -> Result<Artifact, CompileError> {
+    emit_cpu_inner(mir, budget, None, code_pages)
 }
 /// CompileRequest owns the association between this key and the lifted guest bytes.
 pub(crate) fn emit_cpu_entry(
     mir: &MirRegion,
     budget: u32,
     entry: CpuEntryKey,
+    code_pages: &[u32],
 ) -> Result<Artifact, CompileError> {
     if mir.control.entries.len() != 1 {
         return Err(CompileError::Unsupported(
             "CPU entry key requires a single external entry",
         ));
     }
-    emit_cpu_inner(mir, budget, Some(entry))
+    emit_cpu_inner(mir, budget, Some(entry), code_pages)
 }
 fn emit_cpu_inner(
     mir: &MirRegion,
     budget: u32,
     entry: Option<CpuEntryKey>,
+    code_pages: &[u32],
 ) -> Result<Artifact, CompileError> {
     emit_inner(
         mir,
@@ -910,6 +955,7 @@ fn emit_cpu_inner(
         budget,
         true,
         entry,
+        code_pages,
     )
 }
 fn emit_inner(
@@ -918,10 +964,26 @@ fn emit_inner(
     budget: u32,
     cpu: bool,
     entry: Option<CpuEntryKey>,
+    code_pages: &[u32],
 ) -> Result<Artifact, CompileError> {
     // MirRegion can only be constructed by the checked lowering transaction.
     // Its machine plans and allocation are immutable across this boundary.
     mir.control.check_target(cpu)?;
+    if !cpu && !code_pages.is_empty() {
+        return Err(CompileError::InvalidIr(
+            "standalone emitter cannot own CPU code dependencies".into(),
+        ));
+    }
+    if code_pages.len() > 8 {
+        return Err(CompileError::Budget("code dependency pages"));
+    }
+    for (index, page) in code_pages.iter().enumerate() {
+        if page & 4095 != 0 || code_pages[..index].contains(page) {
+            return Err(CompileError::InvalidIr(
+                "invalid or duplicate physical code page".into(),
+            ));
+        }
+    }
     if !cpu && mir.states.iter().any(|state| state.requires_cpu) {
         return Err(CompileError::Unsupported("XMM state requires CPU ABI"));
     }
@@ -993,6 +1055,7 @@ fn emit_inner(
         accounted: None,
         tlb: None,
         read_cache: None,
+        code_pages,
     };
     if let Some(entry) = entry {
         // Reject before ir_enter (which writes previous_ip and clears REP results),
