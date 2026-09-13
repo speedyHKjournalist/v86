@@ -2,6 +2,7 @@
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
 #[derive(Clone, Copy)]
@@ -37,6 +38,7 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub loop_hoisted: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;

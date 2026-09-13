@@ -1,0 +1,89 @@
+name: IR validation
+
+on:
+  push:
+    branches: ['chat/ir-11-safe-optimizations']
+  pull_request:
+    branches: [ir]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compiler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Install native tools
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm
+      - name: Generate shared dispatch tables
+        run: |
+          mkdir -p build
+          make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
+          make ir-generated-check
+      - name: Rust and emitted Wasm regression suite
+        run: |
+          set -o pipefail
+          env RUSTFLAGS="-D warnings" cargo test 2>&1 | tee build/ir-native.log
+          node tests/ir/wasm/run.mjs 2>&1 | tee build/ir-wasm.log
+          node tests/rust/verify-wasmgen-dummy-output.js
+          node tests/ir/decode/oracle.mjs 2>&1 | tee build/ir-decoder.log
+          git diff --exit-code
+      - name: Preserve compiler diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-compiler-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: build/ir-*.log
+  cpu-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Install CPU build tools
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld
+      - name: Live publication, cache, tiering and public backend
+        run: |
+          mkdir -p build
+          set -o pipefail
+          make ir-live-tests ir-cache-tests ir-auto-tests ir-backend-integration-tests 2>&1 | tee build/ir-runtime.log
+      - name: Control flow, memory and packed SIMD differential tests
+        run: |
+          set -o pipefail
+          make ir-cfg-tests ir-memory-tests ir-simd-integer-tests ir-simd-shuffle-tests 2>&1 | tee build/ir-cpu-semantics.log
+          git diff --exit-code
+      - name: Preserve CPU diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-cpu-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: build/ir-*.log

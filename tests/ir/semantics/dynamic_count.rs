@@ -10,7 +10,7 @@ use crate::ir::{
     hir::{Binary, Edge, Op, Region, Terminator},
     ids::{HelperId, ValueId},
     lowering::lower,
-    passes::{run, PassConfig},
+    passes::{licm, run, PassConfig},
     state::{ResumeKind, StateMap},
     types::Type,
     verify::verify,
@@ -28,7 +28,6 @@ fn loop_region() -> Region {
     let effect = b.region.param(h, Type::Effect);
     let body_effect = b.region.param(body, Type::Effect);
     let zero = b.constant(0, Type::I32);
-    let one = b.constant(1, Type::I32);
     b.region.terminate(
         entry,
         Terminator::Branch(Edge {
@@ -89,6 +88,9 @@ fn loop_region() -> Region {
         Some(before),
     );
     b.block = body;
+    // Deliberately defined after the observing/faulting helper: LICM must leave
+    // all recovery maps and the dynamic guest counter unchanged when hoisting.
+    let one = b.constant(1, Type::I32);
     let next_n = b.binary(Binary::Sub, n, one);
     let next_count = b.binary(Binary::Add, count, one);
     let mut completed_state = b.region.states[before.index()].clone();
@@ -135,6 +137,7 @@ fn dynamic_cpu_loops_keep_counter_phis_and_generate_budget_exits() {
     for opt in 0..2 {
         if opt != 0 {
             run(&mut r, PassConfig::default()).unwrap();
+            assert!(licm::run(&mut r, licm::DEFAULT_WORK_LIMIT).unwrap().hoisted > 0);
         }
         verify(&r).unwrap();
         let m = lower(&r).unwrap();
