@@ -1,9 +1,9 @@
+import {bounded_instances} from "./wasm_instances.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {packed} from "./packed_model.mjs";
 import {V86} from "../../../build/libv86.mjs";
 const cases=JSON.parse(fs.readFileSync("build/ir-simd-integer/cases.json"));
-const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-simd-integer/${i}-${opt}.wasm`))));
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 for(const release of [false,true]){
  const vm=new V86({wasm_path:release?"build/v86-ir-test-release.wasm":"build/v86-ir-test.wasm",memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
@@ -13,7 +13,7 @@ for(const release of [false,true]){
     vm.run();const deadline=performance.now()+10000;while(v.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);}await vm.stop();
     const PC=0x8000,BASE=0x310000,ALT=0x350000,STACK=0x90000,UD=0x180100,NM=0x180300,PF=0x180200,GP=0x180000,cr0=cpu.cr[0],cr4=cpu.cr[4];let target,events=[],onEvent,slow=0,guards=0;
     const imports={...e,m:e.memory,ir_xmm_binary:(...a)=>{slow++;return e.ir_xmm_binary(...a);},ir_xmm_load:(...a)=>{slow++;return e.ir_xmm_load(...a);},ir_xmm_store:(...a)=>{slow++;return e.ir_xmm_store(...a);},ir_sse_guard:()=>{guards++;return e.ir_sse_guard();}};
-    const instances=modules.map(pair=>pair.map(m=>new WebAssembly.Instance(m,{e:imports})));
+    const instances=bounded_instances("build/ir-simd-integer",cases.length,imports);
     const extra=name=>[0,1].map(opt=>new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(`build/ir-simd-integer/${name}-${opt}.wasm`)),{e:imports}));
     const chain=extra("chain"),resume=extra("resume"),chainBytes=JSON.parse(fs.readFileSync("build/ir-simd-integer/chain.json"));
     const visible=()=>({regs:Array.from(cpu.reg32,x=>x>>>0),xmm:Array.from(xmm),flags:e.get_eflags()>>>0,rawZero:cpu.flags[0]&64,zeroLazy:cpu.flags_changed[0]&64,last:words[104>>2],ip:cpu.instruction_pointer[0]>>>0});

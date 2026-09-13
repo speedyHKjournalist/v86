@@ -6,6 +6,9 @@ import "./value.mjs";
 import "./state.mjs";
 import "./dynamic_count.mjs";
 import "./dataflow.mjs";
+import "./licm.mjs";
+import "./canonical.mjs";
+import "./instance_cache.mjs";
 import "./owned.mjs";
 for(const n of [127, 128, 255, 256, 1023, 1024]) {
     for(const kind of ["locals", "groups", "imports", "depth"]) {

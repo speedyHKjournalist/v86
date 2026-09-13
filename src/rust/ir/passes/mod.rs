@@ -1,7 +1,9 @@
 //! Bounded, verifier-checked pure dataflow passes. Memory and helpers never enter GVN.
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
+mod canonicalize;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
 #[derive(Clone, Copy)]
@@ -10,7 +12,9 @@ pub struct PassConfig {
     pub merge: bool,
     pub phis: bool,
     pub fold: bool,
+    pub canonicalize: bool,
     pub gvn: bool,
+    pub licm: bool,
     pub dce: bool,
     pub rounds: usize,
 }
@@ -21,7 +25,9 @@ impl Default for PassConfig {
             merge: true,
             phis: true,
             fold: true,
+            canonicalize: true,
             gvn: true,
+            licm: true,
             dce: true,
             rounds: 2,
         }
@@ -35,8 +41,12 @@ pub struct PassStats {
     pub merged: usize,
     pub phis: usize,
     pub folded: usize,
+    pub canonicalized: usize,
+    pub simd_simplified: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub loops: usize,
+    pub hoisted: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -57,6 +67,10 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
             fold(region, &mut stats);
             verify(region).map_err(|e| e.0)?;
         }
+        if config.canonicalize {
+            canonicalize::run(region, &mut stats)?;
+            verify(region).map_err(|e| e.0)?;
+        }
         if config.prune {
             prune::run(region, &mut stats)?;
             verify(region).map_err(|e| e.0)?;
@@ -64,6 +78,11 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
         if config.gvn {
             gvn::run(region, &mut stats)?;
             verify(region).map_err(|e| e.0)?;
+        }
+        if config.licm {
+            let motion = licm::run(region, licm::Limits::default())?;
+            stats.loops += motion.loops;
+            stats.hoisted += motion.hoisted;
         }
         if config.dce {
             dce(region, &mut stats);

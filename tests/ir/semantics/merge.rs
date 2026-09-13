@@ -19,7 +19,9 @@ fn only_merge() -> PassConfig {
         merge: true,
         phis: false,
         fold: false,
+        canonicalize: false,
         gvn: false,
+        licm: false,
         dce: false,
         rounds: 1,
     }

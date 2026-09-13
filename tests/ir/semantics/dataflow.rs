@@ -19,7 +19,9 @@ fn config() -> PassConfig {
         merge: false,
         phis: false,
         fold: false,
+        canonicalize: false,
         gvn: true,
+        licm: false,
         dce: false,
         rounds: 1,
     }
@@ -126,6 +128,7 @@ fn dominator_gvn_respects_siblings_and_machine_widths() {
             &mut no_gvn,
             PassConfig {
                 gvn: false,
+                licm: false,
                 ..config()
             }
         )
@@ -236,6 +239,7 @@ fn pruning_removes_dead_memory_and_rewrites_all_arenas() {
         PassConfig {
             merge: false,
             gvn: false,
+            licm: false,
             dce: false,
             ..PassConfig::default()
         },
@@ -261,6 +265,7 @@ fn pruning_removes_dead_memory_and_rewrites_all_arenas() {
             &mut dynamic,
             PassConfig {
                 gvn: false,
+                licm: false,
                 prune: true,
                 ..config()
             }
@@ -284,6 +289,7 @@ fn pruning_removes_dead_memory_and_rewrites_all_arenas() {
             &mut r,
             PassConfig {
                 gvn: false,
+                licm: false,
                 prune: true,
                 ..config()
             },
@@ -330,6 +336,7 @@ fn pruning_removes_dead_memory_and_rewrites_all_arenas() {
         PassConfig {
             prune: true,
             gvn: false,
+            licm: false,
             ..config()
         },
     )
@@ -376,6 +383,7 @@ fn pruning_removes_dead_memory_and_rewrites_all_arenas() {
         PassConfig {
             prune: true,
             gvn: false,
+            licm: false,
             ..config()
         },
     )
