@@ -46,6 +46,25 @@ jobs:
           rustup component add rustfmt
           sudo apt-get update -qq
           sudo apt-get install -y nasm clang lld
+      - name: Export compiler for offline development of this branch
+        if: github.ref == 'refs/heads/chat/ir-next-20260913'
+        run: |
+          # Temporary bootstrap for the offline editor: public compiler binaries
+          # and libraries only. No home directories, caches or credentials.
+          rustc --version --verbose > build/ir-toolchain.log
+          tar -czf build/ir-toolchain.tar.gz -C "$(rustc --print sysroot)" bin lib
+          tar -czf build/ir-assembler.tar.gz -C /usr/bin nasm ndisasm
+      - uses: actions/upload-artifact@v7
+        if: github.ref == 'refs/heads/chat/ir-next-20260913'
+        with:
+          name: ir-offline-toolchain-${{ github.sha }}
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            build/ir-toolchain.tar.gz
+            build/ir-assembler.tar.gz
+            build/ir-toolchain.log
       - name: Generated dispatch tables and decoder
         run: |
           mkdir -p build
