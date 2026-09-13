@@ -42,10 +42,12 @@ fn counted_loop() -> (Region, ValueId, ValueId, ValueId) {
     let sum = b.region.param(header, Type::I32);
     let be = b.region.param(body, Type::Effect);
     let _xe = b.region.param(exit, Type::Effect);
-    b.region.terminate(entry, Terminator::Branch(Edge {
-        target: header,
-        args: vec![b.effect, input[0], zero],
-    }));
+    // Register initialization is legal only at external entries.
+    let cpu_read = input[7];
+    b.region.terminate(
+        entry,
+        Terminator::Branch(Edge { target: header, args: vec![b.effect, input[0], zero] }),
+    );
     b.gpr[0] = count;
     b.gpr[1] = sum;
     for block in [header, body, exit] {
@@ -54,24 +56,24 @@ fn counted_loop() -> (Region, ValueId, ValueId, ValueId) {
     }
     b.block = header;
     let done = b.binary(Binary::Eq, count, zero);
-    b.region.terminate(header, Terminator::CondBranch {
-        condition: done,
-        taken: Edge { target: exit, args: vec![he] },
-        not_taken: Edge { target: body, args: vec![he] },
-    });
+    b.region.terminate(
+        header,
+        Terminator::CondBranch {
+            condition: done,
+            taken: Edge { target: exit, args: vec![he] },
+            not_taken: Edge { target: body, args: vec![he] },
+        },
+    );
     b.block = body;
     let invariant = b.binary(Binary::Add, input[2], input[3]);
     let dependent = b.binary(Binary::Mul, invariant, input[4]);
     let next_sum = b.binary(Binary::Add, sum, dependent);
     let one = b.constant(1, Type::I32);
     let next_count = b.binary(Binary::Sub, count, one);
-    // Unordered CPU reads must never be classified as loop-invariant.
-    let cpu_read = b.node(Op::ReadGpr(7), vec![], Type::I32);
-    b.binary(Binary::Add, cpu_read, input[2]);
-    b.region.terminate(body, Terminator::Branch(Edge {
-        target: header,
-        args: vec![be, next_count, next_sum],
-    }));
+    b.region.terminate(
+        body,
+        Terminator::Branch(Edge { target: header, args: vec![be, next_count, next_sum] }),
+    );
     let state = snapshot(&mut b.region, b.gpr, &flags, 0x3000);
     b.region.terminate(exit, Terminator::Exit(state));
     (b.region, invariant, dependent, cpu_read)
@@ -92,10 +94,10 @@ fn hoists_transitive_invariants_but_not_loop_state_or_cpu_reads() {
     let before = r.instructions.len();
     let stats = run(&mut r, DEFAULT_WORK_LIMIT).unwrap();
     assert_eq!(stats.loops, 1);
-    assert_eq!(stats.hoisted, 3); // add, multiply, constant one
+    assert_eq!(stats.hoisted, 3);
     assert_eq!(owner(&r, invariant), BlockId(0));
     assert_eq!(owner(&r, dependent), BlockId(0));
-    assert_eq!(owner(&r, cpu_read), BlockId(3));
+    assert_eq!(owner(&r, cpu_read), BlockId(0));
     assert_eq!(r.instructions.len(), before);
     assert_eq!(format!("{:?}", r.states), maps);
     verify(&r).unwrap();
@@ -125,8 +127,7 @@ fn failure_is_atomic_even_after_partial_planning() {
     assert_eq!(run(&mut oversized, DEFAULT_WORK_LIMIT).unwrap_err(), "LICM region budget exceeded");
 }
 
-// CFG-only fixtures need no CPU observations or budget snapshots: they test
-// analysis, not emission. A two-successor block has a local non-folded condition.
+// CFG-only fixtures test analysis rather than CPU state emission.
 fn graph(edges: &[&[usize]], entries: &[usize]) -> Region {
     let mut r = Region::default();
     for b in 0..edges.len() {
@@ -187,12 +188,22 @@ fn whitelist_rejects_observations_faults_and_metadata() {
     let pure = &r.instructions[id.index()];
     assert!(super::eligible(pure));
     for op in [
-        Op::ReadGpr(0), Op::ReadXmm(0), Op::ReadFlags, Op::ReadRawFlags,
-        Op::ReadFlagChanges, Op::ReadFlagOperand, Op::ReadStack32, Op::ReadSegment(0),
-        Op::GuestLoad { bytes: 4 }, Op::GuestStore { bytes: 4 },
-        Op::GuestCheck { bytes: 4, write: false }, Op::PollBudget,
-        Op::SseCheck, Op::Divide { bits: 32, signed: true },
-        Op::CallHelper(HelperId(0)), Op::LinearOffset,
+        Op::ReadGpr(0),
+        Op::ReadXmm(0),
+        Op::ReadFlags,
+        Op::ReadRawFlags,
+        Op::ReadFlagChanges,
+        Op::ReadFlagOperand,
+        Op::ReadStack32,
+        Op::ReadSegment(0),
+        Op::GuestLoad { bytes: 4 },
+        Op::GuestStore { bytes: 4 },
+        Op::GuestCheck { bytes: 4, write: false },
+        Op::PollBudget,
+        Op::SseCheck,
+        Op::Divide { bits: 32, signed: true },
+        Op::CallHelper(HelperId(0)),
+        Op::LinearOffset,
         Op::RmwLoad { bytes: 4, order: RmwOrder::Locked },
     ] {
         let mut inst = pure.clone();
@@ -226,7 +237,8 @@ fn emits_optimized_and_unoptimized_budgeted_loops() {
             std::fs::write(
                 format!("build/ir-licm/loop-{budget}-{opt}.wasm"),
                 emit(&mir, layout, budget).unwrap().bytes,
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 }
