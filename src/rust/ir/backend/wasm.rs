@@ -41,6 +41,7 @@ struct Emitter<'a> {
     tlb: Option<WasmLocal>,
     read_cache: Option<(WasmLocal, WasmLocal)>,
     code_pages: &'a [u32],
+    memory_base: Option<WasmLocal>,
 }
 impl Emitter<'_> {
     fn get(&mut self, value: ValueId) {
@@ -243,15 +244,18 @@ impl Emitter<'_> {
             self.w.return_();
             return;
         }
-        // TLB_HAS_CODE only describes this virtual translation. A second virtual
-        // address can alias a physical page backing the currently executing IR
-        // region, so compare the translated physical pointer against every page
-        // captured by the immutable compilation snapshot before continuing.
+        // TLB entries contain Wasm-linear pointers (`mem8 + physical`), while
+        // immutable dependencies are guest-physical page addresses. Compare in
+        // the same address space so a writable virtual alias of the running code
+        // cannot continue into stale bytes even when its TLB_HAS_CODE bit is clear.
+        let memory_base = self.memory_base.as_ref().unwrap();
         for (index, page) in self.code_pages.iter().enumerate() {
             self.w.get_local(pointer);
             self.w.const_i32(!4095);
             self.w.and_i32();
+            self.w.get_local(memory_base);
             self.w.const_i32(*page as i32);
+            self.w.add_i32();
             self.w.eq_i32();
             if index != 0 {
                 self.w.or_i32();
@@ -1056,6 +1060,7 @@ fn emit_inner(
         tlb: None,
         read_cache: None,
         code_pages,
+        memory_base: None,
     };
     if let Some(entry) = entry {
         // Reject before ir_enter (which writes previous_ip and clears REP results),
@@ -1079,6 +1084,10 @@ fn emit_inner(
         e.accounted = Some(e.w.set_new_local());
         e.w.call_fn0_ret("ir_tlb_base");
         e.tlb = Some(e.w.set_new_local());
+        if !code_pages.is_empty() {
+            e.w.call_fn0_ret("ir_memory_base");
+            e.memory_base = Some(e.w.set_new_local());
+        }
     }
     if mir.has_ram_forwarding() {
         e.w.const_i32(0);
@@ -1174,6 +1183,9 @@ fn emit_inner(
     if let Some((valid, value)) = e.read_cache {
         e.w.free_local(valid);
         e.w.free_local(value);
+    }
+    if let Some(local) = e.memory_base {
+        e.w.free_local(local);
     }
     e.w.finish();
     let bytes = e.w.output().to_vec();
