@@ -1,7 +1,9 @@
 //! Bounded, verifier-checked pure dataflow passes. Memory and helpers never enter GVN.
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
+pub mod canonicalize;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
 #[derive(Clone, Copy)]
@@ -12,6 +14,8 @@ pub struct PassConfig {
     pub fold: bool,
     pub gvn: bool,
     pub dce: bool,
+    pub licm: bool,
+    pub canonicalize: bool,
     pub rounds: usize,
 }
 impl Default for PassConfig {
@@ -23,6 +27,8 @@ impl Default for PassConfig {
             fold: true,
             gvn: true,
             dce: true,
+            licm: true,
+            canonicalize: true,
             rounds: 2,
         }
     }
@@ -37,6 +43,11 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub loop_hoisted: usize,
+    pub loop_work: usize,
+    pub identities: usize,
+    pub identity_constants: usize,
+    pub vector_rewrites: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -61,9 +72,20 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
             prune::run(region, &mut stats)?;
             verify(region).map_err(|e| e.0)?;
         }
+        if config.canonicalize {
+            let simplified = canonicalize::run(region, canonicalize::DEFAULT_WORK_LIMIT)?;
+            stats.identities += simplified.aliases;
+            stats.identity_constants += simplified.constants;
+            stats.vector_rewrites += simplified.vectors;
+        }
         if config.gvn {
             gvn::run(region, &mut stats)?;
             verify(region).map_err(|e| e.0)?;
+        }
+        if config.licm {
+            let motion = licm::run(region, licm::DEFAULT_WORK_LIMIT)?;
+            stats.loop_hoisted += motion.hoisted;
+            stats.loop_work += motion.work;
         }
         if config.dce {
             dce(region, &mut stats);

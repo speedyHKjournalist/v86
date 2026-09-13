@@ -1,0 +1,76 @@
+name: IR compiler validation
+
+on:
+  pull_request:
+    branches: [ir]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-compiler-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [native, runtime, simd]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Install build prerequisites
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld default-jre-headless
+          rustc --version
+          node --version
+          nasm --version
+          cat /proc/sys/vm/max_map_count
+      - name: Native compiler and emitted Wasm
+        if: matrix.suite == 'native'
+        run: |
+          set -o pipefail
+          make ir-tests 2>&1 | tee ir-native.log
+      - name: CPU semantics and online compiler
+        if: matrix.suite == 'runtime'
+        run: |
+          set -o pipefail
+          make ir-analyzer-tests ir-memory-tests ir-stack-tests ir-control-tests \
+            ir-shift-tests ir-multiply-tests ir-bit-tests ir-exchange-tests \
+            ir-enter-tests ir-misc-tests ir-loop-tests ir-cfg-tests \
+            ir-system-stack-tests ir-segment-tests ir-string-tests ir-io-tests \
+            ir-rep-engine-tests ir-rep-tests ir-cpu-info-tests ir-cpu-system-tests \
+            ir-control-regs-tests ir-descriptor-tests ir-task-regs-tests \
+            ir-selector-query-tests ir-flags-observer-tests ir-verr-tests \
+            ir-cmpxchg8b-tests ir-entry-tests ir-live-tests ir-cache-tests \
+            ir-auto-tests ir-backend-integration-tests 2>&1 | tee ir-runtime.log
+      - name: SIMD CPU differential matrix
+        if: matrix.suite == 'simd'
+        run: |
+          set -o pipefail
+          make ir-simd-move-tests ir-simd-integer-tests ir-simd-immediate-tests \
+            ir-simd-shuffle-tests ir-simd-transfer-tests ir-simd-lane-tests \
+            ir-simd-masked-tests 2>&1 | tee ir-simd.log
+      - name: Generated source remains unchanged
+        run: git diff --exit-code
+      - name: Preserve diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-${{ matrix.suite }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: ir-*.log
