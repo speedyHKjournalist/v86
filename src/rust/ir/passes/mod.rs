@@ -2,7 +2,6 @@
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
-pub mod licm;
 mod merge;
 mod prune;
 #[derive(Clone, Copy)]
@@ -38,9 +37,6 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
-    pub licm_loops: usize,
-    pub licm_hoisted: usize,
-    pub licm_work: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -73,18 +69,6 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
             dce(region, &mut stats);
             verify(region).map_err(|e| e.0)?;
         }
-    }
-    Ok(stats)
-}
-/// Tier 2 adds bounded loop motion after scalar simplification exposes invariant
-/// operands. Tier 1 and the existing standalone `run` entry remain unchanged.
-pub fn run_tier2(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
-    let mut stats = run(region, config)?;
-    if config.rounds != 0 {
-        let loops = licm::run(region, licm::Config::default())?;
-        stats.licm_loops = loops.loops;
-        stats.licm_hoisted = loops.hoisted;
-        stats.licm_work = loops.work;
     }
     Ok(stats)
 }
