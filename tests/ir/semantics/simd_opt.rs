@@ -67,18 +67,21 @@ fn scalar_output(b: &mut IntegerBuilder, value: ValueId) {
     if b.ty(value) == Type::I64 {
         b.gpr[0] = b.extract(value, 0, Type::I32);
         b.gpr[1] = b.extract(value, 32, Type::I32);
-    } else {
+    }
+    else {
         b.gpr[0] = value;
     }
 }
 fn op(region: &Region, value: ValueId) -> &Instruction {
-    let Definition::Instruction(id, _) = region.values[value.index()].definition else {
+    let Definition::Instruction(id, _) = region.values[value.index()].definition
+    else {
         panic!()
     };
     &region.instructions[id.index()]
 }
 fn exit(region: &Region) -> &StateMap {
-    let Some(Terminator::Exit(state)) = region.blocks.last().unwrap().terminator else {
+    let Some(Terminator::Exit(state)) = region.blocks.last().unwrap().terminator
+    else {
         panic!()
     };
     &region.states[state.index()]
@@ -148,7 +151,14 @@ fn shuffle_fusion_requires_at_most_two_selected_sources() {
     let a = b.xmm[0];
     let c = b.xmm[1];
     let d = b.xmm[2];
-    let halves = std::array::from_fn(|i| if i < 8 { i as u8 } else { i as u8 + 8 });
+    let halves = std::array::from_fn(|i| {
+        if i < 8 {
+            i as u8
+        }
+        else {
+            i as u8 + 8
+        }
+    });
     let ac = b.node(Op::VectorShuffle(halves), vec![a, c], Type::V128);
     // This outer shuffle needs bytes of a, c AND d: no two-input fusion exists.
     let mut mask = std::array::from_fn(|i| i as u8);
@@ -160,7 +170,8 @@ fn shuffle_fusion_requires_at_most_two_selected_sources() {
     assert_eq!(op(&r, three).op, Op::VectorShuffle(mask));
     assert_eq!(op(&r, three).args, vec![ac, d]);
     // The third input is no longer selected, allowing composition.
-    let Definition::Instruction(id, _) = r.values[three.index()].definition else {
+    let Definition::Instruction(id, _) = r.values[three.index()].definition
+    else {
         panic!()
     };
     r.instructions[id.index()].op =
@@ -240,7 +251,8 @@ fn budget_and_invalid_ir_fail_transactionally() {
     let mut exact = baseline.clone();
     assert_eq!(run(&mut exact, cost).unwrap().work, cost);
     let mut invalid = baseline;
-    let Definition::Instruction(id, _) = invalid.values[extracted.index()].definition else {
+    let Definition::Instruction(id, _) = invalid.values[extracted.index()].definition
+    else {
         panic!()
     };
     invalid.instructions[id.index()].op = Op::VectorExtract { bits: 16, lane: 8 };
@@ -320,7 +332,8 @@ fn specification(r: &Region) -> String {
         .values
         .iter()
         .map(|value| {
-            let Definition::Instruction(id, _) = value.definition else {
+            let Definition::Instruction(id, _) = value.definition
+            else {
                 return "null".to_owned();
             };
             let inst = &r.instructions[id.index()];
@@ -365,7 +378,8 @@ fn emitted_simd_optimization_corpus() {
                 let stats = run(&mut r, DEFAULT_WORK_LIMIT).unwrap();
                 total.aliases += stats.aliases;
                 total.rewritten += stats.rewritten;
-            } else if mode >= 2 {
+            }
+            else if mode >= 2 {
                 passes::run(
                     &mut r,
                     PassConfig {

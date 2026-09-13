@@ -21,9 +21,7 @@ pub struct Stats {
     pub work: usize,
 }
 impl Stats {
-    pub fn simplified(&self) -> usize {
-        self.aliases + self.rewritten
-    }
+    pub fn simplified(&self) -> usize { self.aliases + self.rewritten }
 }
 struct Work {
     remaining: usize,
@@ -132,7 +130,8 @@ fn shuffle(
         }
         let slot = if let Some(slot) = inputs.iter().position(|&v| v == source) {
             slot
-        } else {
+        }
+        else {
             if inputs.len() == 2 {
                 return Ok(Action::Keep);
             }
@@ -146,7 +145,8 @@ fn shuffle(
     }
     if composed == mask && inputs == inst.args {
         Ok(Action::Keep)
-    } else {
+    }
+    else {
         Ok(Action::Rewrite(Op::VectorShuffle(composed), inputs))
     }
 }
@@ -158,7 +158,8 @@ fn simplify(region: &Region, inst: &Instruction, work: &mut Work) -> Result<Acti
             Ok(Action::Alias(inst.args[0]))
         },
         Op::VectorExtract { bits, lane } => {
-            let Some(inner) = definition(region, inst.args[0]) else {
+            let Some(inner) = definition(region, inst.args[0])
+            else {
                 return Ok(Action::Keep);
             };
             match inner.op {
@@ -170,7 +171,8 @@ fn simplify(region: &Region, inst: &Instruction, work: &mut Work) -> Result<Acti
                         // PINSRW consumes low16 of an i32; PEXTRW zero-extends it.
                         return Ok(if bits == 16 {
                             Action::Low16(inner.args[1])
-                        } else {
+                        }
+                        else {
                             Action::Alias(inner.args[1])
                         });
                     }
@@ -178,7 +180,8 @@ fn simplify(region: &Region, inst: &Instruction, work: &mut Work) -> Result<Acti
                     let written = written_bits as u16 * written_lane as u16;
                     if start + bits as u16 <= written || written + written_bits as u16 <= start {
                         Ok(Action::Rewrite(inst.op.clone(), vec![inner.args[0]]))
-                    } else {
+                    }
+                    else {
                         // Mixed-width or partially overlapping lanes cannot forward.
                         Ok(Action::Keep)
                     }
@@ -201,7 +204,8 @@ fn simplify(region: &Region, inst: &Instruction, work: &mut Work) -> Result<Acti
                             },
                             vec![inner.args[(first / 16) as usize]],
                         ))
-                    } else {
+                    }
+                    else {
                         Ok(Action::Keep)
                     }
                 },

@@ -50,7 +50,7 @@ jobs:
           } 2>&1 | tee build/ir-regressions.log
       - name: Formatting and generated-source consistency
         run: |
-          rustfmt --edition 2021 --check --config skip_children=true src/rust/ir/passes/simd.rs tests/ir/semantics/simd_opt.rs
+          rustfmt --edition 2021 --check --config skip_children=true,fn_single_line=true,control_brace_style=ClosingNextLine src/rust/ir/passes/simd.rs tests/ir/semantics/simd_opt.rs
           node --check tests/ir/wasm/simd_opt.mjs
           git diff --exit-code
       - name: Preserve diagnostics
