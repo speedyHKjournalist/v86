@@ -2,6 +2,7 @@
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
 #[derive(Clone, Copy)]
@@ -12,6 +13,8 @@ pub struct PassConfig {
     pub fold: bool,
     pub gvn: bool,
     pub dce: bool,
+    /// Total pure SSA code motion; never moves memory, CPU reads, helpers or polls.
+    pub licm: bool,
     pub rounds: usize,
 }
 impl Default for PassConfig {
@@ -23,6 +26,7 @@ impl Default for PassConfig {
             fold: true,
             gvn: true,
             dce: true,
+            licm: true,
             rounds: 2,
         }
     }
@@ -37,6 +41,9 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub loops: usize,
+    pub hoisted: usize,
+    pub loop_work: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -68,6 +75,22 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
         if config.dce {
             dce(region, &mut stats);
             verify(region).map_err(|e| e.0)?;
+        }
+    }
+    if config.licm && config.rounds != 0 {
+        let loops = licm::run(region, licm::LicmConfig::default())?;
+        stats.loops = loops.natural_loops;
+        stats.hoisted = loops.hoisted;
+        stats.loop_work = loops.work;
+        if loops.hoisted != 0 {
+            if config.gvn {
+                gvn::run(region, &mut stats)?;
+                verify(region).map_err(|e| e.0)?;
+            }
+            if config.dce {
+                dce(region, &mut stats);
+                verify(region).map_err(|e| e.0)?;
+            }
         }
     }
     Ok(stats)

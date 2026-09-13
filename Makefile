@@ -835,3 +835,10 @@ build/v86-ir-cache-test.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o
 build/v86-ir-cache-test-release.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	cargo rustc --release --features ir-test-hooks,jit-invariants $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/release/v86.wasm $@
+
+.PHONY: ir-licm-tests
+ir-licm-tests: ir-generated-check
+	mkdir -p build
+	$(MAKE) src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
+	env RUSTFLAGS="-D warnings" cargo test ir::passes::licm
+	node tests/ir/wasm/licm.mjs

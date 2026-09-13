@@ -19,7 +19,7 @@
 | IR-08 | 部分完成 | XMM V128 SSA、快照、typed locals/边复制，以及 packed/scalar SIMD 传送的原生 RAM 与精确慢路径已实现；已增加 38 种 packed integer 算术/比较/乘法/逻辑及 PS/PD 逻辑别名；已增加打包/解包、变量及立即数 packed 移位；已增加 PSHUF/SHUF 重排；已增加半部传送、MOVD/MOVQ 和重复 lane；已增加符号位掩码、PINSRW/PEXTRW、非临时存储和 LDDQU；已增加 MASKMOVDQU 原生 RAM 与有序慢路径；其余 SIMD 状态/传送、MMX、FP 控制、F80/x87 和无 SIMD 降级仍待实现 |
 | IR-09 | 部分基础 | 整数后端可执行 CFG 和寄存器代码；已增加冷 CPU 入口及真实状态 ABI，可执行具备完整动态计数映射的 CPU 循环；CompileRequest 产物已有显式入口键及执行前校验，实验 CPU Wasm 内可直接执行 IR 编译，显式发布的入口已参与正常 CPU 分派；已有可选的自动热度、区域编译和优化升档；完整 Tier 1 语义、成熟区域选择和系统验收仍未完成 |
 | IR-10 | 部分基础 | 有界常量折叠、支配关系 GVN、trivial phi 消除、StateMap-aware DCE、常量分支裁剪和保留预算检查的直线块合并；已有独立 MIR 字面量常量折叠；其余跨块 FLAGS/状态同步优化未完成 |
-| IR-11 | 未实现 | proof-based 访存复用、forwarding、LICM、循环及 SIMD 优化 |
+| IR-11 | 部分完成 | 已加入可关闭、有工作预算及失败回滚的纯标量/向量 LICM，保留有序动作及 StateMap；proof-based 访存复用、forwarding、归纳变量/强度削弱与其余 SIMD 优化仍未完成 |
 | IR-12 | 部分基础 | 不可变编译请求及 generation/dependency/入口/映射比较已实现；已有只读 CPU 代码快照、单个未发布产物句柄和重校验；共享在线 legacy 桥接已有票据校验、安装前拒绝、缓存取消和浏览器失败回收；已有共享槽池中的 IR 缓存、物理代码页监视和冷执行帧返回后的回收；已有有界自动编译、失败抑制和自动入口淘汰；完整共享版本/链接图及生产策略验收仍未完成 |
 | IR-13 | 完整矩阵未完成 | 已执行 IR 差分和部分生产 legacy/Worker/API 回归；GPU 间歇失败、PIC 跳过等结果有单独记录；已有 Node 中显式/自动 IR 缓存分派及升档测试，以及公开后端在真实浏览器主线程/Worker 的升档、SMC、双向跨后端快照和错误上报测试；完整在线 IR、XP、应用及性能矩阵未完成 |
 | IR-14 | 未实现 | 默认后端仍为 legacy，旧 emitter 未退役 |
@@ -40,6 +40,24 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
 
 详见 [测试报告](ir-validation.md)、[实现说明](ir-design.md)、
 [helper 契约状态](ir-helper-contracts.md) 和 [覆盖说明](ir-coverage.md)。
+
+## 后续推进：受预算约束的纯 SSA LICM
+
+- 在既有优化管线末尾增加自然循环识别和循环不变量外提；仅使用已有、唯一、
+  无条件的 preheader，不修改 CFG、预算检查、StateMap 或 helper/访存次序。
+- 对嵌套循环采用内层优先次序，合并同一 header 的多个 latch；跳过无合法
+  preheader、外部入口循环和不满足单入口条件的区域。CPU backing-state 读取
+  不属于可投机运算，不能仅凭 `!Op::ordered()` 决定是否外提。
+- `PassConfig.licm` 可单独关闭；`LicmConfig.max_work` 限制工作量。变换先在
+  私有副本上完成，验证成功后才提交；失败不改变调用者区域。统计记录自然循环、
+  外提次数与工作量。该开关只影响已经请求优化的实验 IR，不改变默认后端。
+- 本轮本地验证通过 136 项 Rust 测试、31,104 次新增标量/向量 Wasm 对照，
+  以及现有 Wasm 语义套件。新增 oracle 独立计算循环次数、溢出、零次循环、
+  恢复 PC 和动态指令计数，并逐字节比较优化前后的状态映像。
+- 完整 ISA、通用 RAM proof/forwarding、系统/XP/应用性能矩阵及 legacy 退役
+  仍未完成；没有改变覆盖目录中的 Pending 状态或放宽发布门槛。
+
+详见 [LICM 契约与测试](ir-licm.md)。
 
 ## 后续推进：公开后端与 CPU Worker
 
