@@ -104,8 +104,8 @@ fn discover(region: &Region, cfg: &Cfg, work: &mut Work) -> Result<Vec<NaturalLo
             if !members[block] {
                 continue;
             }
-            valid &= cfg.dominates[block][header]
-                && !region.entries.contains(&BlockId(block as u32));
+            valid &=
+                cfg.dominates[block][header] && !region.entries.contains(&BlockId(block as u32));
             if block != header {
                 for pred in &cfg.predecessors[block] {
                     work.spend(1)?;
@@ -165,6 +165,12 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
     verify(region).map_err(|e| e.0)?;
     let cfg = Cfg::compute(region)?;
     let loops = discover(region, &cfg, &mut work)?;
+    if loops.is_empty() {
+        return Ok(Stats {
+            work: work.used,
+            ..Stats::default()
+        });
+    }
     let mut staged = region.clone();
     let mut stats = Stats::default();
     for natural in loops {
@@ -192,8 +198,7 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
                             staged.instructions[def.index()].block.index()
                         },
                     };
-                    invariant &= !natural.members[owner]
-                        && cfg.dominates[natural.preheader][owner];
+                    invariant &= !natural.members[owner] && cfg.dominates[natural.preheader][owner];
                 }
                 if invariant {
                     // Updating ownership makes dependent expressions available
@@ -206,9 +211,13 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
             }
         }
         for block in order {
-            staged.blocks[block].instructions.retain(|id| !moved[id.index()]);
+            staged.blocks[block]
+                .instructions
+                .retain(|id| !moved[id.index()]);
         }
-        staged.blocks[natural.preheader].instructions.extend(hoisted);
+        staged.blocks[natural.preheader]
+            .instructions
+            .extend(hoisted);
     }
     verify(&staged).map_err(|e| e.0)?;
     stats.work = work.used;
@@ -222,4 +231,4 @@ mod tests;
 
 #[cfg(test)]
 #[path = "../../../../tests/ir/semantics/licm_acceptance.rs"]
-mod acceptance_tests;
+mod acceptance;

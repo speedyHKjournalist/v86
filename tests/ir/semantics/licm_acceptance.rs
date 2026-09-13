@@ -8,14 +8,13 @@ use crate::ir::{
     lowering::lower,
     passes::{self, licm, PassConfig},
     runtime::compile::{
-        compile_cpu_cfg_region, CodeDependency, CodeMapping, CompileRequest,
-        ImmutableCodeSnapshot, IrConfig, PublicationKey, Tier,
+        compile_cpu_cfg_region, CodeDependency, CodeMapping, CompileRequest, ImmutableCodeSnapshot,
+        IrConfig, PublicationKey, Tier,
     },
     verify::verify,
 };
 
 // NOP; loop: MOV EAX, EBX; ADD EAX, EDX; DEC ECX; JNZ loop.
-// Unmodified EBX/EDX become entry SSA values after trivial-phi elimination.
 const REGISTER_LOOP: &[u8] = &[0x90, 0x89, 0xD8, 0x01, 0xD0, 0x49, 0x75, 0xF9];
 
 #[test]
@@ -77,19 +76,9 @@ fn cpu_compilation_runs_licm_only_in_optimized_tier_two() {
 
 #[test]
 fn actual_lifted_polls_memory_fault_maps_and_commit_maps_are_not_moved() {
-    for bytes in [
-        REGISTER_LOOP,
-        // NOP; loop: ADD EAX, [ESI]; DEC ECX; JNZ loop.
-        &[0x90, 0x03, 0x06, 0x49, 0x75, 0xFB],
-    ] {
-        let mut region = lift_cpu_cfg(
-            bytes,
-            GuestEip(0x1000),
-            LinearAddress(0x100000),
-            true,
-            8,
-        )
-        .unwrap();
+    for bytes in [REGISTER_LOOP, &[0x90, 0x03, 0x06, 0x49, 0x75, 0xFB]] {
+        let mut region =
+            lift_cpu_cfg(bytes, GuestEip(0x1000), LinearAddress(0x100000), true, 8).unwrap();
         passes::run(&mut region, PassConfig::default()).unwrap();
         let states = format!("{:?}", region.states);
         let observations: Vec<_> = region
@@ -104,7 +93,10 @@ fn actual_lifted_polls_memory_fault_maps_and_commit_maps_are_not_moved() {
         if bytes == REGISTER_LOOP {
             assert!(stats.hoisted > 0);
         } else {
-            assert!(region.instructions.iter().any(|i| matches!(i.op, Op::GuestLoad { .. })));
+            assert!(region
+                .instructions
+                .iter()
+                .any(|i| matches!(i.op, Op::GuestLoad { .. })));
         }
         for (id, before) in observations {
             assert_eq!(format!("{:?}", region.instructions[id]), before);

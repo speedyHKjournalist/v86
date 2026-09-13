@@ -4,16 +4,14 @@ use crate::ir::{
     frontend::decode::{GuestEip, LinearAddress, PhysicalAddress},
     passes::PassConfig,
     runtime::compile::{
-        compile_cpu_cfg_region, CodeDependency, CodeMapping, CompileRequest,
-        ImmutableCodeSnapshot, IrConfig, PublicationKey, Tier,
+        compile_cpu_cfg_region, CodeDependency, CodeMapping, CompileRequest, ImmutableCodeSnapshot,
+        IrConfig, PublicationKey, Tier,
     },
 };
 
 #[test]
 fn licm_is_a_tier_two_optimization_and_respects_disabled_passes() {
     // mov ecx,3; loop: imul ebx,esi,7; add eax,ebx; dec ecx; jnz loop; nop
-    // ESI is invariant. The multiplication is not a literal fold, and the
-    // prologue provides a real preheader distinct from the loop's backedge.
     let snapshot = ImmutableCodeSnapshot {
         bytes: vec![
             0xB9, 3, 0, 0, 0, 0x6B, 0xDE, 7, 0x01, 0xD8, 0x49, 0x75, 0xF8, 0x90,
@@ -58,16 +56,33 @@ fn licm_is_a_tier_two_optimization_and_respects_disabled_passes() {
     assert_eq!(tier_one.passes.loop_hoisted, 0);
     request.tier = Tier::Two;
     let tier_two = compile_cpu_cfg_region(&request, &snapshot, &config).unwrap();
-    assert!(tier_two.passes.loop_hoisted > 0, "no invariant reached the production compiler API");
+    assert!(
+        tier_two.passes.loop_hoisted > 0,
+        "no invariant reached the production compiler API"
+    );
     assert_eq!(tier_two.tier, Tier::Two);
-    assert!(tier_two.current(request.key, &snapshot.dependencies, tier_two.entry, &snapshot.mappings));
-
+    assert!(tier_two.current(
+        request.key,
+        &snapshot.dependencies,
+        tier_two.entry,
+        &snapshot.mappings
+    ));
     config.optimize = false;
-    let disabled = compile_cpu_cfg_region(&request, &snapshot, &config).unwrap();
-    assert_eq!(disabled.passes.loop_hoisted, 0);
+    assert_eq!(
+        compile_cpu_cfg_region(&request, &snapshot, &config)
+            .unwrap()
+            .passes
+            .loop_hoisted,
+        0
+    );
     config.optimize = true;
     config.passes.rounds = 0;
-    let no_rounds = compile_cpu_cfg_region(&request, &snapshot, &config).unwrap();
-    assert_eq!(no_rounds.passes.loop_hoisted, 0);
+    assert_eq!(
+        compile_cpu_cfg_region(&request, &snapshot, &config)
+            .unwrap()
+            .passes
+            .loop_hoisted,
+        0
+    );
     assert_eq!(format!("{snapshot:?}"), unchanged_snapshot);
 }
