@@ -1,0 +1,100 @@
+name: Apply verified IR patch
+
+on:
+  push:
+    branches: [chat/ir11-verified-licm-20260913]
+    paths:
+      - '.github/ir-patch-parts/**'
+      - '.github/workflows/ir-apply-once.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ir-apply-verified-licm
+  cancel-in-progress: true
+
+jobs:
+  validate-and-apply:
+    if: github.repository == 'speedyHKjournalist/v86' && github.ref == 'refs/heads/chat/ir11-verified-licm-20260913'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Verify exact patch and apply to the index
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, pathlib
+          expected = [
+              '8225bf4dfa7facf3655d7ba49d9148211abafc5f4f55214f1e2f8d75399eb13d',
+              '2af4636ac7886d6a2060f3ddbc43a3bdd930dcfde3161e06246ecb03313f443c',
+              '980fb7272339d1434aa481b5bce18ee2d699c3f7f3d06e33d324dcab946cb006',
+              '3bb7ea6b7c09d406e00d8d40f63f6674b241ae27b81ef66f342ae636b0e858c4',
+              'fb077fb3254b4c45c4497a16cfaf9d52d69cff9ee0b33b39904410fb07469254',
+              '8f9dec3b343021d2be98c60e87fe97362094d680fd4f6804112207d442b2632f',
+              '62e2f365548362550e38ee543cf9dcb5d875e58ef215b8d1629883c441740c61',
+              'fdd89020c2fa0cc524fb9e572e38632baa0adbb26885cea735f94a3e144e9831',
+              'bc94994b501d5ff96faf235a5e7a288d219cc2587a872fd9fb67a11f877a2b20',
+              '937daee1d062c172b723ecc529aabc98d905f044e211d0ae3ca66ccda8badc86',
+          ]
+          parts = []
+          for i, digest in enumerate(expected):
+              part = pathlib.Path(f'.github/ir-patch-parts/{i:02}').read_bytes().strip()
+              assert hashlib.sha256(part).hexdigest() == digest, f'patch segment {i} checksum mismatch'
+              parts.append(part)
+          raw = gzip.decompress(base64.b64decode(b''.join(parts), validate=True))
+          assert hashlib.sha256(raw).hexdigest() == '9ed84fcb4726efa0a6cdc4e2ef430ce52589d8fe9d9f957af097ba6ac20071f5'
+          pathlib.Path('/tmp/ir-verified.patch').write_bytes(raw)
+          print('Verified 45,152-byte LICM patch against local tested SHA-256')
+          PY
+          git apply --check /tmp/ir-verified.patch
+          git apply --index --whitespace=error-all /tmp/ir-verified.patch
+          git diff --cached --check
+          git diff --cached --stat
+      - name: Install native and Wasm toolchains
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -y
+          sudo apt-get install -y nasm clang lld
+      - name: Native compiler and generated decoder checks
+        run: |
+          set -o pipefail
+          mkdir -p build
+          make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs ir-generated-check
+          env RUSTFLAGS="-D warnings" cargo test 2>&1 | tee build/ir-native.log
+      - name: Execute Wasm and independent decoder oracles
+        run: |
+          set -o pipefail
+          node tests/ir/wasm/run.mjs 2>&1 | tee build/ir-wasm.log
+          node tests/rust/verify-wasmgen-dummy-output.js
+          node tests/ir/decode/oracle.mjs 2>&1 | tee build/ir-decoder.log
+      - name: CPU control flow and memory regression
+        run: |
+          set -o pipefail
+          make ir-cfg-tests ir-loop-tests ir-memory-tests 2>&1 | tee build/ir-cpu.log
+      - name: Online Tier scheduling regression
+        run: |
+          set -o pipefail
+          make ir-auto-tests 2>&1 | tee build/ir-auto.log
+      - name: Commit only validated source changes
+        run: |
+          git diff --exit-code
+          git rm -r .github/ir-patch-parts .github/ir-verified.patch.gz.b64
+          git config user.name 'IR validation'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git diff --cached --check
+          git commit -m 'feat(ir): add bounded transactional LICM and independent execution oracles'
+          git push origin HEAD:refs/heads/chat/ir11-verified-licm-20260913
+      - name: Preserve validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-licm-validation-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: build/ir-*.log
