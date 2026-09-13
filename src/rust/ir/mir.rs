@@ -112,6 +112,7 @@ pub const CPU_IMPORTS: &[&str] = &[
     "ir_entry_matches",
     "ir_divide_fault",
     "ir_tlb_base",
+    "ir_memory_base",
     "get_eflags",
     "ir_segment_address",
     "ir_memory_read",

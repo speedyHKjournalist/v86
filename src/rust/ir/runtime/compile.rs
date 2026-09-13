@@ -222,7 +222,13 @@ fn compile_inner(
             mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?;
     }
     let code = if cpu {
-        emit_cpu_entry(&mir, config.execution_budget, request.cpu_entry())?
+        let code_pages: Vec<u32> = snapshot.dependencies.iter().map(|d| d.page.0).collect();
+        emit_cpu_entry(
+            &mir,
+            config.execution_budget,
+            request.cpu_entry(),
+            &code_pages,
+        )?
     } else {
         emit(&mir, config.layout, config.execution_budget)?
     };

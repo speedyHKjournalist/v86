@@ -6,6 +6,14 @@ use crate::ir::helper::Outcome;
 pub unsafe fn ir_tlb_base() -> u32 {
     core::ptr::addr_of!(cpu::tlb_data) as u32
 }
+/// Base of guest physical RAM in the shared Wasm linear memory. Native TLB
+/// pointers are `mem8 + guest_physical`; immutable code dependencies store only
+/// guest-physical page addresses, so guarded store continuation needs this base
+/// to compare the two address spaces without trusting the virtual TLB alias.
+#[no_mangle]
+pub unsafe fn ir_memory_base() -> u32 {
+    crate::cpu::memory::mem8 as u32
+}
 #[no_mangle]
 pub unsafe fn ir_segment_address(offset: u32, segment: u32) -> u64 {
     assert!(!cpu::in_jit && segment < 6);
