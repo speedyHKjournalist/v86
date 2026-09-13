@@ -2,6 +2,7 @@
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
 #[derive(Clone, Copy)]
@@ -37,6 +38,9 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub loops: usize,
+    pub hoisted: usize,
+    pub licm_work: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -69,6 +73,18 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
             dce(region, &mut stats);
             verify(region).map_err(|e| e.0)?;
         }
+    }
+    Ok(stats)
+}
+/// Tier 2 adds bounded pure LICM after phi/CFG simplification. Tier 1 retains
+/// the lightweight pipeline above. Zero rounds disables both pipelines.
+pub fn run_tier2(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
+    let mut stats = run(region, config)?;
+    if config.rounds != 0 {
+        let motion = licm::run(region, licm::DEFAULT_WORK_LIMIT)?;
+        stats.loops = motion.loops;
+        stats.hoisted = motion.hoisted;
+        stats.licm_work = motion.work;
     }
     Ok(stats)
 }
