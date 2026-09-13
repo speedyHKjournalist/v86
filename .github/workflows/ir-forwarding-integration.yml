@@ -10,22 +10,18 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ir-forwarding-integration
-  cancel-in-progress: true
-
 jobs:
-  validate-tree:
+  export-validated-source:
     if: github.repository == 'speedyHKjournalist/v86' && github.ref == 'refs/heads/chat/ir-11-licm-20260913'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 5
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Verify and stage the reviewed patch set
+      - name: Reconstruct exactly the tree whose tests passed in run 34735119024
         shell: bash
         run: |
           set -euo pipefail
@@ -43,7 +39,6 @@ jobs:
           text = path.read_text()
           anchor = '    pub loop_hoisted: usize,\n'
           assert text.count(anchor) == 1 and 'pub ram_forwarded:' not in text
-          # Preserve the independently added SIMD module, counters and calls.
           path.write_text(text.replace(anchor, anchor + '    pub ram_forwarded: usize,\n'))
           path = Path('tests/ir/semantics/cfg_frontend.rs')
           text = path.read_text()
@@ -59,64 +54,29 @@ jobs:
               '                                .unwrap();',
               '                        }', ''])
           path.write_text(text.replace(anchor, replacement))
-          # Existing programs 17/18 and their exact scalar/vector fault oracle
-          # are retained, rather than replacing them with the older patch corpus.
           PY
           git add src/rust/ir/passes/mod.rs tests/ir/semantics/cfg_frontend.rs
           git rm -- .github/workflows/ir-forwarding-integration.yml tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
           git diff --cached --check
           mkdir -p build
-          git write-tree | tee build/ir-forwarding-tested-tree.txt
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '24.17.0'
-      - name: Rust and assembler
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add wasm32-unknown-unknown
-          sudo apt-get update -qq
-          sudo apt-get install -y nasm clang lld
-      - name: Native compiler and full generated fixture corpus
-        shell: bash
-        run: |
-          set -euo pipefail
-          make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs ir-generated-check
-          env RUSTFLAGS='-D warnings' cargo test 2>&1 | tee build/ir-integrated-native.log
-      - name: Independent Wasm and decoder oracles
-        shell: bash
-        run: |
-          set -euo pipefail
-          { node tests/ir/wasm/run.mjs; node tests/rust/verify-wasmgen-dummy-output.js; node tests/ir/decode/oracle.mjs; } 2>&1 | tee build/ir-integrated-wasm.log
-      - name: Actual CPU optimizations and exact exceptions
-        shell: bash
-        run: |
-          set -euo pipefail
-          { tools/ir-licm-tests.sh; tools/ir-forwarding-tests.sh; node tests/ir/differential/cfg.mjs; } 2>&1 | tee build/ir-integrated-cpu.log
-      - name: Live compilation, publication and backend regressions
-        shell: bash
-        run: |
-          set -euo pipefail
-          make ir-live-tests ir-cache-tests ir-auto-tests ir-backend-integration-tests 2>&1 | tee build/ir-integrated-runtime.log
-          git diff --exit-code
-          git diff --cached --check
-      - name: Stage exactly the tested Git objects without changing a branch
+          test "$(git write-tree)" = 13adfe6fc4001b571cff2e3db4008fd24f8d756e
+          git write-tree > build/ir-forwarding-tested-tree.txt
+          git archive --format=tar.gz --output=build/ir-forwarding-tested-source.tar.gz 13adfe6fc4001b571cff2e3db4008fd24f8d756e
+      - name: Export content-addressed blobs only; do not create a tree, commit or ref
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, pathlib, subprocess, urllib.request
+          import json, os, pathlib, subprocess, urllib.request, urllib.error
           def git(*args):
               return subprocess.check_output(['git', *args])
           repo = os.environ['GITHUB_REPOSITORY']
           assert repo == 'speedyHKjournalist/v86'
-          assert os.environ['GITHUB_REF'] == 'refs/heads/chat/ir-11-licm-20260913'
-          parent = git('rev-parse', 'HEAD').decode().strip()
           expected = git('write-tree').decode().strip()
-          assert expected == pathlib.Path('build/ir-forwarding-tested-tree.txt').read_text().strip()
-          entries, blobs = [], {}
+          assert expected == '13adfe6fc4001b571cff2e3db4008fd24f8d756e'
+          entries, contents = [], {}
           for raw in git('diff', '--cached', '--name-only', '-z').split(b'\0'):
               if not raw:
                   continue
@@ -126,36 +86,48 @@ jobs:
                   entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': None})
                   continue
               mode, sha = record.split()[:2]
-              content = git('show', ':' + path).decode('utf-8')
-              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'content': content})
-              blobs[path] = sha
-          payload = {'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(), 'tree': entries}
-          request = urllib.request.Request(
-              'https://api.github.com/repos/' + repo + '/git/trees',
-              data=json.dumps(payload).encode(), method='POST',
-              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
-                       'Accept': 'application/vnd.github+json',
-                       'Content-Type': 'application/json',
-                       'X-GitHub-Api-Version': '2022-11-28'})
-          with urllib.request.urlopen(request, timeout=60) as response:
-              created = json.load(response)
-          assert created['sha'] == expected, (created['sha'], expected)
-          report = {'parent': parent, 'tree': expected, 'blobs': blobs,
-                    'run': os.environ['GITHUB_RUN_ID'], 'all_validation_steps_passed': True}
-          pathlib.Path('build/ir-forwarding-publication.json').write_text(json.dumps(report, indent=2))
-          subprocess.run(['git', 'archive', '--format=tar.gz',
-                          '--output=build/ir-forwarding-tested-source.tar.gz', expected], check=True)
+              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': sha})
+              contents[path] = git('show', ':' + path).decode('utf-8')
+          report = {'parent': git('rev-parse', 'HEAD').decode().strip(),
+                    'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(),
+                    'tree': expected, 'entries': entries,
+                    'validation_run': 34735119024, 'export_run': os.environ['GITHUB_RUN_ID'],
+                    'blobs_exported': False}
+          output = pathlib.Path('build/ir-forwarding-publication.json')
+          output.write_text(json.dumps(report, indent=2))
+          pathlib.Path('build/ir-forwarding-contents.json').write_text(json.dumps(contents))
+          for entry in entries:
+              if entry['sha'] is None:
+                  continue
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/' + repo + '/git/blobs',
+                  data=json.dumps({'content': contents[entry['path']], 'encoding': 'utf-8'}).encode(),
+                  method='POST', headers={
+                      'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                      'Accept': 'application/vnd.github+json',
+                      'Content-Type': 'application/json',
+                      'X-GitHub-Api-Version': '2026-03-10'})
+              try:
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      created = json.load(response)
+              except urllib.error.HTTPError as error:
+                  print(error.read().decode('utf-8', errors='replace'))
+                  raise
+              assert created['sha'] == entry['sha'], entry['path']
+              print('EXPORTED', entry['sha'], entry['path'])
+          report['blobs_exported'] = True
+          output.write_text(json.dumps(report, indent=2))
           print('IR_FORWARDING_PUBLICATION=' + json.dumps(report))
           PY
-      - name: Preserve validation and the exact tested source
+      - name: Preserve exact source and publication manifest even if blob export is unavailable
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: ir-forwarding-validation-${{ github.sha }}
+          name: ir-forwarding-publication-${{ github.sha }}
           retention-days: 7
           if-no-files-found: ignore
           path: |
-            build/ir-integrated-*.log
             build/ir-forwarding-tested-tree.txt
             build/ir-forwarding-publication.json
+            build/ir-forwarding-contents.json
             build/ir-forwarding-tested-source.tar.gz
