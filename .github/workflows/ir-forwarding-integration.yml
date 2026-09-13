@@ -1,0 +1,133 @@
+name: IR forwarding integration
+
+on:
+  push:
+    branches: ['chat/ir-11-licm-20260913']
+    paths:
+      - '.github/workflows/ir-forwarding-integration.yml'
+      - 'tools/ir-forwarding-*.patch'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-forwarding-integration
+  cancel-in-progress: true
+
+jobs:
+  validate-tree:
+    if: github.repository == 'speedyHKjournalist/v86' && github.ref == 'refs/heads/chat/ir-11-licm-20260913'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Verify and stage the reviewed patch set
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            '90bdaf5bfd1a54ca8c45944877f03705be7bb271070e769f8fa95282ee9bdb46  tools/ir-forwarding-core.patch' \
+            '0e2705974aac1c67562d5011ddda7cc899963f3cbcf859ec92df538aadf0ae51  tools/ir-forwarding-tests.patch' \
+            'db5c07d3dc09bdc16d48309226ab6c0434c1cf2bb482b8c807036579a95cbf1d  tools/ir-forwarding-docs.patch' | sha256sum --check
+          git apply --check --index tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
+          git apply --index tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
+          git rm -- .github/workflows/ir-forwarding-integration.yml tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
+          git diff --cached --check
+          mkdir -p build
+          git write-tree | tee build/ir-forwarding-tested-tree.txt
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Rust and assembler
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld
+      - name: Native compiler and full generated fixture corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs ir-generated-check
+          env RUSTFLAGS='-D warnings' cargo test 2>&1 | tee build/ir-integrated-native.log
+      - name: Independent Wasm and decoder oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          { node tests/ir/wasm/run.mjs; node tests/rust/verify-wasmgen-dummy-output.js; node tests/ir/decode/oracle.mjs; } 2>&1 | tee build/ir-integrated-wasm.log
+      - name: Actual CPU optimizations and exact exceptions
+        shell: bash
+        run: |
+          set -euo pipefail
+          { tools/ir-licm-tests.sh; tools/ir-forwarding-tests.sh; node tests/ir/differential/cfg.mjs; } 2>&1 | tee build/ir-integrated-cpu.log
+      - name: Live compilation, publication and backend regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          make ir-live-tests ir-cache-tests ir-auto-tests ir-backend-integration-tests 2>&1 | tee build/ir-integrated-runtime.log
+          git diff --exit-code
+          git diff --cached --check
+      - name: Stage exactly the tested Git objects without changing a branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, urllib.request
+          def git(*args):
+              return subprocess.check_output(['git', *args])
+          repo = os.environ['GITHUB_REPOSITORY']
+          assert repo == 'speedyHKjournalist/v86'
+          assert os.environ['GITHUB_REF'] == 'refs/heads/chat/ir-11-licm-20260913'
+          parent = git('rev-parse', 'HEAD').decode().strip()
+          expected = git('write-tree').decode().strip()
+          assert expected == pathlib.Path('build/ir-forwarding-tested-tree.txt').read_text().strip()
+          entries, blobs = [], {}
+          for raw in git('diff', '--cached', '--name-only', '-z').split(b'\0'):
+              if not raw:
+                  continue
+              path = raw.decode()
+              record = git('ls-files', '--stage', '--', path).decode().strip()
+              if not record:
+                  entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': None})
+                  continue
+              mode, sha = record.split()[:2]
+              content = git('show', ':' + path).decode('utf-8')
+              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'content': content})
+              blobs[path] = sha
+          payload = {'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(), 'tree': entries}
+          request = urllib.request.Request(
+              'https://api.github.com/repos/' + repo + '/git/trees',
+              data=json.dumps(payload).encode(), method='POST',
+              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                       'Accept': 'application/vnd.github+json',
+                       'Content-Type': 'application/json',
+                       'X-GitHub-Api-Version': '2022-11-28'})
+          with urllib.request.urlopen(request, timeout=60) as response:
+              created = json.load(response)
+          assert created['sha'] == expected, (created['sha'], expected)
+          report = {'parent': parent, 'tree': expected, 'blobs': blobs,
+                    'run': os.environ['GITHUB_RUN_ID'], 'all_validation_steps_passed': True}
+          pathlib.Path('build/ir-forwarding-publication.json').write_text(json.dumps(report, indent=2))
+          subprocess.run(['git', 'archive', '--format=tar.gz',
+                          '--output=build/ir-forwarding-tested-source.tar.gz', expected], check=True)
+          print('IR_FORWARDING_PUBLICATION=' + json.dumps(report))
+          PY
+      - name: Preserve validation and the exact tested source
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-forwarding-validation-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            build/ir-integrated-*.log
+            build/ir-forwarding-tested-tree.txt
+            build/ir-forwarding-publication.json
+            build/ir-forwarding-tested-source.tar.gz
