@@ -217,6 +217,10 @@ fn compile_inner(
     let mut mir = lower(&region)?;
     drop(region);
     let mir_folds = if config.optimize { mir.fold_constants()? } else { 0 };
+    if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
+        passes.ram_forwarded =
+            mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?;
+    }
     let code = if cpu {
         emit_cpu_entry(&mir, config.execution_budget, request.cpu_entry())?
     } else {

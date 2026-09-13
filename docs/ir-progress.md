@@ -3,7 +3,8 @@
 更新：2026-09-13。固定基线：`8ee73e538daaab15411344d39a1f271e778ac7f3`。
 
 **完整请求尚未完成。** 本次落地了可执行的实验性 IR 编译器与 WasmBuilder
-前置改造。生产 Tier 1/Tier 2 仍使用旧 JIT，尚未完成纯 IR 的 Windows XP 启动验收。
+前置改造。默认后端仍为 legacy；显式选择 IR 时已有自动编译和升档，
+尚未完成纯 IR 的 Windows XP 启动验收。
 原始验收范围以 [实施计划](v86-ir-implementation-plan.md) 为准，没有降低其完成条件。
 
 | 工作包 | 状态 | 已落地及剩余工作 |
@@ -19,7 +20,7 @@
 | IR-08 | 部分完成 | XMM V128 SSA、快照、typed locals/边复制，以及 packed/scalar SIMD 传送的原生 RAM 与精确慢路径已实现；已增加 38 种 packed integer 算术/比较/乘法/逻辑及 PS/PD 逻辑别名；已增加打包/解包、变量及立即数 packed 移位；已增加 PSHUF/SHUF 重排；已增加半部传送、MOVD/MOVQ 和重复 lane；已增加符号位掩码、PINSRW/PEXTRW、非临时存储和 LDDQU；已增加 MASKMOVDQU 原生 RAM 与有序慢路径；其余 SIMD 状态/传送、MMX、FP 控制、F80/x87 和无 SIMD 降级仍待实现 |
 | IR-09 | 部分基础 | 整数后端可执行 CFG 和寄存器代码；已增加冷 CPU 入口及真实状态 ABI，可执行具备完整动态计数映射的 CPU 循环；CompileRequest 产物已有显式入口键及执行前校验，实验 CPU Wasm 内可直接执行 IR 编译，显式发布的入口已参与正常 CPU 分派；已有可选的自动热度、区域编译和优化升档；完整 Tier 1 语义、成熟区域选择和系统验收仍未完成 |
 | IR-10 | 部分基础 | 有界常量折叠、支配关系 GVN、trivial phi 消除、StateMap-aware DCE、常量分支裁剪和保留预算检查的直线块合并；已有独立 MIR 字面量常量折叠；其余跨块 FLAGS/状态同步优化未完成 |
-| IR-11 | 未实现 | proof-based 访存复用、forwarding、LICM、循环及 SIMD 优化 |
+| IR-11 | 部分完成 | 已有受预算约束的纯 SSA LICM，以及 owned MIR 内带静态证书和动态 RAM 有效位的同块重复读取复用；仅优化 Tier 2 启用，保留段检查、MMIO/缺页慢路径和预算恢复；通用别名/effect 证明、store-to-load forwarding、memory LICM 及其余循环/SIMD 优化仍待实现 |
 | IR-12 | 部分基础 | 不可变编译请求及 generation/dependency/入口/映射比较已实现；已有只读 CPU 代码快照、单个未发布产物句柄和重校验；共享在线 legacy 桥接已有票据校验、安装前拒绝、缓存取消和浏览器失败回收；已有共享槽池中的 IR 缓存、物理代码页监视和冷执行帧返回后的回收；已有有界自动编译、失败抑制和自动入口淘汰；完整共享版本/链接图及生产策略验收仍未完成 |
 | IR-13 | 完整矩阵未完成 | 已执行 IR 差分和部分生产 legacy/Worker/API 回归；GPU 间歇失败、PIC 跳过等结果有单独记录；已有 Node 中显式/自动 IR 缓存分派及升档测试，以及公开后端在真实浏览器主线程/Worker 的升档、SMC、双向跨后端快照和错误上报测试；完整在线 IR、XP、应用及性能矩阵未完成 |
 | IR-14 | 未实现 | 默认后端仍为 legacy，旧 emitter 未退役 |
@@ -753,3 +754,16 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
   `build/ir-auto-publication-fixed.log`、`build/ir-auto-publication-fixed-stress.log`。
 - 实验特性检查、普通 debug 构建、生产/实验导入与导出隔离、空白检查通过。
   本轮未新增浏览器宿主、OS 启动或性能验收，完整 IR-00～IR-14 目标仍未完成。
+
+## 后续推进：有界 Tier 2 优化与 RAM 读取复用
+
+- 纯 SSA 循环不变量外提已接入优化 Tier 2；内存、CPU 观察、异常和预算恢复点不移动。
+- 独立 MIR 可为同块、同地址、同宽度的普通读取生成有界静态复用证书；发射器仅在原生
+  RAM 守卫成功后置位运行时有效位，进入慢路径前清零。MMIO 回调、重映射和缺页保留原路径。
+- 成功继续的一单位预算检查可保留复用；检查本身及其物化后返回的出口不删除、不移动。
+  不支持把证书跨块/入口使用，也不对并发共享内存作保证。
+- 已加入伪造证书拒绝、预算失败原子性、Tier/优化开关与真实 CPU 对照测试；入口为
+  `make ir-forwarding-tests`。另有确认实际发生 LICM 后再进入循环内缺页的 CFG 回归。
+- 这些改动不新增 ISA 形式，不改变默认后端、快照 ABI、发布/失效规则或 legacy 退役门槛。
+  完整 IR-00～IR-14、XP、应用和性能验收仍未完成。详见
+  [循环优化说明](ir-licm.md)及 [RAM 读取复用说明](ir-ram-forwarding.md)。

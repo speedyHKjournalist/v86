@@ -40,6 +40,7 @@ pub struct PassStats {
     pub commoned: usize,
     pub removed: usize,
     pub loop_hoisted: usize,
+    pub ram_forwarded: usize,
     pub simd_eliminated: usize,
     pub simd_shuffled: usize,
 }

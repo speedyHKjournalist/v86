@@ -63,7 +63,13 @@ fn reachable_cfg_fixtures() {
                                 assert!(moved.hoisted > 0, "fault fixtures must exercise LICM");
                             }
                         }
-                        let mir = lower(&r).unwrap();
+                        let mut mir = lower(&r).unwrap();
+                        drop(r);
+                        if opt {
+                            mir.fold_constants().unwrap();
+                            mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)
+                                .unwrap();
+                        }
                         assert!(mir.control.dynamic_counts);
                         let artifact = emit_cpu(&mir, budget).unwrap();
                         std::fs::write(

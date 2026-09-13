@@ -187,3 +187,63 @@ fn explicit_code_mappings_and_physical_aliases() {
     source.mappings[1].linear = LinearAddress(0);
     assert!(compile_cpu_region(&wrap, &source, &config(false)).is_ok());
 }
+
+#[test]
+fn loop_motion_is_tier_two_only_and_honors_diagnostic_disable() {
+    // A direct preheader followed by an invariant add in a counted loop.
+    // mov ebp,0; mov eax,edx; add eax,ebx; add ebp,eax; dec ecx; jnz loop
+    let bytes = snapshot(
+        vec![
+            0xBD, 0, 0, 0, 0, 0x89, 0xD0, 0x01, 0xD8, 0x01, 0xC5, 0x49, 0x75, 0xF7,
+        ],
+        0x100000,
+    );
+    for tier in [Tier::One, Tier::Two] {
+        for optimize in [false, true] {
+            for rounds in [0, 2] {
+                let mut req = request(0x1000, 0x100000, true);
+                req.tier = tier;
+                let mut options = config(optimize);
+                options.passes.rounds = rounds;
+                let artifact = compile_cpu_cfg_region(&req, &bytes, &options).unwrap();
+                if tier == Tier::Two && optimize && rounds != 0 {
+                    assert!(
+                        artifact.passes.loop_hoisted > 0,
+                        "optimized Tier 2 must actually run LICM"
+                    );
+                } else {
+                    assert_eq!(artifact.passes.loop_hoisted, 0);
+                }
+                assert_eq!(artifact.entry, EntryContract::Cpu(req.cpu_entry()));
+            }
+        }
+    }
+}
+
+#[test]
+fn guarded_ram_forwarding_is_tier_two_only_in_both_cpu_compile_entry_points() {
+    let bytes = snapshot(vec![0x8B, 0x06, 0x8B, 0x1E], 0x100000);
+    for tier in [Tier::One, Tier::Two] {
+        for optimize in [false, true] {
+            for rounds in [0, 2] {
+                for cfg in [false, true] {
+                    let mut req = request(0x1000, 0x100000, true);
+                    req.tier = tier;
+                    let mut options = config(optimize);
+                    options.passes.rounds = rounds;
+                    let artifact = if cfg {
+                        compile_cpu_cfg_region(&req, &bytes, &options)
+                    } else {
+                        compile_cpu_region(&req, &bytes, &options)
+                    }
+                    .unwrap();
+                    assert_eq!(
+                        artifact.passes.ram_forwarded,
+                        usize::from(tier == Tier::Two && optimize && rounds != 0)
+                    );
+                    assert_eq!(artifact.entry, EntryContract::Cpu(req.cpu_entry()));
+                }
+            }
+        }
+    }
+}

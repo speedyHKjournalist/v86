@@ -835,3 +835,7 @@ build/v86-ir-cache-test.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o
 build/v86-ir-cache-test-release.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	cargo rustc --release --features ir-test-hooks,jit-invariants $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/release/v86.wasm $@
+
+.PHONY: ir-forwarding-tests
+ir-forwarding-tests:
+	tools/ir-forwarding-tests.sh
