@@ -64,6 +64,14 @@ pub fn run(region: &mut Region, config: Config) -> Result<Stats, String> {
     };
     let cfg = Cfg::compute(region)?;
     let loops = natural_loops(region, &cfg, &mut budget)?;
+    // Keep the verified input and scan statistics without cloning an acyclic
+    // region (or a loop that has no eligible existing preheader).
+    if loops.is_empty() {
+        return Ok(Stats {
+            work: config.max_work - budget.remaining,
+            ..Stats::default()
+        });
+    }
     let mut candidate = region.clone();
     let mut stats = Stats::default();
     for natural_loop in loops {
@@ -115,9 +123,9 @@ pub fn run(region: &mut Region, config: Config) -> Result<Stats, String> {
                 .retain(|id| candidate.instructions[id.index()].block.index() == b);
         }
     }
-    verify(&candidate).map_err(|e| e.0)?;
     stats.work = config.max_work - budget.remaining;
     if stats.hoisted != 0 {
+        verify(&candidate).map_err(|e| e.0)?;
         *region = candidate;
     }
     Ok(stats)
@@ -185,8 +193,7 @@ fn natural_loops(
         }
         budget.charge(n + cfg.predecessors[header].len())?;
         if (0..n).any(|b| {
-            members[b]
-                && (!cfg.dominates[b][header] || region.entries.contains(&BlockId(b as u32)))
+            members[b] && (!cfg.dominates[b][header] || region.entries.contains(&BlockId(b as u32)))
         }) {
             continue;
         }
@@ -223,3 +230,6 @@ mod tests;
 
 #[cfg(test)]
 mod pipeline;
+
+#[cfg(test)]
+mod typed;
