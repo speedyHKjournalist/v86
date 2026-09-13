@@ -5,7 +5,7 @@ use crate::ir::{
         region::lift_cpu_cfg,
     },
     lowering::{lower, CompileError},
-    passes::{run, PassConfig},
+    passes::{licm, run, simd, PassConfig},
     runtime::compile::*,
 };
 #[test]
@@ -33,12 +33,17 @@ fn reachable_cfg_fixtures() {
             0xB8, 1, 0, 0, 0, 0x83, 0xF8, 1, 0x75, 3, 0x40, 0xEB, 2, 0x03, 0x06, 0x90,
         ],
         vec![0xB9, 0, 0, 0, 0, 0xE3, 2, 0x0F, 0xA2, 0x40],
+        // Explicit preheader; invariant EBX + EDX feeds a loop-carried EAX.
+        vec![0x90, 0x89, 0xD8, 0x01, 0xD0, 0x49, 0x75, 0xF9],
+        // Two packed permutations compose to identity, but both SSE guards
+        // and their instruction accounting must remain observable.
+        vec![0x66, 0x0F, 0x70, 0xC1, 0x1B, 0x66, 0x0F, 0x70, 0xC0, 0x1B],
     ];
     let mut cases = vec![];
     for (n, bytes) in programs.iter().enumerate() {
         for mode in [false, true] {
             // Memory fixture uses [ESI] and the vector prefix requires 32-bit default.
-            if !mode && matches!(n, 1 | 2 | 10 | 12..=16) {
+            if !mode && matches!(n, 1 | 2 | 10 | 12..=16 | 18) {
                 continue;
             }
             for pc in [0x1000u32, 0xFFFFFFFC] {
@@ -50,6 +55,14 @@ fn reachable_cfg_fixtures() {
                         let mut r = original.clone();
                         if opt {
                             run(&mut r, PassConfig::default()).unwrap();
+                            let vectors = simd::run(&mut r, simd::DEFAULT_WORK_LIMIT).unwrap();
+                            if n == 18 {
+                                assert!(vectors.eliminated > 0);
+                            }
+                            let loops = licm::run(&mut r, licm::DEFAULT_WORK_LIMIT).unwrap();
+                            if n == 17 && mode && pc == 0x1000 {
+                                assert!(loops.hoisted > 0);
+                            }
                         }
                         let mir = lower(&r).unwrap();
                         assert!(mir.control.dynamic_counts);

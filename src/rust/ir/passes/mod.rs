@@ -2,8 +2,10 @@
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
+pub mod simd;
 #[derive(Clone, Copy)]
 pub struct PassConfig {
     pub prune: bool,
@@ -37,6 +39,9 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub loop_hoisted: usize,
+    pub simd_rewritten: usize,
+    pub simd_eliminated: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;

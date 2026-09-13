@@ -8,7 +8,7 @@ use crate::ir::{
         region::lift_cpu_cfg,
     },
     lowering::{lower, CompileError},
-    passes::{run, PassConfig, PassStats},
+    passes::{licm, run, simd, PassConfig, PassStats},
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Backend {
@@ -202,11 +202,40 @@ fn compile_inner(
             request.default_32,
         )?
     };
-    let passes = if config.optimize {
+    let mut passes = if config.optimize {
         run(&mut region, config.passes).map_err(CompileError::InvalidIr)?
     } else {
         PassStats::default()
     };
+    // Cold Tier 1 never pays for loop discovery. The master optimization switch
+    // and zero-round diagnostic configuration also disable code motion.
+    if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
+        let vectors =
+            simd::run(&mut region, simd::DEFAULT_WORK_LIMIT).map_err(CompileError::InvalidIr)?;
+        passes.simd_rewritten = vectors.rewritten;
+        passes.simd_eliminated = vectors.eliminated;
+        // Clean up bypassed shuffle/replacement chains without repeating CFG
+        // transforms or enabling a pass the caller explicitly disabled.
+        if config.passes.dce && vectors.rewritten + vectors.eliminated != 0 {
+            let cleanup = run(
+                &mut region,
+                PassConfig {
+                    prune: false,
+                    merge: false,
+                    phis: false,
+                    fold: false,
+                    gvn: false,
+                    dce: true,
+                    rounds: 1,
+                },
+            )
+            .map_err(CompileError::InvalidIr)?;
+            passes.removed += cleanup.removed;
+        }
+        passes.loop_hoisted = licm::run(&mut region, licm::DEFAULT_WORK_LIMIT)
+            .map_err(CompileError::InvalidIr)?
+            .hoisted;
+    }
     let mut mir = lower(&region)?;
     drop(region);
     let mir_folds = if config.optimize { mir.fold_constants()? } else { 0 };
