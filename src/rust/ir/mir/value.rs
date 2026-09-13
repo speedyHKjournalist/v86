@@ -105,6 +105,7 @@ pub enum Step {
     Value(ValueId),
     I32(i32),
     I64(i64),
+    V128([u8; 16]),
     Scalar(Scalar),
     Read {
         cpu: Reading,
@@ -159,6 +160,7 @@ pub fn lower(region: &Region, inst: &Instruction) -> Option<ValuePlan> {
         } else {
             Step::I32(n as i32)
         }),
+        Op::VectorConst(bytes) => steps.push(Step::V128(bytes)),
         Op::ReadSegment(segment) => read(
             &mut steps,
             Address::Absolute(gp::get_sreg_offset(segment as u32)),
@@ -482,6 +484,7 @@ fn verify_expression_with(
             Step::Value(value) => stack.push(ty(*value)?),
             Step::I32(_) => stack.push(I32),
             Step::I64(_) => stack.push(I64),
+            Step::V128(_) => stack.push(V128),
             Step::Scalar(Scalar::Select) => {
                 if stack.pop() != Some(I32) {
                     return Err(invalid());

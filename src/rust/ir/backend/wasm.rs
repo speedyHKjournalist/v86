@@ -773,6 +773,7 @@ impl Emitter<'_> {
                 Step::Value(value) => self.get(*value),
                 Step::I32(n) => self.w.const_i32(*n),
                 Step::I64(n) => self.w.const_i64(*n),
+                Step::V128(bytes) => self.w.simd_const(*bytes),
                 Step::Scalar(op) => super::scalar::emit(&mut self.w, *op),
                 Step::Read { cpu, standalone } => {
                     self.read_value(if self.cpu { cpu } else { standalone })

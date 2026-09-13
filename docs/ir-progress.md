@@ -18,8 +18,8 @@
 | IR-07 | 部分完成 | 近 CALL/RET、FF /2 与 /4 间接转移及动态 EIP StateMap；已增加单次 MOVS/CMPS/STOS/LODS/SCAS 原生执行；已增加标量 IN/OUT 和单次 INS/OUTS；已接入有界 REP HIR、进度映射及最终提交；已增加 CPUID/RDTSC/RDMSR/WRMSR 终端适配；已增加 SYSENTER/SYSEXIT、HLT/CLI/CLTS/WBINVD；已增加 CR/DR 传送与 CPU 地址映射变更适配；已增加描述符表、SMSW/LMSW 与 INVLPG；已增加 SLDT/STR 与 LLDT/LTR；已增加 LAR/LSL、VERR/VERW；在线 REP 调度、远转移及其余特权/系统指令待实现 |
 | IR-08 | 部分完成 | XMM V128 SSA、快照、typed locals/边复制，以及 packed/scalar SIMD 传送的原生 RAM 与精确慢路径已实现；已增加 38 种 packed integer 算术/比较/乘法/逻辑及 PS/PD 逻辑别名；已增加打包/解包、变量及立即数 packed 移位；已增加 PSHUF/SHUF 重排；已增加半部传送、MOVD/MOVQ 和重复 lane；已增加符号位掩码、PINSRW/PEXTRW、非临时存储和 LDDQU；已增加 MASKMOVDQU 原生 RAM 与有序慢路径；其余 SIMD 状态/传送、MMX、FP 控制、F80/x87 和无 SIMD 降级仍待实现 |
 | IR-09 | 部分基础 | 整数后端可执行 CFG 和寄存器代码；已增加冷 CPU 入口及真实状态 ABI，可执行具备完整动态计数映射的 CPU 循环；CompileRequest 产物已有显式入口键及执行前校验，实验 CPU Wasm 内可直接执行 IR 编译，显式发布的入口已参与正常 CPU 分派；已有可选的自动热度、区域编译和优化升档；完整 Tier 1 语义、成熟区域选择和系统验收仍未完成 |
-| IR-10 | 部分基础 | 有界常量折叠、支配关系 GVN、trivial phi 消除、StateMap-aware DCE、常量分支裁剪和保留预算检查的直线块合并；已有独立 MIR 字面量常量折叠；其余跨块 FLAGS/状态同步优化未完成 |
-| IR-11 | 未实现 | proof-based 访存复用、forwarding、LICM、循环及 SIMD 优化 |
+| IR-10 | 部分基础 | 有界常量折叠、支配关系 GVN、trivial phi 消除、StateMap-aware DCE、常量分支裁剪和保留预算检查的直线块合并；已有独立 MIR 字面量常量折叠及有界标量恒等式简化；其余跨块 FLAGS/状态同步优化未完成 |
+| IR-11 | 部分实现 | 已接入有界自然循环 LICM、标量/SIMD 恒等式、shuffle/lane 数据流简化及位精确向量常量；保留 helper/异常/预算观察点；proof-based 访存复用、forwarding、其余循环优化未实现 |
 | IR-12 | 部分基础 | 不可变编译请求及 generation/dependency/入口/映射比较已实现；已有只读 CPU 代码快照、单个未发布产物句柄和重校验；共享在线 legacy 桥接已有票据校验、安装前拒绝、缓存取消和浏览器失败回收；已有共享槽池中的 IR 缓存、物理代码页监视和冷执行帧返回后的回收；已有有界自动编译、失败抑制和自动入口淘汰；完整共享版本/链接图及生产策略验收仍未完成 |
 | IR-13 | 完整矩阵未完成 | 已执行 IR 差分和部分生产 legacy/Worker/API 回归；GPU 间歇失败、PIC 跳过等结果有单独记录；已有 Node 中显式/自动 IR 缓存分派及升档测试，以及公开后端在真实浏览器主线程/Worker 的升档、SMC、双向跨后端快照和错误上报测试；完整在线 IR、XP、应用及性能矩阵未完成 |
 | IR-14 | 未实现 | 默认后端仍为 legacy，旧 emitter 未退役 |
@@ -753,3 +753,14 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
   `build/ir-auto-publication-fixed.log`、`build/ir-auto-publication-fixed-stress.log`。
 - 实验特性检查、普通 debug 构建、生产/实验导入与导出隔离、空白检查通过。
   本轮未新增浏览器宿主、OS 启动或性能验收，完整 IR-00～IR-14 目标仍未完成。
+
+## 后续推进：有界 LICM 与标量/SIMD 数据流
+
+- 实际优化管线已接入自然循环 LICM；Tier 1 跳过外提，Tier 2 消费 Rust 配置。
+  指令 ID、CFG 和恢复观察点不变，单次 pass 预算失败原子返回。
+- 加入标量恒等式、字节 shuffle 合并、lane 转发/覆盖、位精确 `v128.const`。
+  统一改写 StateMap 引用，保留 SSE guard、MMIO、helper 和故障提交顺序。
+- 新增 12 项 Rust 测试及独立 Wasm oracle；大型整数 SIMD/shuffle 差分改为
+  有界 fixture 缓存，不减少用例，避免一次性保留过多可执行模块。
+- 本次不是 IR-00～IR-14 完成声明；访存证明、剩余 ISA、XP/性能验收及 legacy
+  退役仍未完成。准确范围、测试数和环境限制见 [数据流实现说明](ir-dataflow-optimizations.md)。

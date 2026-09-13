@@ -299,6 +299,10 @@ pub fn verify(region: &Region) -> Result<()> {
                         "constant width overflow",
                     )?;
                 },
+                Op::VectorConst(_) => require(
+                    args.is_empty() && results == [Type::V128],
+                    "vector constant signature",
+                )?,
                 Op::Binary(op) => {
                     require(args.len() == 2 && results.len() == 1, "binary arity")?;
                     require(

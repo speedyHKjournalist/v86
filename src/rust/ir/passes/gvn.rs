@@ -6,6 +6,7 @@ fn eligible(op: &Op) -> bool {
     matches!(
         op,
         Op::Const(_)
+            | Op::VectorConst(_)
             | Op::Binary(_)
             | Op::Select
             | Op::Extend { .. }

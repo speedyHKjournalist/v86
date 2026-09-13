@@ -2,16 +2,23 @@
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
+pub mod simplify;
 #[derive(Clone, Copy)]
 pub struct PassConfig {
     pub prune: bool,
     pub merge: bool,
     pub phis: bool,
     pub fold: bool,
+    pub simplify: bool,
+    pub simplify_work_limit: usize,
     pub gvn: bool,
     pub dce: bool,
+    /// Move only total SSA expressions out of natural loops.
+    pub licm: bool,
+    pub licm_work_limit: usize,
     pub rounds: usize,
 }
 impl Default for PassConfig {
@@ -21,8 +28,12 @@ impl Default for PassConfig {
             merge: true,
             phis: true,
             fold: true,
+            simplify: true,
+            simplify_work_limit: simplify::DEFAULT_WORK_LIMIT,
             gvn: true,
             dce: true,
+            licm: true,
+            licm_work_limit: licm::DEFAULT_WORK_LIMIT,
             rounds: 2,
         }
     }
@@ -37,6 +48,12 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub loops: usize,
+    pub hoisted: usize,
+    pub licm_work: usize,
+    pub scalar_simplified: usize,
+    pub vector_simplified: usize,
+    pub simplify_work: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -52,6 +69,12 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
         if config.phis {
             trivial_phis(region, &mut stats);
             verify(region).map_err(|e| e.0)?;
+        }
+        if config.simplify {
+            let simplified = simplify::run(region, config.simplify_work_limit)?;
+            stats.scalar_simplified += simplified.scalar;
+            stats.vector_simplified += simplified.vector;
+            stats.simplify_work += simplified.work;
         }
         if config.fold {
             fold(region, &mut stats);
@@ -69,6 +92,12 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
             dce(region, &mut stats);
             verify(region).map_err(|e| e.0)?;
         }
+    }
+    if config.licm && config.rounds != 0 {
+        let motion = licm::run(region, config.licm_work_limit)?;
+        stats.loops = motion.loops;
+        stats.hoisted = motion.hoisted;
+        stats.licm_work = motion.work;
     }
     Ok(stats)
 }

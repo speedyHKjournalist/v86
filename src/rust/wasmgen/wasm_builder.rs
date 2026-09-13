@@ -615,9 +615,12 @@ impl WasmBuilder {
         self.simd(0x0D);
         self.instruction_body.extend_from_slice(&lanes);
     }
-    pub fn simd_zero(&mut self) {
+    pub fn simd_const(&mut self, bytes: [u8; 16]) {
         self.simd(0x0C);
-        self.instruction_body.extend_from_slice(&[0; 16]);
+        self.instruction_body.extend_from_slice(&bytes);
+    }
+    pub fn simd_zero(&mut self) {
+        self.simd_const([0; 16]);
     }
     pub fn if_v128(&mut self) {
         self.open_block();

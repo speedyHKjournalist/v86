@@ -406,6 +406,10 @@ fn dce_keeps_snapshot_only_values_and_ordered_helpers() {
             fold: false,
             gvn: false,
             dce: true,
+            simplify: false,
+            simplify_work_limit: crate::ir::passes::simplify::DEFAULT_WORK_LIMIT,
+            licm: false,
+            licm_work_limit: crate::ir::passes::licm::DEFAULT_WORK_LIMIT,
             rounds: 1,
         },
     )

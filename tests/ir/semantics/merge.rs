@@ -21,6 +21,10 @@ fn only_merge() -> PassConfig {
         fold: false,
         gvn: false,
         dce: false,
+        simplify: false,
+        simplify_work_limit: crate::ir::passes::simplify::DEFAULT_WORK_LIMIT,
+        licm: false,
+        licm_work_limit: crate::ir::passes::licm::DEFAULT_WORK_LIMIT,
         rounds: 1,
     }
 }

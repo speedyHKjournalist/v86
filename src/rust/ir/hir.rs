@@ -23,6 +23,8 @@ pub enum RmwOrder {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Op {
     Const(u64),
+    /// A bit-exact SIMD value, independent of host/guest floating-point modes.
+    VectorConst([u8; 16]),
     Binary(Binary),
     Select,
     Extend {
