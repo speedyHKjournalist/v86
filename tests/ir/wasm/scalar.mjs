@@ -80,15 +80,15 @@ function inputs(bits) {
     }
     return [...new Set(values.map(n => n & mask))];
 }
-let oracleChecks = 0;
+let oracle_checks = 0;
 for(const [bits, name] of cases) {
     for(const x of inputs(bits)) {
         const y = BigInt.asUintN(bits, ~x);
         assert.equal(expression(bits, name, x, y), simplified(bits, name, x, y), `${bits}/${name}/${x}`);
-        oracleChecks++;
+        oracle_checks++;
     }
 }
-console.log(`PASS: ${oracleChecks} independent scalar identity checks (not a Rust compiler execution)`);
+console.log(`PASS: ${oracle_checks} independent scalar identity checks (not a Rust compiler execution)`);
 
 if(!process.argv.includes("--oracle-only")) {
     const manifest = JSON.parse(fs.readFileSync("build/ir-scalar/cases.json", "utf8"));

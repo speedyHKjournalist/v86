@@ -33,8 +33,13 @@ fn candidate(r: &Region, i: &Instruction) -> bool {
         && !i.unmasked_word_store
         && matches!(
             i.op,
-            Op::Const(_) | Op::Binary(_) | Op::Select | Op::Extend { .. }
-                | Op::Truncate | Op::Extract { .. } | Op::Insert { .. }
+            Op::Const(_)
+                | Op::Binary(_)
+                | Op::Select
+                | Op::Extend { .. }
+                | Op::Truncate
+                | Op::Extract { .. }
+                | Op::Insert { .. }
         )
 }
 fn definition(r: &Region, v: ValueId) -> Option<&Instruction> {
@@ -72,22 +77,38 @@ fn identity(
             }
             match op {
                 Binary::Add | Binary::Or | Binary::Xor => {
-                    if cb == Some(0) { return Some(Rewrite::Value(a)); }
-                    if ca == Some(0) { return Some(Rewrite::Value(b)); }
+                    if cb == Some(0) {
+                        return Some(Rewrite::Value(a));
+                    }
+                    if ca == Some(0) {
+                        return Some(Rewrite::Value(b));
+                    }
                     if op == Binary::Or && (ca == Some(mask) || cb == Some(mask)) {
                         return Some(Rewrite::Constant(mask));
                     }
                 },
                 Binary::Sub if cb == Some(0) => return Some(Rewrite::Value(a)),
                 Binary::Mul => {
-                    if ca == Some(0) || cb == Some(0) { return Some(Rewrite::Constant(0)); }
-                    if cb == Some(1) { return Some(Rewrite::Value(a)); }
-                    if ca == Some(1) { return Some(Rewrite::Value(b)); }
+                    if ca == Some(0) || cb == Some(0) {
+                        return Some(Rewrite::Constant(0));
+                    }
+                    if cb == Some(1) {
+                        return Some(Rewrite::Value(a));
+                    }
+                    if ca == Some(1) {
+                        return Some(Rewrite::Value(b));
+                    }
                 },
                 Binary::And => {
-                    if ca == Some(0) || cb == Some(0) { return Some(Rewrite::Constant(0)); }
-                    if cb == Some(mask) { return Some(Rewrite::Value(a)); }
-                    if ca == Some(mask) { return Some(Rewrite::Value(b)); }
+                    if ca == Some(0) || cb == Some(0) {
+                        return Some(Rewrite::Constant(0));
+                    }
+                    if cb == Some(mask) {
+                        return Some(Rewrite::Value(a));
+                    }
+                    if ca == Some(mask) {
+                        return Some(Rewrite::Value(b));
+                    }
                 },
                 // HIR integer shifts use Wasm's 32/64-bit count mask, NOT the
                 // guest's 8/16-bit operand width. Keep narrow nonzero shifts.
@@ -102,7 +123,9 @@ fn identity(
         Op::Select => {
             let yes = arg(1);
             let no = arg(2);
-            if yes == no { return Some(Rewrite::Value(yes)); }
+            if yes == no {
+                return Some(Rewrite::Value(yes));
+            }
             if let Some(condition) = literal(arg(0)) {
                 return Some(Rewrite::Value(if condition != 0 { yes } else { no }));
             }
@@ -123,7 +146,8 @@ fn identity(
         Op::Insert { lsb } => {
             let base = arg(0);
             let part = definition(r, arg(1))?;
-            if candidate(r, part) && part.op == (Op::Extract { lsb })
+            if candidate(r, part)
+                && part.op == (Op::Extract { lsb })
                 && aliases[part.args[0].index()] == base
             {
                 return Some(Rewrite::Value(base));
@@ -143,7 +167,9 @@ fn extract_insert(
     let inner = definition(r, base)?;
     if candidate(r, inner) && inner.op == (Op::Insert { lsb }) {
         let part = aliases[inner.args[1].index()];
-        if r.values[part.index()].ty == ty { return Some(Rewrite::Value(part)); }
+        if r.values[part.index()].ty == ty {
+            return Some(Rewrite::Value(part));
+        }
     }
     None
 }
@@ -177,9 +203,13 @@ pub fn run(r: &mut Region, work_limit: usize) -> Result<Stats, String> {
         // final StateMap-aware rewrite visits them too.
         work.spend(1)?;
         work.spend(i.args.len())?;
-        if !active[n] { continue; }
+        if !active[n] {
+            continue;
+        }
         expected += 1;
-        if let Op::Const(value) = i.op { constants[i.results[0].index()] = Some(value); }
+        if let Op::Const(value) = i.op {
+            constants[i.results[0].index()] = Some(value);
+        }
         for arg in &i.args {
             if let Definition::Instruction(producer, _) = r.values[arg.index()].definition {
                 if active[producer.index()] {
@@ -188,13 +218,19 @@ pub fn run(r: &mut Region, work_limit: usize) -> Result<Stats, String> {
                 }
             }
         }
-        if pending[n] == 0 { ready.push(n); }
+        if pending[n] == 0 {
+            ready.push(n);
+        }
     }
     // Reserve the complete remaining rewrite traversal before changing anything.
-    for state in &r.states { work.spend(state.values().len())?; }
+    for state in &r.states {
+        work.spend(state.values().len())?;
+    }
     for block in &r.blocks {
         work.spend(1)?;
-        for edge in block.terminator.as_ref().unwrap().edges() { work.spend(edge.args.len())?; }
+        for edge in block.terminator.as_ref().unwrap().edges() {
+            work.spend(edge.args.len())?;
+        }
     }
     let mut edits = Vec::new();
     let mut visited = 0;
@@ -223,10 +259,14 @@ pub fn run(r: &mut Region, work_limit: usize) -> Result<Stats, String> {
         work.spend(users[n].len())?;
         for &user in &users[n] {
             pending[user] -= 1;
-            if pending[user] == 0 { ready.push(user); }
+            if pending[user] == 0 {
+                ready.push(user);
+            }
         }
     }
-    if visited != expected { return Err("cycle in scalar SSA dependencies".into()); }
+    if visited != expected {
+        return Err("cycle in scalar SSA dependencies".into());
+    }
     // No fallible work follows. Existing operand dominance and exact type equality
     // make aliases valid at all old uses; literal replacements keep the old ID.
     for (n, value) in edits {
@@ -236,7 +276,9 @@ pub fn run(r: &mut Region, work_limit: usize) -> Result<Stats, String> {
     rewrite_values(r, |v| {
         // The verifier permits unused arena slots; never dereference a stale
         // out-of-range operand in such a slot. All live uses were verified.
-        if let Some(&value) = aliases.get(v.index()) { *v = value; }
+        if let Some(&value) = aliases.get(v.index()) {
+            *v = value;
+        }
     });
     Ok(stats)
 }
