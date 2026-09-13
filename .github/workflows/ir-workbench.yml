@@ -16,21 +16,23 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Prepare compiler
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Prepare assembler and browser dependencies
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add --toolchain stable wasm32-unknown-unknown
-          rustup component add --toolchain stable rustfmt
-      - name: Archive public source and isolated toolchain
-        run: |
-          git archive --format=tar HEAD | gzip -1 > ir-source.tar.gz
-          sysroot="$(rustc +stable --print sysroot)"
-          tar -C "$sysroot" --exclude='share/doc' --exclude='share/man' --exclude='lib/rustlib/src' -czf ir-toolchain.tar.gz bin/rustc bin/cargo bin/rustfmt lib
+          sudo apt-get update -y
+          sudo apt-get install -y nasm
+          mkdir -p build
+          make closure-compiler/compiler.jar build/libv86.mjs build/libv86.js build/cpu-worker.js build/jit-capacity.bin build/cpu-worker-test.bin
+          cp /usr/bin/nasm build/nasm
       - uses: actions/upload-artifact@v7
         with:
-          name: ir-workbench-${{ github.sha }}
+          name: ir-test-support-${{ github.sha }}
           retention-days: 1
-          compression-level: 0
           path: |
-            ir-source.tar.gz
-            ir-toolchain.tar.gz
+            closure-compiler/compiler.jar
+            build/nasm
+            build/*.mjs
+            build/*.js
+            build/*.bin
