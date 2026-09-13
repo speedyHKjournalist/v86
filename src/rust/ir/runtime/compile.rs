@@ -209,12 +209,11 @@ fn compile_inner(
     } else {
         PassStats::default()
     };
-    let loop_passes =
-        if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
-            licm::run(&mut region, licm::Config::default()).map_err(CompileError::InvalidIr)?
-        } else {
-            licm::Stats::default()
-        };
+    let loop_passes = if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
+        licm::run(&mut region, licm::Config::default()).map_err(CompileError::InvalidIr)?
+    } else {
+        licm::Stats::default()
+    };
     let mut mir = lower(&region)?;
     drop(region);
     let mir_folds = if config.optimize { mir.fold_constants()? } else { 0 };

@@ -6,6 +6,7 @@ use crate::ir::{
     analysis::loops::{LoopAnalysis, WorkBudget, MAX_BLOCKS},
     hir::*,
     ids::*,
+    types::Type,
     verify::verify,
 };
 
@@ -45,7 +46,7 @@ fn check_limits(region: &Region, config: Config) -> Result<(), String> {
     }
     Ok(())
 }
-fn movable(inst: &Instruction) -> bool {
+fn movable(region: &Region, inst: &Instruction) -> bool {
     // Keep an explicit speculatability whitelist. Neither !ordered() nor GVN
     // eligibility proves that executing an expression on an extra path is safe.
     let total = matches!(
@@ -67,7 +68,20 @@ fn movable(inst: &Instruction) -> bool {
             | Op::VectorExtract { .. }
             | Op::VectorReplace { .. }
     );
+    let data_only = inst.args.iter().chain(&inst.results).all(|v| {
+        matches!(
+            region.values[v.index()].ty,
+            Type::I1
+                | Type::I8
+                | Type::I16
+                | Type::I32
+                | Type::I64
+                | Type::V128
+                | Type::LinearAddress
+        )
+    });
     total
+        && data_only
         && inst.results.len() == 1
         && inst.state.is_none()
         && inst.commit.is_none()
@@ -104,19 +118,19 @@ pub fn run(region: &mut Region, config: Config) -> Result<Stats, String> {
             continue;
         };
         let before = stats.hoisted;
-        let mut blocks: Vec<_> = (0..candidate.blocks.len()).filter(|&b| lp.members[b]).collect();
+        let mut blocks: Vec<_> = (0..candidate.blocks.len())
+            .filter(|&b| lp.members[b])
+            .collect();
         // A strict dominator has fewer dominators. SSA producers are consequently
         // visited before their users even when block allocation order is reversed.
-        blocks.sort_by_key(|&b| {
-            (analysis.cfg.dominates[b].iter().filter(|&&v| v).count(), b)
-        });
+        blocks.sort_by_key(|&b| (analysis.cfg.dominates[b].iter().filter(|&&v| v).count(), b));
         for b in blocks {
             work.charge(candidate.blocks[b].instructions.len())?;
             let mut kept = Vec::with_capacity(candidate.blocks[b].instructions.len());
             for id in candidate.blocks[b].instructions.clone() {
                 work.charge(1)?;
                 let inst = &candidate.instructions[id.index()];
-                let mut invariant = movable(inst);
+                let mut invariant = movable(&candidate, inst);
                 if invariant {
                     for &arg in &inst.args {
                         work.charge(1)?;

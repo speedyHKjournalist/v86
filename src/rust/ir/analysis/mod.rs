@@ -1,2 +1,2 @@
 pub mod cfg;
-pub mod loops;
+pub(crate) mod loops;

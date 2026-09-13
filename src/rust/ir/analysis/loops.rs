@@ -100,9 +100,7 @@ impl LoopAnalysis {
             let mut outside = Vec::new();
             for &pred in &cfg.predecessors[h] {
                 work.charge(1)?;
-                if cfg.reachable[pred.index()]
-                    && !members[pred.index()]
-                    && !outside.contains(&pred)
+                if cfg.reachable[pred.index()] && !members[pred.index()] && !outside.contains(&pred)
                 {
                     outside.push(pred);
                 }
