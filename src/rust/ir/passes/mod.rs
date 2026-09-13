@@ -5,6 +5,7 @@ mod gvn;
 pub mod licm;
 mod merge;
 mod prune;
+pub mod simd;
 #[derive(Clone, Copy)]
 pub struct PassConfig {
     pub prune: bool,
@@ -39,6 +40,8 @@ pub struct PassStats {
     pub commoned: usize,
     pub removed: usize,
     pub loop_hoisted: usize,
+    pub simd_eliminated: usize,
+    pub simd_shuffled: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -57,6 +60,9 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
         }
         if config.fold {
             fold(region, &mut stats);
+            let vector = simd::run(region, simd::DEFAULT_WORK_LIMIT)?;
+            stats.simd_eliminated += vector.eliminated;
+            stats.simd_shuffled += vector.shuffled;
             verify(region).map_err(|e| e.0)?;
         }
         if config.prune {
