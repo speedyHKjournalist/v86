@@ -1,0 +1,74 @@
+name: IR core
+
+on:
+  pull_request:
+    branches: [ir]
+  push:
+    branches: [ir, 'chat/ir-*']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ir-core-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ir-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Compiler and independent decoder tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld
+      - name: Generate baseline dispatch tables and check IR decoder
+        run: |
+          mkdir -p build
+          make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
+          make ir-generated-check
+      - name: Native compiler regressions
+        run: env RUSTFLAGS="-D warnings" cargo test 2>&1 | tee build/ir-native-ci.log
+      - name: Independent Wasm and decoder oracles
+        run: |
+          node tests/ir/wasm/run.mjs
+          node tests/rust/verify-wasmgen-dummy-output.js
+          node tests/ir/decode/oracle.mjs
+      - name: Build CPU oracle and experimental runtime
+        run: |
+          make build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/v86-ir-runtime.wasm build/v86.wasm build/libv86.mjs build/jit-capacity.bin build/cpu-worker-test.bin
+      - name: CPU state, memory, control flow and SIMD differential tests
+        run: |
+          for suite in registers memory stack control shifts multiply bits exchange enter misc loops cfg system_stack segments strings io cpu_info cpu_system control_regs descriptor selector_query verr cmpxchg8b simd_moves simd_integer simd_immediate simd_shuffle simd_transfer simd_lane simd_masked canonical; do
+            node tests/ir/differential/$suite.mjs 2>&1 | tee build/ir-$suite-ci.log
+          done
+          node tests/ir/differential/canonical.mjs build/v86-ir-test-release.wasm
+          node tests/ir/differential/backend.mjs build/v86-ir-runtime.wasm
+      - name: Real browser and CPU Worker backend
+        run: |
+          export GL_CHROME="$(command -v google-chrome || command -v chromium)"
+          test -x "$GL_CHROME"
+          node tests/glbridge/gl_multipass_browser_runner.js ir_backend_browser_test.html 2>&1 | tee build/ir-browser-ci.log
+      - name: Check tracked generated sources
+        run: git diff --exit-code
+      - name: Preserve validation logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-core-validation-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: build/ir-*-ci.log

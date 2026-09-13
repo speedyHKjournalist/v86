@@ -1,0 +1,74 @@
+name: Apply verified IR changes
+on:
+  push:
+    branches: ['chat/ir-11-bounded-2f475484']
+    paths: ['.github/workflows/ir-apply.yml']
+permissions:
+  contents: write
+defaults:
+  run:
+    shell: bash
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Verify source transfer and apply exact tested patch
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, pathlib, subprocess
+          chunks = [pathlib.Path(f'.ir-chat-transfer/{i:02}.b64') for i in range(6)]
+          payload = lzma.decompress(base64.b64decode(b''.join(p.read_bytes() for p in chunks), validate=True))
+          assert hashlib.sha256(payload).hexdigest() == '2f475484d8d7633c405f093779bacf36464be2358543b44c315cf99774429eed'
+          manifest = json.loads(payload)
+          names = []
+          for item in manifest['files']:
+              name = item['path']
+              p = pathlib.PurePosixPath(name)
+              assert not p.is_absolute() and '..' not in p.parts
+              assert name == 'Makefile' or name.startswith(('docs/', 'src/rust/ir/', 'tests/ir/'))
+              names.append(name)
+              old = subprocess.run(['git', 'rev-parse', '--verify', f'HEAD:{name}'], capture_output=True, text=True)
+              actual = old.stdout.strip() if old.returncode == 0 else None
+              assert actual == item['old_sha'], (name, actual, item['old_sha'])
+          assert len(names) == len(set(names)) == 20
+          patch = pathlib.Path(os.environ['RUNNER_TEMP']) / 'ir-verified.patch'
+          patch.write_text(manifest['patch'])
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          for item in manifest['files']:
+              actual = subprocess.check_output(['git', 'hash-object', item['path']], text=True).strip()
+              assert actual == item['new_sha'], (item['path'], actual)
+          (pathlib.Path(os.environ['RUNNER_TEMP']) / 'ir-source-paths.json').write_text(json.dumps(names))
+          print('Verified and applied all 20 source/test/documentation files')
+          PY
+      - name: Compiler tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm
+      - name: Recheck compiler and new execution oracles
+        run: |
+          mkdir -p build
+          make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs ir-generated-check
+          env RUSTFLAGS="-D warnings" cargo test
+          node tests/ir/wasm/licm.mjs
+          node tests/ir/wasm/canonical.mjs
+          node tests/ir/wasm/instance_cache.mjs
+      - name: Commit verified sources to the work branch
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          paths = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'ir-source-paths.json').read_text())
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          subprocess.run(['git', 'add', '--', *paths], check=True)
+          subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], check=True)
+          subprocess.run(['git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], check=True)
+          subprocess.run(['git', 'commit', '-m', 'feat(ir): add bounded LICM and scalar/SIMD canonicalization with differential oracles'], check=True)
+          subprocess.run(['git', 'push', 'origin', 'HEAD:refs/heads/chat/ir-11-bounded-2f475484'], check=True)
+          PY
