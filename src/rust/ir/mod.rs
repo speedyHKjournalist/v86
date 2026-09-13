@@ -22,6 +22,9 @@ pub mod lowering;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/memory.rs"]
 mod memory_tests;
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/store_continuation.rs"]
+mod store_continuation_tests;
 pub mod mir;
 pub mod passes;
 pub mod runtime;
