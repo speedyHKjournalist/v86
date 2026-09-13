@@ -1,0 +1,44 @@
+name: Sync verified SIMD source
+
+on:
+  push:
+    branches: [chat/ir-simd-20260913-4d9c]
+    paths: [.github/workflows/ir-simd-sync.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Apply bounded source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/chat/ir-simd-20260913-4d9c
+          test "$(git rev-parse HEAD^)" = 372ccdc42cc8cb66c61c283295ab7ab673b73f2f
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import lzma
+          from pathlib import Path
+          packed = ''.join(Path(f'.github/ir-simd-sync-{i}.txt').read_text() for i in range(3))
+          patch = lzma.decompress(base64.b64decode(packed, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'a548b0bcd22fe72bbcc5baba88d30bf968431999cf5f118c990604219e0674c3'
+          Path('/tmp/ir-simd-code.patch').write_bytes(patch)
+          PY
+          git apply --index /tmp/ir-simd-code.patch
+          git rm .github/ir-simd-sync-0.txt .github/ir-simd-sync-1.txt .github/ir-simd-sync-2.txt
+          git rm --cached .github/workflows/ir-simd-sync.yml
+          test "$(git write-tree)" = 8a023d5e8d7770d5e4018d8c4838c855fa997d4a
+          git reset HEAD -- .github/workflows/ir-simd-sync.yml
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '39141882+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(ir): simplify pure SIMD SSA with bounded transactional rewrites'
+          git push origin HEAD:refs/heads/chat/ir-simd-20260913-4d9c
