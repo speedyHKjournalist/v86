@@ -3,9 +3,10 @@
 //! Only total, pure SSA expressions may move. CPU reads are NOT pure, even when
 //! `Op::ordered()` is false. Memory, checks, helpers, polls and recovery points
 //! retain their order. No address/permission proof is inferred by this pass.
-use crate::ir::{analysis::cfg::Cfg, hir::*, ids::*, verify::verify};
+use crate::ir::{analysis::cfg::Cfg, helper::HelperAbi, hir::*, ids::*, verify::verify};
 
 pub const DEFAULT_WORK_LIMIT: usize = 1_000_000;
+const MAX_METADATA_ITEMS: usize = 131_072;
 
 #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
 pub struct Stats {
@@ -34,6 +35,53 @@ struct NaturalLoop {
     header: usize,
     preheader: usize,
     members: Vec<bool>,
+}
+
+// Arena counts do not bound nested vectors and strings. Audit their aggregate
+// size before cloning or verifying, without following potentially invalid IDs.
+fn check_limits(region: &Region) -> Result<(), String> {
+    if region.blocks.len() > 64
+        || region.entries.len() > 64
+        || region.instructions.len() > 8192
+        || region.values.len() > 16384
+        || region.states.len() > 8192
+        || region.helpers.len() > 1024
+    {
+        return Err("LICM region budget exceeded".into());
+    }
+    let mut remaining = MAX_METADATA_ITEMS;
+    let mut take = |amount: usize| -> Result<(), String> {
+        remaining = remaining
+            .checked_sub(amount)
+            .ok_or("LICM metadata budget exceeded")?;
+        Ok(())
+    };
+    for block in &region.blocks {
+        take(block.params.len())?;
+        take(block.instructions.len())?;
+        if let Some(term) = &block.terminator {
+            for edge in term.edges() {
+                take(edge.args.len())?;
+            }
+        }
+    }
+    for inst in &region.instructions {
+        take(inst.args.len())?;
+        take(inst.results.len())?;
+    }
+    for state in &region.states {
+        take(state.xmm.len())?;
+        take(state.x87.len())?;
+    }
+    for helper in &region.helpers {
+        take(helper.name.len())?;
+        take(helper.params.len())?;
+        take(helper.results.len())?;
+        if let HelperAbi::Outcome { fault_delivery: Some(name), .. } = &helper.abi {
+            take(name.len())?;
+        }
+    }
+    Ok(())
 }
 
 fn eligible(inst: &Instruction) -> bool {
@@ -147,16 +195,10 @@ fn discover(region: &Region, cfg: &Cfg, work: &mut Work) -> Result<Vec<NaturalLo
 
 /// Atomically optimize a verified region. An error leaves the caller's arenas,
 /// scheduling and recovery maps unchanged. The work limit covers discovery and
-/// candidate/operand visits; fixed arena caps bound the verifier and cloning.
+/// candidate/operand visits; arena and aggregate metadata caps bound the input
+/// to verification and cloning, whose internal work is not charged to `work`.
 pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
-    if region.blocks.len() > 64
-        || region.instructions.len() > 8192
-        || region.values.len() > 16384
-        || region.states.len() > 8192
-        || region.helpers.len() > 1024
-    {
-        return Err("LICM region budget exceeded".into());
-    }
+    check_limits(region)?;
     let mut work = Work {
         remaining: work_limit,
         used: 0,
@@ -312,5 +354,53 @@ mod no_motion_tests {
         let invalid = format!("{region:?}");
         assert!(run(&mut region, DEFAULT_WORK_LIMIT).is_err());
         assert_eq!(format!("{region:?}"), invalid);
+    }
+
+    #[test]
+    fn metadata_limits_precede_verification_of_invalid_ids() {
+        for kind in 0..11 {
+            let mut region = fixture(false);
+            let value = region.instructions[0].results[0];
+            match kind {
+                0 => region.blocks[0].instructions = vec![InstId(u32::MAX); MAX_METADATA_ITEMS + 1],
+                1 => region.blocks[0].params = vec![value; MAX_METADATA_ITEMS + 1],
+                2 => region.instructions[0].args = vec![value; MAX_METADATA_ITEMS + 1],
+                3 => region.instructions[0].results = vec![value; MAX_METADATA_ITEMS + 1],
+                4 => {
+                    region.blocks[0].terminator = Some(Terminator::Branch(Edge {
+                        target: BlockId(0),
+                        args: vec![value; MAX_METADATA_ITEMS + 1],
+                    }));
+                },
+                5 => region.states[0].xmm = vec![value; MAX_METADATA_ITEMS + 1],
+                6 => region.states[0].x87 = vec![value; MAX_METADATA_ITEMS + 1],
+                7 => region.helpers.push(crate::ir::helper::HelperDescriptor::conservative(
+                    "h".repeat(MAX_METADATA_ITEMS + 1),
+                    vec![],
+                    vec![],
+                )),
+                8 => region.helpers.push(crate::ir::helper::HelperDescriptor::conservative(
+                    "helper".into(),
+                    vec![Type::I32; MAX_METADATA_ITEMS + 1],
+                    vec![],
+                )),
+                9 => region.helpers.push(crate::ir::helper::HelperDescriptor::conservative(
+                    "helper".into(),
+                    vec![],
+                    vec![Type::I32; MAX_METADATA_ITEMS + 1],
+                )),
+                _ => {
+                    // Individually small vectors must share the same total cap.
+                    region.instructions[0].args = vec![value; MAX_METADATA_ITEMS / 2];
+                    region.instructions[0].results = vec![value; MAX_METADATA_ITEMS / 2];
+                },
+            }
+            let before = format!("{region:?}");
+            assert_eq!(
+                run(&mut region, DEFAULT_WORK_LIMIT).unwrap_err(),
+                "LICM metadata budget exceeded"
+            );
+            assert_eq!(format!("{region:?}"), before);
+        }
     }
 }
