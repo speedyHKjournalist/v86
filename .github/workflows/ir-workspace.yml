@@ -1,0 +1,35 @@
+name: IR workspace bootstrap
+
+on:
+  push:
+    branches: ['chat/ir-continuation-20260913']
+    paths: ['.github/workflows/ir-workspace.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  references:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 372ccdc42cc8cb66c61c283295ab7ab673b73f2f
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Package exact baseline objects, without configuration or credentials
+        run: |
+          set -euo pipefail
+          git cat-file -e 8ee73e538daaab15411344d39a1f271e778ac7f3:src/rust/cpu/string.rs
+          git cat-file -e 8ee73e538daaab15411344d39a1f271e778ac7f3:src/rust/cpu/cpu.rs
+          tar -C .git -czf /tmp/ir-git-objects.tar.gz objects
+          sha256sum /tmp/ir-git-objects.tar.gz > /tmp/ir-git-objects.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-reference-objects
+          path: |
+            /tmp/ir-git-objects.tar.gz
+            /tmp/ir-git-objects.sha256
+          retention-days: 1
+          compression-level: 0
