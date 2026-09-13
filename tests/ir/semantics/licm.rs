@@ -128,10 +128,7 @@ fn failure_is_atomic_even_after_partial_planning() {
     for _ in 0..65 {
         oversized.block(true);
     }
-    assert_eq!(
-        run(&mut oversized, DEFAULT_WORK_LIMIT).unwrap_err(),
-        "LICM region budget exceeded"
-    );
+    assert_eq!(run(&mut oversized, DEFAULT_WORK_LIMIT).unwrap_err(), "LICM region budget exceeded");
 }
 
 // CFG-only fixtures need no CPU observations or budget snapshots: they test
@@ -154,7 +151,7 @@ fn graph(edges: &[&[usize]], entries: &[usize]) -> Region {
                     taken: edge(*taken),
                     not_taken: edge(*not_taken),
                 }
-            },
+            }
             _ => panic!("fixture needs one or two edges"),
         };
         r.terminate(block, term);
@@ -230,7 +227,9 @@ fn whitelist_rejects_observations_faults_and_metadata() {
             0 => inst.state = Some(StateId(0)),
             1 => inst.commit = Some(StateId(0)),
             2 => inst.trap_after_fault = true,
-            _ => inst.unmasked_word_store = true,
+            _ => {
+                inst.unmasked_word_store = true
+            }
         }
         assert!(!super::eligible(&inst));
     }

@@ -209,14 +209,22 @@ fn compile_inner(
     };
     // Keep Tier 1 inexpensive. The existing GVN switch controls the Tier 2
     // pure-dataflow family; optimize=false and rounds=0 also disable LICM.
-    if config.optimize && request.tier == Tier::Two && config.passes.gvn && config.passes.rounds != 0 {
+    if config.optimize
+        && request.tier == Tier::Two
+        && config.passes.gvn
+        && config.passes.rounds != 0
+    {
         passes.loop_hoisted = licm::run(&mut region, licm::DEFAULT_WORK_LIMIT)
             .map_err(CompileError::InvalidIr)?
             .hoisted;
     }
     let mut mir = lower(&region)?;
     drop(region);
-    let mir_folds = if config.optimize { mir.fold_constants()? } else { 0 };
+    let mir_folds = if config.optimize {
+        mir.fold_constants()?
+    } else {
+        0
+    };
     let code = if cpu {
         emit_cpu_entry(&mir, config.execution_budget, request.cpu_entry())?
     } else {

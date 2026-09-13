@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [ir]
   push:
-    branches: ['chat/ir-*']
+    branches: [ir]
 
 permissions:
   contents: read
@@ -48,7 +48,7 @@ jobs:
           node tests/ir/decode/oracle.mjs
       - name: Rust formatting
         if: always()
-        run: RUSTC_BOOTSTRAP=1 cargo +stable fmt --all -- --check
+        run: cargo +stable fmt --all -- --check
       - name: Check tracked generated sources
         run: git diff --exit-code
 
