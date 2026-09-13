@@ -19,7 +19,7 @@
 | IR-08 | 部分完成 | XMM V128 SSA、快照、typed locals/边复制，以及 packed/scalar SIMD 传送的原生 RAM 与精确慢路径已实现；已增加 38 种 packed integer 算术/比较/乘法/逻辑及 PS/PD 逻辑别名；已增加打包/解包、变量及立即数 packed 移位；已增加 PSHUF/SHUF 重排；已增加半部传送、MOVD/MOVQ 和重复 lane；已增加符号位掩码、PINSRW/PEXTRW、非临时存储和 LDDQU；已增加 MASKMOVDQU 原生 RAM 与有序慢路径；其余 SIMD 状态/传送、MMX、FP 控制、F80/x87 和无 SIMD 降级仍待实现 |
 | IR-09 | 部分基础 | 整数后端可执行 CFG 和寄存器代码；已增加冷 CPU 入口及真实状态 ABI，可执行具备完整动态计数映射的 CPU 循环；CompileRequest 产物已有显式入口键及执行前校验，实验 CPU Wasm 内可直接执行 IR 编译，显式发布的入口已参与正常 CPU 分派；已有可选的自动热度、区域编译和优化升档；完整 Tier 1 语义、成熟区域选择和系统验收仍未完成 |
 | IR-10 | 部分基础 | 有界常量折叠、支配关系 GVN、trivial phi 消除、StateMap-aware DCE、常量分支裁剪和保留预算检查的直线块合并；已有独立 MIR 字面量常量折叠；其余跨块 FLAGS/状态同步优化未完成 |
-| IR-11 | 未实现 | proof-based 访存复用、forwarding、LICM、循环及 SIMD 优化 |
+| IR-11 | 部分完成 | 已加入有界、事务式纯 SIMD SSA 化简：重排融合、通道转发/覆盖消除、位运算恒等化及独立字节 oracle；proof-based 访存复用、forwarding、LICM 及其余循环/SIMD 优化仍待完成 |
 | IR-12 | 部分基础 | 不可变编译请求及 generation/dependency/入口/映射比较已实现；已有只读 CPU 代码快照、单个未发布产物句柄和重校验；共享在线 legacy 桥接已有票据校验、安装前拒绝、缓存取消和浏览器失败回收；已有共享槽池中的 IR 缓存、物理代码页监视和冷执行帧返回后的回收；已有有界自动编译、失败抑制和自动入口淘汰；完整共享版本/链接图及生产策略验收仍未完成 |
 | IR-13 | 完整矩阵未完成 | 已执行 IR 差分和部分生产 legacy/Worker/API 回归；GPU 间歇失败、PIC 跳过等结果有单独记录；已有 Node 中显式/自动 IR 缓存分派及升档测试，以及公开后端在真实浏览器主线程/Worker 的升档、SMC、双向跨后端快照和错误上报测试；完整在线 IR、XP、应用及性能矩阵未完成 |
 | IR-14 | 未实现 | 默认后端仍为 legacy，旧 emitter 未退役 |
@@ -753,3 +753,16 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
   `build/ir-auto-publication-fixed.log`、`build/ir-auto-publication-fixed-stress.log`。
 - 实验特性检查、普通 debug 构建、生产/实验导入与导出隔离、空白检查通过。
   本轮未新增浏览器宿主、OS 启动或性能验收，完整 IR-00～IR-14 目标仍未完成。
+
+## 后续推进：纯 SIMD SSA 化简
+
+- 新增独立 `PassConfig::simd` 开关和命中统计，接入已有 HIR 管线；整数代码和无关
+  packed 运算先快速跳过。变换前后 verifier、私有副本提交及工作/arena 上限保证失败原子性。
+- 重排按实际选择的字节追踪来源，只融合能用至多两个输入表示的结果；通道转发
+  严格保留 16 位截断/零扩展，不处理部分重叠或未对齐的错误简化。
+- effect、CPU 读取、SSE 守卫、恢复/提交节点及客户机计数不移动；别名同时更新
+  全部 StateMap 和分支使用。没有新增访存证明或修改生产 ISA Pending 状态。
+- 新增 11 项 Rust 专项测试；868 个表达式 DAG × 68 组输入 × 四种优化配置，
+  共 236,096 次 Wasm 对照通过，包含独立字节/BigInt 结果模型和完整状态 backing 比较。
+- 这只是 IR-11 的可验证增量，不是完整 IR 或 XP/游戏/性能验收。实现、命令和边界见
+  [SIMD 化简说明](ir-simd-optimization.md)。远端 CI 以具体提交的运行结果为准。

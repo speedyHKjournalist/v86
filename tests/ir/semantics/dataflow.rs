@@ -21,6 +21,7 @@ fn config() -> PassConfig {
         fold: false,
         gvn: true,
         dce: false,
+        simd: false,
         rounds: 1,
     }
 }

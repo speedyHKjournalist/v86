@@ -4,6 +4,7 @@ use std::collections::HashSet;
 mod gvn;
 mod merge;
 mod prune;
+pub mod simd;
 #[derive(Clone, Copy)]
 pub struct PassConfig {
     pub prune: bool,
@@ -11,6 +12,7 @@ pub struct PassConfig {
     pub phis: bool,
     pub fold: bool,
     pub gvn: bool,
+    pub simd: bool,
     pub dce: bool,
     pub rounds: usize,
 }
@@ -22,6 +24,7 @@ impl Default for PassConfig {
             phis: true,
             fold: true,
             gvn: true,
+            simd: true,
             dce: true,
             rounds: 2,
         }
@@ -37,6 +40,7 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub simd_simplified: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -60,6 +64,9 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
         if config.prune {
             prune::run(region, &mut stats)?;
             verify(region).map_err(|e| e.0)?;
+        }
+        if config.simd && simd::may_simplify(region) {
+            stats.simd_simplified += simd::run(region, simd::DEFAULT_WORK_LIMIT)?.simplified();
         }
         if config.gvn {
             gvn::run(region, &mut stats)?;
