@@ -1,46 +1,52 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-// A separate arithmetic oracle prevents identical optimized/unoptimized bugs
-// from passing the full-budget cases. Compare the complete CPU snapshot at
-// each budget, including zero iterations and invalid external entry indices.
-const budgets = [1, 2, 3, 4, 5, 8, 17, 100];
-const counts = [0, 1, 2, 3, 7, 15, 31];
-const values = [0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x12345678];
+const memory = new WebAssembly.Memory({initial: 64});
+const words = new Uint32Array(memory.buffer);
 let executions = 0;
-for(const budget of budgets) {
-    const modules = [false, true].map(opt => {
-        const bytes = fs.readFileSync(`build/ir-licm/loop-${budget}-${opt}.wasm`);
-        assert(WebAssembly.validate(bytes), `LICM module budget=${budget} opt=${opt}`);
-        return new WebAssembly.Module(bytes);
-    });
-    for(const count of counts) {
-        for(let sample = 0; sample < values.length; sample++) {
-            const x = values[sample];
-            const y = values[(sample + 1) % values.length];
-            const z = values[(sample + 3) % values.length];
-            for(const entry of [0, -1, 1]) {
-                const outputs = modules.map(module => {
-                    const m = new WebAssembly.Memory({initial: 64});
-                    const state = new Uint32Array(m.buffer);
-                    state.set([count, 0x76543210, x, y, z, 5, 6, 7, 0xAD7, 0x1000, 0, 0xDEADBEEF]);
-                    new WebAssembly.Instance(module, {e: {m}}).exports.f(entry);
-                    executions++;
-                    return Array.from(state.slice(0, 16));
-                });
-                const label = `budget=${budget} count=${count} sample=${sample} entry=${entry}`;
-                assert.deepEqual(outputs[1], outputs[0], label);
-                if(entry !== 0) {
-                    assert.deepEqual(outputs[0].slice(0, 12),
-                        [count, 0x76543210, x, y, z, 5, 6, 7, 0xAD7, 0x1000, 0, 0xDEADBEEF], label);
-                } else if(budget === 100) {
-                    const increment = Math.imul((x + y) >>> 0, z);
-                    assert.equal(outputs[0][0], 0, `${label}: loop completed`);
-                    assert.equal(outputs[0][1], Math.imul(count, increment) >>> 0, `${label}: arithmetic oracle`);
-                    assert.equal(outputs[0][9], 0x3000, `${label}: exit EIP`);
+for(const poll of [false, true]) {
+    for(const budget of [1, 2, 3, 4, 5, 8, 16, 32, 100]) {
+        const instances = [false, true].map(optimized => {
+            const bytes = fs.readFileSync(`build/ir-licm/loop-${poll}-${budget}-${optimized}.wasm`);
+            assert(WebAssembly.validate(bytes));
+            return new WebAssembly.Instance(new WebAssembly.Module(bytes), {e: {m: memory}});
+        });
+        for(const a of [0, 123, 0xFFFFFFFF]) {
+            for(const n of [0, 1, 2, 7, 12]) {
+                for(const c of [0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF]) {
+                    for(const d of [0, 1, 3, 0xFFFFFFFF]) {
+                        for(const flags of [2, 0x8D7]) {
+                            const input = [a, n, c, d, 0x90000, 0x12345678, 0xABCDEF01, 0x2468ACE0];
+                            const results = instances.map(instance => {
+                                words.fill(0, 0, 64);
+                                words.set(input);
+                                words[8] = flags;
+                                words[9] = 0xDEADBEEF;
+                                words[10] = 17;
+                                words[11] = 0x76543210;
+                                instance.exports.f(0);
+                                executions++;
+                                return Array.from(words.slice(0, 12));
+                            });
+                            assert.deepEqual(results[1], results[0], `LICM recovery: poll=${poll}, budget=${budget}, input=${input}`);
+                            if(budget === 100) {
+                                const expected = input.slice();
+                                expected[0] = Number((BigInt(a) + BigInt(n) * (BigInt(c) * BigInt(d) + 7n)) & 0xFFFFFFFFn);
+                                expected[1] = 0;
+                                assert.deepEqual(results[0], [...expected, flags, 0x4000, 0, 0x76543210], "independent arithmetic oracle");
+                            }
+                        }
+                    }
                 }
+            }
+        }
+        for(const instance of instances) {
+            for(const entry of [-1, 1, 0x7FFFFFFF]) {
+                words.fill(0x12345678, 0, 64);
+                instance.exports.f(entry);
+                assert(words.slice(0, 64).every(value => value === 0x12345678), "invalid entry must not execute hoists");
             }
         }
     }
 }
-console.log(`PASS: ${executions} LICM Wasm executions; budget snapshots, zero iterations, overflow and invalid entries`);
+console.log(`PASS: ${executions} LICM Wasm executions; independent wrapping arithmetic, zero trips, exact budget/poll recovery and invalid entries`);

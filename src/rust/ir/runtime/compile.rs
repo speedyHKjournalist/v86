@@ -8,7 +8,7 @@ use crate::ir::{
         region::lift_cpu_cfg,
     },
     lowering::{lower, CompileError},
-    passes::{licm, run, PassConfig, PassStats},
+    passes::{run, run_tier2, PassConfig, PassStats},
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Backend {
@@ -202,29 +202,19 @@ fn compile_inner(
             request.default_32,
         )?
     };
-    let mut passes = if config.optimize {
-        run(&mut region, config.passes).map_err(CompileError::InvalidIr)?
+    let passes = if config.optimize {
+        let optimize = if request.tier == Tier::Two {
+            run_tier2
+        } else {
+            run
+        };
+        optimize(&mut region, config.passes).map_err(CompileError::InvalidIr)?
     } else {
         PassStats::default()
     };
-    // Keep Tier 1 inexpensive. The existing GVN switch controls the Tier 2
-    // pure-dataflow family; optimize=false and rounds=0 also disable LICM.
-    if config.optimize
-        && request.tier == Tier::Two
-        && config.passes.gvn
-        && config.passes.rounds != 0
-    {
-        passes.loop_hoisted = licm::run(&mut region, licm::DEFAULT_WORK_LIMIT)
-            .map_err(CompileError::InvalidIr)?
-            .hoisted;
-    }
     let mut mir = lower(&region)?;
     drop(region);
-    let mir_folds = if config.optimize {
-        mir.fold_constants()?
-    } else {
-        0
-    };
+    let mir_folds = if config.optimize { mir.fold_constants()? } else { 0 };
     let code = if cpu {
         emit_cpu_entry(&mir, config.execution_budget, request.cpu_entry())?
     } else {
