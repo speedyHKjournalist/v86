@@ -1,0 +1,602 @@
+diff --git a/tests/ir/semantics/mir_forwarding.rs b/tests/ir/semantics/mir_forwarding.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/ir/semantics/mir_forwarding.rs
+@@ -0,0 +1,255 @@
++use super::{plan, verify, Forwarding, DEFAULT_WORK_LIMIT};
++use crate::ir::{
++    backend::wasm::emit_cpu,
++    frontend::{
++        decode::{GuestEip, LinearAddress},
++        lift::lift_cpu,
++    },
++    hir::{Op, Terminator},
++    ids::*,
++    lowering::{lower, lower_draft},
++    mir::memory::NativeMemory,
++    passes::{run, PassConfig},
++    types::Type,
++};
++
++fn region(bytes: &[u8]) -> crate::ir::hir::Region {
++    let mut r = lift_cpu(bytes, GuestEip(0x100000), LinearAddress(0x100000), true).unwrap();
++    run(&mut r, PassConfig::default()).unwrap();
++    r
++}
++fn loads(r: &crate::ir::hir::Region) -> Vec<InstId> {
++    r.blocks
++        .iter()
++        .flat_map(|b| b.instructions.iter())
++        .copied()
++        .filter(|id| matches!(r.instructions[id.index()].op, Op::GuestLoad { .. }))
++        .collect()
++}
++
++#[test]
++fn repeated_reads_use_owned_machine_certificates_and_separate_cache_locals() {
++    for bytes in [
++        vec![0x8A, 0x06, 0x8A, 0x1E],
++        vec![0x66, 0x8B, 0x06, 0x66, 0x8B, 0x1E],
++        vec![0x8B, 0x06, 0x8B, 0x1E],
++        vec![0x8B, 0x06, 0x8B, 0x1E, 0x8B, 0x16],
++    ] {
++        let r = region(&bytes);
++        let ids = loads(&r);
++        let mut m = lower(&r).unwrap();
++        drop(r);
++        let plain = emit_cpu(&m, 32).unwrap();
++        assert_eq!(
++            m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(),
++            ids.len() - 1
++        );
++        assert_eq!(m.ram_forwarding(ids[0]), Some(Forwarding::Begin));
++        for pair in ids.windows(2) {
++            assert_eq!(
++                m.ram_forwarding(pair[1]),
++                Some(Forwarding::Reuse { previous: pair[0] })
++            );
++        }
++        let optimized = emit_cpu(&m, 32).unwrap();
++        assert!(
++            optimized.locals >= plain.locals + 2,
++            "validity and cached data outlive coalesced SSA slots"
++        );
++        assert_eq!(
++            m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(),
++            ids.len() - 1
++        );
++    }
++}
++
++#[test]
++fn widths_addresses_segments_and_runtime_barriers_are_not_alias_guesses() {
++    for bytes in [
++        vec![0x8B, 0x06, 0x8A, 0x1E],             // different widths
++        vec![0x8B, 0x06, 0x8B, 0x1F],             // ESI vs EDI
++        vec![0x8B, 0x06, 0x64, 0x8B, 0x1E],       // DS vs FS
++        vec![0x8B, 0x06, 0x46, 0x8B, 0x1E],       // changed offset
++        vec![0x8B, 0x06, 0x8B, 0x17, 0x8B, 0x1E], // unrelated read may be MMIO
++        vec![0x8B, 0x06, 0x01, 0x1E],             // RMW never reuses ordinary load
++    ] {
++        let r = region(&bytes);
++        assert_eq!(
++            lower(&r)
++                .unwrap()
++                .forward_ram_reads(DEFAULT_WORK_LIMIT)
++                .unwrap(),
++            0
++        );
++    }
++    // Insert an ordered check/poll between the same-width, same-address reads.
++    // A check remains a barrier. A one-unit PollBudget stays in place but its
++    // continuation has no guest effect; its observation arm leaves the frame.
++    for op in [
++        Op::PollBudget,
++        Op::GuestCheck {
++            bytes: 4,
++            write: false,
++        },
++    ] {
++        let mut r = region(&[0x8B, 0x06, 0x8B, 0x1E]);
++        let ids = loads(&r);
++        let second = ids[1];
++        let block = r.instructions[second.index()].block;
++        let old_effect = *r.instructions[second.index()].args.last().unwrap();
++        let state = r.instructions[second.index()].state;
++        let term = r.blocks[block.index()].terminator.take().unwrap();
++        let mut args = if matches!(op, Op::GuestCheck { .. }) {
++            vec![r.instructions[second.index()].args[0]]
++        } else {
++            vec![]
++        };
++        args.push(old_effect);
++        let new_effect = r.append(block, op, args, &[Type::Effect], state)[0];
++        let added = r.blocks[block.index()].instructions.pop().unwrap();
++        let at = r.blocks[block.index()]
++            .instructions
++            .iter()
++            .position(|id| *id == second)
++            .unwrap();
++        r.blocks[block.index()].instructions.insert(at, added);
++        *r.instructions[second.index()].args.last_mut().unwrap() = new_effect;
++        r.terminate(block, term);
++        crate::ir::verify::verify(&r).unwrap();
++        let poll = r.instructions[added.index()].op == Op::PollBudget;
++        assert_eq!(
++            lower(&r)
++                .unwrap()
++                .forward_ram_reads(DEFAULT_WORK_LIMIT)
++                .unwrap(),
++            usize::from(poll)
++        );
++    }
++}
++
++#[test]
++fn forwarding_failures_are_atomic_and_forged_certificates_are_rejected() {
++    let r = region(&[0x8B, 0x06, 0x8B, 0x1E]);
++    let ids = loads(&r);
++    let mut m = lower(&r).unwrap();
++    assert!(m.forward_ram_reads(0).is_err());
++    assert!(!m.has_ram_forwarding());
++    assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 1);
++    let before: Vec<_> = ids.iter().map(|id| m.ram_forwarding(*id)).collect();
++    assert!(m.forward_ram_reads(1).is_err());
++    assert_eq!(
++        before,
++        ids.iter()
++            .map(|id| m.ram_forwarding(*id))
++            .collect::<Vec<_>>()
++    );
++    for mutation in 0..4 {
++        let mut draft = lower_draft(&r).unwrap();
++        draft.ram_forwarding = plan(&draft, DEFAULT_WORK_LIMIT).unwrap();
++        match mutation {
++            0 => draft.ram_forwarding[ids[0].index()] = None,
++            1 => {
++                draft.ram_forwarding[ids[1].index()] = Some(Forwarding::Reuse { previous: ids[1] })
++            },
++            2 => draft.ram_forwarding[0] = Some(Forwarding::Begin),
++            _ => {
++                draft.ram_forwarding.pop();
++            },
++        }
++        assert!(verify(&draft).is_err());
++        assert!(draft.finish().is_err(), "forged certificate {mutation}");
++    }
++}
++
++#[test]
++fn forwarding_never_crosses_a_block_boundary_or_external_entry() {
++    let bytes = [0x8B, 0x06, 0xEB, 0, 0x8B, 0x1E];
++    let r = crate::ir::frontend::region::lift_cpu_cfg(
++        &bytes,
++        GuestEip(0x100000),
++        LinearAddress(0x100000),
++        true,
++        8,
++    )
++    .unwrap();
++    let ids = loads(&r);
++    assert_ne!(
++        r.instructions[ids[0].index()].block,
++        r.instructions[ids[1].index()].block
++    );
++    assert_eq!(
++        lower(&r)
++            .unwrap()
++            .forward_ram_reads(DEFAULT_WORK_LIMIT)
++            .unwrap(),
++        0
++    );
++    assert!(r
++        .blocks
++        .iter()
++        .any(|b| matches!(b.terminator, Some(Terminator::Branch(_)))));
++}
++
++#[test]
++fn emits_guarded_forwarding_cpu_corpus_after_dropping_hir() {
++    std::fs::create_dir_all("build/ir-forwarding").unwrap();
++    let programs = [
++        vec![0x8A, 0x06, 0x8A, 0x1E, 0x8A, 0x16],
++        vec![0x66, 0x8B, 0x06, 0x66, 0x8B, 0x1E, 0x66, 0x8B, 0x16],
++        vec![0x8B, 0x06, 0x8B, 0x1E, 0x8B, 0x16],
++    ];
++    let mut cases = vec![];
++    for (n, bytes) in programs.iter().enumerate() {
++        for forward in [false, true] {
++            let r = region(bytes);
++            let mut m = lower(&r).unwrap();
++            drop(r);
++            if forward {
++                assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 2);
++            }
++            assert_eq!(
++                m.memory
++                    .iter()
++                    .flatten()
++                    .filter(|p| matches!(p.native, NativeMemory::ScalarLoad { ticket: None, .. }))
++                    .count(),
++                3
++            );
++            std::fs::write(
++                format!("build/ir-forwarding/{n}-{forward}.wasm"),
++                emit_cpu(&m, 32).unwrap().bytes,
++            )
++            .unwrap();
++        }
++        for budget in [1, 2, 3, 4, 8] {
++            for forward in [false, true] {
++                let mut r = crate::ir::frontend::region::lift_cpu_cfg(
++                    bytes,
++                    GuestEip(0x100000),
++                    LinearAddress(0x100000),
++                    true,
++                    8,
++                )
++                .unwrap();
++                run(&mut r, PassConfig::default()).unwrap();
++                let mut m = lower(&r).unwrap();
++                drop(r);
++                assert!(m.control.polls.iter().any(Option::is_some));
++                if forward {
++                    assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 2);
++                }
++                std::fs::write(
++                    format!("build/ir-forwarding/cfg-{n}-{budget}-{forward}.wasm"),
++                    emit_cpu(&m, budget).unwrap().bytes,
++                )
++                .unwrap();
++            }
++        }
++        cases.push(format!("{bytes:?}"));
++    }
++    std::fs::write(
++        "build/ir-forwarding/cases.json",
++        format!("[{}]", cases.join(",")),
++    )
++    .unwrap();
++}
+diff --git a/tests/ir/differential/forwarding.mjs b/tests/ir/differential/forwarding.mjs
+new file mode 100644
+--- /dev/null
++++ b/tests/ir/differential/forwarding.mjs
+@@ -0,0 +1,195 @@
++import assert from "node:assert/strict";
++import fs from "node:fs";
++import {V86} from "../../../build/libv86.mjs";
++
++const cases = JSON.parse(fs.readFileSync("build/ir-forwarding/cases.json"));
++const modules = cases.map((_, i) => [false, true].map(forward => {
++    const bytes = fs.readFileSync(`build/ir-forwarding/${i}-${forward}.wasm`);
++    assert(WebAssembly.validate(bytes));
++    return new WebAssembly.Module(bytes);
++}));
++const vm = new V86({wasm_path: "build/v86-ir-test.wasm", memory_size: 32 << 20,
++    bios: {buffer: Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
++    disable_keyboard: true, disable_mouse: true, disable_speaker: true,
++    net_device: {type: "none"}, autostart: false});
++const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
++try {
++    await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
++    const cpu = vm.v86.cpu, e = cpu.wm.exports, mem = cpu.mem8;
++    const words = new Uint32Array(cpu.wasm_memory.buffer);
++    const view = new DataView(mem.buffer, mem.byteOffset);
++    vm.run();
++    const deadline = performance.now() + 10000;
++    while(view.getUint16(0x500, true) !== 0xCAFE) {
++        assert(performance.now() < deadline, "BIOS timeout");
++        await sleep(1);
++    }
++    await vm.stop();
++    const PC = 0x100000, STACK = 0x90000, HANDLER = 0x180000;
++    const initialCr0 = cpu.cr[0];
++    const put = (address, value) => view.setUint32(address, value, true);
++    const get = address => view.getUint32(address, true);
++    let slowReads = 0, events = [], mode = "ordinary", callbacks = 0;
++    const imports = {...e, m: e.memory, ir_memory_read: (...args) => {
++        slowReads++;
++        return e.ir_memory_read(...args);
++    }};
++    const instances = modules.map(pair => pair.map(module => new WebAssembly.Instance(module, {e: imports})));
++    function reset(index, address, hot, fault = "none") {
++        e.ir_test_set_cr0(initialCr0 | 0x10000);
++        cpu.segment_offsets.fill(0, 0, 6);
++        cpu.segment_is_null.fill(0, 0, 6);
++        cpu.reg32.set([0x12345678, 0x87654321, 0xABCDEF01, 0xFEDCBA98, STACK, 0x76543210, address, 0x11223344]);
++        cpu.flags[0] = 3; cpu.flags_changed[0] = 0x8D4;
++        words[96 >> 2] = 31; words[104 >> 2] = 0x7FFFFFFF; words[112 >> 2] = 0x80000000;
++        cpu.instruction_pointer[0] = PC; cpu.in_hlt[0] = 0;
++        cpu.cr[2] = 0; words[664 >> 2] = 100;
++        mem.set(cases[index], PC);
++        mem.fill(0xCC, STACK - 64, STACK);
++        for(let n = -8; n < 16; n++) mem[address + n] = (n * 29 + 0x9B) & 255;
++        mem.set([0x12, 0x34, 0x56, 0x78], 0x330040);
++        cpu.idtr_offset[0] = 0x2000; cpu.idtr_size[0] = 0x7FF;
++        for(const vector of [13, 14]) {
++            put(0x2000 + vector * 8, (8 << 16) | (HANDLER & 65535));
++            put(0x2004 + vector * 8, (HANDLER & 0xFFFF0000) | 0x8E00);
++        }
++        const page = address >>> 12;
++        put(0x13000 + page * 4, page * 4096 | 3);
++        put(0x13000 + (page + 1) * 4, (page + 1) * 4096 | 3);
++        e.full_clear_tlb();
++        mode = "ordinary"; callbacks = 0; events = [];
++        if(hot) e.ir_memory_read(address, [1, 2, 4][index]);
++        if(fault === "missing") put(0x13000 + page * 4, 0);
++        if(fault === "cross") put(0x13000 + (page + 1) * 4, 0);
++        if(fault === "segment") cpu.segment_is_null[3] = 1;
++        if(fault !== "none") e.full_clear_tlb();
++        slowReads = 0;
++    }
++    function snapshot(address) {
++        return {gpr: Array.from(cpu.reg32, value => value >>> 0), flags: e.get_eflags() >>> 0,
++            ip: cpu.instruction_pointer[0] >>> 0, cr2: cpu.cr[2] >>> 0,
++            committed: words[664 >> 2], stack: Array.from(mem.slice(STACK - 64, STACK)),
++            data: Array.from(mem.slice(address - 8, address + 16))};
++    }
++    function interpret(count) {
++        // ir_test_step is the instruction body, not the outer CPU loop: account
++        // successful retirements explicitly for an independent count oracle.
++        for(let step = 0; step < count; step++) {
++            e.ir_test_step();
++            if(cpu.instruction_pointer[0] === HANDLER) break;
++            words[664 >> 2]++;
++        }
++    }
++    let ram = 0, faultCases = 0, mmio = 0;
++    for(let index = 0; index < cases.length; index++) {
++        for(const address of [0x310040, 0x310FFC, 0x310FFD, 0x310FFF]) {
++            for(const hot of [false, true]) for(const opt of [0, 1]) {
++                reset(index, address, hot);
++                instances[index][opt].exports.f(0);
++                const actual = snapshot(address);
++                assert.equal(actual.ip, PC + cases[index].length);
++                assert.equal(actual.committed, 103);
++                if(hot && address === 0x310040) assert.equal(slowReads, 0);
++                reset(index, address, hot);
++                interpret(3);
++                assert.deepEqual(actual, snapshot(address), `RAM width=${1 << index} hot=${hot} address=${address} opt=${opt}`);
++                ram++;
++            }
++        }
++        for(const fault of ["missing", "segment", ...(index === 0 ? [] : ["cross"])]) {
++            const address = fault === "cross" ? 0x310FFF : 0x310040;
++            for(const opt of [0, 1]) {
++                reset(index, address, false, fault);
++                instances[index][opt].exports.f(0);
++                const actual = snapshot(address);
++                assert.equal(actual.ip, HANDLER);
++                assert.equal(actual.committed, 100, "faulting first read must not retire");
++                assert.equal(get(STACK - 12), PC);
++                reset(index, address, false, fault);
++                interpret(1);
++                assert.deepEqual(actual, snapshot(address));
++                faultCases++;
++            }
++        }
++    }
++    let budgetExits = 0;
++    for(let index = 0; index < cases.length; index++) for(const budget of [1, 2, 3, 4, 8]) {
++        const pair = [false, true].map(forward => {
++            const module = new WebAssembly.Module(fs.readFileSync(
++                `build/ir-forwarding/cfg-${index}-${budget}-${forward}.wasm`));
++            return new WebAssembly.Instance(module, {e: imports});
++        });
++        for(const hot of [false, true]) {
++            let expected;
++            for(const instance of pair) {
++                reset(index, 0x310040, hot);
++                instance.exports.f(0);
++                const actual = snapshot(0x310040), completed = actual.committed - 100;
++                assert(completed >= 0 && completed <= 3);
++                if(budget === 8) assert.equal(completed, 3);
++                if(expected) assert.deepEqual(actual, expected, "read forwarding preserves exact merged-block budget exits");
++                else expected = actual;
++                reset(index, 0x310040, hot);
++                interpret(completed);
++                assert.deepEqual(actual, snapshot(0x310040));
++                budgetExits++;
++            }
++        }
++    }
++    const observe = (kind, address) => {
++        callbacks++;
++        events.push({kind, address, gpr: Array.from(cpu.reg32),
++            pc: cpu.instruction_pointer[0] >>> 0, flags: e.get_eflags() >>> 0});
++        if(mode === "remap") {
++            put(0x13000 + 0xA0 * 4, 0x330003);
++            e.full_clear_tlb();
++        } else if(mode === "unmap") {
++            put(0x13000 + 0xA0 * 4, 0);
++            e.full_clear_tlb();
++        }
++        // Repeated reads are observably different: a cached MMIO value is wrong.
++        return (0x89ABC000 + callbacks * 17) | 0;
++    };
++    cpu.io.mmap_register(0xA0000, 0x20000,
++        address => observe("r8", address) & 255, () => assert.fail("unexpected write"),
++        address => observe("r32", address), () => assert.fail("unexpected write"));
++    for(let index = 0; index < cases.length; index++) for(const callbackMode of ["ordinary", "remap", "unmap"]) {
++        for(const opt of [0, 1]) {
++            const configure = () => { reset(index, 0xA0040, false); mode = callbackMode; };
++            configure();
++            instances[index][opt].exports.f(0);
++            const actual = snapshot(0xA0040), observed = events.slice();
++            assert(slowReads > 0, "MMIO must use observing slow reads");
++            if(callbackMode === "ordinary") assert(callbacks >= 3, "every device read must occur");
++            if(callbackMode === "unmap") {
++                assert.equal(actual.ip, HANDLER, "second read sees callback-induced unmapping");
++                assert.equal(actual.committed, 101);
++                assert.equal(get(STACK - 12), PC + [2, 3, 2][index]);
++                faultCases++;
++            } else {
++                assert.equal(actual.committed, 103);
++            }
++            configure();
++            interpret(callbackMode === "unmap" ? 2 : 3);
++            assert.deepEqual(actual, snapshot(0xA0040), `MMIO ${callbackMode} width=${1 << index} opt=${opt}`);
++            assert.deepEqual(observed, events, "preserve callback order and observed architectural state");
++            mmio++;
++        }
++    }
++    // A warmed supervisor mapping must still be checked at CPL3 before a chain
++    // can obtain its first valid native-RAM result. No TSS is needed for this test.
++    for(const opt of [0, 1]) {
++        reset(2, 0x310040, true);
++        const cpl = new Uint8Array(cpu.wasm_memory.buffer, 612, 1);
++        const stop = new Error("permission slow path");
++        const guarded = new WebAssembly.Instance(modules[2][opt], {e: {...imports,
++            ir_memory_read: () => { throw stop; },
++        }});
++        cpl[0] = 3;
++        try { assert.throws(() => guarded.exports.f(0), error => error === stop); }
++        finally { cpl[0] = 0; }
++    }
++    console.log(`PASS: ${ram} guarded-read RAM differentials, ${faultCases} real fault cases, ${mmio} MMIO/callback-remapping differentials, ${budgetExits} exact merged-block budget exits and CPL guards`);
++} finally {
++    await vm.destroy();
++}
+diff --git a/tests/ir/semantics/entry.rs b/tests/ir/semantics/entry.rs
+--- a/tests/ir/semantics/entry.rs
++++ b/tests/ir/semantics/entry.rs
+@@ -187,3 +187,63 @@
+     source.mappings[1].linear = LinearAddress(0);
+     assert!(compile_cpu_region(&wrap, &source, &config(false)).is_ok());
+ }
++
++#[test]
++fn loop_motion_is_tier_two_only_and_honors_diagnostic_disable() {
++    // A direct preheader followed by an invariant add in a counted loop.
++    // mov ebp,0; mov eax,edx; add eax,ebx; add ebp,eax; dec ecx; jnz loop
++    let bytes = snapshot(
++        vec![
++            0xBD, 0, 0, 0, 0, 0x89, 0xD0, 0x01, 0xD8, 0x01, 0xC5, 0x49, 0x75, 0xF7,
++        ],
++        0x100000,
++    );
++    for tier in [Tier::One, Tier::Two] {
++        for optimize in [false, true] {
++            for rounds in [0, 2] {
++                let mut req = request(0x1000, 0x100000, true);
++                req.tier = tier;
++                let mut options = config(optimize);
++                options.passes.rounds = rounds;
++                let artifact = compile_cpu_cfg_region(&req, &bytes, &options).unwrap();
++                if tier == Tier::Two && optimize && rounds != 0 {
++                    assert!(
++                        artifact.passes.loop_hoisted > 0,
++                        "optimized Tier 2 must actually run LICM"
++                    );
++                } else {
++                    assert_eq!(artifact.passes.loop_hoisted, 0);
++                }
++                assert_eq!(artifact.entry, EntryContract::Cpu(req.cpu_entry()));
++            }
++        }
++    }
++}
++
++#[test]
++fn guarded_ram_forwarding_is_tier_two_only_in_both_cpu_compile_entry_points() {
++    let bytes = snapshot(vec![0x8B, 0x06, 0x8B, 0x1E], 0x100000);
++    for tier in [Tier::One, Tier::Two] {
++        for optimize in [false, true] {
++            for rounds in [0, 2] {
++                for cfg in [false, true] {
++                    let mut req = request(0x1000, 0x100000, true);
++                    req.tier = tier;
++                    let mut options = config(optimize);
++                    options.passes.rounds = rounds;
++                    let artifact = if cfg {
++                        compile_cpu_cfg_region(&req, &bytes, &options)
++                    } else {
++                        compile_cpu_region(&req, &bytes, &options)
++                    }
++                    .unwrap();
++                    assert_eq!(
++                        artifact.passes.ram_forwarded,
++                        usize::from(tier == Tier::Two && optimize && rounds != 0)
++                    );
++                    assert_eq!(artifact.entry, EntryContract::Cpu(req.cpu_entry()));
++                }
++            }
++        }
++    }
++}
+diff --git a/tests/ir/semantics/cfg_frontend.rs b/tests/ir/semantics/cfg_frontend.rs
+--- a/tests/ir/semantics/cfg_frontend.rs
++++ b/tests/ir/semantics/cfg_frontend.rs
+@@ -5,7 +5,7 @@
+         region::lift_cpu_cfg,
+     },
+     lowering::{lower, CompileError},
+-    passes::{run, PassConfig},
++    passes::{licm, run, PassConfig},
+     runtime::compile::*,
+ };
+ #[test]
+@@ -33,12 +33,17 @@
+             0xB8, 1, 0, 0, 0, 0x83, 0xF8, 1, 0x75, 3, 0x40, 0xEB, 2, 0x03, 0x06, 0x90,
+         ],
+         vec![0xB9, 0, 0, 0, 0, 0xE3, 2, 0x0F, 0xA2, 0x40],
++        // Preheader + invariant arithmetic + faulting scalar read in a loop.
++        vec![
++            0xBD, 0, 0, 0, 0, 0x89, 0xD0, 0x01, 0xD8, 0x01, 0xC5, 0x03, 0x2E, 0x81, 0xC6, 0, 0x10,
++            0, 0, 0x49, 0x75, 0xEF,
++        ],
+     ];
+     let mut cases = vec![];
+     for (n, bytes) in programs.iter().enumerate() {
+         for mode in [false, true] {
+             // Memory fixture uses [ESI] and the vector prefix requires 32-bit default.
+-            if !mode && matches!(n, 1 | 2 | 10 | 12..=16) {
++            if !mode && matches!(n, 1 | 2 | 10 | 12..=17) {
+                 continue;
+             }
+             for pc in [0x1000u32, 0xFFFFFFFC] {
+@@ -50,8 +55,18 @@
+                         let mut r = original.clone();
+                         if opt {
+                             run(&mut r, PassConfig::default()).unwrap();
++                            let motion = licm::run(&mut r, licm::DEFAULT_WORK_LIMIT).unwrap();
++                            if n == 17 {
++                                assert!(motion.hoisted > 0);
++                            }
+                         }
+-                        let mir = lower(&r).unwrap();
++                        let mut mir = lower(&r).unwrap();
++                        drop(r);
++                        if opt {
++                            mir.fold_constants().unwrap();
++                            mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)
++                                .unwrap();
++                        }
+                         assert!(mir.control.dynamic_counts);
+                         let artifact = emit_cpu(&mir, budget).unwrap();
+                         std::fs::write(
+diff --git a/tests/ir/differential/cfg.mjs b/tests/ir/differential/cfg.mjs
+--- a/tests/ir/differential/cfg.mjs
++++ b/tests/ir/differential/cfg.mjs
+@@ -67,7 +67,7 @@
+     const HANDLER=0x180000, set32=(a,v)=>view.setUint32(a,v,true);
+     for(let i=0;i<cases.length;i++) {
+         const c=cases[i];
+-        if(![12,13].includes(c[0]) || c[3]!==0x1000 || c[4]!==100) continue;
++        if(![12,13,17].includes(c[0]) || c[3]!==0x1000 || c[4]!==100) continue;
+         for(const initialCount of [100,0xFFFFFFFC]) for(const lazy of [false,true]) {
+             const configure=()=>{
+                 reset(c,7,0x8D7,lazy,initialCount,false);
+@@ -82,8 +82,9 @@
+                 frame:Array.from(mem.slice(STACK-32,STACK))});
+             configure(); instances[i].exports.f(0); const actual=faultState();
+             assert.equal(actual.ip,HANDLER); assert.equal(actual.cr2,DATA+4096);
+-            assert.equal(words[664>>2],(initialCount+5)>>>0,"only completed instructions retire before second-iteration fault");
+-            configure(); for(let j=0;j<6;j++) e.ir_test_step();
++            const completed = c[0] === 17 ? 11 : 5;
++            assert.equal(words[664>>2],(initialCount+completed)>>>0,"only completed instructions retire before second-iteration fault");
++            configure(); for(let j=0;j<completed+1;j++) e.ir_test_step();
+             assert.deepEqual(actual,faultState(),`second-iteration #PF, CFG ${i}`);
+             set32(0x13000+((DATA+4096)>>>12)*4,(DATA+4096)|3); e.full_clear_tlb();
+             faults++;
