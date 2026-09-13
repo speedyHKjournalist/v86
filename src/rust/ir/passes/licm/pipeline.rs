@@ -6,14 +6,19 @@ use crate::ir::{
     },
     passes::{run_tier2, PassConfig},
     runtime::compile::{
-        compile_cpu_cfg_region, compile_cpu_region, compile_region, CodeDependency,
-        CodeMapping, CompileRequest, ImmutableCodeSnapshot, IrConfig, PublicationKey, Tier,
+        compile_cpu_cfg_region, compile_cpu_region, compile_region, CodeDependency, CodeMapping,
+        CompileRequest, ImmutableCodeSnapshot, IrConfig, PublicationKey, Tier,
     },
 };
 
 fn request(tier: Tier) -> CompileRequest {
     CompileRequest {
-        key: PublicationKey { job: 1, vm_generation: 2, slot: 3, slot_generation: 4 },
+        key: PublicationKey {
+            job: 1,
+            vm_generation: 2,
+            slot: 3,
+            slot_generation: 4,
+        },
         pc: GuestEip(0x1000),
         linear: LinearAddress(0x100000),
         default_32: true,
@@ -23,9 +28,13 @@ fn request(tier: Tier) -> CompileRequest {
 fn snapshot(bytes: &[u8]) -> ImmutableCodeSnapshot {
     ImmutableCodeSnapshot {
         bytes: bytes.to_vec(),
-        dependencies: vec![CodeDependency { page: PhysicalAddress(0x300000), version: 1 }],
+        dependencies: vec![CodeDependency {
+            page: PhysicalAddress(0x300000),
+            version: 1,
+        }],
         mappings: vec![CodeMapping {
-            linear: LinearAddress(0x100000), physical: PhysicalAddress(0x300000),
+            linear: LinearAddress(0x100000),
+            physical: PhysicalAddress(0x300000),
         }],
     }
 }
@@ -36,7 +45,13 @@ fn config(optimize: bool) -> IrConfig {
         execution_budget: 100,
         rep_iteration_budget: 8,
         max_code_bytes: 128,
-        layout: StateLayout { gpr: 0, flags: 32, eip: 36, committed: 40, flag_operand: 44 },
+        layout: StateLayout {
+            gpr: 0,
+            flags: 32,
+            eip: 36,
+            committed: 40,
+            flag_operand: 44,
+        },
     }
 }
 
@@ -77,7 +92,14 @@ fn optimized_loop_pipeline_keeps_input_unchanged_with_zero_rounds() {
     let bytes = [0xB9, 3, 0, 0, 0, 0x89, 0xD0, 0x01, 0xF0, 0x49, 0x75, 0xF9];
     let mut r = lift_cpu_cfg(&bytes, GuestEip(0x1000), LinearAddress(0x100000), true, 8).unwrap();
     let before = format!("{:?}", r);
-    let stats = run_tier2(&mut r, PassConfig { rounds: 0, ..PassConfig::default() }).unwrap();
+    let stats = run_tier2(
+        &mut r,
+        PassConfig {
+            rounds: 0,
+            ..PassConfig::default()
+        },
+    )
+    .unwrap();
     assert_eq!(stats.licm_hoisted, 0);
     assert_eq!(format!("{:?}", r), before);
 }

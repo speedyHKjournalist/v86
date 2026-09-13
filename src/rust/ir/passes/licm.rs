@@ -104,7 +104,9 @@ pub fn run(region: &mut Region, config: Config) -> Result<Stats, String> {
                 // Earlier hoists are now available at the end of the preheader.
                 // Stable IDs preserve every StateMap and edge-only use.
                 candidate.instructions[id.index()].block = BlockId(natural_loop.preheader as u32);
-                candidate.blocks[natural_loop.preheader].instructions.push(id);
+                candidate.blocks[natural_loop.preheader]
+                    .instructions
+                    .push(id);
                 stats.hoisted += 1;
             }
             budget.charge(candidate.blocks[b].instructions.len())?;
@@ -184,8 +186,7 @@ fn natural_loops(
         budget.charge(n + cfg.predecessors[header].len())?;
         if (0..n).any(|b| {
             members[b]
-                && (!cfg.dominates[b][header]
-                    || region.entries.contains(&BlockId(b as u32)))
+                && (!cfg.dominates[b][header] || region.entries.contains(&BlockId(b as u32)))
         }) {
             continue;
         }
