@@ -1,24 +1,79 @@
 use crate::ir::{
     backend::wasm::{emit, StateLayout},
-    frontend::{decode::{GuestEip, LinearAddress}, integer::IntegerBuilder, region::lift_cpu_cfg},
-    hir::*, ids::*, lowering::lower,
+    frontend::{
+        decode::{GuestEip, LinearAddress},
+        integer::IntegerBuilder,
+        region::lift_cpu_cfg,
+    },
+    hir::*,
+    ids::*,
+    lowering::lower,
     passes::{self, scalar, PassConfig},
-    state::{ResumeKind, StateMap}, types::Type, verify::verify,
+    state::{ResumeKind, StateMap},
+    types::Type,
+    verify::verify,
 };
 
 const CASES: [&str; 38] = [
-    "add-r0", "add-l0", "sub-r0", "sub-self", "mul-r1", "mul-l1", "mul-r0", "mul-l0",
-    "and-rmask", "and-lmask", "and-self", "and-r0", "and-l0", "or-r0", "or-l0", "or-self",
-    "or-rmask", "or-lmask", "xor-r0", "xor-l0", "xor-self", "eq-self", "ult-self", "slt-self",
-    "shl-zero", "shr-zero", "sar-zero", "shl-masked-zero", "shr-masked-zero", "sar-masked-zero",
-    "select-same", "select-true", "select-false", "truncate-unsigned", "truncate-signed",
-    "shl-nonzero", "shr-nonzero", "sar-nonzero",
+    "add-r0",
+    "add-l0",
+    "sub-r0",
+    "sub-self",
+    "mul-r1",
+    "mul-l1",
+    "mul-r0",
+    "mul-l0",
+    "and-rmask",
+    "and-lmask",
+    "and-self",
+    "and-r0",
+    "and-l0",
+    "or-r0",
+    "or-l0",
+    "or-self",
+    "or-rmask",
+    "or-lmask",
+    "xor-r0",
+    "xor-l0",
+    "xor-self",
+    "eq-self",
+    "ult-self",
+    "slt-self",
+    "shl-zero",
+    "shr-zero",
+    "sar-zero",
+    "shl-masked-zero",
+    "shr-masked-zero",
+    "sar-masked-zero",
+    "select-same",
+    "select-true",
+    "select-false",
+    "truncate-unsigned",
+    "truncate-signed",
+    "shl-nonzero",
+    "shr-nonzero",
+    "sar-nonzero",
 ];
 fn config() -> PassConfig {
-    PassConfig { prune: false, merge: false, phis: false, fold: true, gvn: false, dce: true, rounds: 1 }
+    PassConfig {
+        prune: false,
+        merge: false,
+        phis: false,
+        fold: true,
+        gvn: false,
+        dce: true,
+        rounds: 1,
+    }
 }
 fn ty(bits: u8) -> Type {
-    match bits { 1 => Type::I1, 8 => Type::I8, 16 => Type::I16, 32 => Type::I32, 64 => Type::I64, _ => panic!() }
+    match bits {
+        1 => Type::I1,
+        8 => Type::I8,
+        16 => Type::I16,
+        32 => Type::I32,
+        64 => Type::I64,
+        _ => panic!(),
+    }
 }
 fn input(b: &mut IntegerBuilder, bits: u8, index: usize) -> ValueId {
     let low = b.gpr[index];
@@ -37,9 +92,17 @@ fn input(b: &mut IntegerBuilder, bits: u8, index: usize) -> ValueId {
 }
 fn snapshot(b: &mut IntegerBuilder) -> StateId {
     b.region.state(StateMap {
-        instruction_pc: GuestEip(0x9000), next_pc: GuestEip(0x9001), next_value: None,
-        resume: ResumeKind::AfterInstruction, gpr: b.gpr, flags: b.flags.clone(),
-        xmm: vec![], x87: vec![], committed_instructions: 1, count_base: None, rep_progress: None,
+        instruction_pc: GuestEip(0x9000),
+        next_pc: GuestEip(0x9001),
+        next_value: None,
+        resume: ResumeKind::AfterInstruction,
+        gpr: b.gpr,
+        flags: b.flags.clone(),
+        xmm: vec![],
+        x87: vec![],
+        committed_instructions: 1,
+        count_base: None,
+        rep_progress: None,
     })
 }
 fn finish(mut b: IntegerBuilder, value: ValueId) -> Region {
@@ -49,8 +112,11 @@ fn finish(mut b: IntegerBuilder, value: ValueId) -> Region {
         let high = b.binary(Binary::Shr, value, shift);
         b.gpr[1] = b.node(Op::Truncate, vec![high], Type::I32);
     } else {
-        b.gpr[0] = if b.ty(value) == Type::I32 { value }
-            else { b.node(Op::Extend { signed: false }, vec![value], Type::I32) };
+        b.gpr[0] = if b.ty(value) == Type::I32 {
+            value
+        } else {
+            b.node(Op::Extend { signed: false }, vec![value], Type::I32)
+        };
         b.gpr[1] = b.constant(0, Type::I32);
     }
     let state = snapshot(&mut b);
@@ -109,7 +175,8 @@ fn fixture(bits: u8, name: &str) -> Region {
         },
         "truncate-unsigned" | "truncate-signed" => {
             assert!(bits < 64);
-            let extended = b.node(Op::Extend { signed: name == "truncate-signed" }, vec![x], Type::I64);
+            let extended =
+                b.node(Op::Extend { signed: name == "truncate-signed" }, vec![x], Type::I64);
             b.node(Op::Truncate, vec![extended], ty(bits))
         },
         "shl-nonzero" => b.binary(Binary::Shl, x, nonzero),
@@ -126,12 +193,16 @@ fn emit_scalar_identity_differentials() {
     let mut manifest = Vec::new();
     for bits in [1, 8, 16, 32, 64] {
         for name in CASES {
-            if bits == 64 && name.starts_with("truncate-") { continue; }
+            if bits == 64 && name.starts_with("truncate-") {
+                continue;
+            }
             let original = fixture(bits, name);
             verify(&original).unwrap();
             for optimized in [false, true] {
                 let mut r = original.clone();
-                if optimized { passes::run(&mut r, config()).unwrap(); }
+                if optimized {
+                    passes::run(&mut r, config()).unwrap();
+                }
                 verify(&r).unwrap();
                 let wasm = emit(&lower(&r).unwrap(), layout, 100).unwrap().bytes;
                 std::fs::write(format!("build/ir-scalar/{bits}-{name}-{optimized}.wasm"), wasm).unwrap();
@@ -182,7 +253,8 @@ fn scalar_rewrites_every_state_observation_without_removing_effects() {
     b.region.states[rep.index()].resume = ResumeKind::RepProgress;
     b.region.states[rep.index()].rep_progress = Some([alias; 3]);
     b.region.states[rep.index()].count_base = Some(alias);
-    let effect = b.region.append(b.block, Op::PollBudget, vec![b.effect], &[Type::Effect], Some(rep))[0];
+    let effect =
+        b.region.append(b.block, Op::PollBudget, vec![b.effect], &[Type::Effect], Some(rep))[0];
     let after = snapshot(&mut b);
     b.region.states[after.index()].next_value = Some(alias);
     b.region.states[after.index()].count_base = Some(alias);
@@ -226,7 +298,9 @@ fn inverse_bitfield_updates_and_extensions_keep_exact_widths() {
         let mut r = finish(b, extracted);
         let stats = scalar::run(&mut r, scalar::DEFAULT_WORK_LIMIT).unwrap();
         assert_eq!(stats.aliases, 1);
-        let Definition::Instruction(id, _) = r.values[r.states[0].gpr[0].index()].definition else { panic!() };
+        let Definition::Instruction(id, _) = r.values[r.states[0].gpr[0].index()].definition else {
+            panic!();
+        };
         assert_eq!(r.instructions[id.index()].args, vec![part]);
         verify(&r).unwrap();
     }
@@ -252,7 +326,9 @@ fn dependency_order_is_independent_of_instruction_arena_order() {
     let n = r.instructions.len();
     r.instructions.reverse();
     for block in &mut r.blocks {
-        for id in &mut block.instructions { *id = InstId((n - 1 - id.index()) as u32); }
+        for id in &mut block.instructions {
+            *id = InstId((n - 1 - id.index()) as u32);
+        }
     }
     for value in &mut r.values {
         if let Definition::Instruction(ref mut id, _) = value.definition {
@@ -266,9 +342,18 @@ fn dependency_order_is_independent_of_instruction_arena_order() {
 }
 #[test]
 fn ignored_load_result_does_not_erase_the_memory_observation() {
-    let mut r = lift_cpu_cfg(&[0x8B, 0x03, 0x31, 0xC0], GuestEip(0x1000), LinearAddress(0x100000), true, 8).unwrap();
-    let ordered = |r: &Region| r.blocks.iter().flat_map(|b| &b.instructions)
-        .map(|id| &r.instructions[id.index()]).filter(|i| i.op.ordered()).map(|i| i.op.clone()).collect::<Vec<_>>();
+    let mut r =
+        lift_cpu_cfg(&[0x8B, 0x03, 0x31, 0xC0], GuestEip(0x1000), LinearAddress(0x100000), true, 8)
+            .unwrap();
+    let ordered = |r: &Region| {
+        r.blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .map(|id| &r.instructions[id.index()])
+            .filter(|i| i.op.ordered())
+            .map(|i| i.op.clone())
+            .collect::<Vec<_>>()
+    };
     let before = ordered(&r);
     assert!(before.iter().any(|op| matches!(op, Op::GuestLoad { .. })));
     passes::run(&mut r, config()).unwrap();
@@ -309,14 +394,21 @@ fn cross_block_aliases_rewrite_edges_conditions_and_entry_states() {
     let incoming = snapshot(&mut b);
     b.region.blocks[join.index()].entry_state = Some(incoming);
     let edge = Edge { target: join, args: vec![me, a] };
-    b.region.terminate(middle, Terminator::CondBranch { condition, taken: edge.clone(), not_taken: edge });
+    b.region.terminate(
+        middle,
+        Terminator::CondBranch { condition, taken: edge.clone(), not_taken: edge },
+    );
     b.block = join;
     b.effect = je;
     let one = b.constant(1, Type::I32);
     let value = b.binary(Binary::Mul, a, one);
     let mut r = finish(b, value);
     assert_eq!(scalar::run(&mut r, scalar::DEFAULT_WORK_LIMIT).unwrap().aliases, 3);
-    let Terminator::CondBranch { condition, taken, not_taken } = r.blocks[middle.index()].terminator.as_ref().unwrap() else { panic!() };
+    let Terminator::CondBranch { condition, taken, not_taken } =
+        r.blocks[middle.index()].terminator.as_ref().unwrap()
+    else {
+        panic!();
+    };
     assert_eq!(*condition, f);
     assert_eq!(taken.args, vec![me, x]);
     assert_eq!(not_taken.args, vec![me, x]);
@@ -329,7 +421,9 @@ fn self_xor_exposes_flags_for_branch_pruning_and_budget_recovery() {
     let bytes = [0x31, 0xC0, 0x75, 3, 0x40, 0xEB, 1, 0x43, 0x90];
     let original = lift_cpu_cfg(&bytes, GuestEip(0x1000), LinearAddress(0x100000), true, 16).unwrap();
     let mut optimized = original.clone();
-    let stats = passes::run(&mut optimized, PassConfig { prune: true, rounds: 2, ..config() }).unwrap();
+    let stats =
+        passes::run(&mut optimized, PassConfig { prune: true, phis: true, rounds: 2, ..config() })
+            .unwrap();
     assert!(stats.scalar_constants > 0);
     assert!(stats.branches > 0 && stats.unreachable > 0);
     let layout = StateLayout { gpr: 0, flags: 32, eip: 36, committed: 40, flag_operand: 44 };
@@ -345,8 +439,14 @@ fn self_xor_exposes_flags_for_branch_pruning_and_budget_recovery() {
 fn unused_arena_slots_do_not_break_the_transaction() {
     let mut r = fixture(32, "add-r0");
     r.instructions.push(Instruction {
-        block: BlockId(0), op: Op::Binary(Binary::Add), args: vec![ValueId(u32::MAX); 2],
-        results: vec![], state: None, commit: None, trap_after_fault: false, unmasked_word_store: false,
+        block: BlockId(0),
+        op: Op::Binary(Binary::Add),
+        args: vec![ValueId(u32::MAX); 2],
+        results: vec![],
+        state: None,
+        commit: None,
+        trap_after_fault: false,
+        unmasked_word_store: false,
     });
     verify(&r).unwrap();
     scalar::run(&mut r, scalar::DEFAULT_WORK_LIMIT).unwrap();
