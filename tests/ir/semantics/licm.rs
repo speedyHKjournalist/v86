@@ -93,7 +93,8 @@ fn counted_loop() -> (Region, ValueId, ValueId, ValueId) {
 }
 
 fn owner(region: &Region, value: ValueId) -> BlockId {
-    let Definition::Instruction(id, _) = region.values[value.index()].definition else {
+    let Definition::Instruction(id, _) = region.values[value.index()].definition
+    else {
         panic!("expected instruction result")
     };
     region.instructions[id.index()].block
@@ -208,7 +209,8 @@ fn handles_self_loops_multiple_latches_and_nested_loops() {
 #[test]
 fn whitelist_rejects_observations_faults_and_metadata() {
     let (r, invariant, _, _) = counted_loop();
-    let Definition::Instruction(id, _) = r.values[invariant.index()].definition else {
+    let Definition::Instruction(id, _) = r.values[invariant.index()].definition
+    else {
         panic!()
     };
     let pure = &r.instructions[id.index()];
