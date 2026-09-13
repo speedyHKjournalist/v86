@@ -8,7 +8,7 @@ use crate::ir::{
         region::lift_cpu_cfg,
     },
     lowering::{lower, CompileError},
-    passes::{run, PassConfig, PassStats},
+    passes::{licm, run, PassConfig, PassStats},
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Backend {
@@ -202,11 +202,18 @@ fn compile_inner(
             request.default_32,
         )?
     };
-    let passes = if config.optimize {
+    let mut passes = if config.optimize {
         run(&mut region, config.passes).map_err(CompileError::InvalidIr)?
     } else {
         PassStats::default()
     };
+    // Cold Tier 1 never pays for loop discovery. The master optimization switch
+    // and zero-round diagnostic configuration also disable code motion.
+    if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
+        passes.loop_hoisted = licm::run(&mut region, licm::DEFAULT_WORK_LIMIT)
+            .map_err(CompileError::InvalidIr)?
+            .hoisted;
+    }
     let mut mir = lower(&region)?;
     drop(region);
     let mir_folds = if config.optimize { mir.fold_constants()? } else { 0 };
