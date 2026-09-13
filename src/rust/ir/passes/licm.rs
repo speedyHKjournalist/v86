@@ -237,10 +237,10 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
                         Definition::Parameter(owner, _) => owner.index(),
                         Definition::Instruction(def, _) => {
                             staged.instructions[def.index()].block.index()
-                        },
+                        }
                     };
-                    invariant &= !natural.members[owner]
-                        && cfg.dominates[natural.preheader][owner];
+                    invariant &=
+                        !natural.members[owner] && cfg.dominates[natural.preheader][owner];
                 }
                 if invariant {
                     // Updating ownership makes dependent expressions available
@@ -371,7 +371,7 @@ mod no_motion_tests {
                         target: BlockId(0),
                         args: vec![value; MAX_METADATA_ITEMS + 1],
                     }));
-                },
+                }
                 5 => region.states[0].xmm = vec![value; MAX_METADATA_ITEMS + 1],
                 6 => region.states[0].x87 = vec![value; MAX_METADATA_ITEMS + 1],
                 7 => region.helpers.push(crate::ir::helper::HelperDescriptor::conservative(
@@ -393,7 +393,7 @@ mod no_motion_tests {
                     // Individually small vectors must share the same total cap.
                     region.instructions[0].args = vec![value; MAX_METADATA_ITEMS / 2];
                     region.instructions[0].results = vec![value; MAX_METADATA_ITEMS / 2];
-                },
+                }
             }
             let before = format!("{region:?}");
             assert_eq!(
