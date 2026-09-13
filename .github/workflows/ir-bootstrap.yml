@@ -1,0 +1,44 @@
+name: IR development bootstrap
+
+on:
+  push:
+    branches: ['chat/ir-continuation-20260913']
+    paths: ['.github/workflows/ir-bootstrap.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Archive tracked sources only
+        run: git archive --format=tar.gz --output=ir-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-development-source
+          path: ir-source.tar.gz
+          retention-days: 1
+          compression-level: 0
+      - name: Install public Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add rustfmt
+          rustup target add wasm32-unknown-unknown
+          rustc --version
+          cargo --version
+      - name: Bundle public toolchain for offline native and Wasm tests
+        run: |
+          sysroot="$(rustc --print sysroot)"
+          tar -czf ir-rust-toolchain.tar.gz -C "$sysroot" bin lib
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-development-toolchain
+          path: ir-rust-toolchain.tar.gz
+          retention-days: 1
+          compression-level: 0
