@@ -1,0 +1,40 @@
+name: IR development snapshot
+
+on:
+  push:
+    branches: [chat/ir-continuation-20260913]
+    paths: [.github/workflows/ir-dev-snapshot.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Prepare compiler toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup component add rustfmt --toolchain stable
+          rustup target add wasm32-unknown-unknown --toolchain stable
+          sudo apt-get update -y
+          sudo apt-get install -y nasm
+      - name: Package tracked source and compiler tools
+        run: |
+          mkdir -p snapshot
+          git archive --format=tar.gz 372ccdc42cc8cb66c61c283295ab7ab673b73f2f > snapshot/source.tar.gz
+          toolchain=$(dirname "$(dirname "$(rustup which --toolchain stable rustc)")")
+          tar -C "$toolchain" -czf snapshot/rust-toolchain.tar.gz bin lib
+          cp /usr/bin/nasm snapshot/nasm
+          rustup run stable rustc --version > snapshot/toolchain-version.txt
+          sha256sum snapshot/source.tar.gz snapshot/rust-toolchain.tar.gz snapshot/nasm > snapshot/SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-development-snapshot
+          path: snapshot/
+          compression-level: 0
+          retention-days: 1
