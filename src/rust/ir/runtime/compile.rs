@@ -203,7 +203,11 @@ fn compile_inner(
         )?
     };
     let passes = if config.optimize {
-        let optimize = if request.tier == Tier::Two { run_tier2 } else { run };
+        let optimize = if request.tier == Tier::Two {
+            run_tier2
+        } else {
+            run
+        };
         optimize(&mut region, config.passes).map_err(CompileError::InvalidIr)?
     } else {
         PassStats::default()
