@@ -1,211 +1,199 @@
-//! Transactional, bounded LICM for total, CPU-independent SSA expressions.
+//! Bounded, transactional LICM for non-trapping SSA expressions only.
 //!
-//! Only existing unconditional preheaders are used. The CFG, effect chain,
-//! snapshots, fault sites and budget polls are never rewritten by this pass.
+//! No CFG is rewritten. A loop must already have an unconditional, unique
+//! preheader; memory operations, CPU reads, helpers and recovery points never
+//! move. In particular, `!op.ordered()` is NOT a speculation proof.
 use crate::ir::{analysis::cfg::Cfg, hir::*, ids::*, verify::verify};
 
 #[derive(Clone, Copy, Debug)]
-pub struct LicmConfig {
+pub struct Config {
     pub max_work: usize,
     pub max_hoisted: usize,
 }
-impl Default for LicmConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
-            max_work: 1_000_000,
+            max_work: 262_144,
             max_hoisted: 256,
         }
     }
 }
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LicmStats {
+#[derive(Default, Debug, Eq, PartialEq)]
+pub struct Stats {
     pub loops: usize,
-    /// Number of moves; an instruction may move through nested preheaders.
     pub hoisted: usize,
     pub work: usize,
 }
-struct Work {
+struct Budget {
     remaining: usize,
 }
-impl Work {
-    fn spend(&mut self, amount: usize) -> Result<(), String> {
+impl Budget {
+    fn charge(&mut self, amount: usize) -> Result<(), String> {
         self.remaining = self
             .remaining
             .checked_sub(amount)
-            .ok_or_else(|| "LICM work budget exceeded".to_string())?;
+            .ok_or("LICM work budget exceeded")?;
         Ok(())
     }
 }
 struct NaturalLoop {
     header: usize,
     preheader: usize,
-    body: Vec<bool>,
+    members: Vec<bool>,
 }
 
-/// On any failure, including the final verifier, `region` is unchanged.
-pub fn run(region: &mut Region, config: LicmConfig) -> Result<LicmStats, String> {
+/// All failures leave the caller's region unchanged, including budget failures
+/// after finding or moving candidates in earlier (possibly nested) loops.
+pub fn run(region: &mut Region, config: Config) -> Result<Stats, String> {
+    if config.max_work > 1_048_576 || config.max_hoisted > 1024 {
+        return Err("invalid LICM budget".into());
+    }
     if region.blocks.len() > 64
         || region.instructions.len() > 8192
         || region.values.len() > 16384
-        || region.states.len() > 8192
+        || region.states.len() > 4096
     {
         return Err("LICM region budget exceeded".into());
     }
     verify(region).map_err(|e| e.0)?;
-    let mut work = Work {
+    if config.max_hoisted == 0 {
+        return Ok(Stats::default());
+    }
+    let mut budget = Budget {
         remaining: config.max_work,
     };
-    work.spend(1)?;
     let cfg = Cfg::compute(region)?;
-    let loops = natural_loops(region, &cfg, &mut work)?;
-    if loops.is_empty() {
-        return Ok(LicmStats {
-            work: config.max_work - work.remaining,
-            ..LicmStats::default()
-        });
-    }
-    let mut draft = region.clone();
-    let mut stats = LicmStats::default();
-    for natural in loops {
+    let loops = natural_loops(region, &cfg, &mut budget)?;
+    let mut candidate = region.clone();
+    let mut stats = Stats::default();
+    for natural_loop in loops {
         stats.loops += 1;
-        let mut order: Vec<_> = (0..draft.blocks.len())
-            .filter(|&b| natural.body[b])
+        // SSA definitions in dominating blocks precede their uses, even when
+        // the arena was not allocated in CFG or dominator order.
+        let mut order: Vec<_> = (0..candidate.blocks.len())
+            .filter(|&b| natural_loop.members[b])
             .collect();
-        order.sort_by_key(|&b| (cfg.dominates[b].iter().filter(|&&v| v).count(), b));
-        let mut selected = vec![false; draft.instructions.len()];
-        let mut moves = Vec::new();
+        order.sort_by_key(|&b| cfg.dominates[b].iter().filter(|&&v| v).count());
         for b in order {
-            for &id in &draft.blocks[b].instructions {
-                work.spend(1)?;
-                let inst = &draft.instructions[id.index()];
-                if !movable(inst) {
+            for id in candidate.blocks[b].instructions.clone() {
+                budget.charge(1)?;
+                let inst = &candidate.instructions[id.index()];
+                if !speculatable(inst) {
                     continue;
                 }
                 let mut invariant = true;
-                for &arg in &inst.args {
-                    work.spend(1)?;
-                    let owner = match draft.values[arg.index()].definition {
+                for &value in &inst.args {
+                    budget.charge(1)?;
+                    let owner = match candidate.values[value.index()].definition {
                         Definition::Parameter(block, _) => block.index(),
-                        Definition::Instruction(def, _) => {
-                            if selected[def.index()] {
-                                continue;
-                            }
-                            draft.instructions[def.index()].block.index()
+                        Definition::Instruction(id, _) => {
+                            candidate.instructions[id.index()].block.index()
                         },
                     };
-                    if natural.body[owner] || !cfg.dominates[natural.preheader][owner] {
+                    if !cfg.dominates[natural_loop.preheader][owner] {
                         invariant = false;
                         break;
                     }
                 }
-                if invariant {
-                    if stats.hoisted >= config.max_hoisted {
-                        return Err("LICM hoist budget exceeded".into());
-                    }
-                    selected[id.index()] = true;
-                    moves.push(id);
-                    stats.hoisted += 1;
+                if !invariant {
+                    continue;
                 }
+                if stats.hoisted == config.max_hoisted {
+                    return Err("LICM hoist budget exceeded".into());
+                }
+                // Earlier hoists are now available at the end of the preheader.
+                // Stable IDs preserve every StateMap and edge-only use.
+                candidate.instructions[id.index()].block = BlockId(natural_loop.preheader as u32);
+                candidate.blocks[natural_loop.preheader]
+                    .instructions
+                    .push(id);
+                stats.hoisted += 1;
             }
-        }
-        // Selection is in definition-before-use order. Stable IDs preserve all
-        // recovery-only references; only the instruction's owning block changes.
-        for (b, block) in draft.blocks.iter_mut().enumerate() {
-            if natural.body[b] {
-                block.instructions.retain(|id| !selected[id.index()]);
-            }
-        }
-        for id in moves {
-            draft.instructions[id.index()].block = BlockId(natural.preheader as u32);
-            draft.blocks[natural.preheader].instructions.push(id);
+            budget.charge(candidate.blocks[b].instructions.len())?;
+            candidate.blocks[b]
+                .instructions
+                .retain(|id| candidate.instructions[id.index()].block.index() == b);
         }
     }
-    verify(&draft).map_err(|e| e.0)?;
-    stats.work = config.max_work - work.remaining;
-    *region = draft;
+    verify(&candidate).map_err(|e| e.0)?;
+    stats.work = config.max_work - budget.remaining;
+    if stats.hoisted != 0 {
+        *region = candidate;
+    }
     Ok(stats)
 }
 
-fn movable(inst: &Instruction) -> bool {
-    if inst.state.is_some()
-        || inst.commit.is_some()
-        || inst.trap_after_fault
-        || inst.unmasked_word_store
-        || inst.results.len() != 1
-    {
-        return false;
-    }
-    // `!op.ordered()` is NOT sufficient: ReadGpr/ReadFlags/ReadXmm etc. observe
-    // mutable CPU state, and future operations must be audited explicitly.
-    matches!(
-        inst.op,
-        Op::Const(_)
-            | Op::Binary(_)
-            | Op::Select
-            | Op::Extend { .. }
-            | Op::Truncate
-            | Op::Extract { .. }
-            | Op::Insert { .. }
-            | Op::CountLeadingZeros
-            | Op::CountTrailingZeros
-            | Op::PopulationCount
-            | Op::LinearOffset
-            | Op::VectorBitmask { .. }
-            | Op::VectorBinary(_)
-            | Op::VectorShuffle(_)
-            | Op::VectorExtract { .. }
-            | Op::VectorReplace { .. }
-    )
+fn speculatable(inst: &Instruction) -> bool {
+    inst.results.len() == 1
+        && inst.state.is_none()
+        && inst.commit.is_none()
+        && !inst.trap_after_fault
+        && !inst.unmasked_word_store
+        && matches!(
+            inst.op,
+            Op::Const(_)
+                | Op::Binary(_)
+                | Op::Select
+                | Op::Extend { .. }
+                | Op::Truncate
+                | Op::Extract { .. }
+                | Op::Insert { .. }
+                | Op::CountLeadingZeros
+                | Op::CountTrailingZeros
+                | Op::PopulationCount
+                | Op::LinearOffset
+                | Op::VectorBitmask { .. }
+                | Op::VectorBinary(_)
+                | Op::VectorShuffle(_)
+                | Op::VectorExtract { .. }
+                | Op::VectorReplace { .. }
+        )
 }
 
-fn natural_loops(region: &Region, cfg: &Cfg, work: &mut Work) -> Result<Vec<NaturalLoop>, String> {
+fn natural_loops(
+    region: &Region,
+    cfg: &Cfg,
+    budget: &mut Budget,
+) -> Result<Vec<NaturalLoop>, String> {
     let n = region.blocks.len();
-    let mut latches = vec![Vec::new(); n];
-    for (b, block) in region.blocks.iter().enumerate() {
-        if !cfg.reachable[b] {
+    let mut loops = Vec::new();
+    for header in 0..n {
+        budget.charge(1 + cfg.predecessors[header].len())?;
+        if region.entries.contains(&BlockId(header as u32)) {
             continue;
         }
-        for edge in block.terminator.as_ref().unwrap().edges() {
-            work.spend(1)?;
-            let header = edge.target.index();
-            if cfg.dominates[b][header] {
-                latches[header].push(b);
-            }
-        }
-    }
-    let mut result = Vec::new();
-    for (header, tails) in latches.into_iter().enumerate() {
-        work.spend(1)?;
-        if tails.is_empty() || region.entries.contains(&BlockId(header as u32)) {
+        let mut stack: Vec<_> = cfg.predecessors[header]
+            .iter()
+            .filter(|p| cfg.dominates[p.index()][header])
+            .map(|p| p.index())
+            .collect();
+        if stack.is_empty() {
             continue;
         }
-        let mut body = vec![false; n];
-        body[header] = true;
-        let mut stack = tails;
+        // Union every latch of this header, rather than treating overlapping
+        // backedges as independent loops with unsound preheaders.
+        let mut members = vec![false; n];
+        members[header] = true;
         while let Some(b) = stack.pop() {
-            work.spend(1)?;
-            if body[b] {
+            budget.charge(1)?;
+            if members[b] {
                 continue;
             }
-            body[b] = true;
-            for pred in &cfg.predecessors[b] {
-                work.spend(1)?;
-                if cfg.reachable[pred.index()] {
-                    stack.push(pred.index());
-                }
-            }
+            members[b] = true;
+            budget.charge(cfg.predecessors[b].len())?;
+            stack.extend(cfg.predecessors[b].iter().map(|p| p.index()));
         }
-        // Reject secondary entries (including external roots) and any body not
-        // dominated by its header. This also keeps irreducible cycles untouched.
+        budget.charge(n + cfg.predecessors[header].len())?;
         if (0..n).any(|b| {
-            body[b] && (!cfg.dominates[b][header] || region.entries.contains(&BlockId(b as u32)))
+            members[b]
+                && (!cfg.dominates[b][header] || region.entries.contains(&BlockId(b as u32)))
         }) {
             continue;
         }
         let mut outside: Vec<_> = cfg.predecessors[header]
             .iter()
-            .map(|b| b.index())
-            .filter(|&b| !body[b])
+            .map(|p| p.index())
+            .filter(|&p| !members[p])
             .collect();
         outside.sort_unstable();
         outside.dedup();
@@ -213,37 +201,25 @@ fn natural_loops(region: &Region, cfg: &Cfg, work: &mut Work) -> Result<Vec<Natu
             continue;
         }
         let preheader = outside[0];
-        if !cfg.reachable[preheader] || !cfg.dominates[header][preheader] {
+        if !matches!(
+            &region.blocks[preheader].terminator,
+            Some(Terminator::Branch(edge)) if edge.target.index() == header
+        ) {
             continue;
         }
-        if !matches!(&region.blocks[preheader].terminator,
-            Some(Terminator::Branch(edge)) if edge.target.index() == header)
-        {
-            continue;
-        }
-        let mut single_entry = true;
-        for b in 0..n {
-            if !body[b] || b == header {
-                continue;
-            }
-            for pred in &cfg.predecessors[b] {
-                work.spend(1)?;
-                if !body[pred.index()] {
-                    single_entry = false;
-                }
-            }
-        }
-        if single_entry {
-            result.push(NaturalLoop {
-                header,
-                preheader,
-                body,
-            });
-        }
+        loops.push(NaturalLoop {
+            header,
+            preheader,
+            members,
+        });
     }
-    result.sort_by_key(|l| (l.body.iter().filter(|&&b| b).count(), l.header));
-    Ok(result)
+    // Inner loops first: an outer pass can then move their invariants again.
+    loops.sort_by_key(|l| (l.members.iter().filter(|&&b| b).count(), l.header));
+    Ok(loops)
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod pipeline;

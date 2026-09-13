@@ -8,7 +8,7 @@ use crate::ir::{
         region::lift_cpu_cfg,
     },
     lowering::{lower, CompileError},
-    passes::{run, PassConfig, PassStats},
+    passes::{run, run_tier2, PassConfig, PassStats},
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Backend {
@@ -203,11 +203,12 @@ fn compile_inner(
         )?
     };
     let passes = if config.optimize {
-        let mut selected = config.passes;
-        // Speculative pure code motion is a Tier 2 optimization. Keep the
-        // latency-oriented Tier 1 pipeline unchanged.
-        selected.licm &= request.tier == Tier::Two;
-        run(&mut region, selected).map_err(CompileError::InvalidIr)?
+        let optimize = if request.tier == Tier::Two {
+            run_tier2
+        } else {
+            run
+        };
+        optimize(&mut region, config.passes).map_err(CompileError::InvalidIr)?
     } else {
         PassStats::default()
     };

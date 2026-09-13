@@ -34,7 +34,7 @@ def main() -> int:
         env = os.environ.copy()
         env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") + " -D warnings").strip()
         subprocess.run(["cargo", "test", "ir::passes"], cwd=ROOT, env=env, check=True)
-        for script in ("licm", "simd_opt", "corpus_shards"):
+        for script in ("licm", "licm_extended", "simd_opt", "corpus_shards"):
             subprocess.run(["node", f"tests/ir/wasm/{script}.mjs"], cwd=ROOT, check=True)
     else:
         # Fail before building if an archive/shallow checkout cannot provide the

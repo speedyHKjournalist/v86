@@ -28,7 +28,7 @@ the original HIR. Zero-trip loops may compute an unused pure value, but cannot g
 a guest-visible access, exception, state update or retired instruction.
 
 The pass rejects regions above 64 blocks, 8,192 instruction slots, 16,384 value slots
-or 8,192 StateMaps. Defaults allow 1,000,000 charged work units and 256 moves. A move
+or 4,096 StateMaps. Defaults allow 262,144 charged work units and 256 moves. A move
 through each nested preheader is counted separately. Work units count selected
 traversals, not wall-clock time or every allocator/verifier operation; structural
 limits bound the other work. A verified clone is committed only after success, so
@@ -57,10 +57,11 @@ both false. Global `IrConfig::optimize = false` bypasses all passes. SIMD runs i
 bounded canonicalization rounds. LICM runs once after those rounds; GVN and DCE
 cleanup are repeated only when code was moved and those passes are enabled.
 
-The common runtime compiler entry masks LICM off for `Tier::One`. It is eligible
-for optimized `Tier::Two` requests through all three compilation APIs; a standalone
-caller of the pass pipeline controls its own tier policy. Zero rounds do not run
-LICM. `PassStats::hoisted` counts moves and `simd_simplified` counts rewrites. No new
+The common runtime compiler entry retains the upstream `run`/`run_tier2` split.
+Only optimized `Tier::Two` requests through the three compilation APIs use
+`run_tier2`; ordinary `run` performs no LICM. Zero rounds do not run LICM.
+`PassStats::licm_loops`, `licm_hoisted` and `licm_work` preserve upstream statistics,
+while `simd_simplified` counts the new rewrites. No new
 JavaScript public option, memory-proof claim, or performance guarantee is implied.
 
 ## Reproducible tests
@@ -93,7 +94,21 @@ fault priorities, memory permissions, MMIO observations, partial faults and resu
 checks. Child failure or a malformed shard token fails the parent run. A partition
 unit test checks exhaustive coverage and index preservation.
 
-## Validation recorded in this change
+## Reconciliation with concurrent upstream work
+
+While this change was being validated, `ir` advanced to
+`00da882962df72b4c39e8dd28f9f5a3bb1ac8639` and incorporated another LICM
+implementation. The final integration **retains that implementation**, its public
+`Config`/`Stats` API, original tests, Wasm oracle, `run_tier2` entry and runtime
+compiler selection. It does not overwrite that concurrent work with the initial
+implementation from this branch.
+
+The nine additional LICM tests now live in `licm/extended_tests.rs`, with their
+own `ir-licm-extended` fixtures and `wasm/licm_extended.mjs` model. The four SIMD
+tests remain new. A per-pass LICM opt-out and optional GVN/DCE cleanup extend the
+existing Tier 2 pipeline; the SIMD pass runs during scalar canonicalization.
+
+## Validation recorded before reconciliation
 
 Local compiler: Rust 1.98.1; Wasm execution: Node 22.16.0, Linux x86-64. Source and
 public toolchain were obtained through a temporary repository CI artifact; that
@@ -130,3 +145,19 @@ Proof-based memory reuse, forwarding, induction-variable/strength transforms,
 remaining ISA/MIR/link management, production-default migration and legacy emitter
 retirement remain open. No speedup or XP/game compatibility claim follows from
 synthetic optimization correctness tests.
+
+## Validation after reconciliation
+
+The integrated source passed all **153 native Rust tests** and the complete
+standalone Wasm execution runner. The optimization subset contains 26 tests:
+13 preserved upstream LICM tests and 13 additional LICM/SIMD tests. The preserved
+LICM oracle passed 21,600 executions; the additional CFG/budget oracle passed
+7,680 executions; the SIMD byte oracle passed 9,088 executions. Moving the added
+tests to a separate module was followed by rerunning the 26-test subset and all
+three optimization oracles.
+
+The integrated release runtime kernel was rebuilt, and `live_runtime`, `cache`,
+`auto` and `backend` differential runners passed against that exact kernel.
+The earlier large-corpus counts remain results of the pre-reconciliation revision;
+they are not silently relabeled as a full CPU-matrix rerun of this final merge.
+The final full CI matrix is a separate check on the PR commit.

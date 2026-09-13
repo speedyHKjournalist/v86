@@ -3,6 +3,9 @@ use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
 pub mod licm;
+#[cfg(test)]
+#[path = "licm/extended_tests.rs"]
+mod licm_extended_tests;
 mod merge;
 mod prune;
 mod simd;
@@ -43,7 +46,9 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
-    pub hoisted: usize,
+    pub licm_loops: usize,
+    pub licm_hoisted: usize,
+    pub licm_work: usize,
     pub simd_simplified: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
@@ -82,10 +87,18 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
             verify(region).map_err(|e| e.0)?;
         }
     }
+    Ok(stats)
+}
+/// Tier 2 adds bounded loop motion after scalar/SIMD simplification. Keep the
+/// existing standalone/Tier 1 entry and LICM statistics contract unchanged.
+pub fn run_tier2(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
+    let mut stats = run(region, config)?;
     if config.licm && config.rounds != 0 {
-        let moved = licm::run(region, licm::LicmConfig::default())?;
-        stats.hoisted += moved.hoisted;
-        if moved.hoisted != 0 {
+        let loops = licm::run(region, licm::Config::default())?;
+        stats.licm_loops = loops.loops;
+        stats.licm_hoisted = loops.hoisted;
+        stats.licm_work = loops.work;
+        if loops.hoisted != 0 {
             if config.gvn {
                 gvn::run(region, &mut stats)?;
                 verify(region).map_err(|e| e.0)?;

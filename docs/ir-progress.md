@@ -3,7 +3,7 @@
 更新：2026-09-13。固定基线：`8ee73e538daaab15411344d39a1f271e778ac7f3`。
 
 **完整请求尚未完成。** 生产默认仍为 legacy；显式选择 IR 时已有自动编译与
-Tier 2 升档。本轮补充 Tier 2 纯 SSA LICM、位精确 SIMD 化简及回归入口，
+Tier 2 升档。本轮保留并整合并行合入的 Tier 2 纯 SSA LICM，补充位精确 SIMD 化简及回归入口，
 尚未完成纯 IR 的 Windows XP 启动、全 ISA 或性能验收。
 原始验收范围以 [实施计划](v86-ir-implementation-plan.md) 为准，没有降低其完成条件。
 
@@ -52,7 +52,7 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
   重排链；四个独立源不能非法合并为两个源。所有恢复映射一起改写，不改变浮点、
   guest 内存、SSE 资格检查或 CPU ABI。
 - 新增 13 项 Rust 优化测试，独立模型执行 7,680 次 LICM 和 9,088 次 SIMD
-  reference/optimized Wasm 对照。完整 native Rust 测试为 140 项，全部通过；
+  reference/optimized Wasm 对照。整合并行更新前完整 native Rust 测试为 140 项，全部通过；
   现有独立 Wasm 执行矩阵亦通过。详细环境、范围和未运行项目见
   [IR-11 实现与验证](ir-optimizations.md)。
 - `tests/ir/run_regressions.py` 提供优化子集与 42 个 Make target 的完整回归入口。
@@ -68,3 +68,16 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
 
 **未改变的验收门槛：** 不把实验覆盖改成生产完成，不绕过 `ir-default-gate`，
 不删除 legacy 发射器，不宣称 XP/游戏兼容或性能提升。完整目标仍为 IR-00–IR-14。
+
+## 并行更新整合
+
+目标 `ir` 在本轮期间前进至 `00da882962df72b4c39e8dd28f9f5a3bb1ac8639`，
+已合入另一版 LICM。本分支保留该实现、原测试及 `run_tier2`/统计字段契约，
+将本轮 9 项 LICM 测试作为独立补充模块保留，并接入 4 项 SIMD 测试、
+按 pass 关闭 LICM 的开关和后续 GVN/DCE 清理；没有用本轮初版覆盖并行工作。
+
+整合后的完整 native Rust 测试为 **153 项通过**，独立 Wasm 矩阵通过；
+保留的 LICM oracle 完成 21,600 次执行，新增 LICM/SIMD oracle 分别完成
+7,680/9,088 次执行。重新构建的 release runtime 核心通过 live/cache/auto/backend
+回归。此前两个 SIMD 大矩阵的全量结果属于整合前版本，最终合并版本的
+完整 CPU 矩阵以 PR CI 为准，没有将旧结果冒充为本次重新执行。
