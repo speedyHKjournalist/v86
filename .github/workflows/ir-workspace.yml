@@ -9,41 +9,24 @@ permissions:
   contents: read
 
 jobs:
-  workspace:
+  dependencies:
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Install minimal compiler
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Prepare the repository's pinned build dependency
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add wasm32-unknown-unknown
-          rustup component add rustfmt
-          sudo apt-get update -y
-          sudo apt-get install -y nasm
-      - name: Package reproducible source and compiler
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/ir-workspace/toolchain /tmp/ir-workspace/source /tmp/ir-workspace/bin
-          git archive HEAD | tar -xf - -C /tmp/ir-workspace/source
-          toolchain="$(dirname "$(dirname "$(rustup which rustc)")")"
-          cp -a "$toolchain/bin" /tmp/ir-workspace/toolchain/
-          mkdir -p /tmp/ir-workspace/toolchain/lib/rustlib
-          cp -a "$toolchain"/lib/*.so* /tmp/ir-workspace/toolchain/lib/
-          cp -a "$toolchain/lib/rustlib/x86_64-unknown-linux-gnu" /tmp/ir-workspace/toolchain/lib/rustlib/
-          cp -a "$toolchain/lib/rustlib/wasm32-unknown-unknown" /tmp/ir-workspace/toolchain/lib/rustlib/
-          cp /usr/bin/nasm /tmp/ir-workspace/bin/
-          rustc --version > /tmp/ir-workspace/VERSIONS.txt
-          cargo --version >> /tmp/ir-workspace/VERSIONS.txt
-          git rev-parse HEAD >> /tmp/ir-workspace/VERSIONS.txt
-          tar -C /tmp/ir-workspace -czf /tmp/ir-workspace.tar.gz .
+          make closure-compiler/compiler.jar
+          sha256sum closure-compiler/compiler.jar > closure-compiler/SHA256SUMS
+          node --version > closure-compiler/NODE_VERSION
       - uses: actions/upload-artifact@v7
         with:
-          name: ir-workspace
-          path: /tmp/ir-workspace.tar.gz
+          name: ir-build-dependencies
+          path: closure-compiler/
           retention-days: 1
           compression-level: 0
