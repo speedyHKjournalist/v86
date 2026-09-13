@@ -21,6 +21,8 @@ fn only_merge() -> PassConfig {
         fold: false,
         gvn: false,
         dce: false,
+        licm: false,
+        simd: false,
         rounds: 1,
     }
 }

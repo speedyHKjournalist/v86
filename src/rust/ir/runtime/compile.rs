@@ -203,7 +203,11 @@ fn compile_inner(
         )?
     };
     let passes = if config.optimize {
-        run(&mut region, config.passes).map_err(CompileError::InvalidIr)?
+        let mut selected = config.passes;
+        // Keep loop analysis out of the latency-sensitive Tier 1 compiler.
+        selected.licm &= request.tier == Tier::Two;
+        selected.simd &= request.tier == Tier::Two;
+        run(&mut region, selected).map_err(CompileError::InvalidIr)?
     } else {
         PassStats::default()
     };

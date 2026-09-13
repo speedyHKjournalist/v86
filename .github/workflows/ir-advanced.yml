@@ -1,0 +1,85 @@
+name: IR advanced optimizations
+
+on:
+  pull_request:
+    branches: [ir]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-advanced-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  values:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Prepare native compiler and disassembler
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          sudo apt-get update -y
+          sudo apt-get install -y nasm
+      - name: Focused transformations and independent Wasm oracles
+        run: |
+          set -o pipefail
+          node tests/ir/advanced.mjs 2>&1 | tee ir-advanced.log
+      - name: Full native and Wasm core regression
+        run: |
+          set -o pipefail
+          env RUSTFLAGS="-D warnings" make ir-backend-tests 2>&1 | tee ir-core.log
+          node tests/ir/decode/oracle.mjs 2>&1 | tee ir-decoder.log
+          git diff --exit-code
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ir-advanced-value-logs
+          retention-days: 7
+          path: ir-*.log
+
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Prepare CPU build dependencies
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -y
+          sudo apt-get install -y nasm clang default-jre
+      - name: Native fixtures
+        run: |
+          node tests/ir/advanced.mjs
+          cargo test
+      - name: CPU control flow, memory, REP and SIMD regressions
+        run: |
+          set -o pipefail
+          make ir-cfg-tests ir-memory-tests ir-rep-tests ir-entry-tests ir-simd-integer-tests ir-simd-shuffle-tests ir-simd-lane-tests ir-simd-transfer-tests 2>&1 | tee ir-cpu-semantics.log
+      - name: Online compilation, cache and Tier 2 integration
+        run: |
+          set -o pipefail
+          make ir-live-tests ir-cache-tests ir-auto-tests ir-backend-integration-tests 2>&1 | tee ir-cpu-runtime.log
+          git diff --exit-code
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ir-advanced-cpu-logs
+          retention-days: 7
+          path: ir-*.log

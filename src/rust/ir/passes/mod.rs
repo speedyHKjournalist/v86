@@ -2,8 +2,10 @@
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
+pub mod simd;
 #[derive(Clone, Copy)]
 pub struct PassConfig {
     pub prune: bool,
@@ -12,6 +14,9 @@ pub struct PassConfig {
     pub fold: bool,
     pub gvn: bool,
     pub dce: bool,
+    /// Pure loop motion; production Tier 1 explicitly disables this pass.
+    pub licm: bool,
+    pub simd: bool,
     pub rounds: usize,
 }
 impl Default for PassConfig {
@@ -23,6 +28,8 @@ impl Default for PassConfig {
             fold: true,
             gvn: true,
             dce: true,
+            licm: true,
+            simd: true,
             rounds: 2,
         }
     }
@@ -37,6 +44,11 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub licm_hoisted: usize,
+    pub licm_loops: usize,
+    pub simd_eliminated: usize,
+    pub simd_composed: usize,
+    pub simd_overwritten_lanes: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -61,9 +73,20 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
             prune::run(region, &mut stats)?;
             verify(region).map_err(|e| e.0)?;
         }
+        if config.simd {
+            let vectors = simd::run(region, simd::DEFAULT_WORK_BUDGET)?;
+            stats.simd_eliminated += vectors.eliminated;
+            stats.simd_composed += vectors.composed;
+            stats.simd_overwritten_lanes += vectors.overwritten_lanes;
+        }
         if config.gvn {
             gvn::run(region, &mut stats)?;
             verify(region).map_err(|e| e.0)?;
+        }
+        if config.licm {
+            let motion = licm::run(region, licm::DEFAULT_WORK_BUDGET)?;
+            stats.licm_hoisted += motion.hoisted;
+            stats.licm_loops += motion.loops;
         }
         if config.dce {
             dce(region, &mut stats);
