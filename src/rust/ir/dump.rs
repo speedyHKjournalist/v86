@@ -52,6 +52,9 @@ pub fn mir(region: &super::mir::MirRegion) -> String {
         )
         .unwrap();
         for id in &block.instructions {
+            if let Some(proof) = region.ram_forwarding(*id) {
+                writeln!(&mut out, "  i{}: guarded_ram_read={proof:?}", id.0).unwrap();
+            }
             if let Some(plan) = &region.control.polls[id.index()] {
                 writeln!(&mut out, "  i{}: {plan:#?}", id.0).unwrap();
             } else if let Some(plan) = &region.memory[id.index()] {

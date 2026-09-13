@@ -5,6 +5,7 @@ use crate::ir::mir::arithmetic::{
 use crate::ir::mir::call::{CallPlan, Observation};
 use crate::ir::mir::control::{Copy, Edge as MirEdge, Source, Terminator as MirTerminator};
 use crate::ir::mir::effect::EffectPlan;
+use crate::ir::mir::forwarding::Forwarding;
 use crate::ir::mir::materialize::{Count, CountMode, Store, Write};
 use crate::ir::mir::memory::{
     Argument, MemoryPlan, NativeMemory, RamGuard, RuntimeCall, SlowResult, VectorCombine,
@@ -38,6 +39,7 @@ struct Emitter<'a> {
     cpu: bool,
     accounted: Option<WasmLocal>,
     tlb: Option<WasmLocal>,
+    read_cache: Option<(WasmLocal, WasmLocal)>,
 }
 impl Emitter<'_> {
     fn get(&mut self, value: ValueId) {
@@ -388,7 +390,33 @@ impl Emitter<'_> {
         }
         self.w.call_signature(call.name, call.signature.clone());
     }
-    fn planned_memory(&mut self, plan: &MemoryPlan) {
+    fn memory_with_forwarding(&mut self, plan: &MemoryPlan, proof: Option<Forwarding>) {
+        match proof {
+            Some(Forwarding::Begin) => {
+                self.w.const_i32(0);
+                self.w.set_local(&self.read_cache.as_ref().unwrap().0);
+                self.planned_memory(plan, true);
+            },
+            Some(Forwarding::Reuse { .. }) => {
+                self.w.get_local(&self.read_cache.as_ref().unwrap().0);
+                self.w.if_void();
+                self.w.get_local(&self.read_cache.as_ref().unwrap().1);
+                let NativeMemory::ScalarLoad {
+                    result,
+                    ticket: None,
+                } = plan.native
+                else {
+                    unreachable!("verified scalar forwarding certificate")
+                };
+                self.set(result);
+                self.w.else_();
+                self.planned_memory(plan, true);
+                self.w.block_end();
+            },
+            None => self.planned_memory(plan, false),
+        }
+    }
+    fn planned_memory(&mut self, plan: &MemoryPlan, cache: bool) {
         let bytes = plan.guard.bytes;
         let entry = self.planned_ram_guard(plan.address, &plan.guard);
         self.w.if_void();
@@ -412,6 +440,15 @@ impl Emitter<'_> {
                     2 => self.w.load_unaligned_u16(0),
                     4 => self.w.load_unaligned_i32(0),
                     _ => unreachable!(),
+                }
+                if cache {
+                    // The load is guarded as ordinary, same-page readable RAM;
+                    // this is the only path allowed to make the cache valid.
+                    let (valid, value) = self.read_cache.as_ref().unwrap();
+                    self.w.set_local(value);
+                    self.w.const_i32(1);
+                    self.w.set_local(valid);
+                    self.w.get_local(value);
                 }
                 self.set(*result);
             },
@@ -516,6 +553,12 @@ impl Emitter<'_> {
             },
         }
         self.w.else_();
+        if cache {
+            // Clear BEFORE entering a callback or a page walk. Slow success is
+            // not evidence that RAM or its mapping remained stable.
+            self.w.const_i32(0);
+            self.w.set_local(&self.read_cache.as_ref().unwrap().0);
+        }
         self.prepare_memory_call(plan.before);
         self.runtime_call(&plan.call);
         match &plan.result {
@@ -819,7 +862,7 @@ impl Emitter<'_> {
         if let Some(plan) = &mir.control.polls[id.index()] {
             self.poll(Some(plan.recovery), plan.cost, remaining);
         } else if let Some(plan) = &mir.memory[id.index()] {
-            self.planned_memory(plan);
+            self.memory_with_forwarding(plan, mir.ram_forwarding(id));
         } else if let Some(plan) = &mir.effects[id.index()] {
             self.planned_effect(plan);
         } else if let Some(plan) = &mir.calls[id.index()] {
@@ -949,6 +992,7 @@ fn emit_inner(
         cpu,
         accounted: None,
         tlb: None,
+        read_cache: None,
     };
     if let Some(entry) = entry {
         // Reject before ir_enter (which writes previous_ip and clears REP results),
@@ -972,6 +1016,13 @@ fn emit_inner(
         e.accounted = Some(e.w.set_new_local());
         e.w.call_fn0_ret("ir_tlb_base");
         e.tlb = Some(e.w.set_new_local());
+    }
+    if mir.has_ram_forwarding() {
+        e.w.const_i32(0);
+        let valid = e.w.set_new_local();
+        e.w.const_i32(0);
+        let value = e.w.set_new_local();
+        e.read_cache = Some((valid, value));
     }
     for ty in &mir.allocation.local_types {
         if *ty == Type::V128 {
@@ -1056,6 +1107,10 @@ fn emit_inner(
     }
     if let Some(local) = e.tlb {
         e.w.free_local(local);
+    }
+    if let Some((valid, value)) = e.read_cache {
+        e.w.free_local(valid);
+        e.w.free_local(value);
     }
     e.w.finish();
     let bytes = e.w.output().to_vec();

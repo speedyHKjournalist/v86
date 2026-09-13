@@ -173,6 +173,7 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
     Ok(Draft {
         hir: region,
         data: MirData {
+            ram_forwarding: vec![None; region.instructions.len()],
             value_types: region.values.iter().map(|v| v.ty).collect(),
             allocation,
             helpers,

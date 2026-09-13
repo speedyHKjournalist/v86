@@ -3,6 +3,7 @@ pub mod arithmetic;
 pub mod call;
 pub mod control;
 pub mod effect;
+pub mod forwarding;
 pub mod materialize;
 pub mod memory;
 mod optimize;
@@ -31,6 +32,7 @@ pub struct MirData {
     pub control: control::ControlFlow,
     pub values: Vec<Option<value::ValuePlan>>,
     pub states: Vec<materialize::StatePlan>,
+    pub(super) ram_forwarding: Vec<Option<forwarding::Forwarding>>,
 }
 
 /// Verified, owned MIR. No mutable dereference: transformations must preserve the
@@ -45,6 +47,18 @@ impl Deref for MirRegion {
     }
 }
 impl MirRegion {
+    /// Enable guarded repeated scalar reads from ordinary RAM. This transformation
+    /// uses owned MIR only, with transactional work-budget failure.
+    pub fn forward_ram_reads(&mut self, work_limit: usize) -> Result<usize, CompileError> {
+        forwarding::optimize(&mut self.data, work_limit)
+    }
+    pub fn ram_forwarding(&self, id: super::ids::InstId) -> Option<forwarding::Forwarding> {
+        self.data.ram_forwarding[id.index()]
+    }
+    pub fn has_ram_forwarding(&self) -> bool {
+        self.data.ram_forwarding.iter().any(Option::is_some)
+    }
+
     /// Fold literal machine operations without changing definitions, effects,
     /// local assignments or recovery points. The update is transactional.
     pub fn fold_constants(&mut self) -> Result<usize, CompileError> {
@@ -86,6 +100,7 @@ impl Draft<'_> {
         control::verify(self.hir, &data.allocation, &data.control)?;
         value::verify(self.hir, &data.values)?;
         materialize::verify(self.hir, &data.states)?;
+        forwarding::verify(data)?;
         Ok(MirRegion { data: self.data })
     }
 }
