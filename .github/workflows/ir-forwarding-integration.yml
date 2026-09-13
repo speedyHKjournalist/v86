@@ -33,8 +33,10 @@ jobs:
             '90bdaf5bfd1a54ca8c45944877f03705be7bb271070e769f8fa95282ee9bdb46  tools/ir-forwarding-core.patch' \
             '0e2705974aac1c67562d5011ddda7cc899963f3cbcf859ec92df538aadf0ae51  tools/ir-forwarding-tests.patch' \
             'db5c07d3dc09bdc16d48309226ab6c0434c1cf2bb482b8c807036579a95cbf1d  tools/ir-forwarding-docs.patch' | sha256sum --check
-          git apply --check --index --exclude=src/rust/ir/passes/mod.rs tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
-          git apply --index --exclude=src/rust/ir/passes/mod.rs tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
+          excludes=(--exclude=src/rust/ir/passes/mod.rs --exclude=tests/ir/semantics/cfg_frontend.rs --exclude=tests/ir/differential/cfg.mjs)
+          patches=(tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch)
+          git apply --check --index "${excludes[@]}" "${patches[@]}"
+          git apply --index "${excludes[@]}" "${patches[@]}"
           python3 - <<'PY'
           from pathlib import Path
           path = Path('src/rust/ir/passes/mod.rs')
@@ -43,8 +45,24 @@ jobs:
           assert text.count(anchor) == 1 and 'pub ram_forwarded:' not in text
           # Preserve the independently added SIMD module, counters and calls.
           path.write_text(text.replace(anchor, anchor + '    pub ram_forwarded: usize,\n'))
+          path = Path('tests/ir/semantics/cfg_frontend.rs')
+          text = path.read_text()
+          anchor = '                        let mir = lower(&r).unwrap();\n'
+          assert text.count(anchor) == 1 and 'forward_ram_reads' not in text
+          assert 'fault fixtures must exercise LICM' in text
+          replacement = '\n'.join([
+              '                        let mut mir = lower(&r).unwrap();',
+              '                        drop(r);',
+              '                        if opt {',
+              '                            mir.fold_constants().unwrap();',
+              '                            mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)',
+              '                                .unwrap();',
+              '                        }', ''])
+          path.write_text(text.replace(anchor, replacement))
+          # Existing programs 17/18 and their exact scalar/vector fault oracle
+          # are retained, rather than replacing them with the older patch corpus.
           PY
-          git add src/rust/ir/passes/mod.rs
+          git add src/rust/ir/passes/mod.rs tests/ir/semantics/cfg_frontend.rs
           git rm -- .github/workflows/ir-forwarding-integration.yml tools/ir-forwarding-core.patch tools/ir-forwarding-tests.patch tools/ir-forwarding-docs.patch
           git diff --cached --check
           mkdir -p build
