@@ -24,10 +24,12 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '24.17.0'
-      - name: Native Rust toolchain
+      - name: Native Rust toolchain and decoder oracle
         run: |
           rustup toolchain install stable --profile minimal
           rustup component add rustfmt --toolchain stable
+          sudo apt-get update -y
+          sudo apt-get install -y nasm
       - name: Generate baseline dispatch tables and check IR decoder
         run: |
           mkdir -p build
@@ -39,13 +41,37 @@ jobs:
         run: node tests/ir/wasm/licm.mjs
       - name: Native compiler regressions
         run: env RUSTFLAGS="-D warnings" cargo +stable test
-      - name: Execute emitted Wasm
+      - name: Execute emitted Wasm and decoder oracle
         run: |
           node tests/ir/wasm/run.mjs
           node tests/rust/verify-wasmgen-dummy-output.js
           node tests/ir/decode/oracle.mjs
       - name: Rust formatting
         if: always()
-        run: cargo +stable fmt --all -- --check
+        run: RUSTC_BOOTSTRAP=1 cargo +stable fmt --all -- --check
+      - name: Check tracked generated sources
+        run: git diff --exit-code
+
+  ir-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Install native and Wasm toolchains
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -y
+          sudo apt-get install -y nasm clang lld
+      - name: Build CPU and execute IR differential tests
+        run: make ir-tests ir-cfg-tests ir-loop-tests ir-memory-tests ir-stack-tests
+      - name: Live compilation, cache, tiers and public backend
+        run: make ir-live-tests ir-cache-tests ir-auto-tests ir-backend-integration-tests
       - name: Check tracked generated sources
         run: git diff --exit-code
