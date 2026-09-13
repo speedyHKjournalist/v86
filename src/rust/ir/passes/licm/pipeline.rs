@@ -103,3 +103,6 @@ fn optimized_loop_pipeline_keeps_input_unchanged_with_zero_rounds() {
     assert_eq!(stats.licm_hoisted, 0);
     assert_eq!(format!("{:?}", r), before);
 }
+
+#[path = "cpu_recovery.rs"]
+mod cpu_recovery;
