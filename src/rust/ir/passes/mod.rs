@@ -5,6 +5,7 @@ mod gvn;
 pub mod licm;
 mod merge;
 mod prune;
+pub mod scalar;
 pub mod simd;
 #[derive(Clone, Copy)]
 pub struct PassConfig {
@@ -43,6 +44,8 @@ pub struct PassStats {
     pub ram_forwarded: usize,
     pub simd_eliminated: usize,
     pub simd_shuffled: usize,
+    pub scalar_aliases: usize,
+    pub scalar_constants: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -60,6 +63,10 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
             verify(region).map_err(|e| e.0)?;
         }
         if config.fold {
+            let scalar = scalar::run(region, scalar::DEFAULT_WORK_LIMIT)?;
+            stats.scalar_aliases += scalar.aliases;
+            stats.scalar_constants += scalar.constants;
+            verify(region).map_err(|e| e.0)?;
             fold(region, &mut stats);
             let vector = simd::run(region, simd::DEFAULT_WORK_LIMIT)?;
             stats.simd_eliminated += vector.eliminated;
