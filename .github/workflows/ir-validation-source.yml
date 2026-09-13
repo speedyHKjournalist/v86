@@ -1,0 +1,24 @@
+name: IR validation source
+on:
+  push:
+    branches: ['chat/ir-licm-live-validation-20260913-0305']
+    paths: ['.github/workflows/ir-validation-source.yml']
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Export public source objects without credentials or local configuration
+        run: git cat-file --batch-all-objects --batch-check='%(objectname)' | git pack-objects --stdout > public-ir-source.pack
+      - uses: actions/upload-artifact@v7
+        with:
+          name: public-ir-source
+          path: public-ir-source.pack
+          compression-level: 0
+          retention-days: 1
