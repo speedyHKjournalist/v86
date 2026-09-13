@@ -20,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y nasm
-          mkdir -p "$RUNNER_TEMP/ir-prerequisites"
+          mkdir -p build "$RUNNER_TEMP/ir-prerequisites"
           cp "$(command -v nasm)" "$RUNNER_TEMP/ir-prerequisites/nasm"
           make closure-compiler/compiler.jar build/jit-capacity.bin build/cpu-worker-test.bin
           cp closure-compiler/compiler.jar build/jit-capacity.bin build/cpu-worker-test.bin "$RUNNER_TEMP/ir-prerequisites/"
