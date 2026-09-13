@@ -23,7 +23,8 @@ Only integer pure-result instructions are replaced, in place, retaining their
 SSA IDs. Parameters are not removed or replaced by instructions: their original
 values remain available to entry StateMaps before the first instruction. Memory,
 CPU-state reads, helpers, effects, FP/vector values, proofs and RMW tickets are
-opaque. No polling or memory/helper operation is moved, hoisted or deleted.
+opaque. No reachable polling or memory/helper operation is moved, hoisted or
+eliminated from value facts. Proven-unreachable blocks can be removed.
 
 Branch changes and pure-result constants are installed on a private region
 clone, then unreachable blocks are compacted with the existing CFG pass and the
@@ -48,6 +49,7 @@ Native regressions cover lattice laws, equal/different phi inputs, parallel
 edges, forced dead predecessors, non-topological block allocation, stable and
 changing loop-carried values, independent entry parameters, pass disabling,
 transactional budget exhaustion, malformed input, helpers and DCE tombstones.
+A delayed predecessor explicitly tests revocation of optimistic phi/branch facts.
 
 The native suite generates 144 Wasm modules: eight CFGs, six execution budgets,
 and three modes (unoptimized, SCCP only, full optimization pipeline). The Node
@@ -55,6 +57,12 @@ runner requires all fixtures and compares complete StateMaps at budget exits.
 It also checks independent arithmetic/CMP FLAGS, loop counts, dynamic EIP and
 count bases, invalid entries, and state-boundary canaries. Existing helper,
 scalar, decoder and actual CPU differential suites remain enabled unchanged.
+
+Another 480 typed-phi modules cover I1/I8/I16/I32/I64, twelve integer operations,
+and four boundary input pairs, before and after SCCP. The JavaScript BigInt
+oracle checks signedness, overflow and shift masks independently of the shared
+Rust evaluator. In total the new suite requires 624 modules, performs 9,600
+normal executions and checks 25,920 invalid-entry calls.
 
 ```sh
 env RUSTFLAGS="-D warnings" cargo test
@@ -65,8 +73,17 @@ node tests/ir/wasm/run.mjs
 
 The editing container has Node but no Rust toolchain or repository clone access.
 Only Node syntax checks were available locally when preparing this change.
-Compilation and compiler-generated Wasm/CPU results must be read from the
-existing IR-core workflow; adding tests alone is not a passing result.
+Actual results for the initial implementation at `1b66da3` are recorded in
+[IR-core run 34745211129](https://github.com/speedyHKjournalist/v86/actions/runs/34745211129):
+169 native tests passed under `-D warnings`, all 144 CFG modules and 8,640 new
+executions passed, as did the existing 3,840 CPU LICM comparisons, 43,008 CFG
+comparisons, 21,504 exact budget exits, real page faults and guarded RAM/MMIO
+callback recovery. The additional typed-phi suite must pass on the final PR
+head; the initial run does not validate tests added afterward.
+
+The separate CI initially reported rustfmt differences in the new Rust files;
+these were corrected without weakening the check. Its ESLint job reported
+1,048 errors in unchanged files. Complete repository CI is not asserted green.
 
 ## Remaining work
 

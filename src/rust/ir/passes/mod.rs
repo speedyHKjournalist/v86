@@ -129,13 +129,9 @@ fn evaluate_integer(region: &Region, inst: &Instruction, args: &[u64]) -> Option
             Binary::And => args[0] & args[1],
             Binary::Or => args[0] | args[1],
             Binary::Xor => args[0] ^ args[1],
-            Binary::Shl => {
-                args[0].wrapping_shl((args[1] & if bits == 64 { 63 } else { 31 }) as u32)
-            },
+            Binary::Shl => args[0].wrapping_shl((args[1] & if bits == 64 { 63 } else { 31 }) as u32),
             Binary::Shr => args[0] >> (args[1] & if bits == 64 { 63 } else { 31 }),
-            Binary::Sar => {
-                (signed(args[0]) >> (args[1] & if bits == 64 { 63 } else { 31 })) as u64
-            },
+            Binary::Sar => (signed(args[0]) >> (args[1] & if bits == 64 { 63 } else { 31 })) as u64,
             Binary::Eq => (args[0] == args[1]) as u64,
             Binary::Ult => (args[0] < args[1]) as u64,
             Binary::Slt => (signed(args[0]) < signed(args[1])) as u64,
@@ -167,7 +163,11 @@ fn evaluate_integer(region: &Region, inst: &Instruction, args: &[u64]) -> Option
         Op::Extract { lsb } => args[0] >> lsb,
         Op::Insert { lsb } => {
             let width = region.values[inst.args[1].index()].ty.bits().unwrap();
-            let part = if width == 64 { u64::MAX } else { ((1u64 << width) - 1) << lsb };
+            let part = if width == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << width) - 1) << lsb
+            };
             (args[0] & !part) | args[1] << lsb
         },
         _ => return None,

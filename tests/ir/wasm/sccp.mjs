@@ -82,3 +82,59 @@ for(const name of cases) {
     }
 }
 console.log(`PASS: ${modules} SCCP modules, ${executions} before/SCCP/pipeline executions; phi joins, parallel edges, loops, FLAGS, dynamic EIP/count and exact budget recovery`);
+
+const widths = JSON.parse(fs.readFileSync("build/ir-sccp/widths.json"));
+assert.equal(widths.length, 240);
+let width_executions = 0;
+for(let id = 0; id < widths.length; id++) {
+    const [width, op, a_text, b_text] = widths[id];
+    const bits = BigInt(width);
+    const mask = (1n << bits) - 1n;
+    const a = BigInt(a_text);
+    const b = BigInt(b_text);
+    const shift = b & (width === 64 ? 63n : 31n);
+    const signed = n => n & (1n << (bits - 1n)) ? n - (1n << bits) : n;
+    let expected;
+    switch(op) {
+        case "Add": expected = a + b; break;
+        case "Sub": expected = a - b; break;
+        case "Mul": expected = a * b; break;
+        case "And": expected = a & b; break;
+        case "Or": expected = a | b; break;
+        case "Xor": expected = a ^ b; break;
+        case "Shl": expected = a << shift; break;
+        case "Shr": expected = a >> shift; break;
+        case "Sar": expected = signed(a) >> shift; break;
+        case "Eq": expected = BigInt(a === b); break;
+        case "Ult": expected = BigInt(a < b); break;
+        case "Slt": expected = BigInt(signed(a) < signed(b)); break;
+        default: assert.fail(`unknown operation ${op}`);
+    }
+    expected &= mask;
+    const functions = [false, true].map(optimized => {
+        const bytes = fs.readFileSync(`build/ir-sccp/width-${id}-${optimized}.wasm`);
+        assert(WebAssembly.validate(bytes), `width case ${id}: valid Wasm`);
+        return new WebAssembly.Instance(new WebAssembly.Module(bytes), {e: {m: memory}}).exports.f;
+    });
+    for(const branch of [0, 1]) {
+        let reference;
+        for(const f of functions) {
+            const input = new Uint32Array(16).fill(0xA5A5A5A5);
+            input[7] = branch;
+            input[8] = 0xAD7;
+            words.set(input);
+            f(0);
+            const state = Array.from(words);
+            assert.equal(words[0], Number(expected & 0xFFFFFFFFn), `${id}: low result`);
+            assert.equal(words[1], Number(expected >> 32n), `${id}: high result`);
+            assert.equal(words[9], 0x9001, `${id}: exit EIP`);
+            assert.equal(words[10], 1, `${id}: committed count`);
+            assert.equal(words[8], input[8], `${id}: unchanged FLAGS`);
+            assert.deepEqual(state.slice(12), Array.from(input.slice(12)), `${id}: canaries`);
+            if(reference) assert.deepEqual(state, reference, `${id}: complete StateMap`);
+            else reference = state;
+            width_executions++;
+        }
+    }
+}
+console.log(`PASS: 480 typed phi modules and ${width_executions} independent BigInt executions at I1/I8/I16/I32/I64, including overflow and narrow/Wasm shift masks`);

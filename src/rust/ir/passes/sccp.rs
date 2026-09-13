@@ -68,7 +68,9 @@ fn evaluate(r: &Region, i: &Instruction, values: &[Lattice]) -> Lattice {
         let yes = values[i.args[1].index()];
         let no = values[i.args[2].index()];
         return match values[i.args[0].index()] {
-            Lattice::Constant(n) => if n != 0 { yes } else { no },
+            Lattice::Constant(n) => {
+                if n != 0 { yes } else { no }
+            },
             Lattice::Overdefined => yes.join(no),
             Lattice::Unknown if yes == no => yes,
             Lattice::Unknown => Lattice::Unknown,
@@ -102,7 +104,11 @@ struct Analysis<'a> {
 impl<'a> Analysis<'a> {
     fn new(region: &'a Region, limit: usize) -> Result<Self, String> {
         let mut work = Work(limit);
-        for n in [region.values.len(), region.instructions.len(), region.blocks.len()] {
+        for n in [
+            region.values.len(),
+            region.instructions.len(),
+            region.blocks.len(),
+        ] {
             work.spend(n)?;
         }
         let mut users = vec![Vec::new(); region.values.len()];
@@ -268,7 +274,12 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
                 }
             }
         }
-        if let Some(Terminator::CondBranch { condition, taken, not_taken }) = &block.terminator {
+        if let Some(Terminator::CondBranch {
+            condition,
+            taken,
+            not_taken,
+        }) = &block.terminator
+        {
             if let Lattice::Constant(n) = analysis.values[condition.index()] {
                 let edge = if n != 0 { taken } else { not_taken };
                 analysis.work.spend(1 + edge.args.len())?;
@@ -281,7 +292,12 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
     }
     // Charge the final arena/state traversal before the transactional clone.
     // Verification and CFG compaction also retain their own structural limits.
-    for n in [region.values.len(), region.instructions.len(), region.states.len(), region.helpers.len()] {
+    for n in [
+        region.values.len(),
+        region.instructions.len(),
+        region.states.len(),
+        region.helpers.len(),
+    ] {
         analysis.work.spend(n)?;
     }
     for i in &region.instructions {
