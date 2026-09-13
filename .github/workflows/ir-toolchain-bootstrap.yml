@@ -13,17 +13,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Prepare compiler
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Prepare offline test prerequisites
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add wasm32-unknown-unknown
-          rustup component add rustfmt
-          mkdir -p "$RUNNER_TEMP/ir-toolchain"
-          rustc -Vv > "$RUNNER_TEMP/ir-toolchain/version.txt"
-          tar --exclude='share/doc' --exclude='lib/rustlib/src' -czf "$RUNNER_TEMP/ir-toolchain/rust.tar.gz" -C "$(rustc --print sysroot)" .
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm
+          mkdir -p "$RUNNER_TEMP/ir-prerequisites"
+          cp "$(command -v nasm)" "$RUNNER_TEMP/ir-prerequisites/nasm"
+          make closure-compiler/compiler.jar build/jit-capacity.bin build/cpu-worker-test.bin
+          cp closure-compiler/compiler.jar build/jit-capacity.bin build/cpu-worker-test.bin "$RUNNER_TEMP/ir-prerequisites/"
       - uses: actions/upload-artifact@v7
         with:
-          name: ir-offline-toolchain
-          path: ${{ runner.temp }}/ir-toolchain
+          name: ir-offline-prerequisites
+          path: ${{ runner.temp }}/ir-prerequisites
           retention-days: 1
