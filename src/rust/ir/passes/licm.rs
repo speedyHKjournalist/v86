@@ -165,6 +165,11 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
     verify(region).map_err(|e| e.0)?;
     let cfg = Cfg::compute(region)?;
     let loops = discover(region, &cfg, &mut work)?;
+    // Acyclic regions and loops without a legal preheader have no motion to
+    // plan. Keep input validation, but avoid cloning all HIR arenas here.
+    if loops.is_empty() {
+        return Ok(Stats { work: work.used, ..Stats::default() });
+    }
     let mut staged = region.clone();
     let mut stats = Stats::default();
     for natural in loops {
@@ -210,9 +215,13 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
         }
         staged.blocks[natural.preheader].instructions.extend(hoisted);
     }
-    verify(&staged).map_err(|e| e.0)?;
+    // Loop discovery can succeed without finding an invariant. Do not replace
+    // unchanged arenas or verify the same graph twice in that case.
+    if stats.hoisted != 0 {
+        verify(&staged).map_err(|e| e.0)?;
+        *region = staged;
+    }
     stats.work = work.used;
-    *region = staged;
     Ok(stats)
 }
 
@@ -223,3 +232,85 @@ mod tests;
 #[cfg(test)]
 #[path = "../../../../tests/ir/semantics/licm_pipeline.rs"]
 mod pipeline_tests;
+
+#[cfg(test)]
+mod no_motion_tests {
+    use super::*;
+    use crate::ir::{
+        frontend::{decode::GuestEip, integer::IntegerBuilder},
+        state::{ResumeKind, StateMap},
+        types::Type,
+    };
+
+    fn fixture(looping: bool) -> Region {
+        let mut b = IntegerBuilder::new();
+        if looping {
+            let header = b.region.block(false);
+            let effect = b.region.param(header, Type::Effect);
+            let count = b.region.param(header, Type::I32);
+            b.region.terminate(
+                b.block,
+                Terminator::Branch(Edge { target: header, args: vec![b.effect, b.gpr[0]] }),
+            );
+            let next = b.region.append(
+                header,
+                Op::Binary(Binary::Add),
+                vec![count, count],
+                &[Type::I32],
+                None,
+            )[0];
+            b.region.terminate(
+                header,
+                Terminator::Branch(Edge { target: header, args: vec![effect, next] }),
+            );
+        } else {
+            let state = b.region.state(StateMap {
+                instruction_pc: GuestEip(0x1000),
+                next_pc: GuestEip(0x1001),
+                next_value: None,
+                resume: ResumeKind::BeforeInstruction,
+                gpr: b.gpr,
+                flags: b.flags.clone(),
+                xmm: vec![],
+                x87: vec![],
+                committed_instructions: 0,
+                count_base: None,
+                rep_progress: None,
+            });
+            b.region.terminate(b.block, Terminator::Exit(state));
+        }
+        b.region
+    }
+
+    #[test]
+    fn unchanged_regions_retain_their_original_arenas() {
+        for looping in [false, true] {
+            let mut region = fixture(looping);
+            verify(&region).unwrap();
+            let before = format!("{region:?}");
+            let blocks = region.blocks.as_ptr();
+            let instructions = region.instructions.as_ptr();
+            let values = region.values.as_ptr();
+            let result = run(&mut region, DEFAULT_WORK_LIMIT).unwrap();
+            assert_eq!(result.loops, usize::from(looping));
+            assert_eq!(result.hoisted, 0);
+            assert!(result.work > 0);
+            assert_eq!(region.blocks.as_ptr(), blocks);
+            assert_eq!(region.instructions.as_ptr(), instructions);
+            assert_eq!(region.values.as_ptr(), values);
+            assert_eq!(format!("{region:?}"), before);
+        }
+    }
+
+    #[test]
+    fn no_motion_fast_path_still_checks_input_and_work_budget() {
+        let mut region = fixture(false);
+        let before = format!("{region:?}");
+        assert!(run(&mut region, 0).unwrap_err().contains("budget"));
+        assert_eq!(format!("{region:?}"), before);
+        region.instructions[0].block = BlockId(u32::MAX);
+        let invalid = format!("{region:?}");
+        assert!(run(&mut region, DEFAULT_WORK_LIMIT).is_err());
+        assert_eq!(format!("{region:?}"), invalid);
+    }
+}
