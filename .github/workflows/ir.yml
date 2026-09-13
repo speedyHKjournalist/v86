@@ -47,6 +47,10 @@ jobs:
           rustup component add rustfmt
           sudo apt-get update -y
           sudo apt-get install -y nasm clang lld
+      - name: Loop optimization and budget recovery
+        run: |
+          set -o pipefail
+          make ir-licm-tests 2>&1 | tee ir-licm.log
       - name: Compiler and Wasm differential tests
         run: |
           set -o pipefail
@@ -70,4 +74,4 @@ jobs:
           retention-days: 7
           path: |
             ir-*.log
-            build/ir-*.wasm
+            build/ir-*/**/*.wasm

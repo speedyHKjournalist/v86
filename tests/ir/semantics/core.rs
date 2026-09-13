@@ -405,6 +405,7 @@ fn dce_keeps_snapshot_only_values_and_ordered_helpers() {
             phis: false,
             fold: false,
             gvn: false,
+            licm: false,
             dce: true,
             rounds: 1,
         },

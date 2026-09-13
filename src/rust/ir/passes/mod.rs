@@ -2,6 +2,7 @@
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
 #[derive(Clone, Copy)]
@@ -11,6 +12,7 @@ pub struct PassConfig {
     pub phis: bool,
     pub fold: bool,
     pub gvn: bool,
+    pub licm: bool,
     pub dce: bool,
     pub rounds: usize,
 }
@@ -22,6 +24,7 @@ impl Default for PassConfig {
             phis: true,
             fold: true,
             gvn: true,
+            licm: true,
             dce: true,
             rounds: 2,
         }
@@ -37,6 +40,8 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub loops: usize,
+    pub hoisted: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -64,6 +69,11 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
         if config.gvn {
             gvn::run(region, &mut stats)?;
             verify(region).map_err(|e| e.0)?;
+        }
+        if config.licm {
+            let result = licm::run(region, licm::DEFAULT_WORK_BUDGET)?;
+            stats.loops += result.loops;
+            stats.hoisted += result.hoisted;
         }
         if config.dce {
             dce(region, &mut stats);

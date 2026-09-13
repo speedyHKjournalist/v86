@@ -835,3 +835,9 @@ build/v86-ir-cache-test.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o
 build/v86-ir-cache-test-release.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	cargo rustc --release --features ir-test-hooks,jit-invariants $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/release/v86.wasm $@
+
+# Focused LICM fixtures do not require a guest CPU or downloaded disk images.
+.PHONY: ir-licm-tests
+ir-licm-tests: ir-generated-check $(INSTRUCTION_TABLES)
+	env RUSTFLAGS="-D warnings" cargo test ir::licm_tests
+	node tests/ir/wasm/licm.mjs

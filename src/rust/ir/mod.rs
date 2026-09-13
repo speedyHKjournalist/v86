@@ -179,3 +179,7 @@ mod dataflow_tests;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/entry.rs"]
 mod entry_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/licm.rs"]
+mod licm_tests;

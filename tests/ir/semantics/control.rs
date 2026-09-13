@@ -113,6 +113,7 @@ fn dynamic_eip_is_verified_and_kept_alive_by_state_maps() {
             phis: false,
             fold: false,
             gvn: false,
+            licm: false,
             dce: true,
             rounds: 1,
         },
