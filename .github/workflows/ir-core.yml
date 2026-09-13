@@ -24,6 +24,10 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '24.17.0'
+      - name: Install decoder oracle dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm
       - name: Native Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -47,6 +51,8 @@ jobs:
             node tests/rust/verify-wasmgen-dummy-output.js
             node tests/ir/decode/oracle.mjs
           } 2>&1 | tee build/ir-wasm.log
+      - name: Check Rust formatting
+        run: cargo +stable fmt -- --check
       - name: Check tracked generated sources
         run: git diff --exit-code
       - name: Preserve diagnostics

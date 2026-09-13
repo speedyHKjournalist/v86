@@ -192,8 +192,8 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
                             staged.instructions[def.index()].block.index()
                         },
                     };
-                    invariant &= !natural.members[owner]
-                        && cfg.dominates[natural.preheader][owner];
+                    invariant &=
+                        !natural.members[owner] && cfg.dominates[natural.preheader][owner];
                 }
                 if invariant {
                     // Updating ownership makes dependent expressions available

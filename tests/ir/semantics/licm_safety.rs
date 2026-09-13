@@ -77,8 +77,7 @@ fn fixture() -> Fixture {
     b.block = body;
     let before = b.region.blocks[body.index()].entry_state;
     let poll0 = InstId(b.region.instructions.len() as u32);
-    let effect =
-        b.region.append(body, Op::PollBudget, vec![body_effect], &[Type::Effect], before)[0];
+    let effect = b.region.append(body, Op::PollBudget, vec![body_effect], &[Type::Effect], before)[0];
     let add = b.binary(Binary::Add, input[0], input[1]);
     let invariant = instruction(&b.region, add);
     let square = b.binary(Binary::Mul, add, add);
@@ -88,15 +87,11 @@ fn fixture() -> Fixture {
     current[7] = add;
     let after = snapshot(&mut b.region, current, &flags, 0x3000);
     let poll1 = InstId(b.region.instructions.len() as u32);
-    let effect = b
-        .region
-        .append(body, Op::PollBudget, vec![effect], &[Type::Effect], Some(after))[0];
+    let effect = b.region.append(body, Op::PollBudget, vec![effect], &[Type::Effect], Some(after))[0];
     let one = b.constant(1, Type::I32);
     let next_count = b.binary(Binary::Sub, count, one);
-    b.region.terminate(
-        body,
-        Terminator::Branch(Edge { target: header, args: vec![effect, next_count, next_sum] }),
-    );
+    let backedge = Edge { target: header, args: vec![effect, next_count, next_sum] };
+    b.region.terminate(body, Terminator::Branch(backedge));
     let state = snapshot(
         &mut b.region,
         {
@@ -141,10 +136,8 @@ fn hoists_dependency_chain_and_preserves_recovery_effects_and_edges() {
     }
     assert_eq!(format!("{:?}", f.region.states), states);
     for (b, expected) in f.region.blocks.iter().zip(blocks) {
-        assert_eq!(
-            format!("{:?} {:?} {:?}", b.params, b.terminator, b.entry_state),
-            expected,
-        );
+        let actual = format!("{:?} {:?} {:?}", b.params, b.terminator, b.entry_state);
+        assert_eq!(actual, expected);
     }
     verify(&f.region).unwrap();
     lower(&f.region).unwrap();
@@ -154,8 +147,7 @@ fn hoists_dependency_chain_and_preserves_recovery_effects_and_edges() {
 #[test]
 fn state_bearing_expression_is_not_speculated() {
     let mut f = fixture();
-    f.region.instructions[f.invariant.index()].state =
-        f.region.blocks[f.body.index()].entry_state;
+    f.region.instructions[f.invariant.index()].state = f.region.blocks[f.body.index()].entry_state;
     let stats = run(&mut f.region, DEFAULT_WORK_LIMIT).unwrap();
     assert_eq!(stats.hoisted, 1);
     assert_eq!(f.region.instructions[f.invariant.index()].block, f.body);
@@ -164,10 +156,9 @@ fn state_bearing_expression_is_not_speculated() {
 #[test]
 fn unused_arena_definitions_are_not_dereferenced() {
     let mut f = fixture();
-    f.region.values.push(Value {
-        ty: Type::I32,
-        definition: Definition::Instruction(InstId(u32::MAX), 0),
-    });
+    f.region
+        .values
+        .push(Value { ty: Type::I32, definition: Definition::Instruction(InstId(u32::MAX), 0) });
     verify(&f.region).unwrap();
     assert_eq!(run(&mut f.region, DEFAULT_WORK_LIMIT).unwrap().hoisted, 3);
 }
@@ -214,10 +205,9 @@ fn compile_request_only_runs_licm_in_optimized_tier_two() {
         // mov ecx,4; loop: mov eax,esi; add eax,edi; dec ecx; jnz loop
         bytes: vec![0xB9, 4, 0, 0, 0, 0x8B, 0xC6, 0x03, 0xC7, 0x49, 0x75, 0xF9],
         dependencies: vec![CodeDependency { page: PhysicalAddress(0x200000), version: 1 }],
-        mappings: vec![CodeMapping {
-            linear: LinearAddress(0x100000),
-            physical: PhysicalAddress(0x200000),
-        }],
+        mappings: vec![
+            CodeMapping { linear: LinearAddress(0x100000), physical: PhysicalAddress(0x200000) },
+        ],
     };
     let mut config = IrConfig {
         optimize: true,

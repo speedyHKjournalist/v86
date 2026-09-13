@@ -70,10 +70,8 @@ fn counted_loop() -> (Region, ValueId, ValueId, ValueId) {
     let next_sum = b.binary(Binary::Add, sum, dependent);
     let one = b.constant(1, Type::I32);
     let next_count = b.binary(Binary::Sub, count, one);
-    b.region.terminate(
-        body,
-        Terminator::Branch(Edge { target: header, args: vec![be, next_count, next_sum] }),
-    );
+    b.region
+        .terminate(body, Terminator::Branch(Edge { target: header, args: vec![be, next_count, next_sum] }));
     let state = snapshot(&mut b.region, b.gpr, &flags, 0x3000);
     b.region.terminate(exit, Terminator::Exit(state));
     (b.region, invariant, dependent, cpu_read)
