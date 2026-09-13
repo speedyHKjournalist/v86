@@ -25,14 +25,18 @@ jobs:
         with:
           node-version: '24.17.0'
       - name: Native Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup component add rustfmt --toolchain stable
       - name: Generate baseline dispatch tables and check IR decoder
         run: |
           mkdir -p build
           make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
           make ir-generated-check
       - name: Native compiler regressions
-        run: env RUSTFLAGS="-D warnings" cargo +stable test
+        run: |
+          set -o pipefail
+          env RUSTFLAGS="-D warnings" cargo +stable test 2>&1 | tee build/ir-native.log
       - name: Execute emitted Wasm
         run: |
           node tests/ir/wasm/run.mjs
@@ -40,3 +44,26 @@ jobs:
           node tests/ir/decode/oracle.mjs
       - name: Check tracked generated sources
         run: git diff --exit-code
+      - name: Preserve diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-diagnostics-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: build/ir-native.log
+      - name: Package reproducible source and native compiler
+        if: always() && github.event_name == 'push'
+        run: |
+          git archive --format=tar.gz --output=/tmp/ir-source.tar.gz HEAD
+          tar -czf /tmp/ir-native-toolchain.tar.gz -C "$(rustc +stable --print sysroot)" bin/rustc bin/cargo bin/rustfmt lib
+      - name: Preserve development kit
+        if: always() && github.event_name == 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-devkit-${{ github.sha }}
+          retention-days: 1
+          compression-level: 0
+          path: |
+            /tmp/ir-source.tar.gz
+            /tmp/ir-native-toolchain.tar.gz
