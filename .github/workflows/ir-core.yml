@@ -1,0 +1,88 @@
+name: IR Tier 2 regressions
+
+on:
+  pull_request:
+    branches: [ir]
+  push:
+    branches: [ir]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-tier2-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compiler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Install compiler and independent decoder
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm
+      - name: Generate baseline tables and check the IR catalogue
+        run: |
+          mkdir -p build
+          make ir-generated-check src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
+      - name: Native verifier and compiler regressions
+        run: |
+          set -o pipefail
+          env RUSTFLAGS="-D warnings" cargo test 2>&1 | tee build/ir-native.log
+      - name: Execute emitted Wasm and decoder oracle
+        run: |
+          set -o pipefail
+          node tests/ir/wasm/run.mjs 2>&1 | tee build/ir-wasm.log
+          node tests/rust/verify-wasmgen-dummy-output.js
+          node tests/ir/decode/oracle.mjs 2>&1 | tee build/ir-decode.log
+      - name: Check generated source isolation
+        run: git diff --exit-code
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ir-compiler-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: build/ir-*.log
+
+  cpu-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Install CPU build tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld
+      - name: CPU loops, publication, invalidation and automatic tiers
+        run: |
+          set -o pipefail
+          mkdir -p build
+          make ir-cfg-tests ir-loop-tests ir-cache-tests ir-auto-tests ir-backend-integration-tests 2>&1 | tee build/ir-cpu-runtime.log
+      - name: Check generated source isolation
+        run: git diff --exit-code
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ir-cpu-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: build/ir-cpu-runtime.log

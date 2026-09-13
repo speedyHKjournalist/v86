@@ -8,7 +8,7 @@ use crate::ir::{
         region::lift_cpu_cfg,
     },
     lowering::{lower, CompileError},
-    passes::{run, PassConfig, PassStats},
+    passes::{run, run_tier2, PassConfig, PassStats},
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Backend {
@@ -203,7 +203,8 @@ fn compile_inner(
         )?
     };
     let passes = if config.optimize {
-        run(&mut region, config.passes).map_err(CompileError::InvalidIr)?
+        let optimize = if request.tier == Tier::Two { run_tier2 } else { run };
+        optimize(&mut region, config.passes).map_err(CompileError::InvalidIr)?
     } else {
         PassStats::default()
     };

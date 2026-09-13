@@ -2,8 +2,10 @@
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
 mod gvn;
+pub mod licm;
 mod merge;
 mod prune;
+pub mod simd;
 #[derive(Clone, Copy)]
 pub struct PassConfig {
     pub prune: bool,
@@ -37,8 +39,17 @@ pub struct PassStats {
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
+    pub loop_hoisted: usize,
+    pub simd_simplified: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
+    run_inner(region, config, false)
+}
+/// Tier 2 adds proof-free loop motion; Tier 1 retains the lightweight pass set.
+pub fn run_tier2(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
+    run_inner(region, config, true)
+}
+fn run_inner(region: &mut Region, config: PassConfig, loops: bool) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
     if config.rounds > 8 {
         return Err("pass iteration budget exceeded".into());
@@ -64,6 +75,11 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
         if config.gvn {
             gvn::run(region, &mut stats)?;
             verify(region).map_err(|e| e.0)?;
+        }
+        if loops {
+            let simd = simd::run(region, 1_000_000)?;
+            stats.simd_simplified += simd.aliases + simd.rewritten;
+            stats.loop_hoisted += licm::run(region, licm::Config::default())?.hoisted;
         }
         if config.dce {
             dce(region, &mut stats);
