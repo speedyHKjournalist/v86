@@ -1,0 +1,435 @@
+diff --git a/src/rust/ir/backend/wasm.rs b/src/rust/ir/backend/wasm.rs
+--- a/src/rust/ir/backend/wasm.rs
++++ b/src/rust/ir/backend/wasm.rs
+@@ -5,6 +5,7 @@
+ use crate::ir::mir::call::{CallPlan, Observation};
+ use crate::ir::mir::control::{Copy, Edge as MirEdge, Source, Terminator as MirTerminator};
+ use crate::ir::mir::effect::EffectPlan;
++use crate::ir::mir::forwarding::Forwarding;
+ use crate::ir::mir::materialize::{Count, CountMode, Store, Write};
+ use crate::ir::mir::memory::{
+     Argument, MemoryPlan, NativeMemory, RamGuard, RuntimeCall, SlowResult, VectorCombine,
+@@ -38,6 +39,7 @@
+     cpu: bool,
+     accounted: Option<WasmLocal>,
+     tlb: Option<WasmLocal>,
++    read_cache: Option<(WasmLocal, WasmLocal)>,
+ }
+ impl Emitter<'_> {
+     fn get(&mut self, value: ValueId) {
+@@ -388,7 +390,33 @@
+         }
+         self.w.call_signature(call.name, call.signature.clone());
+     }
+-    fn planned_memory(&mut self, plan: &MemoryPlan) {
++    fn memory_with_forwarding(&mut self, plan: &MemoryPlan, proof: Option<Forwarding>) {
++        match proof {
++            Some(Forwarding::Begin) => {
++                self.w.const_i32(0);
++                self.w.set_local(&self.read_cache.as_ref().unwrap().0);
++                self.planned_memory(plan, true);
++            },
++            Some(Forwarding::Reuse { .. }) => {
++                self.w.get_local(&self.read_cache.as_ref().unwrap().0);
++                self.w.if_void();
++                self.w.get_local(&self.read_cache.as_ref().unwrap().1);
++                let NativeMemory::ScalarLoad {
++                    result,
++                    ticket: None,
++                } = plan.native
++                else {
++                    unreachable!("verified scalar forwarding certificate")
++                };
++                self.set(result);
++                self.w.else_();
++                self.planned_memory(plan, true);
++                self.w.block_end();
++            },
++            None => self.planned_memory(plan, false),
++        }
++    }
++    fn planned_memory(&mut self, plan: &MemoryPlan, cache: bool) {
+         let bytes = plan.guard.bytes;
+         let entry = self.planned_ram_guard(plan.address, &plan.guard);
+         self.w.if_void();
+@@ -412,6 +440,15 @@
+                     2 => self.w.load_unaligned_u16(0),
+                     4 => self.w.load_unaligned_i32(0),
+                     _ => unreachable!(),
++                }
++                if cache {
++                    // The load is guarded as ordinary, same-page readable RAM;
++                    // this is the only path allowed to make the cache valid.
++                    let (valid, value) = self.read_cache.as_ref().unwrap();
++                    self.w.set_local(value);
++                    self.w.const_i32(1);
++                    self.w.set_local(valid);
++                    self.w.get_local(value);
+                 }
+                 self.set(*result);
+             },
+@@ -516,6 +553,12 @@
+             },
+         }
+         self.w.else_();
++        if cache {
++            // Clear BEFORE entering a callback or a page walk. Slow success is
++            // not evidence that RAM or its mapping remained stable.
++            self.w.const_i32(0);
++            self.w.set_local(&self.read_cache.as_ref().unwrap().0);
++        }
+         self.prepare_memory_call(plan.before);
+         self.runtime_call(&plan.call);
+         match &plan.result {
+@@ -819,7 +862,7 @@
+         if let Some(plan) = &mir.control.polls[id.index()] {
+             self.poll(Some(plan.recovery), plan.cost, remaining);
+         } else if let Some(plan) = &mir.memory[id.index()] {
+-            self.planned_memory(plan);
++            self.memory_with_forwarding(plan, mir.ram_forwarding(id));
+         } else if let Some(plan) = &mir.effects[id.index()] {
+             self.planned_effect(plan);
+         } else if let Some(plan) = &mir.calls[id.index()] {
+@@ -949,6 +992,7 @@
+         cpu,
+         accounted: None,
+         tlb: None,
++        read_cache: None,
+     };
+     if let Some(entry) = entry {
+         // Reject before ir_enter (which writes previous_ip and clears REP results),
+@@ -972,6 +1016,13 @@
+         e.accounted = Some(e.w.set_new_local());
+         e.w.call_fn0_ret("ir_tlb_base");
+         e.tlb = Some(e.w.set_new_local());
++    }
++    if mir.has_ram_forwarding() {
++        e.w.const_i32(0);
++        let valid = e.w.set_new_local();
++        e.w.const_i32(0);
++        let value = e.w.set_new_local();
++        e.read_cache = Some((valid, value));
+     }
+     for ty in &mir.allocation.local_types {
+         if *ty == Type::V128 {
+@@ -1057,6 +1108,10 @@
+     if let Some(local) = e.tlb {
+         e.w.free_local(local);
+     }
++    if let Some((valid, value)) = e.read_cache {
++        e.w.free_local(valid);
++        e.w.free_local(value);
++    }
+     e.w.finish();
+     let bytes = e.w.output().to_vec();
+     if bytes.len() > 256 * 1024 {
+diff --git a/src/rust/ir/dump.rs b/src/rust/ir/dump.rs
+--- a/src/rust/ir/dump.rs
++++ b/src/rust/ir/dump.rs
+@@ -52,6 +52,9 @@
+         )
+         .unwrap();
+         for id in &block.instructions {
++            if let Some(proof) = region.ram_forwarding(*id) {
++                writeln!(&mut out, "  i{}: guarded_ram_read={proof:?}", id.0).unwrap();
++            }
+             if let Some(plan) = &region.control.polls[id.index()] {
+                 writeln!(&mut out, "  i{}: {plan:#?}", id.0).unwrap();
+             } else if let Some(plan) = &region.memory[id.index()] {
+diff --git a/src/rust/ir/lowering.rs b/src/rust/ir/lowering.rs
+--- a/src/rust/ir/lowering.rs
++++ b/src/rust/ir/lowering.rs
+@@ -173,6 +173,7 @@
+     Ok(Draft {
+         hir: region,
+         data: MirData {
++            ram_forwarding: vec![None; region.instructions.len()],
+             value_types: region.values.iter().map(|v| v.ty).collect(),
+             allocation,
+             helpers,
+diff --git a/src/rust/ir/mir.rs b/src/rust/ir/mir.rs
+--- a/src/rust/ir/mir.rs
++++ b/src/rust/ir/mir.rs
+@@ -3,6 +3,7 @@
+ pub mod call;
+ pub mod control;
+ pub mod effect;
++pub mod forwarding;
+ pub mod materialize;
+ pub mod memory;
+ mod optimize;
+@@ -31,6 +32,7 @@
+     pub control: control::ControlFlow,
+     pub values: Vec<Option<value::ValuePlan>>,
+     pub states: Vec<materialize::StatePlan>,
++    pub(super) ram_forwarding: Vec<Option<forwarding::Forwarding>>,
+ }
+ 
+ /// Verified, owned MIR. No mutable dereference: transformations must preserve the
+@@ -45,6 +47,18 @@
+     }
+ }
+ impl MirRegion {
++    /// Enable guarded repeated scalar reads from ordinary RAM. This transformation
++    /// uses owned MIR only, with transactional work-budget failure.
++    pub fn forward_ram_reads(&mut self, work_limit: usize) -> Result<usize, CompileError> {
++        forwarding::optimize(&mut self.data, work_limit)
++    }
++    pub fn ram_forwarding(&self, id: super::ids::InstId) -> Option<forwarding::Forwarding> {
++        self.data.ram_forwarding[id.index()]
++    }
++    pub fn has_ram_forwarding(&self) -> bool {
++        self.data.ram_forwarding.iter().any(Option::is_some)
++    }
++
+     /// Fold literal machine operations without changing definitions, effects,
+     /// local assignments or recovery points. The update is transactional.
+     pub fn fold_constants(&mut self) -> Result<usize, CompileError> {
+@@ -86,6 +100,7 @@
+         control::verify(self.hir, &data.allocation, &data.control)?;
+         value::verify(self.hir, &data.values)?;
+         materialize::verify(self.hir, &data.states)?;
++        forwarding::verify(data)?;
+         Ok(MirRegion { data: self.data })
+     }
+ }
+diff --git a/src/rust/ir/passes/mod.rs b/src/rust/ir/passes/mod.rs
+--- a/src/rust/ir/passes/mod.rs
++++ b/src/rust/ir/passes/mod.rs
+@@ -39,6 +39,7 @@
+     pub commoned: usize,
+     pub removed: usize,
+     pub loop_hoisted: usize,
++    pub ram_forwarded: usize,
+ }
+ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
+     verify(region).map_err(|e| e.0)?;
+diff --git a/src/rust/ir/runtime/compile.rs b/src/rust/ir/runtime/compile.rs
+--- a/src/rust/ir/runtime/compile.rs
++++ b/src/rust/ir/runtime/compile.rs
+@@ -217,6 +217,10 @@
+     let mut mir = lower(&region)?;
+     drop(region);
+     let mir_folds = if config.optimize { mir.fold_constants()? } else { 0 };
++    if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
++        passes.ram_forwarded =
++            mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?;
++    }
+     let code = if cpu {
+         emit_cpu_entry(&mir, config.execution_budget, request.cpu_entry())?
+     } else {
+diff --git a/src/rust/ir/mir/forwarding.rs b/src/rust/ir/mir/forwarding.rs
+new file mode 100644
+--- /dev/null
++++ b/src/rust/ir/mir/forwarding.rs
+@@ -0,0 +1,210 @@
++//! Guarded, intra-block ordinary-RAM read forwarding. A static chain is not a
++//! license to reuse a slow read: the emitter carries a separate runtime valid
++//! bit which is set ONLY by a successful native RAM guard/load. MMIO, callbacks,
++//! page crossings and faults keep their original ordered slow paths.
++use super::{
++    effect::EffectPlan,
++    memory::{Argument, MemoryPlan, NativeMemory, RamGuard, SlowResult},
++    value::Step,
++    MirData,
++};
++use crate::ir::{ids::*, lowering::CompileError};
++
++pub const DEFAULT_WORK_LIMIT: usize = 262_144;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum Forwarding {
++    /// Reset validity before the first guarded read of each chain, on every visit.
++    Begin,
++    /// A preceding candidate in this block, with the same address and width.
++    Reuse { previous: InstId },
++}
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum AddressKey {
++    Value(ValueId),
++    Segment {
++        base: u32,
++        null_byte: u32,
++        offset: ValueId,
++    },
++}
++
++fn eligible(plan: &MemoryPlan) -> bool {
++    let NativeMemory::ScalarLoad {
++        result,
++        ticket: None,
++    } = plan.native
++    else {
++        return false;
++    };
++    let bytes = plan.guard.bytes;
++    matches!(bytes, 1 | 2 | 4)
++        && plan.guard == RamGuard::new(bytes, false)
++        && plan.result
++            == (SlowResult::Packed {
++                result,
++                trap_after_fault: false,
++            })
++        && plan.call.name == "ir_memory_read"
++        && plan.call.args == [Argument::Value(plan.address), Argument::I32(bytes as i32)]
++}
++fn segment(plan: &EffectPlan) -> Option<(ValueId, AddressKey)> {
++    match *plan {
++        EffectPlan::Address {
++            base,
++            null_byte,
++            offset,
++            result,
++            ref call,
++            trap_after_fault: false,
++            ..
++        } if call.name == "ir_segment_address" => Some((
++            result,
++            AddressKey::Segment {
++                base,
++                null_byte,
++                offset,
++            },
++        )),
++        _ => None,
++    }
++}
++fn spend(left: &mut usize, amount: usize) -> Result<(), CompileError> {
++    *left = left
++        .checked_sub(amount)
++        .ok_or(CompileError::Budget("MIR RAM forwarding work"))?;
++    Ok(())
++}
++
++/// Derive the full certificate from owned, already legalized machine plans.
++/// No HIR, runtime memory, CPU state or mutable compiler context is consulted.
++fn plan(data: &MirData, work_limit: usize) -> Result<Vec<Option<Forwarding>>, CompileError> {
++    let n = data.memory.len();
++    if data.control.blocks.len() > 64 || n > 8192 || data.value_types.len() > 16384 {
++        return Err(CompileError::Budget("MIR RAM forwarding region"));
++    }
++    if [
++        data.effects.len(),
++        data.calls.len(),
++        data.values.len(),
++        data.control.polls.len(),
++    ]
++    .iter()
++    .any(|&len| len != n)
++    {
++        return Err(CompileError::InvalidIr(
++            "inconsistent forwarding arenas".into(),
++        ));
++    }
++    let mut left = work_limit;
++    spend(&mut left, n + data.value_types.len())?;
++    let mut result = vec![None; n];
++    let mut addresses = vec![None; data.value_types.len()];
++    // Segment expressions remain at their original positions. Canonical keys
++    // identify repeated resolutions but never remove the segment-null guard.
++    for effect in data.effects.iter().flatten() {
++        spend(&mut left, 1)?;
++        if let Some((value, key)) = segment(effect) {
++            let slot = addresses.get_mut(value.index()).ok_or_else(|| {
++                CompileError::InvalidIr("forwarding address outside value arena".into())
++            })?;
++            *slot = Some(key);
++        }
++    }
++    for block in &data.control.blocks {
++        let mut previous: Option<(AddressKey, u8, InstId)> = None;
++        for &id in &block.instructions {
++            spend(&mut left, 1)?;
++            let index = id.index();
++            let Some(memory) = data.memory.get(index) else {
++                return Err(CompileError::InvalidIr(
++                    "forwarding instruction outside arena".into(),
++                ));
++            };
++            if let Some(poll) = &data.control.polls[index] {
++                // The checked one-unit poll only updates a Wasm budget local on
++                // continuation. Its materialization arm RETURNS from the entry;
++                // it cannot resume with a stale cache after observing CPU state.
++                if poll.cost == 1 {
++                    continue;
++                }
++                previous = None;
++                continue;
++            }
++            if let Some(memory) = memory {
++                if eligible(memory) {
++                    let key = addresses
++                        .get(memory.address.index())
++                        .copied()
++                        .flatten()
++                        .unwrap_or(AddressKey::Value(memory.address));
++                    if let Some((old_key, bytes, old)) = previous {
++                        if key == old_key && bytes == memory.guard.bytes {
++                            if result[old.index()].is_none() {
++                                result[old.index()] = Some(Forwarding::Begin);
++                            }
++                            result[index] = Some(Forwarding::Reuse { previous: old });
++                        }
++                    }
++                    previous = Some((key, memory.guard.bytes, id));
++                    continue;
++                }
++            } else if let Some(effect) = &data.effects[index] {
++                if segment(effect).is_some() {
++                    continue;
++                }
++            } else if data.calls[index].is_none() && data.control.polls[index].is_none() {
++                if let Some(value) = &data.values[index] {
++                    spend(&mut left, value.steps.len())?;
++                    // CPU observations (including helper reads) are conservative
++                    // barriers, even if the corresponding HIR node is unordered.
++                    if value
++                        .steps
++                        .iter()
++                        .all(|step| !matches!(step, Step::Read { .. }))
++                    {
++                        continue;
++                    }
++                }
++            }
++            // Stores, RMW, checks, division, calls, vector reads and every
++            // unrecognized action terminate the chain regardless of alias class.
++            previous = None;
++        }
++    }
++    Ok(result)
++}
++
++pub(super) fn optimize(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
++    let next = plan(data, work_limit)?;
++    let count = next
++        .iter()
++        .filter(|p| matches!(p, Some(Forwarding::Reuse { .. })))
++        .count();
++    // Planning is read-only; a failed bound/validation cannot partially enable
++    // forwarding. No SSA use, recovery map or allocated local is rewritten.
++    data.ram_forwarding = next;
++    Ok(count)
++}
++
++pub(super) fn verify(data: &MirData) -> Result<(), CompileError> {
++    if data.ram_forwarding.len() != data.memory.len() {
++        return Err(CompileError::InvalidIr(
++            "invalid RAM forwarding certificate length".into(),
++        ));
++    }
++    // All-None is the explicit disabled form. Otherwise require the COMPLETE
++    // deterministic certificate, preventing a reuse without its initializing read.
++    if data.ram_forwarding.iter().any(Option::is_some)
++        && data.ram_forwarding != plan(data, DEFAULT_WORK_LIMIT)?
++    {
++        return Err(CompileError::InvalidIr(
++            "invalid RAM forwarding certificate".into(),
++        ));
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++#[path = "../../../../tests/ir/semantics/mir_forwarding.rs"]
++mod tests;
