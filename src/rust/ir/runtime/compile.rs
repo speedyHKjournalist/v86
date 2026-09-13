@@ -207,9 +207,9 @@ fn compile_inner(
     } else {
         PassStats::default()
     };
-    // Cold Tier 1 never pays for loop discovery. The master optimization switch
-    // and zero-round diagnostic configuration also disable code motion.
-    if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
+    // Keep Tier 1 inexpensive. The existing GVN switch controls the Tier 2
+    // pure-dataflow family; optimize=false and rounds=0 also disable LICM.
+    if config.optimize && request.tier == Tier::Two && config.passes.gvn && config.passes.rounds != 0 {
         passes.loop_hoisted = licm::run(&mut region, licm::DEFAULT_WORK_LIMIT)
             .map_err(CompileError::InvalidIr)?
             .hoisted;
