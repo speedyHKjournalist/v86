@@ -5,14 +5,18 @@ on:
     paths: ['.github/workflows/ir-bootstrap.yml']
 permissions:
   contents: read
+concurrency:
+  group: ir-bootstrap-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   workspace:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
           node-version: '24.17.0'
@@ -23,32 +27,36 @@ jobs:
           rustup target add wasm32-unknown-unknown
           rustup component add rustfmt
           sudo apt-get update -qq
-          sudo apt-get install -y nasm
-      - name: Package source and public toolchain
+          sudo apt-get install -y nasm clang lld
+      - name: Package public toolchain
         run: |
           mkdir -p bootstrap
-          git archive --format=tar HEAD | gzip -1 > bootstrap/source.tar.gz
           rustc --version > bootstrap/toolchain.txt
           tar -C "$(rustc --print sysroot)" -czf bootstrap/rust-toolchain.tar.gz bin lib
           cp /usr/bin/nasm bootstrap/nasm
           sha256sum bootstrap/* > bootstrap/SHA256SUMS
       - uses: actions/upload-artifact@v7
         with:
-          name: ir-offline-workspace
+          name: ir-wasm-toolchain
           path: bootstrap/
           retention-days: 1
           compression-level: 0
-      - name: Prepare CPU artifacts
-        run: make build/v86.wasm build/libv86.mjs build/jit-capacity.bin build/cpu-worker-test.bin
+      - name: Prepare CPU and reference artifacts
+        run: |
+          make build/v86.wasm build/libv86.mjs build/jit-capacity.bin build/cpu-worker-test.bin
+          make build/v86-rep-reference.wasm build/v86-task-reference.wasm
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: ir-baseline-build
           retention-days: 1
+          if-no-files-found: ignore
           path: |
-            build/v86.wasm
+            build/v86*.wasm
             build/libv86.mjs
             build/cpu-worker.js
             build/softfloat.o
             build/zstddeclib.o
             build/jit-capacity.bin
             build/cpu-worker-test.bin
+            closure-compiler/compiler.jar
