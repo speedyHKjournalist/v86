@@ -1,0 +1,29 @@
+name: IR offline validation toolchain
+
+on:
+  push:
+    branches: ['chat/ir-completion-20260913']
+    paths: ['.github/workflows/ir-toolchain-bootstrap.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  toolchain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Prepare compiler
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          rustup component add rustfmt
+          mkdir -p "$RUNNER_TEMP/ir-toolchain"
+          rustc -Vv > "$RUNNER_TEMP/ir-toolchain/version.txt"
+          tar --exclude='share/doc' --exclude='lib/rustlib/src' -czf "$RUNNER_TEMP/ir-toolchain/rust.tar.gz" -C "$(rustc --print sysroot)" .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-offline-toolchain
+          path: ${{ runner.temp }}/ir-toolchain
+          retention-days: 1
