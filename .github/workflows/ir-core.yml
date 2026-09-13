@@ -1,0 +1,69 @@
+name: IR compiler regressions
+
+on:
+  pull_request:
+    branches: [ir]
+  push:
+    branches: [ir, 'chat/ir-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-core-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ir-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Install native and Wasm tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld
+      - name: Generate dispatch tables and check IR decoder
+        run: |
+          mkdir -p build
+          make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
+          make ir-generated-check
+      - name: Native regressions and independent Wasm oracles
+        run: |
+          set -o pipefail
+          make ir-tests 2>&1 | tee build/ir-native-wasm.log
+      - name: LICM inside the CPU Wasm
+        run: |
+          set -o pipefail
+          { node tests/ir/differential/bounded_instances_test.mjs; make ir-licm-tests; } 2>&1 | tee build/ir-licm-cpu.log
+      - name: CFG, live compilation, publication and automatic tiers
+        run: |
+          set -o pipefail
+          make ir-cfg-tests ir-live-tests ir-cache-tests ir-auto-tests ir-backend-integration-tests 2>&1 | tee build/ir-runtime.log
+      - name: Large SIMD suites with bounded module retention
+        run: |
+          set -o pipefail
+          make ir-simd-integer-tests ir-simd-shuffle-tests 2>&1 | tee build/ir-simd.log
+      - name: Tracked generated sources must be unchanged
+        run: git diff --exit-code
+      - name: Preserve diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir-diagnostics-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            build/ir-native-wasm.log
+            build/ir-licm-cpu.log
+            build/ir-runtime.log
+            build/ir-simd.log

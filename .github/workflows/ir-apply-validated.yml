@@ -1,0 +1,108 @@
+name: Apply validated IR source checkpoint
+
+on:
+  push:
+    branches: ['chat/ir-licm-cpu-checkpoint-*']
+    paths: ['.github/workflows/ir-apply-validated.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.repository == 'speedyHKjournalist/v86' && startsWith(github.ref, 'refs/heads/chat/ir-licm-cpu-checkpoint-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Reproduce six locally tested file blobs
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from hashlib import sha1
+
+          hashes = {
+              'Makefile': ('cdae4b55a323901be431711187d132905f0d9aca', 'a32cffb70ba9f5138ab35c16285ce7227a682d50'),
+              'src/rust/ir/passes/licm.rs': ('56bb51c9cd44cdc92d1913954cc2421b9a03f777', 'e97d6e26b9c75ea8e3c320a6a040e36328563117'),
+              'tests/ir/semantics/licm.rs': ('ebe30fc9c2e61ddb100445a18ab9ca074a38049b', '63205c8d2e41154981f874bf156cec0d83f9e3c0'),
+              'tests/ir/wasm/run.mjs': ('30c0f8a234ab175ac6294a323ffd00c6ad69e007', 'c8f10729fac9d6061810a524db32833c77bfd15d'),
+              'tests/ir/differential/simd_integer.mjs': ('0278cbcffc3952fac66bc1ba499a796a99a45fd1', '931dee7d9b1857824b33e4f267070576ed33d0ee'),
+              'tests/ir/differential/simd_shuffle.mjs': ('044922c6ad3b8beaced8ee3a928a9ebf4bd9b685', 'b42fb092f34d3bc52bd88d93f6c8cb64e0bda5cb'),
+          }
+          def blob(text):
+              data = text.encode()
+              return sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+          sources = {path: Path(path).read_text() for path in hashes}
+          for path, (before, _) in hashes.items():
+              assert blob(sources[path]) == before, f'Unexpected input revision: {path}'
+          def replace(path, old, new):
+              assert sources[path].count(old) == 1, f'Ambiguous edit: {path}: {old!r}'
+              sources[path] = sources[path].replace(old, new)
+
+          replace('Makefile', '.PHONY: ir-coverage ir-default-gate\n',
+              '# Focused IR-11 regression: native pass proof checks, standalone Wasm, then\n'
+              '# artifacts compiled inside the real CPU Wasm and compared with its interpreter.\n'
+              '.PHONY: ir-licm-tests\n'
+              'ir-licm-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs build/jit-capacity.bin\n'
+              '\tenv RUSTFLAGS="-D warnings" cargo test ir::passes::licm\n'
+              '\tnode tests/ir/wasm/licm.mjs\n'
+              '\tnode tests/ir/differential/licm.mjs\n\n'
+              '.PHONY: ir-coverage ir-default-gate\n')
+          replace('src/rust/ir/passes/licm.rs',
+              '    let loops = discover(region, &cfg, &mut work)?;\n',
+              '    let loops = discover(region, &cfg, &mut work)?;\n'
+              '    if loops.is_empty() {\n'
+              '        return Ok(Stats { work: work.used, ..Stats::default() });\n'
+              '    }\n')
+          p = 'tests/ir/semantics/licm.rs'
+          replace(p, '    // Unordered CPU reads must never be classified as loop-invariant.\n'
+              '    let cpu_read = b.node(Op::ReadGpr(7), vec![], Type::I32);\n'
+              '    b.binary(Binary::Add, cpu_read, input[2]);\n',
+              '    // This depends on a loop-carried parameter and must remain in the body.\n'
+              '    let variant = b.binary(Binary::Add, count, input[2]);\n')
+          replace(p, 'fn hoists_transitive_invariants_but_not_loop_state_or_cpu_reads()',
+              'fn hoists_transitive_invariants_but_not_loop_state()')
+          sources[p] = sources[p].replace('cpu_read', 'variant')
+          sources[p] += '\n#[test]\n' \
+              'fn malformed_cpu_read_in_loop_is_rejected_without_weakening_verifier() {\n' \
+              '    let (mut r, _, _, _) = counted_loop();\n' \
+              '    let body = BlockId(3);\n' \
+              '    let term = r.blocks[body.index()].terminator.take().unwrap();\n' \
+              '    r.append(body, Op::ReadGpr(7), vec![], &[Type::I32], None);\n' \
+              '    r.terminate(body, term);\n' \
+              '    let before = format!("{r:?}");\n' \
+              '    assert!(run(&mut r, DEFAULT_WORK_LIMIT)\n' \
+              '        .unwrap_err()\n' \
+              '        .contains("GPR initialization outside entry"));\n' \
+              '    assert_eq!(format!("{r:?}"), before);\n' \
+              '}\n'
+          replace('tests/ir/wasm/run.mjs', 'import "./owned.mjs";\n',
+              'import "./owned.mjs";\nimport "./licm.mjs";\n'
+              'import "../differential/bounded_instances_test.mjs";\n')
+          for suite in ['integer', 'shuffle']:
+              p = f'tests/ir/differential/simd_{suite}.mjs'
+              replace(p, 'import {V86} from "../../../build/libv86.mjs";\n',
+                  'import {V86} from "../../../build/libv86.mjs";\n'
+                  'import {boundedInstances, reexecWithGc} from "./bounded_instances.mjs";\n'
+                  'reexecWithGc();\n')
+              replace(p, 'const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-simd-' + suite + '/${i}-${opt}.wasm`))));\n', '')
+              replace(p, 'const instances=modules.map(pair=>pair.map(m=>new WebAssembly.Instance(m,{e:imports})));',
+                  'const instances=boundedInstances(i=>[0,1].map(opt=>new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(`build/ir-simd-' + suite + '/${i}-${opt}.wasm`)),{e:imports})));')
+              replace(p, 'instances[i][opt]', 'instances(i)[opt]')
+              replace(p, ' }finally{await vm.destroy();}',
+                  '    assert(instances.stats().peak<=64);instances.clear();\n }finally{await vm.destroy();}')
+          for path, (_, after) in hashes.items():
+              assert blob(sources[path]) == after, f'Output differs from locally tested blob: {path}'
+          for path, text in sources.items():
+              Path(path).write_text(text)
+              print(blob(text), path)
+          PY
+          git diff --check
+          git add -- Makefile src/rust/ir/passes/licm.rs tests/ir/semantics/licm.rs tests/ir/wasm/run.mjs tests/ir/differential/simd_integer.mjs tests/ir/differential/simd_shuffle.mjs
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(ir): apply validated LICM and bounded SIMD regression changes'
+          git push origin "HEAD:$GITHUB_REF"
