@@ -43,6 +43,7 @@ jobs:
           {
             node tests/ir/wasm/run.mjs
             node tests/ir/wasm/licm.mjs
+            node tests/ir/wasm/licm_safety.mjs
             node tests/rust/verify-wasmgen-dummy-output.js
             node tests/ir/decode/oracle.mjs
           } 2>&1 | tee build/ir-wasm.log

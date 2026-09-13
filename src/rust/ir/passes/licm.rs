@@ -223,3 +223,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../../../../tests/ir/semantics/licm_acceptance.rs"]
 mod acceptance_tests;
+
+#[cfg(test)]
+#[path = "../../../../tests/ir/semantics/licm_safety.rs"]
+mod safety_tests;
