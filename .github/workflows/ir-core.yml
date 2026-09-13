@@ -19,13 +19,18 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: '24.17.0'
       - name: Native Rust toolchain
         run: rustup toolchain install stable --profile minimal
-      - name: Check generated decoder
-        run: make ir-generated-check
+      - name: Generate baseline dispatch tables and check IR decoder
+        run: |
+          mkdir -p build
+          make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
+          make ir-generated-check
       - name: Native compiler regressions
         run: env RUSTFLAGS="-D warnings" cargo +stable test
       - name: Execute emitted Wasm
@@ -33,3 +38,5 @@ jobs:
           node tests/ir/wasm/run.mjs
           node tests/rust/verify-wasmgen-dummy-output.js
           node tests/ir/decode/oracle.mjs
+      - name: Check tracked generated sources
+        run: git diff --exit-code
