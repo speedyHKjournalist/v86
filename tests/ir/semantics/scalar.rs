@@ -205,8 +205,7 @@ fn emit_scalar_identity_differentials() {
                 }
                 verify(&r).unwrap();
                 let wasm = emit(&lower(&r).unwrap(), layout, 100).unwrap().bytes;
-                std::fs::write(format!("build/ir-scalar/{bits}-{name}-{optimized}.wasm"), wasm)
-                    .unwrap();
+                std::fs::write(format!("build/ir-scalar/{bits}-{name}-{optimized}.wasm"), wasm).unwrap();
             }
             manifest.push(format!("[{bits},\"{name}\"]"));
         }
@@ -300,7 +299,7 @@ fn inverse_bitfield_updates_and_extensions_keep_exact_widths() {
         let stats = scalar::run(&mut r, scalar::DEFAULT_WORK_LIMIT).unwrap();
         assert_eq!(stats.aliases, 1);
         let Definition::Instruction(id, _) = r.values[r.states[0].gpr[0].index()].definition else {
-            panic!()
+            panic!();
         };
         assert_eq!(r.instructions[id.index()].args, vec![part]);
         verify(&r).unwrap();
@@ -343,14 +342,9 @@ fn dependency_order_is_independent_of_instruction_arena_order() {
 }
 #[test]
 fn ignored_load_result_does_not_erase_the_memory_observation() {
-    let mut r = lift_cpu_cfg(
-        &[0x8B, 0x03, 0x31, 0xC0],
-        GuestEip(0x1000),
-        LinearAddress(0x100000),
-        true,
-        8,
-    )
-    .unwrap();
+    let mut r =
+        lift_cpu_cfg(&[0x8B, 0x03, 0x31, 0xC0], GuestEip(0x1000), LinearAddress(0x100000), true, 8)
+            .unwrap();
     let ordered = |r: &Region| {
         r.blocks
             .iter()
@@ -413,7 +407,7 @@ fn cross_block_aliases_rewrite_edges_conditions_and_entry_states() {
     let Terminator::CondBranch { condition, taken, not_taken } =
         r.blocks[middle.index()].terminator.as_ref().unwrap()
     else {
-        panic!()
+        panic!();
     };
     assert_eq!(*condition, f);
     assert_eq!(taken.args, vec![me, x]);
@@ -425,14 +419,11 @@ fn cross_block_aliases_rewrite_edges_conditions_and_entry_states() {
 fn self_xor_exposes_flags_for_branch_pruning_and_budget_recovery() {
     // xor eax,eax; jnz dead; inc eax; jmp end; dead: inc ebx; end: nop
     let bytes = [0x31, 0xC0, 0x75, 3, 0x40, 0xEB, 1, 0x43, 0x90];
-    let original =
-        lift_cpu_cfg(&bytes, GuestEip(0x1000), LinearAddress(0x100000), true, 16).unwrap();
+    let original = lift_cpu_cfg(&bytes, GuestEip(0x1000), LinearAddress(0x100000), true, 16).unwrap();
     let mut optimized = original.clone();
-    let stats = passes::run(
-        &mut optimized,
-        PassConfig { prune: true, phis: true, rounds: 2, ..config() },
-    )
-    .unwrap();
+    let stats =
+        passes::run(&mut optimized, PassConfig { prune: true, phis: true, rounds: 2, ..config() })
+            .unwrap();
     assert!(stats.scalar_constants > 0);
     assert!(stats.branches > 0 && stats.unreachable > 0);
     let layout = StateLayout { gpr: 0, flags: 32, eip: 36, committed: 40, flag_operand: 44 };
