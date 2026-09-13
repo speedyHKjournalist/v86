@@ -157,7 +157,10 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
     {
         return Err("LICM region budget exceeded".into());
     }
-    let mut work = Work { remaining: work_limit, used: 0 };
+    let mut work = Work {
+        remaining: work_limit,
+        used: 0,
+    };
     work.spend(1)?;
     verify(region).map_err(|e| e.0)?;
     let cfg = Cfg::compute(region)?;
@@ -185,7 +188,9 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
                     work.spend(1)?;
                     let owner = match staged.values[value.index()].definition {
                         Definition::Parameter(owner, _) => owner.index(),
-                        Definition::Instruction(def, _) => staged.instructions[def.index()].block.index(),
+                        Definition::Instruction(def, _) => {
+                            staged.instructions[def.index()].block.index()
+                        },
                     };
                     invariant &= !natural.members[owner]
                         && cfg.dominates[natural.preheader][owner];
@@ -214,3 +219,7 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
 #[cfg(test)]
 #[path = "../../../../tests/ir/semantics/licm.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../../../tests/ir/semantics/licm_acceptance.rs"]
+mod acceptance_tests;
