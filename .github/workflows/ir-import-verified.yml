@@ -1,0 +1,115 @@
+name: Import verified LICM source
+on:
+  push:
+    branches: [chat/ir-licm-verified-20260913]
+    paths: [.github/workflows/ir-import-verified.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: true
+      - name: Reproduce and verify the locally tested tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = 0f45180284871ad7ea2519312960aa621a600fa8
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          data = json.loads(r'''{
+            "old": {
+              ".github/workflows/ir.yml": "ed457c58f8ad854ece49c051cd72f3e28cd61789",
+              "Makefile": "cdae4b55a323901be431711187d132905f0d9aca",
+              "docs/ir-progress.md": "0810119f67f2064af03e9470a6fde2fdf7df8a7c",
+              "src/rust/ir/analysis/mod.rs": "26cb1041ac3f52135b1194e0c3250f1eaa8a8f1c",
+              "src/rust/ir/mod.rs": "12b825d40d27600a95d1243d2a6099d00c2d0db5",
+              "src/rust/ir/passes/mod.rs": "7f8945ef9db6ce42c7fe0f53f07abe4ccde9a1e0",
+              "tests/ir/semantics/control.rs": "2052cece92aabe671690c10a3c8f0f201c990292",
+              "tests/ir/semantics/core.rs": "fa0fd473ccafb3d2fab06639c5fc4c1d93a62570",
+              "tests/ir/semantics/dataflow.rs": "87fc0d0a17bbe89e629880784d34ad1c4951a70b",
+              "tests/ir/semantics/merge.rs": "326bf10d47b30f08a6121bf545be2944fb550326",
+              "tests/ir/wasm/run.mjs": "30c0f8a234ab175ac6294a323ffd00c6ad69e007"
+            },
+            "new": {
+              ".github/workflows/ir.yml": "e822c6cac2a264c6f643d800da7c0bbf52134a0f",
+              "Makefile": "1aa7d9736f608449a3a78fdb028543262a23efbc",
+              "docs/ir-licm.md": "695c0bd87f833ee2a4b0f4ea0327fc17c6893c07",
+              "docs/ir-progress.md": "1c5dca2600504a1463926ca250f1ca34433184f9",
+              "src/rust/ir/analysis/loops.rs": "bd81551e2dadc6bd1fa70d7662409208ab045b5f",
+              "src/rust/ir/analysis/mod.rs": "5111ac9adc34e19ae869a3c0b3c80030554c8c60",
+              "src/rust/ir/mod.rs": "e8b307d47a2fe26161a8481c8931406c36945440",
+              "src/rust/ir/passes/licm.rs": "9a18e843cfdcfd0fef49c327644a218ca84cf3ca",
+              "src/rust/ir/passes/mod.rs": "4c285258a4d4b99111602bf7162ceca4ac0a6208",
+              "tests/ir/semantics/control.rs": "ee112487764f000dcd5dd2563466f4435c3beb1f",
+              "tests/ir/semantics/core.rs": "bc3880b5d53cc947f1aed1179c4964c9ccc2f4b1",
+              "tests/ir/semantics/dataflow.rs": "36f93ec3c1402093d0eda88d1dda7a37685558e6",
+              "tests/ir/semantics/licm.rs": "c3b24bb0ccb4f64cc8d32b923fe1e09a69699062",
+              "tests/ir/semantics/merge.rs": "46729334802208ac6f05843ab0ef51c372bcd1cd",
+              "tests/ir/wasm/licm.mjs": "5af7fd9e4e85d6b5b42cfd96359430d008b70642",
+              "tests/ir/wasm/run.mjs": "cf9a1318f8c6ef6f39ba0e155b02fc56dcf9c7c2"
+            },
+            "edits": {
+              ".github/workflows/ir.yml": [
+                [49,49,"      - name: Loop optimization and budget recovery\n        run: |\n          set -o pipefail\n          make ir-licm-tests 2>&1 | tee ir-licm.log\n"],
+                [72,73,"            build/ir-*/**/*.wasm\n"]
+              ],
+              "Makefile": [
+                [837,837,"\n# Focused LICM fixtures do not require a guest CPU or downloaded disk images.\n.PHONY: ir-licm-tests\nir-licm-tests: ir-generated-check $(INSTRUCTION_TABLES)\n\tenv RUSTFLAGS=\"-D warnings\" cargo test ir::licm_tests\n\tnode tests/ir/wasm/licm.mjs\n"]
+              ],
+              "docs/ir-progress.md": [
+                [21,22,"| IR-11 | 部分完成 | 有界自然循环分析与事务式纯 SSA LICM，保留 StateMap/effect/预算；独立开关、135 项 Rust 回归与 11,520 次新增 Wasm 执行通过；proof-based 访存复用、forwarding、访存 LICM、其余循环/SIMD 优化待实现 |\n"],
+                [755,755,"\n## 后续推进：IR-11 纯值 LICM\n\n- 新增有界自然循环分析、多 latch 合并和内层优先处理，要求可证明的既有\n  preheader，不改变 CFG 或外部入口。多入口与不可约循环不外提。\n- 只移动全定义纯 SSA 运算；CPU 读取、访存、守卫、helper、除法和所有带恢复\n  状态的节点保持原位。候选变换在预算与 verifier 检查成功后原子提交。\n- 优化管线增加独立 `licm` 开关及循环/移动统计。135 项 Rust 测试与已有 Wasm\n  执行矩阵通过；新增 oracle 完成 11,520 次执行并独立核对完整结束结果。\n- 这不是完整 IR-11 或 IR-00～IR-14 的完成声明。未执行 Windows XP、游戏加载\n  和性能验收，不修改生产 Pending、默认后端或 legacy 路径。\n- 安全边界、限制和重现入口见 [LICM 说明](ir-licm.md)。\n"]
+              ],
+              "src/rust/ir/analysis/mod.rs": [[1,1,"pub mod loops;\n"]],
+              "src/rust/ir/mod.rs": [[181,181,"\n#[cfg(test)]\n#[path = \"../../../tests/ir/semantics/licm.rs\"]\nmod licm_tests;\n"]],
+              "src/rust/ir/passes/mod.rs": [
+                [4,4,"pub mod licm;\n"],
+                [13,13,"    pub licm: bool,\n"],
+                [24,24,"            licm: true,\n"],
+                [39,39,"    pub loops: usize,\n    pub hoisted: usize,\n"],
+                [66,66,"        }\n        if config.licm {\n            let result = licm::run(region, licm::DEFAULT_WORK_BUDGET)?;\n            stats.loops += result.loops;\n            stats.hoisted += result.hoisted;\n"]
+              ],
+              "tests/ir/semantics/control.rs": [[115,115,"            licm: false,\n"]],
+              "tests/ir/semantics/core.rs": [[407,407,"            licm: false,\n"]],
+              "tests/ir/semantics/dataflow.rs": [
+                [22,22,"        licm: false,\n"],
+                [128,128,"                licm: false,\n"],
+                [238,238,"            licm: false,\n"],
+                [263,263,"                licm: false,\n"],
+                [286,286,"                licm: false,\n"],
+                [332,332,"            licm: false,\n"],
+                [378,378,"            licm: false,\n"]
+              ],
+              "tests/ir/semantics/merge.rs": [[22,22,"        licm: false,\n"]],
+              "tests/ir/wasm/run.mjs": [[8,8,"import \"./licm.mjs\";\n"]]
+            }
+          }''')
+          def blob(contents):
+              return hashlib.sha1(b"blob " + str(len(contents)).encode() + b"\0" + contents).hexdigest()
+          updates = {}
+          for name, sha in data["old"].items():
+              raw = Path(name).read_bytes()
+              assert blob(raw) == sha, f"Changed baseline: {name}"
+              lines = raw.decode().splitlines(keepends=True)
+              for start, end, replacement in reversed(data["edits"][name]):
+                  lines[start:end] = replacement.splitlines(keepends=True)
+              updates[name] = "".join(lines).encode()
+          for name, sha in data["new"].items():
+              raw = updates.get(name, Path(name).read_bytes())
+              assert blob(raw) == sha, f"Tested-source mismatch: {name}: {blob(raw)} != {sha}"
+              print("Verified", name, sha)
+          for name, raw in updates.items():
+              Path(name).write_bytes(raw)
+          PY
+          git diff --check
+          git rm .github/workflows/ir-import-verified.yml
+          git add -u
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'ir: integrate bounded LICM and verified regression fixtures'
+          git push origin HEAD:refs/heads/chat/ir-licm-verified-20260913
