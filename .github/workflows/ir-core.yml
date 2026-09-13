@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [ir]
   push:
-    branches: [ir]
+    branches: [ir, 'chat/ir-11-verified-optimizations-20260913']
   workflow_dispatch:
 
 permissions:
