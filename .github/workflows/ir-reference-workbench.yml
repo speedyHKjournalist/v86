@@ -1,0 +1,33 @@
+name: IR reference workbench
+
+on:
+  push:
+    branches: ['chat/ir-11-ram-and-loop-verified-20260913']
+    paths: ['.github/workflows/ir-reference-workbench.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  reference:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Prepare independent disassembler and pinned Git objects
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y nasm
+          git fetch --depth=1 origin 8ee73e538daaab15411344d39a1f271e778ac7f3
+          git cat-file -e 8ee73e538daaab15411344d39a1f271e778ac7f3:src/rust/cpu/string.rs
+          tar -C .git -czf ir-reference-objects.tar.gz objects
+          cp /usr/bin/ndisasm ir-ndisasm
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-reference-support-${{ github.sha }}
+          retention-days: 1
+          path: |
+            ir-reference-objects.tar.gz
+            ir-ndisasm
