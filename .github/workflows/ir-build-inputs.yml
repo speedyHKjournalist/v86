@@ -1,0 +1,28 @@
+name: IR build inputs
+
+on:
+  push:
+    branches: ['chat/ir-advanced-simd-20260913']
+    paths: ['.github/workflows/ir-build-inputs.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  inputs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch the compiler version pinned by the existing Makefile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p closure-compiler
+          curl --fail --location --retry 3 --output closure-compiler/compiler.jar https://repo.maven.apache.org/maven2/com/google/javascript/closure-compiler/v20210601/closure-compiler-v20210601.jar
+          sha256sum closure-compiler/compiler.jar > closure-compiler/SHA256SUMS
+          java -jar closure-compiler/compiler.jar --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ir-closure-compiler-v20210601
+          path: closure-compiler/
+          retention-days: 1
