@@ -4,8 +4,8 @@ use crate::ir::{
     frontend::decode::{GuestEip, LinearAddress, PhysicalAddress},
     passes::PassConfig,
     runtime::compile::{
-        compile_cpu_cfg_region, CodeDependency, CodeMapping, CompileRequest,
-        ImmutableCodeSnapshot, IrConfig, PublicationKey, Tier,
+        compile_cpu_cfg_region, CodeDependency, CodeMapping, CompileRequest, ImmutableCodeSnapshot,
+        IrConfig, PublicationKey, Tier,
     },
 };
 
@@ -58,9 +58,21 @@ fn licm_is_a_tier_two_optimization_and_respects_disabled_passes() {
     assert_eq!(tier_one.passes.loop_hoisted, 0);
     request.tier = Tier::Two;
     let tier_two = compile_cpu_cfg_region(&request, &snapshot, &config).unwrap();
-    assert!(tier_two.passes.loop_hoisted > 0, "no invariant reached the production compiler API");
+    assert!(
+        tier_two.passes.loop_hoisted > 0,
+        "no invariant reached the production compiler API"
+    );
     assert_eq!(tier_two.tier, Tier::Two);
-    assert!(tier_two.current(request.key, &snapshot.dependencies, tier_two.entry, &snapshot.mappings));
+    assert!(tier_two.current(
+        request.key,
+        &snapshot.dependencies,
+        tier_two.entry,
+        &snapshot.mappings
+    ));
+
+    let mut stale = snapshot.dependencies.clone();
+    stale[0].version += 1;
+    assert!(!tier_two.current(request.key, &stale, tier_two.entry, &snapshot.mappings));
 
     config.optimize = false;
     let disabled = compile_cpu_cfg_region(&request, &snapshot, &config).unwrap();

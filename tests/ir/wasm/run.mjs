@@ -7,6 +7,9 @@ import "./state.mjs";
 import "./dynamic_count.mjs";
 import "./dataflow.mjs";
 import "./owned.mjs";
+import "./licm.mjs";
+import "./simd_rewrite.mjs";
+import "../differential/fixture_cache_test.mjs";
 for(const n of [127, 128, 255, 256, 1023, 1024]) {
     for(const kind of ["locals", "groups", "imports", "depth"]) {
         const bytes = fs.readFileSync(`build/ir-wasm/${kind}-${n}.wasm`);

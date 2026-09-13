@@ -5,6 +5,7 @@ mod gvn;
 pub mod licm;
 mod merge;
 mod prune;
+pub mod simd_rewrite;
 #[derive(Clone, Copy)]
 pub struct PassConfig {
     pub prune: bool,
@@ -39,6 +40,7 @@ pub struct PassStats {
     pub commoned: usize,
     pub removed: usize,
     pub loop_hoisted: usize,
+    pub simd_rewritten: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     verify(region).map_err(|e| e.0)?;
@@ -56,6 +58,8 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
             verify(region).map_err(|e| e.0)?;
         }
         if config.fold {
+            stats.simd_rewritten +=
+                simd_rewrite::run(region, simd_rewrite::DEFAULT_WORK_LIMIT)?.rewritten;
             fold(region, &mut stats);
             verify(region).map_err(|e| e.0)?;
         }

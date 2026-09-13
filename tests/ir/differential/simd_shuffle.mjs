@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import {fixtureInstances} from "./fixture_cache.mjs";
 import {shuffle} from "./shuffle_model.mjs";
 import {V86} from "../../../build/libv86.mjs";
 const cases=JSON.parse(fs.readFileSync("build/ir-simd-shuffle/cases.json"));
-const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-simd-shuffle/${i}-${opt}.wasm`))));
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 for(const release of [false,true]){
  const vm=new V86({wasm_path:release?"build/v86-ir-test-release.wasm":"build/v86-ir-test.wasm",memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
@@ -13,7 +13,7 @@ for(const release of [false,true]){
     vm.run();const deadline=performance.now()+10000;while(v.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);}await vm.stop();
     const PC=0x8000,BASE=0x310000,ALT=0x350000,STACK=0x90000,UD=0x180100,NM=0x180300,PF=0x180200,GP=0x180000,cr0=cpu.cr[0],cr4=cpu.cr[4];let target,events=[],onEvent,slow=0,guards=0;
     const imports={...e,m:e.memory,ir_xmm_shuffle:(...a)=>{slow++;return e.ir_xmm_shuffle(...a);},ir_xmm_binary:(...a)=>{slow++;return e.ir_xmm_binary(...a);},ir_xmm_load:(...a)=>{slow++;return e.ir_xmm_load(...a);},ir_xmm_store:(...a)=>{slow++;return e.ir_xmm_store(...a);},ir_sse_guard:()=>{guards++;return e.ir_sse_guard();}};
-    const instances=modules.map(pair=>pair.map(m=>new WebAssembly.Instance(m,{e:imports})));
+    const instances=fixtureInstances("build/ir-simd-shuffle",{e:imports},cases.length);
     const extra=name=>[0,1].map(opt=>new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(`build/ir-simd-shuffle/${name}-${opt}.wasm`)),{e:imports}));
     const chain=extra("chain"),resume=extra("resume"),chainBytes=JSON.parse(fs.readFileSync("build/ir-simd-shuffle/chain.json"));
     const visible=()=>({regs:Array.from(cpu.reg32,x=>x>>>0),xmm:Array.from(xmm),flags:e.get_eflags()>>>0,rawZero:cpu.flags[0]&64,zeroLazy:cpu.flags_changed[0]&64,last:words[104>>2],ip:cpu.instruction_pointer[0]>>>0});
@@ -35,7 +35,7 @@ for(const release of [false,true]){
     const caught=f=>{try{f();return false;}catch(error){assert(error instanceof WebAssembly.RuntimeError);return true;}};
     function compare(i,configure,{fault=false,abort=false,check}={}){
         configure();e.ir_test_step();const before=visible(),data=Array.from({length:4},(_,l)=>get32(target+l*4));assert.equal(caught(()=>e.ir_test_step()),abort);const expected=state(),observed=events.slice();check?.(before,data,expected);
-        const counts=[];for(const opt of [0,1]){configure();assert.equal(caught(()=>instances[i][opt].exports.f(0)),abort);assert.equal(words[664>>2],fault||abort?101:102);assert.deepEqual(state(),expected,`SSE shuffle ${i}/${opt}`);assert.deepEqual(events,observed,`events ${i}/${opt}`);counts.push([slow,guards]);}return {expected,observed,counts};
+        const counts=[];for(const opt of [0,1]){configure();assert.equal(caught(()=>instances(i)[opt].exports.f(0)),abort);assert.equal(words[664>>2],fault||abort?101:102);assert.deepEqual(state(),expected,`SSE shuffle ${i}/${opt}`);assert.deepEqual(events,observed,`events ${i}/${opt}`);counts.push([slow,guards]);}return {expected,observed,counts};
     }
     let ordinary=0,native=0;
     for(let i=0;i<cases.length;i++)for(const hot of cases[i][7]<8?[false]:[false,true]){

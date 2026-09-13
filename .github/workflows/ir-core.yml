@@ -4,7 +4,8 @@ on:
   pull_request:
     branches: [ir]
   push:
-    branches: ['chat/ir-*']
+    branches: [ir]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,44 +17,49 @@ concurrency:
 jobs:
   ir-core:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Preserve exact source checkpoint
-        run: git archive --format=tar HEAD | gzip -1 > ir-source.tar.gz
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ir-source-${{ github.sha }}
-          retention-days: 1
-          compression-level: 0
-          path: ir-source.tar.gz
       - uses: actions/setup-node@v6
         with:
           node-version: '24.17.0'
-      - name: Native Rust toolchain
+      - name: Install native and Wasm toolchains
         run: |
           rustup toolchain install stable --profile minimal
-          rustup component add rustfmt --toolchain stable
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -qq
+          sudo apt-get install -y nasm clang lld
       - name: Generate baseline dispatch tables and check IR decoder
         run: |
           mkdir -p build
           make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
           make ir-generated-check
-      - name: Native compiler regressions
+      - name: Native compiler regressions and emitted fixtures
         run: |
           set -o pipefail
-          env RUSTFLAGS="-D warnings" cargo +stable test 2>&1 | tee build/ir-native.log
-      - name: Execute emitted Wasm
+          env RUSTFLAGS="-D warnings" cargo test 2>&1 | tee build/ir-native.log
+      - name: Execute emitted Wasm and independent decoder oracle
         run: |
           set -o pipefail
           {
             node tests/ir/wasm/run.mjs
-            node tests/ir/wasm/licm.mjs
             node tests/rust/verify-wasmgen-dummy-output.js
             node tests/ir/decode/oracle.mjs
           } 2>&1 | tee build/ir-wasm.log
+      - name: CPU cache, automatic tiers and backend integration
+        run: |
+          set -o pipefail
+          make ir-cache-tests ir-auto-tests ir-backend-integration-tests 2>&1 | tee build/ir-runtime.log
+      - name: Full debug and release SIMD differential suites
+        run: |
+          set -o pipefail
+          make build/v86-ir-test.wasm build/v86-ir-test-release.wasm
+          for suite in simd_integer simd_shuffle simd_lane; do
+            node --expose-gc "tests/ir/differential/$suite.mjs" 2>&1 | tee "build/ir-$suite.log"
+          done
       - name: Check tracked generated sources
         run: git diff --exit-code
       - name: Preserve diagnostics
@@ -63,6 +69,4 @@ jobs:
           name: ir-diagnostics-${{ github.sha }}
           retention-days: 7
           if-no-files-found: ignore
-          path: |
-            build/ir-native.log
-            build/ir-wasm.log
+          path: build/ir-*.log

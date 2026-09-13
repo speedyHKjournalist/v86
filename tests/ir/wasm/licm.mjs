@@ -1,59 +1,66 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-// Independent arithmetic/CFG oracle, not just opt-vs-unopt equality.
-// Trace: entry, (header, body)*, header, exit. A body accumulates
-// (input[2] + input[3]) * input[4], wrapping at the i32 machine width.
+// Model the original CFG independently: entry -> header -> body/header or exit.
+// Budget recovery is checked against this model, not just opt vs. no-opt.
+function expected(input, flags, operand, budget) {
+    const result = [...input, flags, 0, 0, operand];
+    const step = Number(((BigInt(input[2]) + BigInt(input[3])) * BigInt(input[4])) & 0xFFFFFFFFn);
+    let block = 0, count = input[0], sum = 0;
+    for(let remaining = budget; remaining > 0; remaining--) {
+        if(block === 0) block = 1;
+        else if(block === 1) block = count === 0 ? 2 : 3;
+        else if(block === 3) {
+            count = count - 1 >>> 0;
+            sum = sum + step >>> 0;
+            block = 1;
+        }
+        else {
+            result[0] = count;
+            result[1] = sum;
+            result[9] = 0x3000;
+            return result;
+        }
+    }
+    result[0] = count;
+    result[1] = sum;
+    result[9] = 0x2000 + block;
+    return result;
+}
+let executions = 0;
 const memory = new WebAssembly.Memory({initial: 64});
 const words = new Uint32Array(memory.buffer);
-const cases = [];
-for(const a of [0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF]) {
-    for(const b of [0, 1, 0xFFFFFFFF]) {
-        for(const c of [0, 1, 3, 0x80000001]) cases.push([a, b, c]);
-    }
-}
-let seed = 0x86C0FFEE;
-function random() {
-    seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
-    return seed >>> 0;
-}
-for(let i = 0; i < 64; i++) cases.push([random(), random(), random()]);
-let executions = 0;
 for(const budget of [1, 2, 3, 4, 5, 8, 17, 100]) {
     const instances = [false, true].map(opt => {
         const bytes = fs.readFileSync(`build/ir-licm/loop-${budget}-${opt}.wasm`);
-        assert(WebAssembly.validate(bytes), `LICM budget ${budget}, optimized=${opt}`);
+        assert(WebAssembly.validate(bytes));
         return new WebAssembly.Instance(new WebAssembly.Module(bytes), {e: {m: memory}});
     });
-    for(const count of [0, 1, 2, 3, 7, 19, 0xFFFFFFFF]) {
-        const iterations = Math.min(count, Math.max(0, Math.floor((budget - 1) / 2)));
-        const pc = budget >= 2 * count + 3 ? 0x3000 :
-            budget === 2 * count + 2 ? 0x2002 : budget % 2 ? 0x2001 : 0x2003;
-        for(const [a, b, c] of cases) for(const flags of [2, 0x8D7, 0x202]) {
-            const input = [count, 0xDEADBEEF, a, b, c, 0x12345678, 0xABCDEF01, 0x76543210];
-            const expected = input.slice();
-            const product = ((BigInt(a) + BigInt(b)) & 0xFFFFFFFFn) * BigInt(c);
-            expected[0] = count - iterations;
-            expected[1] = Number((BigInt(iterations) * product) & 0xFFFFFFFFn);
-            for(const instance of instances) {
-                words.fill(0xA5A5A5A5, 0, 32);
-                words.set(input);
-                words[8] = flags;
-                words[9] = 0;
-                words[10] = 99;
-                words[11] = 0xFEDCBA98;
-                instance.exports.f(0);
-                assert.deepEqual(Array.from(words.slice(0, 8)), expected,
-                    `budget=${budget}, count=${count}, operands=${a},${b},${c}`);
-                assert.equal(words[8], flags, "FLAGS must survive motion");
-                assert.equal(words[9], pc, "exact block-budget recovery EIP");
-                assert.equal(words[10], 0, "preserve fixture StateMap instruction count");
-                assert.equal(words[11], 0xFEDCBA98, "preserve lazy flag operand");
-                assert(words.slice(12, 32).every(value => value === 0xA5A5A5A5),
-                    "do not write beyond the declared CPU state layout");
-                executions++;
-            }
+    for(const count of [0, 1, 2, 7, 100, 0xFFFFFFFF])
+    for(const a of [0, 1, 0x7FFFFFFF, 0xFFFFFFFF])
+    for(const b of [0, 1, 0x80000000, 0xFFFFFFFF])
+    for(const c of [0, 1, 0x12345678, 0xFFFFFFFF])
+    for(const flags of [2, 0x8D7]) {
+        const input = [count, 0xDEADBEEF, a, b, c, 0x87654321, 0xABCDEF01, 0x12345678];
+        const operand = 0xCAFEBABE;
+        const reference = expected(input, flags, operand, budget);
+        for(const instance of instances) {
+            words.fill(0xA5A5A5A5, 0, 32);
+            words.set([...input, flags, 0, 99, operand]);
+            instance.exports.f(0);
+            assert.deepEqual(Array.from(words.slice(0, 12)), reference,
+                `budget=${budget} count=${count} inputs=${a},${b},${c}`);
+            assert(words.slice(12, 32).every(value => value === 0xA5A5A5A5), "no extra architectural stores");
+            executions++;
+        }
+    }
+    words.fill(0xA5A5A5A5, 0, 32);
+    for(const entry of [-1, 1, 0x7FFFFFFF]) {
+        for(const instance of instances) {
+            instance.exports.f(entry);
+            assert(words.slice(0, 32).every(value => value === 0xA5A5A5A5), "invalid entry has no effects");
+            executions++;
         }
     }
 }
-console.log(`PASS: ${executions} independent LICM Wasm executions; zero-trip, overflow, transitive invariants, unchanged FLAGS and exact budget exits`);
+console.log(`PASS: ${executions} LICM Wasm executions with an independent loop/budget model, overflow, zero-trip loops, flags and recovery state`);
