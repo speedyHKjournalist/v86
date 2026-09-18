@@ -91,6 +91,8 @@ pub enum Op {
     ReadRawFlags,
     ReadFlagChanges,
     ReadFlagOperand,
+    ReadFlagResult,
+    ReadFlagSize,
     CountLeadingZeros,
     CountTrailingZeros,
     PopulationCount,
