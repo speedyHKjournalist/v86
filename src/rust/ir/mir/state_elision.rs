@@ -10,6 +10,7 @@ use super::{materialize::StatePlan, value::Address, MirData};
 use crate::{
     cpu::global_pointers as gp,
     ir::{
+        helper::{ExceptionOwner, HelperAbi},
         hir::{Definition, Op, Region},
         ids::{StateId, ValueId},
         lowering::CompileError,
