@@ -44,6 +44,7 @@ pub struct PassStats {
     pub loop_hoisted: usize,
     pub ram_forwarded: usize,
     pub state_writes_elided: usize,
+    pub cpu_values_elided: usize,
     pub simd_eliminated: usize,
     pub simd_shuffled: usize,
     pub scalar_aliases: usize,
