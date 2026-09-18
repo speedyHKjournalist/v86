@@ -70,11 +70,7 @@ impl MirRegion {
     ) -> Result<usize, CompileError> {
         state_elision::enable(&mut self.data, work_limit)
     }
-    pub(crate) fn cpu_state_write_elided(
-        &self,
-        state: super::ids::StateId,
-        write: usize,
-    ) -> bool {
+    pub(crate) fn cpu_state_write_elided(&self, state: super::ids::StateId, write: usize) -> bool {
         state_elision::elided(&self.data, state, write)
     }
 
