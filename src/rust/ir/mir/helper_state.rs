@@ -22,7 +22,12 @@ pub struct Plan {
 }
 
 fn derive(region: &Region, calls: &[Option<CallPlan>], work_limit: usize) -> Result<Plan, CompileError> {
-    if region.instructions.len() > work_limit || calls.len() != region.instructions.len() {
+    if calls.len() != region.instructions.len() {
+        return Err(CompileError::InvalidIr(
+            "helper-state call-plan mismatch".into(),
+        ));
+    }
+    if region.instructions.len() > work_limit {
         return Err(CompileError::Budget("helper-state work"));
     }
     let mut eligible = vec![false; region.instructions.len()];
