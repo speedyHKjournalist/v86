@@ -2,8 +2,9 @@
 //!
 //! The certificate only removes writes that reconstruct values proven equal to
 //! the CPU backing state present when the IR entry was invoked. Regions with any
-//! resumable memory/helper/commit observation are rejected wholesale; budget
-//! recovery and terminal exits are the only observation sites allowed.
+//! resumable memory/helper/commit observation are rejected wholesale. Budget
+//! recovery and the guarded SSE check are allowed because any observing arm
+//! materializes state and immediately exits the current IR entry.
 
 use super::{materialize::StatePlan, value::Address, MirData};
 use crate::{
@@ -188,7 +189,8 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
             .flat_map(|block| &block.instructions)
             .map(|id| &region.instructions[id.index()])
             .any(|inst| {
-                (inst.state.is_some() || inst.commit.is_some()) && inst.op != Op::PollBudget
+                (inst.state.is_some() || inst.commit.is_some())
+                    && !matches!(inst.op, Op::PollBudget | Op::SseCheck)
             })
     {
         return Ok(disabled(states));
@@ -346,6 +348,30 @@ mod tests {
         }
         assert!(skipped_flag_operand > 0);
         assert!(skipped_gprs > 0);
+        emit_cpu(&mir, 32).unwrap();
+    }
+
+    #[test]
+    fn guarded_sse_check_allows_path_stable_xmm_elision() {
+        // PXOR changes XMM0 on the backedge, while XMM1 remains exactly the
+        // entry value. SseCheck may observe state only on an arm that returns.
+        let mut mir = optimized(&[0x66, 0x0F, 0xEF, 0xC1, 0xE2, 0xFA]);
+        assert!(enable(&mut mir.data, DEFAULT_WORK_LIMIT).unwrap() > 0);
+        let xmm0 = gp::get_reg_xmm_offset(0);
+        let xmm1 = gp::get_reg_xmm_offset(1);
+        let mut kept_changed = false;
+        let mut skipped_unchanged = false;
+        for (state, mask) in mir.states.iter().zip(&mir.state_elision.masks) {
+            for (write, &skip) in state.cpu.writes.iter().zip(mask) {
+                match write.address {
+                    Address::Absolute(address) if address == xmm0 => kept_changed |= !skip,
+                    Address::Absolute(address) if address == xmm1 => skipped_unchanged |= skip,
+                    _ => (),
+                }
+            }
+        }
+        assert!(kept_changed, "loop-carried XMM0 must remain materialized");
+        assert!(skipped_unchanged, "entry-equivalent XMM1 should be elided");
         emit_cpu(&mir, 32).unwrap();
     }
 
