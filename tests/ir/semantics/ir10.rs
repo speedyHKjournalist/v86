@@ -96,6 +96,10 @@ fn cfg_region() -> crate::ir::hir::Region {
     let entry = b.block;
     let left = b.region.block(false);
     let right = b.region.block(false);
+    let gpr = b.gpr;
+    let recovery = state(&mut b, 0x1300, gpr);
+    b.region.blocks[left.index()].entry_state = Some(recovery);
+    b.region.blocks[right.index()].entry_state = Some(recovery);
     let cond = b.constant(1, Type::I1);
     b.region.terminate(
         entry,
