@@ -18,10 +18,8 @@ fn emit_pair(bytes: &[u8], mode: bool, pc: u32, name: &str) {
         }
         let mut mir = lower(&r).unwrap();
         if opt != 0 {
-            mir.elide_redundant_cpu_state_writes(
-                crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
-            )
-            .unwrap();
+            mir.elide_redundant_cpu_state_writes(crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT)
+                .unwrap();
         }
         std::fs::write(
             format!("build/ir-simd-integer/{name}-{opt}.wasm"),
