@@ -1,9 +1,11 @@
 # IR-11: guarded ordinary-RAM forwarding
 
-This is an incremental optimization, not completion of IR-11 or IR-00–IR-14.
-It does not change ISA coverage, the default backend, CPU/snapshot ABI, live
+This document describes the ordinary-RAM forwarding component of the completed
+IR-11 optimizer package. IR-00–IR-14 as a whole remains incomplete. This work
+does not change ISA coverage, the default backend, CPU/snapshot ABI, live
 publication/invalidation, or the legacy-retirement gate. No application speedup
-or Windows XP acceptance is claimed.
+or Windows XP acceptance is claimed. See [IR-11 completion](ir11-completion.md)
+for the package-level boundary.
 
 ## Implementation
 
@@ -18,10 +20,13 @@ Supported widths are 1, 2 and 4 bytes. In addition to repeated loads, an exact
 same-address/same-width scalar store with a successful architectural commit may
 seed the immediately following load chain. The store is never removed: only a
 later load result may be supplied from the value that was actually written on the
-native RAM path. The pass does not guess pointer aliases, move memory out of a
-loop, merge different widths, or carry a certificate across a control-flow edge.
-RMW, vector memory, general checks, CPU observations and unknown/helper effects
-terminate a chain.
+native RAM path. A proven-disjoint committed scalar store may also leave an
+earlier load cache live; disjointness is limited to constant byte ranges whose
+physical-page offsets cannot overlap even under virtual-page aliasing. The pass
+does not guess pointer aliases, merge different widths, or carry this
+intra-block certificate across a control-flow edge. RMW, vector memory, general
+checks and unknown/helper effects remain barriers. Loop reuse uses a separate
+fault-preserving certificate described in [IR-11 completion](ir11-completion.md).
 
 The immutable compiler enables it only for optimized Tier 2 with nonzero pass
 rounds, after existing machine constant folding. `passes.ram_forwarded` counts
@@ -100,9 +105,13 @@ The broader CFG regression also contains a loop with a confirmed nonzero LICM
 motion count followed by a later faulting load. Pure motion and memory forwarding
 must preserve the original exception point, stack frame and retirement count.
 
-## Still open
+## Remaining roadmap scope
 
-General proof-carrying alias/effect analysis, memory LICM, broader loop/SIMD
-optimization, complete ISA semantics and the roadmap's
-system/performance acceptance and legacy retirement remain outstanding. See
-[LICM](ir-licm.md) and the [implementation status](ir-progress.md).
+The proof lattice intentionally remains conservative: unproved address
+relations are `MayAlias`, loop memory reuse is read-only, and stores/RMW/vector
+memory or unknown helpers disable loop caching. Broader speculative alias
+analysis is not required by the IR-11 completion boundary. Complete ISA
+semantics, IR-12 lifecycle/linking, IR-13 system/performance acceptance and
+IR-14 legacy retirement remain outstanding. See [LICM](ir-licm.md),
+[IR-11 completion](ir11-completion.md) and the
+[implementation status](ir-progress.md).
