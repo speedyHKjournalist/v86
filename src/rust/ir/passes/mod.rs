@@ -16,6 +16,10 @@ pub struct PassConfig {
     pub phis: bool,
     pub copy: bool,
     pub fold: bool,
+    /// CPU-only per-flag demand/liveness after exact backing lowering.
+    pub flags: bool,
+    /// Trim pre-call CPU StateMap observations for audited pure helpers.
+    pub helper_state: bool,
     pub gvn: bool,
     pub dce: bool,
     pub rounds: usize,
@@ -28,6 +32,8 @@ impl Default for PassConfig {
             phis: true,
             copy: true,
             fold: true,
+            flags: true,
+            helper_state: true,
             gvn: true,
             dce: true,
             rounds: 2,
@@ -48,6 +54,7 @@ pub struct PassStats {
     pub loop_hoisted: usize,
     pub ram_forwarded: usize,
     pub state_writes_elided: usize,
+    pub helper_states_elided: usize,
     pub cpu_values_elided: usize,
     pub simd_eliminated: usize,
     pub simd_shuffled: usize,
