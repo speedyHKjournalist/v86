@@ -305,6 +305,72 @@ fn emits_guarded_forwarding_cpu_corpus_after_dropping_hir() {
 
 
 #[test]
+fn emits_guarded_loop_cache_cpu_corpus_after_dropping_hir() {
+    std::fs::create_dir_all("build/ir-forwarding").unwrap();
+    let budgets = [1u32, 2, 3, 4, 8, 64];
+    let addresses = [0x310040u32, 0x0A0040u32];
+    let mut programs = Vec::new();
+
+    for (case, address) in addresses.into_iter().enumerate() {
+        // NOP; loop: MOV EAX,moffs32; DEC ECX; JNZ loop.
+        // The NOP is a real unique preheader. The first load stays at its
+        // original fault point; only later successful native-RAM iterations
+        // may reuse the loop cache.
+        let bytes = vec![
+            0x90,
+            0xA1,
+            address as u8,
+            (address >> 8) as u8,
+            (address >> 16) as u8,
+            (address >> 24) as u8,
+            0x49,
+            0x75,
+            0xF8,
+        ];
+        for budget in budgets {
+            for cached in [false, true] {
+                let mut r = crate::ir::frontend::region::lift_cpu_cfg(
+                    &bytes,
+                    GuestEip(0x100000),
+                    LinearAddress(0x100000),
+                    true,
+                    16,
+                )
+                .unwrap();
+                run(&mut r, PassConfig::default()).unwrap();
+                let mut m = lower(&r).unwrap();
+                drop(r);
+                if cached {
+                    assert_eq!(
+                        m.cache_loop_invariant_ram_reads(DEFAULT_WORK_LIMIT)
+                            .unwrap(),
+                        1
+                    );
+                    assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 0);
+                }
+                std::fs::write(
+                    format!("build/ir-forwarding/loop-{case}-{budget}-{cached}.wasm"),
+                    emit_cpu(&m, budget).unwrap().bytes,
+                )
+                .unwrap();
+            }
+        }
+        programs.push(format!(
+            "{{\"address\":{address},\"bytes\":{bytes:?}}}"
+        ));
+    }
+    std::fs::write(
+        "build/ir-forwarding/loops.json",
+        format!(
+            "{{\"budgets\":{:?},\"cases\":[{}]}}",
+            budgets,
+            programs.join(",")
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
 fn disjoint_constant_store_preserves_an_existing_load_chain() {
     // MOV EAX,[0x2000]; MOV [0x2010],EBX; MOV ECX,[0x2000].
     // The middle store has a distinct page offset even if two virtual pages
