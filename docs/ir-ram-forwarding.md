@@ -1,4 +1,4 @@
-# IR-11: guarded ordinary-RAM read forwarding
+# IR-11: guarded ordinary-RAM forwarding
 
 This is an incremental optimization, not completion of IR-11 or IR-00–IR-14.
 It does not change ISA coverage, the default backend, CPU/snapshot ABI, live
@@ -14,10 +14,14 @@ address checks and the continuation of the existing one-unit budget poll between
 them. Each read must have identical SSA address (or identical segment base/null
 check/offset tuple), width and canonical ordinary-read slow-path contract.
 
-Supported widths are 1, 2 and 4 bytes. The pass does not guess pointer aliases,
-remove stores, forward a store, move memory out of a loop, merge different widths,
-or carry a certificate across a control-flow edge. RMW, vector memory, general
-checks, CPU observations and unknown/helper effects terminate a chain.
+Supported widths are 1, 2 and 4 bytes. In addition to repeated loads, an exact
+same-address/same-width scalar store with a successful architectural commit may
+seed the immediately following load chain. The store is never removed: only a
+later load result may be supplied from the value that was actually written on the
+native RAM path. The pass does not guess pointer aliases, move memory out of a
+loop, merge different widths, or carry a certificate across a control-flow edge.
+RMW, vector memory, general checks, CPU observations and unknown/helper effects
+terminate a chain.
 
 The immutable compiler enables it only for optimized Tier 2 with nonzero pass
 rounds, after existing machine constant folding. `passes.ram_forwarded` counts
@@ -39,13 +43,17 @@ A certificate alone never proves that a guest read is ordinary RAM. The emitter
 allocates separate i32 validity/data locals only when a chain exists:
 
 1. `Begin` clears validity on every visit, including repeated loop entries.
-2. Only the original successful native RAM guard followed by the actual load
-   stores a value and sets validity. Read permissions, privilege, same-page
-   access and the existing TLB/RAM conditions are checked before certification.
-3. `Reuse` can bypass a duplicate read only while that runtime bit is valid.
-4. A slow path clears validity **before** state materialization, page walking or
-   callbacks. Slow success never grants validity. MMIO therefore remains an
-   ordered sequence of reads, including callbacks that change mappings.
+2. A successful native ordinary load may store its loaded value and set validity.
+   A committed scalar store may also set the cache to the value just written,
+   but only after the native same-page writable-RAM guard and physical write have
+   succeeded. The existing immutable code-page alias check still runs before any
+   following guest instruction can consume that cache; an alias forces return.
+3. `Reuse` can bypass a later same-address/same-width scalar load only while
+   that runtime bit is valid.
+4. A slow load or store clears validity **before** state materialization, page
+   walking or callbacks. Slow store success already returns from the IR entry,
+   and slow load success never grants validity. MMIO therefore retains its
+   ordered callback behavior, including callbacks that change mappings.
 
 The cache uses dedicated Wasm locals rather than an earlier SSA local whose
 physical slot may already have been reused by the allocator. Each chain starts
@@ -72,10 +80,13 @@ tools/ir-forwarding-tests.sh
 The script uses the normal Rust/Wasm, Node.js, C compiler and NASM prerequisites
 and the repository's small CPU fixture, not a guest OS image.
 
-Native tests cover width/address/segment barriers, a non-forwardable RMW, checks,
-budget polls, separate locals, HIR destruction, invalid certificates, no cross-block
-reuse, and atomic budget failures. Compiler entry tests cover linear/CFG APIs,
-both tiers, disabled optimization and zero-round diagnostics.
+Native tests cover repeated-load and store-to-load certificates at 8/16/32 bits,
+width/address/segment barriers, a non-forwardable RMW, checks, budget polls,
+separate locals, HIR destruction, invalid certificates, no cross-block reuse, and
+atomic budget failures. Compiler entry tests cover linear/CFG APIs, both tiers,
+disabled optimization and zero-round diagnostics. The scalar-store CPU fixture
+also executes a native store followed by a same-address load while preserving the
+existing slow-path exit, code-alias exit and post-store fault checks.
 
 The actual-CPU corpus compares optimized/unoptimized modules against the
 interpreter, including cold/warm TLBs, page crossings, true #PF/#GP, FLAGS/EIP/CR2,
@@ -91,7 +102,7 @@ must preserve the original exception point, stack frame and retirement count.
 
 ## Still open
 
-General proof-carrying alias/effect analysis, store-to-load forwarding, memory
-LICM, broader loop/SIMD optimization, complete ISA semantics and the roadmap's
+General proof-carrying alias/effect analysis, memory LICM, broader loop/SIMD
+optimization, complete ISA semantics and the roadmap's
 system/performance acceptance and legacy retirement remain outstanding. See
 [LICM](ir-licm.md) and the [implementation status](ir-progress.md).
