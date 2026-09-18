@@ -302,3 +302,101 @@ fn emits_guarded_forwarding_cpu_corpus_after_dropping_hir() {
     )
     .unwrap();
 }
+
+
+#[test]
+fn disjoint_constant_store_preserves_an_existing_load_chain() {
+    // MOV EAX,[0x2000]; MOV [0x3000],EBX; MOV ECX,[0x2000].
+    // The middle store is a different constant byte range under the same
+    // segment base. Its slow path returns; only the proven-disjoint native
+    // continuation can reach the final load.
+    let bytes = [
+        0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x00, 0x30, 0x00, 0x00, 0x8B, 0x0D,
+        0x00, 0x20, 0x00, 0x00,
+    ];
+    let r = region(&bytes);
+    let ids = loads(&r);
+    assert_eq!(ids.len(), 2);
+    let mut m = lower(&r).unwrap();
+    assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 1);
+    assert_eq!(m.ram_forwarding(ids[0]), Some(Forwarding::Begin));
+    assert_eq!(
+        m.ram_forwarding(ids[1]),
+        Some(Forwarding::Reuse { previous: ids[0] })
+    );
+    emit_cpu(&m, 32).unwrap();
+
+    // Overlap is deliberately MayAlias and therefore kills the old proof.
+    let overlapping = [
+        0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x02, 0x20, 0x00, 0x00, 0x8B, 0x0D,
+        0x00, 0x20, 0x00, 0x00,
+    ];
+    let r = region(&overlapping);
+    assert_eq!(
+        lower(&r)
+            .unwrap()
+            .forward_ram_reads(DEFAULT_WORK_LIMIT)
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn loop_invariant_load_cache_keeps_first_fault_point_and_resets_at_preheader() {
+    // Entry preheader JMPs into:
+    //   mov eax,[0x2000]
+    //   dec ecx
+    //   jnz loop
+    // The load itself remains in place. Only after a successful native RAM
+    // access may later iterations reuse its dedicated cache.
+    let bytes = [
+        0xEB, 0x00, 0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x49, 0x75, 0xF7,
+    ];
+    let r = crate::ir::frontend::region::lift_cpu_cfg(
+        &bytes,
+        GuestEip(0x100000),
+        LinearAddress(0x100000),
+        true,
+        16,
+    )
+    .unwrap();
+    let ids = loads(&r);
+    assert_eq!(ids.len(), 1);
+    let mut m = lower(&r).unwrap();
+    assert_eq!(
+        m.cache_loop_invariant_ram_reads(DEFAULT_WORK_LIMIT)
+            .unwrap(),
+        1
+    );
+    let proof = m.ram_loop_cache(ids[0]).expect("loop cache proof");
+    assert_eq!(proof.slot, 0);
+    let reset_blocks: Vec<_> = (0..m.control.blocks.len())
+        .filter(|&block| {
+            m.ram_loop_resets(BlockId(block as u32))
+                .contains(&proof.slot)
+        })
+        .collect();
+    assert_eq!(reset_blocks.len(), 1);
+    emit_cpu(&m, 32).unwrap();
+
+    // A guest store in the loop prevents loop caching rather than guessing
+    // alias or mapping stability.
+    let with_store = [
+        0xEB, 0x00, 0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0xA3, 0x00, 0x30, 0x00, 0x00, 0x49,
+        0x75, 0xF2,
+    ];
+    let r = crate::ir::frontend::region::lift_cpu_cfg(
+        &with_store,
+        GuestEip(0x100000),
+        LinearAddress(0x100000),
+        true,
+        24,
+    )
+    .unwrap();
+    let mut m = lower(&r).unwrap();
+    assert_eq!(
+        m.cache_loop_invariant_ram_reads(DEFAULT_WORK_LIMIT)
+            .unwrap(),
+        0
+    );
+}
