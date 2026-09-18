@@ -1,6 +1,7 @@
 //! Bounded, verifier-checked pure dataflow passes. Memory and helpers never enter GVN.
 use super::{hir::*, ids::*, verify::verify};
 use std::collections::HashSet;
+pub mod copy;
 mod gvn;
 pub mod licm;
 mod merge;
@@ -13,6 +14,7 @@ pub struct PassConfig {
     pub prune: bool,
     pub merge: bool,
     pub phis: bool,
+    pub copy: bool,
     pub fold: bool,
     pub gvn: bool,
     pub dce: bool,
@@ -24,6 +26,7 @@ impl Default for PassConfig {
             prune: true,
             merge: true,
             phis: true,
+            copy: true,
             fold: true,
             gvn: true,
             dce: true,
@@ -38,6 +41,7 @@ pub struct PassStats {
     pub cross_commoned: usize,
     pub merged: usize,
     pub phis: usize,
+    pub copied: usize,
     pub folded: usize,
     pub commoned: usize,
     pub removed: usize,
@@ -67,9 +71,14 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
             trivial_phis(region, &mut stats);
             verify(region).map_err(|e| e.0)?;
         }
+        if config.copy {
+            let copies = copy::run(region, copy::DEFAULT_WORK_LIMIT)?;
+            stats.copied += copies.propagated;
+            stats.scalar_aliases += copies.propagated;
+            verify(region).map_err(|e| e.0)?;
+        }
         if config.fold {
-            let scalar = scalar::run(region, scalar::DEFAULT_WORK_LIMIT)?;
-            stats.scalar_aliases += scalar.aliases;
+            let scalar = scalar::run_constants(region, scalar::DEFAULT_WORK_LIMIT)?;
             stats.scalar_constants += scalar.constants;
             verify(region).map_err(|e| e.0)?;
             fold(region, &mut stats);
