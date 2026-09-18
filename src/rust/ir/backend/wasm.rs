@@ -5,7 +5,7 @@ use crate::ir::mir::arithmetic::{
 use crate::ir::mir::call::{CallPlan, Observation};
 use crate::ir::mir::control::{Copy, Edge as MirEdge, Source, Terminator as MirTerminator};
 use crate::ir::mir::effect::EffectPlan;
-use crate::ir::mir::forwarding::Forwarding;
+use crate::ir::mir::forwarding::{Forwarding, LoopForwarding};
 use crate::ir::mir::materialize::{Count, CountMode, Store, Write};
 use crate::ir::mir::memory::{
     Argument, MemoryPlan, NativeMemory, RamGuard, RuntimeCall, SlowResult, VectorCombine,
@@ -31,6 +31,11 @@ enum Local {
     I64(WasmLocalI64),
     V128(WasmLocalV128),
 }
+#[derive(Clone, Copy)]
+enum MemoryCache {
+    Chain,
+    Loop(usize),
+}
 struct Emitter<'a> {
     w: WasmBuilder,
     mir: &'a MirRegion,
@@ -40,6 +45,7 @@ struct Emitter<'a> {
     accounted: Option<WasmLocal>,
     tlb: Option<WasmLocal>,
     read_cache: Option<(WasmLocal, WasmLocal)>,
+    loop_read_caches: Vec<(WasmLocal, WasmLocal)>,
     code_pages: &'a [u32],
     memory_base: Option<WasmLocal>,
 }
@@ -85,6 +91,44 @@ impl Emitter<'_> {
             Local::I32(l) => self.w.free_local(l),
             Local::I64(l) => self.w.free_local_i64(l),
             Local::V128(l) => self.w.free_local_v128(l),
+        }
+    }
+    fn cache_valid(&mut self, cache: MemoryCache) {
+        match cache {
+            MemoryCache::Chain => self.w.get_local(&self.read_cache.as_ref().unwrap().0),
+            MemoryCache::Loop(slot) => self.w.get_local(&self.loop_read_caches[slot].0),
+        }
+    }
+    fn cache_value(&mut self, cache: MemoryCache) {
+        match cache {
+            MemoryCache::Chain => self.w.get_local(&self.read_cache.as_ref().unwrap().1),
+            MemoryCache::Loop(slot) => self.w.get_local(&self.loop_read_caches[slot].1),
+        }
+    }
+    fn cache_set_value(&mut self, cache: MemoryCache) {
+        match cache {
+            MemoryCache::Chain => self.w.set_local(&self.read_cache.as_ref().unwrap().1),
+            MemoryCache::Loop(slot) => self.w.set_local(&self.loop_read_caches[slot].1),
+        }
+    }
+    fn cache_mark_valid(&mut self, cache: MemoryCache) {
+        self.w.const_i32(1);
+        match cache {
+            MemoryCache::Chain => self.w.set_local(&self.read_cache.as_ref().unwrap().0),
+            MemoryCache::Loop(slot) => self.w.set_local(&self.loop_read_caches[slot].0),
+        }
+    }
+    fn cache_clear(&mut self, cache: MemoryCache) {
+        self.w.const_i32(0);
+        match cache {
+            MemoryCache::Chain => self.w.set_local(&self.read_cache.as_ref().unwrap().0),
+            MemoryCache::Loop(slot) => self.w.set_local(&self.loop_read_caches[slot].0),
+        }
+    }
+    fn clear_loop_caches(&mut self) {
+        for slot in 0..self.loop_read_caches.len() {
+            self.w.const_i32(0);
+            self.w.set_local(&self.loop_read_caches[slot].0);
         }
     }
     fn mask(&mut self, ty: Type) {
@@ -426,17 +470,39 @@ impl Emitter<'_> {
         }
         self.w.call_signature(call.name, call.signature.clone());
     }
-    fn memory_with_forwarding(&mut self, plan: &MemoryPlan, proof: Option<Forwarding>) {
+    fn memory_with_forwarding(
+        &mut self,
+        plan: &MemoryPlan,
+        proof: Option<Forwarding>,
+        loop_proof: Option<LoopForwarding>,
+    ) {
+        if let Some(loop_proof) = loop_proof {
+            let cache = MemoryCache::Loop(loop_proof.slot);
+            self.cache_valid(cache);
+            self.w.if_void();
+            self.cache_value(cache);
+            let NativeMemory::ScalarLoad {
+                result,
+                ticket: None,
+            } = plan.native
+            else {
+                unreachable!("verified loop RAM cache certificate")
+            };
+            self.set(result);
+            self.w.else_();
+            self.planned_memory(plan, Some(cache));
+            self.w.block_end();
+            return;
+        }
         match proof {
             Some(Forwarding::Begin) => {
-                self.w.const_i32(0);
-                self.w.set_local(&self.read_cache.as_ref().unwrap().0);
-                self.planned_memory(plan, true);
+                self.cache_clear(MemoryCache::Chain);
+                self.planned_memory(plan, Some(MemoryCache::Chain));
             },
             Some(Forwarding::Reuse { .. }) => {
-                self.w.get_local(&self.read_cache.as_ref().unwrap().0);
+                self.cache_valid(MemoryCache::Chain);
                 self.w.if_void();
-                self.w.get_local(&self.read_cache.as_ref().unwrap().1);
+                self.cache_value(MemoryCache::Chain);
                 let NativeMemory::ScalarLoad {
                     result,
                     ticket: None,
@@ -446,13 +512,13 @@ impl Emitter<'_> {
                 };
                 self.set(result);
                 self.w.else_();
-                self.planned_memory(plan, true);
+                self.planned_memory(plan, Some(MemoryCache::Chain));
                 self.w.block_end();
             },
-            None => self.planned_memory(plan, false),
+            None => self.planned_memory(plan, None),
         }
     }
-    fn planned_memory(&mut self, plan: &MemoryPlan, cache: bool) {
+    fn planned_memory(&mut self, plan: &MemoryPlan, cache: Option<MemoryCache>) {
         let bytes = plan.guard.bytes;
         let entry = self.planned_ram_guard(plan.address, &plan.guard);
         self.w.if_void();
@@ -477,14 +543,12 @@ impl Emitter<'_> {
                     4 => self.w.load_unaligned_i32(0),
                     _ => unreachable!(),
                 }
-                if cache {
-                    // The load is guarded as ordinary, same-page readable RAM;
-                    // this is the only path allowed to make the cache valid.
-                    let (valid, value) = self.read_cache.as_ref().unwrap();
-                    self.w.set_local(value);
-                    self.w.const_i32(1);
-                    self.w.set_local(valid);
-                    self.w.get_local(value);
+                if let Some(cache) = cache {
+                    // Only the successful native ordinary-RAM path establishes
+                    // validity for either an intra-block or loop cache.
+                    self.cache_set_value(cache);
+                    self.cache_mark_valid(cache);
+                    self.cache_value(cache);
                 }
                 self.set(*result);
             },
@@ -501,16 +565,13 @@ impl Emitter<'_> {
                     4 => self.w.store_unaligned_i32(0),
                     _ => unreachable!(),
                 }
-                if cache {
-                    // The write itself has completed on canonical same-page RAM.
-                    // A code-page alias may still force an immediate return below,
-                    // but only the continuing path can consume this cached value.
+                if let Some(cache) = cache {
+                    // Store seeding is used only by the intra-block certificate.
+                    // The write has completed on canonical same-page RAM.
                     self.get(*value);
                     self.mask(self.mir.value_types[value.index()]);
-                    let (valid, cached) = self.read_cache.as_ref().unwrap();
-                    self.w.set_local(cached);
-                    self.w.const_i32(1);
-                    self.w.set_local(valid);
+                    self.cache_set_value(cache);
+                    self.cache_mark_valid(cache);
                 }
                 if let Some(commit) = commit {
                     let pointer = pointer.unwrap();
@@ -606,12 +667,12 @@ impl Emitter<'_> {
             },
         }
         self.w.else_();
-        if cache {
-            // Clear BEFORE entering a callback or a page walk. Slow load/store
-            // success is not evidence that RAM or its mapping remained stable.
-            self.w.const_i32(0);
-            self.w.set_local(&self.read_cache.as_ref().unwrap().0);
+        if matches!(cache, Some(MemoryCache::Chain)) {
+            self.cache_clear(MemoryCache::Chain);
         }
+        // Any slow guest-memory path can enter a page walk or MMIO callback that
+        // changes mappings. Invalidate every loop cache before that observation.
+        self.clear_loop_caches();
         self.prepare_memory_call(plan.before);
         self.runtime_call(&plan.call);
         match &plan.result {
@@ -919,7 +980,7 @@ impl Emitter<'_> {
         if let Some(plan) = &mir.control.polls[id.index()] {
             self.poll(Some(plan.recovery), plan.cost, remaining);
         } else if let Some(plan) = &mir.memory[id.index()] {
-            self.memory_with_forwarding(plan, mir.ram_forwarding(id));
+            self.memory_with_forwarding(plan, mir.ram_forwarding(id), mir.ram_loop_cache(id));
         } else if let Some(plan) = &mir.effects[id.index()] {
             self.planned_effect(plan);
         } else if let Some(plan) = &mir.calls[id.index()] {
@@ -1080,6 +1141,7 @@ fn emit_inner(
         accounted: None,
         tlb: None,
         read_cache: None,
+        loop_read_caches: vec![],
         code_pages,
         memory_base: None,
     };
@@ -1116,6 +1178,13 @@ fn emit_inner(
         e.w.const_i32(0);
         let value = e.w.set_new_local();
         e.read_cache = Some((valid, value));
+    }
+    for _ in 0..mir.ram_loop_cache_slots() {
+        e.w.const_i32(0);
+        let valid = e.w.set_new_local();
+        e.w.const_i32(0);
+        let value = e.w.set_new_local();
+        e.loop_read_caches.push((valid, value));
     }
     for ty in &mir.allocation.local_types {
         if *ty == Type::V128 {
@@ -1154,6 +1223,9 @@ fn emit_inner(
         e.w.const_i32(b as i32);
         e.w.eq_i32();
         e.w.if_void();
+        for &slot in mir.ram_loop_resets(BlockId(b as u32)) {
+            e.cache_clear(MemoryCache::Loop(slot));
+        }
         e.poll(block.recovery, block.budget_cost, &remaining);
         for id in &block.instructions {
             e.instruction(*id, &remaining);
