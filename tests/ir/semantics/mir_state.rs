@@ -36,6 +36,10 @@ fn region(mode: u8, xmm: bool, backing: bool) -> Region {
     if !backing {
         b.flags.raw_zero = None;
         b.flags.zero_is_lazy = None;
+        b.flags.raw_flags = None;
+        b.flags.lazy_mask = None;
+        b.flags.last_result = None;
+        b.flags.last_op_size = None;
     }
     let resume = match mode {
         0 => ResumeKind::BeforeInstruction,
