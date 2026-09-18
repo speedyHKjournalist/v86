@@ -1277,6 +1277,10 @@ fn emit_inner(
         e.w.free_local(valid);
         e.w.free_local(value);
     }
+    for (valid, value) in e.loop_read_caches {
+        e.w.free_local(valid);
+        e.w.free_local(value);
+    }
     if let Some(local) = e.memory_base {
         e.w.free_local(local);
     }
