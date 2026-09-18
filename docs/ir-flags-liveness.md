@@ -90,13 +90,17 @@ ADD/SUB/AND/CMP/JNZ and mixed ADC/SBB/INC/DEC/JNZ fixtures compare raw flags,
 interpreter execution at the same budget exit. The mixed fixture runs in both
 16/32-bit default modes and has an additional byte-width variant.
 
-## Still open
+## Conservative fallback and completion boundary
 
-The validity model is intentionally conservative. SAHF/BCD and remaining
-special/undefined flag layouts still require separate auditing before they can
-participate in exact backing. General dirty-state merging across
-resumable helper/MMU callbacks, memory LICM, remaining ISA coverage, system and
-performance validation, and IR-14 retirement remain separate work.
+The validity model remains intentionally conservative. SAHF/BCD and remaining
+special/undefined flag layouts canonicalize at recovery instead of inventing an
+unproved lazy backing. This is a supported negative/precondition path of the
+completed IR-10 FLAGS pass, not a correctness gap in its liveness analysis.
+
+IR-10 also adds audited helper-state trimming for state-independent, nonfaulting
+helpers. Broader dirty-state specialization across resumable helper/MMU
+callbacks, memory LICM, remaining ISA coverage, system/performance validation
+and IR-14 retirement remain later work. See [IR-10 completion](ir10-completion.md).
 
 
 ## Extended backing bundle
