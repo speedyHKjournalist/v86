@@ -502,9 +502,9 @@ impl Emitter<'_> {
                     // The write itself has completed on canonical same-page RAM.
                     // A code-page alias may still force an immediate return below,
                     // but only the continuing path can consume this cached value.
-                    let (valid, cached) = self.read_cache.as_ref().unwrap();
                     self.get(*value);
                     self.mask(self.mir.value_types[value.index()]);
+                    let (valid, cached) = self.read_cache.as_ref().unwrap();
                     self.w.set_local(cached);
                     self.w.const_i32(1);
                     self.w.set_local(valid);
