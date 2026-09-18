@@ -76,6 +76,7 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             b.write(2, i.operand_size, value);
         },
         0x9E => {
+            b.invalidate_flag_backing();
             let ah = b.read(4, 8);
             for (n, bit) in [0, 2, 4, 6, 7].into_iter().enumerate() {
                 b.flags.arithmetic[n] = b.extract(ah, bit, Type::I1);
@@ -101,6 +102,7 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             b.write(4, 8, value);
         },
         0xFC | 0xFD => {
+            b.invalidate_flag_backing();
             b.flags.system = c(
                 b,
                 if op == 0xFC { Binary::And } else { Binary::Or },
@@ -117,6 +119,7 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             b.write(0, 8, carry);
         },
         0x37 | 0x3F => {
+            b.invalidate_flag_backing();
             let al = b.read(0, 8);
             let low = c(b, Binary::And, al, 15);
             let nine = b.constant(9, Type::I8);
@@ -136,6 +139,7 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             b.flags.arithmetic[2] = adjust;
         },
         0x27 | 0x2F => {
+            b.invalidate_flag_backing();
             let al = b.read(0, 8);
             let low = c(b, Binary::And, al, 15);
             let nine = b.constant(9, Type::I8);
@@ -165,6 +169,7 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             // of whether the incoming CPU flags happened to be lazy.
         },
         0xD5 => {
+            b.invalidate_flag_backing();
             let al = b.read(0, 8);
             let ah = b.read(4, 8);
             let product = c(b, Binary::Mul, ah, i.immediate.unwrap());
@@ -194,6 +199,7 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
                 Some(map),
             );
             b.effect = values[2];
+            b.invalidate_flag_backing();
             b.write(4, 8, values[0]);
             b.write(0, 8, values[1]);
             szp(b, values[1]);

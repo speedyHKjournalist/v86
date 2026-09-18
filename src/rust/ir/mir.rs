@@ -2,6 +2,7 @@
 pub mod arithmetic;
 pub mod call;
 pub mod control;
+pub mod cpu_liveness;
 pub mod effect;
 pub mod forwarding;
 pub mod materialize;
@@ -35,6 +36,7 @@ pub struct MirData {
     pub states: Vec<materialize::StatePlan>,
     pub(super) ram_forwarding: Vec<Option<forwarding::Forwarding>>,
     pub(super) state_elision: state_elision::Plan,
+    pub(super) cpu_liveness: cpu_liveness::Plan,
 }
 
 /// Verified, owned MIR. No mutable dereference: transformations must preserve the
@@ -72,6 +74,16 @@ impl MirRegion {
     }
     pub(crate) fn cpu_state_write_elided(&self, state: super::ids::StateId, write: usize) -> bool {
         state_elision::elided(&self.data, state, write)
+    }
+
+    /// Enable CPU-only post-lowering liveness. Standalone emission keeps the
+    /// complete generic SSA graph; CPU emission may skip pure value programs
+    /// not referenced by the CPU recovery plan or guest semantics.
+    pub fn elide_dead_cpu_values(&mut self, work_limit: usize) -> Result<usize, CompileError> {
+        cpu_liveness::enable(&mut self.data, work_limit)
+    }
+    pub(crate) fn cpu_instruction_live(&self, id: super::ids::InstId) -> bool {
+        cpu_liveness::instruction_live(&self.data, id)
     }
 
     /// Fold literal machine operations without changing definitions, effects,
@@ -117,6 +129,7 @@ impl Draft<'_> {
         materialize::verify(self.hir, &data.states)?;
         forwarding::verify(data)?;
         state_elision::verify(self.hir, data)?;
+        cpu_liveness::verify(self.hir, data)?;
         Ok(MirRegion { data: self.data })
     }
 }

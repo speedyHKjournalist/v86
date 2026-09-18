@@ -33,6 +33,7 @@ pub(super) fn fixture(owner: ExceptionOwner) -> Region {
             lazy_mask: None,
             last_result: None,
             last_op_size: None,
+            backing_valid: None,
         },
         xmm: vec![],
         x87: vec![],

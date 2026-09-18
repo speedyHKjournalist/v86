@@ -241,6 +241,9 @@ fn calculate(
         old_zero_lazy,
         b.flags.zero_is_lazy.unwrap(),
     ));
+    // Group-2/double-shift raw CF/OF backing is partly eager and count-sensitive.
+    // Keep concrete FLAGS materialization until that layout is modeled exactly.
+    b.invalidate_flag_backing();
     let result = select(b, unchanged, a, result);
     if width == 32 {
         result

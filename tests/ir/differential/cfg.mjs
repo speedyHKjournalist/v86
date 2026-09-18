@@ -48,7 +48,7 @@ try {
             const cold=!!(executions&1);
             reset(c,counter,flags,lazy,initialCount,cold); const before=state(), raw_before=raw_flags();
             instances[i].exports.f(0);
-            const actual=state(), count=(words[664>>2]-initialCount)>>>0;
+            const actual=state(), raw_after=raw_flags(), count=(words[664>>2]-initialCount)>>>0;
             if(opt && program===3 && pc===0x1000) {
                 assert.deepEqual(raw_flags(),raw_before,"pure self-loop preserves exact lazy FLAGS backing");
             }
@@ -62,6 +62,9 @@ try {
             reset(c,counter,flags,lazy,initialCount,cold);
             for(let j=0;j<count;j++) e.ir_test_step();
             assert.deepEqual(actual,state(),`CFG ${i}, ECX=${counter}, flags=${flags}, lazy=${lazy}, count=${count}`);
+            if(opt && program===19) {
+                assert.deepEqual(raw_after,raw_flags(),"supported ALU preserves exact interpreter lazy FLAGS backing");
+            }
             // ir_test_step deliberately bypasses the interpreter scheduler counter.
             executions++; steps+=count;
         }

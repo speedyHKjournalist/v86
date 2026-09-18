@@ -41,6 +41,8 @@ fn reachable_cfg_fixtures() {
             0x90, 0x66, 0x0F, 0xEF, 0xC1, 0xF3, 0x0F, 0x6F, 0x16, 0x81, 0xC6, 0, 0x10, 0, 0, 0xE2,
             0xF0,
         ],
+        // Exact lazy backing: ADD; SUB; AND; CMP; JNZ; NOP.
+        vec![0x01, 0xD8, 0x29, 0xD1, 0x83, 0xE0, 0x7F, 0x83, 0xF9, 0, 0x75, 0, 0x90],
     ];
     let mut cases = vec![];
     for (n, bytes) in programs.iter().enumerate() {
@@ -69,6 +71,10 @@ fn reachable_cfg_fixtures() {
                             mir.fold_constants().unwrap();
                             mir.elide_redundant_cpu_state_writes(
                                 crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
+                            )
+                            .unwrap();
+                            mir.elide_dead_cpu_values(
+                                crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT,
                             )
                             .unwrap();
                             mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)
@@ -147,6 +153,10 @@ fn cfg_boundaries_and_immutable_compile() {
         artifact.passes.state_writes_elided > 0,
         "optimized pure CFG should elide entry-equivalent CPU state stores"
     );
+    assert!(
+        artifact.passes.cpu_values_elided > 0,
+        "optimized pure CFG should elide CPU-only concrete FLAGS values"
+    );
     let tier_one = CompileRequest {
         key: PublicationKey {
             job: 5,
@@ -157,13 +167,16 @@ fn cfg_boundaries_and_immutable_compile() {
         default_32: request.default_32,
         tier: Tier::One,
     };
+    let tier_one = compile_cpu_cfg_region(&tier_one, &snapshot, &config).unwrap();
     assert_eq!(
-        compile_cpu_cfg_region(&tier_one, &snapshot, &config)
-            .unwrap()
-            .passes
-            .state_writes_elided,
+        tier_one.passes.state_writes_elided,
         0,
         "Tier 1 must not enable state-write elision"
+    );
+    assert_eq!(
+        tier_one.passes.cpu_values_elided,
+        0,
+        "Tier 1 must not enable CPU-only value liveness"
     );
     assert!(artifact.current(
         request.key,

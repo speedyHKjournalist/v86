@@ -338,6 +338,7 @@ fn independent_entry_parameters_are_always_unknown_runtime_inputs() {
         lazy_mask: None,
         last_result: None,
         last_op_size: None,
+        backing_valid: None,
     };
     let s = snapshot(&mut r, [result; 8], &flags, 0x1000);
     r.terminate(b, Terminator::Exit(s));

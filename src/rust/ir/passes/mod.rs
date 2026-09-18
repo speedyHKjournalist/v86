@@ -44,6 +44,7 @@ pub struct PassStats {
     pub loop_hoisted: usize,
     pub ram_forwarded: usize,
     pub state_writes_elided: usize,
+    pub cpu_values_elided: usize,
     pub simd_eliminated: usize,
     pub simd_shuffled: usize,
     pub scalar_aliases: usize,
@@ -231,6 +232,7 @@ fn rewrite_values(region: &mut Region, replace: impl Fn(&mut ValueId)) {
             &mut state.flags.lazy_mask,
             &mut state.flags.last_result,
             &mut state.flags.last_op_size,
+            &mut state.flags.backing_valid,
         ] {
             if let Some(value) = value {
                 replace(value);

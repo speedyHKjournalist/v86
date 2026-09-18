@@ -188,6 +188,12 @@ fn origins(region: &Region, left: &mut usize) -> Result<Vec<Origin>, CompileErro
 fn is_initial(origins: &[Origin], value: ValueId, initial: Initial) -> bool {
     origins[value.index()] == Origin::Initial(initial)
 }
+fn is_true(region: &Region, value: ValueId) -> bool {
+    let Definition::Instruction(id, result) = region.values[value.index()].definition else {
+        return false;
+    };
+    result == 0 && matches!(region.instructions[id.index()].op, Op::Const(1))
+}
 
 fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Plan, CompileError> {
     let mut left = work_limit;
@@ -253,7 +259,11 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
             && state
                 .flags
                 .last_op_size
-                .is_some_and(|value| is_initial(&origins, value, Initial::LastOpSize));
+                .is_some_and(|value| is_initial(&origins, value, Initial::LastOpSize))
+            && state
+                .flags
+                .backing_valid
+                .is_some_and(|value| is_true(region, value));
         let mut mask = vec![false; plan.cpu.writes.len()];
         for (write_index, write) in plan.cpu.writes.iter().enumerate() {
             mask[write_index] = match write.address {

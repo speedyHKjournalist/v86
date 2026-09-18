@@ -36,6 +36,7 @@ impl IntegerBuilder {
         let last_op1 = region.append(block, Op::ReadFlagOperand, vec![], &[Type::I32], None)[0];
         let last_result = region.append(block, Op::ReadFlagResult, vec![], &[Type::I32], None)[0];
         let last_op_size = region.append(block, Op::ReadFlagSize, vec![], &[Type::I32], None)[0];
+        let backing_valid = region.append(block, Op::Const(1), vec![], &[Type::I1], None)[0];
         let bits = std::array::from_fn(|i| {
             region.append(
                 block,
@@ -63,6 +64,7 @@ impl IntegerBuilder {
                 lazy_mask: Some(changes),
                 last_result: Some(last_result),
                 last_op_size: Some(last_op_size),
+                backing_valid: Some(backing_valid),
             },
         }
     }
@@ -87,6 +89,43 @@ impl IntegerBuilder {
     }
     pub fn extract(&mut self, value: ValueId, lsb: u8, ty: Type) -> ValueId {
         self.node(Op::Extract { lsb }, vec![value], ty)
+    }
+    fn as_i32(&mut self, value: ValueId) -> ValueId {
+        if self.ty(value) == Type::I32 {
+            value
+        } else {
+            self.node(Op::Extend { signed: false }, vec![value], Type::I32)
+        }
+    }
+    pub fn invalidate_flag_backing(&mut self) {
+        let invalid = self.constant(0, Type::I1);
+        self.flags.backing_valid = Some(invalid);
+    }
+    fn update_lazy_backing(&mut self, group: u8, result: ValueId, width: u8) {
+        use crate::cpu::cpu::{FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAGS_ALL, FLAG_SUB};
+        let result = self.as_i32(result);
+        self.flags.last_result = Some(result);
+        self.flags.last_op_size = Some(self.constant((width - 1) as u32, Type::I32));
+        let logical = matches!(group, 1 | 4 | 6);
+        if logical {
+            let clear = !(FLAG_CARRY | FLAG_ADJUST | FLAG_OVERFLOW) as u32;
+            let raw = self.flags.raw_flags.unwrap();
+            let clear = self.constant(clear, Type::I32);
+            self.flags.raw_flags = Some(self.binary(Binary::And, raw, clear));
+            self.flags.lazy_mask = Some(self.constant(
+                (FLAGS_ALL & !FLAG_CARRY & !FLAG_ADJUST & !FLAG_OVERFLOW) as u32,
+                Type::I32,
+            ));
+        } else if matches!(group, 0 | 5 | 7) {
+            let mask = if matches!(group, 5 | 7) {
+                (FLAGS_ALL | FLAG_SUB) as u32
+            } else {
+                FLAGS_ALL as u32
+            };
+            self.flags.lazy_mask = Some(self.constant(mask, Type::I32));
+        } else {
+            self.invalidate_flag_backing();
+        }
     }
     pub fn read(&mut self, register: u8, width: u8) -> ValueId {
         let (r, lsb) = if width == 8 {
@@ -189,6 +228,7 @@ impl IntegerBuilder {
         let pf = self.binary(Binary::Xor, parity, one);
         self.flags.arithmetic = [cf, pf, af, zf, sf, of];
         self.flags.zero_is_lazy = Some(one);
+        self.update_lazy_backing(group, result, width);
         result
     }
     pub fn condition(&mut self, cc: u8) -> ValueId {

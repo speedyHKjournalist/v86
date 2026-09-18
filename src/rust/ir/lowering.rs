@@ -166,8 +166,13 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
     let states: Vec<_> = region
         .states
         .iter()
-        .map(super::mir::materialize::lower)
+        .map(|state| super::mir::materialize::lower(region, state))
         .collect();
+    let cpu_liveness = super::mir::cpu_liveness::lower(
+        region,
+        &states,
+        super::mir::cpu_liveness::DEFAULT_WORK_LIMIT,
+    )?;
     let state_elision = super::mir::state_elision::lower(
         region,
         &states,
@@ -180,6 +185,7 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
         data: MirData {
             ram_forwarding: vec![None; region.instructions.len()],
             state_elision,
+            cpu_liveness,
             value_types: region.values.iter().map(|v| v.ty).collect(),
             allocation,
             helpers,
