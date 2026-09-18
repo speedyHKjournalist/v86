@@ -74,6 +74,8 @@ try {
     }
     const state=(a=ADDRESS)=>[...Array.from(cpu.reg32,x=>x>>>0),e.get_eflags()>>>0,words[104>>2],cpu.instruction_pointer[0]>>>0,
         cpu.cr[2]>>>0,get32(a),...Array.from(mem.slice(STACK-32,STACK))];
+    const raw_state=()=>[cpu.flags[0]>>>0,cpu.flags_changed[0]>>>0,
+        words[112>>2]>>>0,words[104>>2]>>>0,words[96>>2]>>>0];
     const seeds=[];
     for(const lo of [0,1,0xFFFFFFFF,0x80000000,0x7FFFFFFF,0xFFFF,0x8000,0xFF,0x80])
         for(const source of [0,1,2,0xFFFFFFFF,0x80000000,0x7FFFFFFF,0xFFFF,0x8000,0x80])seeds.push([lo,lo&1?0xFFFFFFFF:0,source]);
@@ -86,12 +88,13 @@ try {
     for(let i=0;i<cases.length;i++)for(const [s,seed] of seeds.entries())for(const opt of [0,1]) {
         reset(i,seed,ADDRESS,true);
         const expected=reference(cases[i],Array.from(cpu.reg32,x=>x>>>0),e.get_eflags()>>>0,words[104>>2],get32(ADDRESS));
-        instances[i][opt].exports.f(0);const actual=state();
+        instances[i][opt].exports.f(0);const actual=state(),actual_raw=raw_state();
         if(expected){assert.deepEqual(actual.slice(0,10),expected,`BigInt multiply/divide ${i}/${s}/${opt}`);assert.equal(actual[10],PC+cases[i][0].length);assert.equal(words[664>>2],101);assert.equal(divFaults,0);success++;}
         else {assert.equal(actual[10],HANDLER);assert.equal(words[664>>2],100);assert.equal(divFaults,1);de++;}
         if(cases[i][4]>=8){assert.equal(reads,0);native++;}
         reset(i,seed,ADDRESS,true);e.ir_test_step();
         assert.deepEqual(actual,state(),`CPU multiply/divide ${i}/${s}/${opt}`);
+        if(expected)assert.deepEqual(actual_raw,raw_state(),`raw multiply/divide backing ${i}/${s}/${opt}`);
     }
     console.log(`PASS: ${success} native multiply/divide successes, ${de} single #DE deliveries, ${native} warm source reads; BigInt and exact CPU oracles`);
     const observe=(kind,a)=>events.push({kind,a,regs:Array.from(cpu.reg32,x=>x>>>0),flags:e.get_eflags()>>>0,ip:cpu.instruction_pointer[0]>>>0});
