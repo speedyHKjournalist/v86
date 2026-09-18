@@ -1,9 +1,10 @@
 # IR-11: bounded pure-value loop-invariant code motion
 
-This is a **partial IR-11 implementation**, not completion of IR-00–IR-14.
-It supplements the baseline status in [ir-progress.md](ir-progress.md). No ISA
-coverage entry, production default, public CPU state layout or legacy retirement
-gate is changed.
+This document describes the pure-value LICM component of IR-11. IR-11 is now
+complete at the package boundary documented in
+[ir11-completion.md](ir11-completion.md), while IR-00–IR-14 as a whole remains
+incomplete. No ISA coverage entry, production default, public CPU state layout
+or legacy retirement gate is changed.
 
 ## Runtime integration
 
@@ -83,12 +84,12 @@ recovery. Invalid entry indices must leave the state untouched.
 Tier 2 recovery, lazy/non-lazy flags, overflow and wrapping retirement counters.
 It does not substitute for an operating-system or application benchmark.
 
-## Still outstanding
+## Package context
 
-This does not implement proof-carrying memory reuse, load elimination,
-store-to-load forwarding, memory LICM, new SIMD peepholes, synthetic preheaders,
+This pure-value pass deliberately still does not move faulting memory operations.
+IR-11's separate owned-MIR proof layer supplies guarded scalar forwarding and
+fault-preserving loop-invariant RAM caching without changing the first dynamic
+fault point; see [ir11-completion.md](ir11-completion.md). Synthetic preheaders,
 full ISA coverage, the complete link/version graph, general MIR restructuring,
-XP/workload acceptance, measured application speedups or legacy-JIT retirement.
-The production coverage gate must remain closed until its independent criteria
-are met. No completion claim or speedup claim should be inferred from the test
-counts or the existence of this pass.
+XP/workload acceptance, measured application speedups and legacy-JIT retirement
+remain outside this component. The production coverage gate remains closed.
