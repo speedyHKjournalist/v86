@@ -73,7 +73,8 @@ fn dce_region() -> crate::ir::hir::Region {
     let mut b = IntegerBuilder::new();
     let _dead0 = b.binary(Binary::Add, b.gpr[2], b.gpr[3]);
     let _dead1 = b.binary(Binary::Xor, b.gpr[4], b.gpr[5]);
-    let out = state(&mut b, 0x1100, b.gpr);
+    let gpr = b.gpr;
+    let out = state(&mut b, 0x1100, gpr);
     b.region.terminate(b.block, Terminator::Exit(out));
     b.region
 }
