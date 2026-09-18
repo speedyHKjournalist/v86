@@ -253,7 +253,7 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
     })
 }
 
-pub(super) fn lower(
+pub(crate) fn lower(
     region: &Region,
     states: &[StatePlan],
     work_limit: usize,
