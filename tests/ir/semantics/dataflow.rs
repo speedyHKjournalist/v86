@@ -193,6 +193,7 @@ fn independent_entries_and_cpu_reads_are_not_commoned() {
         lazy_mask: None,
         last_result: None,
         last_op_size: None,
+        backing_valid: None,
     };
     let state = snapshot(&mut r, [value; 8], &flags, 0x1000);
     r.terminate(join, Terminator::Exit(state));
