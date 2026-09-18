@@ -218,6 +218,9 @@ fn compile_inner(
     drop(region);
     let mir_folds = if config.optimize { mir.fold_constants()? } else { 0 };
     if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
+        passes.state_writes_elided = mir.elide_redundant_cpu_state_writes(
+            crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
+        )?;
         passes.ram_forwarded =
             mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?;
     }
