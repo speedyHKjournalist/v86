@@ -1,7 +1,7 @@
 //! Ordered state writes and count phases selected before Wasm emission.
 use super::value::{self, Address, Load, Reading, Scalar, Step};
 use crate::ir::{
-    hir::Region,
+    hir::{Definition, Op, Region},
     lowering::CompileError,
     state::{ResumeKind, StateMap},
 };
@@ -42,6 +42,9 @@ pub struct StatePlan {
     pub standalone: Materialization,
     pub decoded_next: Write,
     pub requires_cpu: bool,
+    /// CPU recovery writes exact v86 lazy-FLAGS backing instead of six
+    /// canonical concrete arithmetic flags.
+    pub lazy_flags: bool,
 }
 fn write(address: Address, expression: Vec<Step>) -> Write {
     Write {
@@ -60,7 +63,24 @@ fn cs_base() -> Step {
         standalone: read,
     }
 }
-fn target(state: &StateMap, cpu: bool) -> Materialization {
+fn constant_true(region: &Region, value: crate::ir::ids::ValueId) -> bool {
+    let Definition::Instruction(id, result) = region.values[value.index()].definition else {
+        return false;
+    };
+    result == 0 && matches!(region.instructions[id.index()].op, Op::Const(1))
+}
+fn exact_lazy_backing(region: &Region, state: &StateMap) -> bool {
+    state
+        .flags
+        .backing_valid
+        .is_some_and(|value| constant_true(region, value))
+        && state.flags.raw_flags.is_some()
+        && state.flags.lazy_mask.is_some()
+        && state.flags.last_result.is_some()
+        && state.flags.last_op_size.is_some()
+        && state.flags.last_op1.is_some()
+}
+fn target(state: &StateMap, cpu: bool, lazy_flags: bool) -> Materialization {
     use Step::{Value, I32};
     let mut writes: Vec<_> = state
         .gpr
@@ -78,42 +98,63 @@ fn target(state: &StateMap, cpu: bool) -> Materialization {
     if let Some(value) = state.flags.last_op1 {
         writes.push(write(Address::FlagOperand, vec![Value(value)]));
     }
-    let mut flags = vec![
-        Value(state.flags.system),
-        I32(!0x8D5),
-        Step::Scalar(Scalar::I32And),
-    ];
     let raw_zero = if cpu { state.flags.raw_zero } else { None };
-    for (&value, shift) in state.flags.arithmetic.iter().zip([0, 2, 4, 6, 7, 11]) {
-        flags.extend([
-            Value(if shift == 6 { raw_zero.unwrap_or(value) } else { value }),
-            I32(shift),
-            Step::Scalar(Scalar::I32Shl),
-            Step::Scalar(Scalar::I32Or),
-        ]);
-    }
-    writes.push(write(Address::Flags, flags));
-    if cpu {
-        if raw_zero.is_some() {
-            writes.push(write(
-                Address::Absolute(gp::last_result as u32),
-                vec![
-                    Value(state.flags.arithmetic[3]),
-                    I32(1),
-                    Step::Scalar(Scalar::I32Xor),
-                ],
-            ));
-            writes.push(write(
-                Address::Absolute(gp::last_op_size as u32),
-                vec![I32(31)],
-            ));
+    if cpu && lazy_flags {
+        writes.push(write(
+            Address::Flags,
+            vec![Value(state.flags.raw_flags.unwrap())],
+        ));
+        writes.push(write(
+            Address::Absolute(gp::last_result as u32),
+            vec![Value(state.flags.last_result.unwrap())],
+        ));
+        writes.push(write(
+            Address::Absolute(gp::last_op_size as u32),
+            vec![Value(state.flags.last_op_size.unwrap())],
+        ));
+        writes.push(write(
+            Address::Absolute(gp::flags_changed as u32),
+            vec![Value(state.flags.lazy_mask.unwrap())],
+        ));
+    } else {
+        let mut flags = vec![
+            Value(state.flags.system),
+            I32(!0x8D5),
+            Step::Scalar(Scalar::I32And),
+        ];
+        for (&value, shift) in state.flags.arithmetic.iter().zip([0, 2, 4, 6, 7, 11]) {
+            flags.extend([
+                Value(if shift == 6 { raw_zero.unwrap_or(value) } else { value }),
+                I32(shift),
+                Step::Scalar(Scalar::I32Shl),
+                Step::Scalar(Scalar::I32Or),
+            ]);
         }
-        let lazy = if let Some(value) = state.flags.zero_is_lazy {
-            vec![Value(value), I32(6), Step::Scalar(Scalar::I32Shl)]
-        } else {
-            vec![I32(0)]
-        };
-        writes.push(write(Address::Absolute(gp::flags_changed as u32), lazy));
+        writes.push(write(Address::Flags, flags));
+        if cpu {
+            if raw_zero.is_some() {
+                writes.push(write(
+                    Address::Absolute(gp::last_result as u32),
+                    vec![
+                        Value(state.flags.arithmetic[3]),
+                        I32(1),
+                        Step::Scalar(Scalar::I32Xor),
+                    ],
+                ));
+                writes.push(write(
+                    Address::Absolute(gp::last_op_size as u32),
+                    vec![I32(31)],
+                ));
+            }
+            let lazy = if let Some(value) = state.flags.zero_is_lazy {
+                vec![Value(value), I32(6), Step::Scalar(Scalar::I32Shl)]
+            } else {
+                vec![I32(0)]
+            };
+            writes.push(write(Address::Absolute(gp::flags_changed as u32), lazy));
+        }
+    }
+    if cpu {
         writes.push(write(
             Address::Absolute(gp::previous_ip as u32),
             vec![
@@ -146,11 +187,13 @@ fn target(state: &StateMap, cpu: bool) -> Materialization {
         },
     }
 }
-pub fn lower(state: &StateMap) -> StatePlan {
+pub fn lower(region: &Region, state: &StateMap) -> StatePlan {
+    let lazy_flags = exact_lazy_backing(region, state);
     StatePlan {
-        cpu: target(state, true),
-        standalone: target(state, false),
+        cpu: target(state, true, lazy_flags),
+        standalone: target(state, false, false),
         requires_cpu: !state.xmm.is_empty(),
+        lazy_flags,
         decoded_next: write(
             Address::Absolute(gp::instruction_pointer as u32),
             vec![
@@ -163,7 +206,11 @@ pub fn lower(state: &StateMap) -> StatePlan {
 }
 pub fn verify(region: &Region, plans: &[StatePlan]) -> Result<(), CompileError> {
     if plans.len() != region.states.len()
-        || region.states.iter().zip(plans).any(|(s, p)| lower(s) != *p)
+        || region
+            .states
+            .iter()
+            .zip(plans)
+            .any(|(s, p)| lower(region, s) != *p)
     {
         return Err(CompileError::InvalidIr(
             "invalid state materialization plan".into(),
