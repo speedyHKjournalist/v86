@@ -7,6 +7,16 @@ use super::rewrite_values;
 use crate::ir::{hir::*, ids::*, verify::verify};
 
 pub const DEFAULT_WORK_LIMIT: usize = 1_000_000;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Mode {
+    Copies,
+    Constants,
+    All,
+}
+impl Mode {
+    fn aliases(self) -> bool { matches!(self, Self::Copies | Self::All) }
+    fn constants(self) -> bool { matches!(self, Self::Constants | Self::All) }
+}
 #[derive(Default, Debug)]
 pub struct Stats {
     pub aliases: usize,
@@ -177,7 +187,7 @@ fn extract_insert(
 /// Plan in SSA dependency order, even when block/arena order is not dominance
 /// order. Phi parameters are opaque roots; no edge facts or memory proofs are
 /// inferred. Budget failure (including the final rewrite visit) is atomic.
-pub fn run(r: &mut Region, work_limit: usize) -> Result<Stats, String> {
+pub fn run_mode(r: &mut Region, work_limit: usize, mode: Mode) -> Result<Stats, String> {
     let mut work = Work(work_limit);
     // Charge the arena/CFG sizes before asking the existing verifier to inspect
     // them. The verifier has its own contract; this is a pass work budget.
@@ -242,18 +252,19 @@ pub fn run(r: &mut Region, work_limit: usize) -> Result<Stats, String> {
         let result = i.results[0];
         if let Some(edit) = identity(r, i, &aliases, &constants) {
             match edit {
-                Rewrite::Value(value) => {
+                Rewrite::Value(value) if mode.aliases() => {
                     if r.values[result.index()].ty != r.values[value.index()].ty {
                         return Err("scalar simplification type mismatch".into());
                     }
                     aliases[result.index()] = value;
                     stats.aliases += 1;
                 },
-                Rewrite::Constant(value) => {
+                Rewrite::Constant(value) if mode.constants() => {
                     constants[result.index()] = Some(value);
                     edits.push((n, value));
                     stats.constants += 1;
                 },
+                _ => {},
             }
         }
         work.spend(users[n].len())?;
@@ -281,6 +292,15 @@ pub fn run(r: &mut Region, work_limit: usize) -> Result<Stats, String> {
         }
     });
     Ok(stats)
+}
+pub fn run_copies(r: &mut Region, work_limit: usize) -> Result<Stats, String> {
+    run_mode(r, work_limit, Mode::Copies)
+}
+pub fn run_constants(r: &mut Region, work_limit: usize) -> Result<Stats, String> {
+    run_mode(r, work_limit, Mode::Constants)
+}
+pub fn run(r: &mut Region, work_limit: usize) -> Result<Stats, String> {
+    run_mode(r, work_limit, Mode::All)
 }
 
 #[cfg(test)]
