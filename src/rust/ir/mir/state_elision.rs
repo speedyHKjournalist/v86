@@ -29,6 +29,8 @@ enum Initial {
     RawZero,
     FlagChanges,
     ZeroLazy,
+    LastResult,
+    LastOpSize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +90,8 @@ fn special_origin(region: &Region, value: ValueId, origins: &[Origin]) -> Origin
         Op::ReadRawFlags => Origin::Initial(Initial::RawFlags),
         Op::ReadFlagOperand => Origin::Initial(Initial::FlagOperand),
         Op::ReadFlagChanges => Origin::Initial(Initial::FlagChanges),
+        Op::ReadFlagResult => Origin::Initial(Initial::LastResult),
+        Op::ReadFlagSize => Origin::Initial(Initial::LastOpSize),
         Op::Extract { lsb } if inst.args.len() == 1 => match origins[inst.args[0].index()] {
             Origin::Initial(Initial::FlagSystem) => [0u8, 2, 4, 6, 7, 11]
                 .iter()
@@ -210,11 +214,42 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
             .ok_or_else(|| CompileError::InvalidIr("state-elision plan/state mismatch".into()))?;
         spend(&mut left, plan.cpu.writes.len())?;
 
-        // Arithmetic FLAGS backing is deliberately not elided yet. StateMap
-        // currently retains only the ZF lazy-provenance bit, while the CPU
-        // flags_changed word may carry other lazy arithmetic bits. Replaying
-        // materialization canonicalizes those bits; skipping it would preserve
-        // a different internal representation without a complete proof.
+        // Full lazy backing may be left untouched only when both the semantic
+        // arithmetic flags and every captured backing component are still the
+        // exact entry values. Any changed flag falls back to canonical
+        // materialization, preserving the previous recovery contract.
+        let arithmetic_clean = state
+            .flags
+            .arithmetic
+            .iter()
+            .enumerate()
+            .all(|(bit, &value)| is_initial(&origins, value, Initial::FlagBit(bit as u8)));
+        let backing_clean = arithmetic_clean
+            && is_initial(&origins, state.flags.system, Initial::FlagSystem)
+            && state
+                .flags
+                .raw_zero
+                .is_some_and(|value| is_initial(&origins, value, Initial::RawZero))
+            && state
+                .flags
+                .zero_is_lazy
+                .is_some_and(|value| is_initial(&origins, value, Initial::ZeroLazy))
+            && state
+                .flags
+                .raw_flags
+                .is_some_and(|value| is_initial(&origins, value, Initial::RawFlags))
+            && state
+                .flags
+                .lazy_mask
+                .is_some_and(|value| is_initial(&origins, value, Initial::FlagChanges))
+            && state
+                .flags
+                .last_result
+                .is_some_and(|value| is_initial(&origins, value, Initial::LastResult))
+            && state
+                .flags
+                .last_op_size
+                .is_some_and(|value| is_initial(&origins, value, Initial::LastOpSize));
         let mut mask = vec![false; plan.cpu.writes.len()];
         for (write_index, write) in plan.cpu.writes.iter().enumerate() {
             mask[write_index] = match write.address {
@@ -226,13 +261,13 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
                     .flags
                     .last_op1
                     .is_some_and(|value| is_initial(&origins, value, Initial::FlagOperand)),
-                Address::Flags => false,
+                Address::Flags => backing_clean,
                 Address::Absolute(address)
                     if address == gp::last_result as u32
                         || address == gp::last_op_size as u32
                         || address == gp::flags_changed as u32 =>
                 {
-                    false
+                    backing_clean
                 },
                 Address::Absolute(address) => state.xmm.iter().enumerate().any(|(reg, &value)| {
                     address == gp::get_reg_xmm_offset(reg as u32)
