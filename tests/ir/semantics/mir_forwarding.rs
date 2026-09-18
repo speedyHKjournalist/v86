@@ -1,4 +1,4 @@
-use super::{plan, verify, Forwarding, DEFAULT_WORK_LIMIT};
+use super::{loop_plan, plan, verify, Forwarding, DEFAULT_WORK_LIMIT};
 use crate::ir::{
     backend::wasm::emit_cpu,
     frontend::{
@@ -399,4 +399,32 @@ fn loop_invariant_load_cache_keeps_first_fault_point_and_resets_at_preheader() {
             .unwrap(),
         0
     );
+}
+
+
+#[test]
+fn forged_loop_cache_certificate_is_rejected_atomically() {
+    let bytes = [
+        0xEB, 0x00, 0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x49, 0x75, 0xF7,
+    ];
+    let r = crate::ir::frontend::region::lift_cpu_cfg(
+        &bytes,
+        GuestEip(0x100000),
+        LinearAddress(0x100000),
+        true,
+        16,
+    )
+    .unwrap();
+    let mut draft = lower_draft(&r).unwrap();
+    draft.ram_loop_cache = loop_plan(&draft, DEFAULT_WORK_LIMIT).unwrap();
+    assert_eq!(draft.ram_loop_cache.slots, 1);
+    let reset = draft
+        .ram_loop_cache
+        .resets
+        .iter()
+        .position(|slots| !slots.is_empty())
+        .unwrap();
+    draft.ram_loop_cache.resets[reset].clear();
+    assert!(verify(&draft).is_err());
+    assert!(draft.finish().is_err());
 }
