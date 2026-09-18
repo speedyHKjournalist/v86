@@ -67,6 +67,10 @@ fn reachable_cfg_fixtures() {
                         drop(r);
                         if opt {
                             mir.fold_constants().unwrap();
+                            mir.elide_redundant_cpu_state_writes(
+                                crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
+                            )
+                            .unwrap();
                             mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)
                                 .unwrap();
                         }
@@ -139,6 +143,28 @@ fn cfg_boundaries_and_immutable_compile() {
         },
     };
     let artifact = compile_cpu_cfg_region(&request, &snapshot, &config).unwrap();
+    assert!(
+        artifact.passes.state_writes_elided > 0,
+        "optimized pure CFG should elide entry-equivalent CPU state stores"
+    );
+    let tier_one = CompileRequest {
+        key: PublicationKey {
+            job: 5,
+            ..request.key
+        },
+        pc: request.pc,
+        linear: request.linear,
+        default_32: request.default_32,
+        tier: Tier::One,
+    };
+    assert_eq!(
+        compile_cpu_cfg_region(&tier_one, &snapshot, &config)
+            .unwrap()
+            .passes
+            .state_writes_elided,
+        0,
+        "Tier 1 must not enable state-write elision"
+    );
     assert!(artifact.current(
         request.key,
         &snapshot.dependencies,

@@ -163,17 +163,23 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
         .iter()
         .map(|inst| super::mir::value::lower(region, inst))
         .collect();
-    let states = region
+    let states: Vec<_> = region
         .states
         .iter()
         .map(super::mir::materialize::lower)
         .collect();
+    let state_elision = super::mir::state_elision::lower(
+        region,
+        &states,
+        super::mir::state_elision::DEFAULT_WORK_LIMIT,
+    )?;
     let allocation = allocate(region).map_err(CompileError::Budget)?;
     let control = super::mir::control::lower(region, &allocation)?;
     Ok(Draft {
         hir: region,
         data: MirData {
             ram_forwarding: vec![None; region.instructions.len()],
+            state_elision,
             value_types: region.values.iter().map(|v| v.ty).collect(),
             allocation,
             helpers,

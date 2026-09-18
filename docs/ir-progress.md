@@ -19,7 +19,7 @@
 | IR-07 | 部分完成 | 近 CALL/RET、FF /2 与 /4 间接转移及动态 EIP StateMap；已增加单次 MOVS/CMPS/STOS/LODS/SCAS 原生执行；已增加标量 IN/OUT 和单次 INS/OUTS；已接入有界 REP HIR、进度映射及最终提交；已增加 CPUID/RDTSC/RDMSR/WRMSR 终端适配；已增加 SYSENTER/SYSEXIT、HLT/CLI/CLTS/WBINVD；已增加 CR/DR 传送与 CPU 地址映射变更适配；已增加描述符表、SMSW/LMSW 与 INVLPG；已增加 SLDT/STR 与 LLDT/LTR；已增加 LAR/LSL、VERR/VERW；在线 REP 调度、远转移及其余特权/系统指令待实现 |
 | IR-08 | 部分完成 | XMM V128 SSA、快照、typed locals/边复制，以及 packed/scalar SIMD 传送的原生 RAM 与精确慢路径已实现；已增加 38 种 packed integer 算术/比较/乘法/逻辑及 PS/PD 逻辑别名；已增加打包/解包、变量及立即数 packed 移位；已增加 PSHUF/SHUF 重排；已增加半部传送、MOVD/MOVQ 和重复 lane；已增加符号位掩码、PINSRW/PEXTRW、非临时存储和 LDDQU；已增加 MASKMOVDQU 原生 RAM 与有序慢路径；其余 SIMD 状态/传送、MMX、FP 控制、F80/x87 和无 SIMD 降级仍待实现 |
 | IR-09 | 部分基础 | 整数后端可执行 CFG 和寄存器代码；已增加冷 CPU 入口及真实状态 ABI，可执行具备完整动态计数映射的 CPU 循环；CompileRequest 产物已有显式入口键及执行前校验，实验 CPU Wasm 内可直接执行 IR 编译，显式发布的入口已参与正常 CPU 分派；已有可选的自动热度、区域编译和优化升档；完整 Tier 1 语义、成熟区域选择和系统验收仍未完成 |
-| IR-10 | 部分基础 | 有界常量折叠、支配关系 GVN、trivial phi 消除、StateMap-aware DCE、常量分支裁剪和保留预算检查的直线块合并；已有独立 MIR 字面量常量折叠；其余跨块 FLAGS/状态同步优化未完成 |
+| IR-10 | 部分基础 | 有界常量折叠、支配关系 GVN、trivial phi 消除、StateMap-aware DCE、常量分支裁剪和保留预算检查的直线块合并；已有独立 MIR 字面量常量折叠；新增纯 CPU CFG 的入口等价 backing-state 证明，可在 Tier 2 预算恢复/出口省略未变化 GPR/XMM/last_op1 写回；完整 arithmetic FLAGS backing 因尚未保存全部 lazy provenance 继续强制物化；可继续 helper/MMU 观察后的通用 dirty-state 合流及更细粒度 FLAGS liveness 仍未完成 |
 | IR-11 | 部分完成 | 已有受预算约束的纯 SSA LICM，以及 owned MIR 内带静态证书和动态 RAM 有效位的同块重复读取复用；现已支持严格同地址/同宽度、已提交 native 标量写入到后续普通读取的 store-to-load forwarding，慢路径、代码页物理别名和观察边界仍保持保守退出；仅优化 Tier 2 启用；通用别名/effect 证明、memory LICM 及其余循环/SIMD 优化仍待实现 |
 | IR-12 | 部分基础 | 不可变编译请求及 generation/dependency/入口/映射比较已实现；已有只读 CPU 代码快照、单个未发布产物句柄和重校验；共享在线 legacy 桥接已有票据校验、安装前拒绝、缓存取消和浏览器失败回收；已有共享槽池中的 IR 缓存、物理代码页监视和冷执行帧返回后的回收；已有有界自动编译、失败抑制和自动入口淘汰；完整共享版本/链接图及生产策略验收仍未完成 |
 | IR-13 | 完整矩阵未完成 | 已执行 IR 差分和部分生产 legacy/Worker/API 回归；GPU 间歇失败、PIC 跳过等结果有单独记录；已有 Node 中显式/自动 IR 缓存分派及升档测试，以及公开后端在真实浏览器主线程/Worker 的升档、SMC、双向跨后端快照和错误上报测试；完整在线 IR、XP、应用及性能矩阵未完成 |
@@ -775,3 +775,12 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
 - store/load 任一慢路径在页表遍历、MMIO 或 callback 前清空有效位；成功的慢 store 继续按既有契约退出当前 IR 入口，因此不会把 callback 结果错误升级为 RAM 证明。
 - 新增 8/16/32 位证书回归、宽度/地址/段屏障，以及 CPU Wasm 的 store→load 执行对照；现有慢 store 退出、物理代码页别名退出和后续 #PF 精确恢复测试继续共用同一套件。
 - 该增量推进 IR-11，但不改变生产默认 backend、ISA 覆盖门槛、共享版本图或 IR-14 legacy emitter 退役条件。
+
+
+## 后续推进：保守 CPU state-write elision
+
+- lowering 在 HIR/CFG edge 仍可见时，对 GPR、XMM 及 FLAGS provenance 来源做固定点传播，生成每个 StateMap 的 CPU write 省略证书；本轮实际只允许 GPR/XMM/last_op1 省略，完整 arithmetic FLAGS backing 保持强制写回。
+- 当前只对单外部入口、没有可继续 memory/helper/commit 观察点的 CPU CFG 生效；PollBudget 与 guarded SseCheck 的观察分支允许，因为一旦物化就立即退出当前 IR entry。遇到可继续慢路径则整区使用全 false 证书，不猜测 CPU backing 历史。
+- EFLAGS、last_result、last_op_size、flags_changed、EIP、previous_ip 与退休计数永远保留；发生寄存器变化时对应 GPR/XMM 写回继续保留。Tier 1、standalone、关闭优化和 zero-round 配置不启用。
+- optimized Tier 2 记录 passes.state_writes_elided；现有 CFG CPU differential 同时覆盖优化前后精确预算出口、FLAGS/XMM、previous_ip、退休计数及既有 fault case。
+- 该增量为后续跨块 FLAGS demand/liveness 和 resumable observer dirty-state 合流建立基础，不改变 ISA coverage、默认 backend 或 IR-14 退役门槛。详见 [state-write elision](ir-state-elision.md)。

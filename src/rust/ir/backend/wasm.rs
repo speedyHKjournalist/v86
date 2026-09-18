@@ -132,7 +132,10 @@ impl Emitter<'_> {
         let states = &self.mir.states;
         let plan = &states[values.index()];
         let materialization = if self.cpu { &plan.cpu } else { &plan.standalone };
-        for write in &materialization.writes {
+        for (index, write) in materialization.writes.iter().enumerate() {
+            if self.cpu && self.mir.cpu_state_write_elided(values, index) {
+                continue;
+            }
             self.state_write(write);
         }
         let count = &states[count.index()];
