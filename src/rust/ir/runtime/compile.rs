@@ -222,6 +222,8 @@ fn compile_inner(
             passes.state_writes_elided = mir.elide_redundant_cpu_state_writes(
                 crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
             )?;
+            passes.cpu_values_elided =
+                mir.elide_dead_cpu_values(crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT)?;
         }
         passes.ram_forwarded =
             mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?;
