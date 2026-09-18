@@ -361,13 +361,15 @@ mod tests {
     }
 
     #[test]
-    fn pure_cfg_elides_entry_equivalent_register_xmm_and_flag_operand_writes() {
-        // JECXZ and MOV do not modify GPRs other than EAX or the last_op1
-        // backing; the join therefore carries exact entry origins across blocks.
+    fn pure_cfg_elides_exact_entry_register_and_lazy_flags_backing() {
+        // JECXZ and MOV do not modify FLAGS. The join therefore carries both
+        // semantic flag values and the exact entry lazy backing through blocks.
         let mut mir = optimized(&[0xE3, 2, 0x89, 0xD8, 0x90]);
         let count = enable(&mut mir.data, DEFAULT_WORK_LIMIT).unwrap();
         assert!(count > 0);
         let mut skipped_flag_operand = 0;
+        let mut skipped_flags = 0;
+        let mut skipped_lazy = 0;
         let mut skipped_gprs = 0;
         for (state, mask) in mir.states.iter().zip(&mir.state_elision.masks) {
             for (write, &skip) in state.cpu.writes.iter().zip(mask) {
@@ -376,13 +378,13 @@ mod tests {
                 }
                 match write.address {
                     Address::FlagOperand => skipped_flag_operand += 1,
-                    Address::Flags => panic!("arithmetic FLAGS backing must not be elided"),
+                    Address::Flags => skipped_flags += 1,
                     Address::Absolute(a)
                         if a == gp::last_result as u32
                             || a == gp::last_op_size as u32
                             || a == gp::flags_changed as u32 =>
                     {
-                        panic!("lazy FLAGS backing must not be elided")
+                        skipped_lazy += 1;
                     },
                     Address::Gpr(_) => skipped_gprs += 1,
                     _ => (),
@@ -390,6 +392,8 @@ mod tests {
             }
         }
         assert!(skipped_flag_operand > 0);
+        assert!(skipped_flags > 0);
+        assert!(skipped_lazy > 0);
         assert!(skipped_gprs > 0);
         emit_cpu(&mir, 32).unwrap();
     }
