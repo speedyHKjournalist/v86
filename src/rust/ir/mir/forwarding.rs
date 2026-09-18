@@ -8,7 +8,7 @@
 use super::{
     effect::EffectPlan,
     memory::{Argument, MemoryPlan, NativeMemory, RamGuard, SlowResult},
-    value::Step,
+    value::{Reading, Step},
     MirData,
 };
 use crate::ir::{ids::*, lowering::CompileError};
@@ -310,11 +310,15 @@ fn plan_with_loops(
             } else if data.calls[index].is_none() && data.control.polls[index].is_none() {
                 if let Some(value) = &data.values[index] {
                     spend(&mut left, value.steps.len())?;
-                    if value
-                        .steps
-                        .iter()
-                        .all(|step| !matches!(step, Step::Read { .. }))
-                    {
+                    if value.steps.iter().all(|step| {
+                        !matches!(
+                            step,
+                            Step::Read {
+                                cpu: Reading::Call { .. },
+                                ..
+                            }
+                        )
+                    }) {
                         continue;
                     }
                 }
