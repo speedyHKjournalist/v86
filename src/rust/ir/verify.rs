@@ -132,6 +132,10 @@ pub fn verify(region: &Region) -> Result<()> {
             backing.iter().all(Option::is_some) || backing.iter().all(Option::is_none),
             "incomplete lazy flags backing",
         )?;
+        require(
+            map.flags.backing_valid.is_some() == backing[0].is_some(),
+            "lazy flags validity/backing mismatch",
+        )?;
         if let Some(value) = map.flags.zero_is_lazy {
             require(ty(value)? == Type::I1, "zero lazy flag type")?;
         }
@@ -140,6 +144,9 @@ pub fn verify(region: &Region) -> Result<()> {
         }
         for value in backing.into_iter().flatten() {
             require(ty(value)? == Type::I32, "lazy flags backing type")?;
+        }
+        if let Some(value) = map.flags.backing_valid {
+            require(ty(value)? == Type::I1, "lazy flags validity type")?;
         }
         require(
             map.xmm.is_empty() || map.xmm.len() == 8,
