@@ -162,6 +162,13 @@ impl IntegerBuilder {
         self.flags.raw_flags = Some(self.select_backing(unchanged, old_raw, raw));
         self.flags.lazy_mask = Some(self.select_backing(unchanged, old_mask, mask));
     }
+    pub fn preserve_raw_flag_bit(&mut self, value: ValueId, bit: u8) {
+        let Some(raw) = self.flags.raw_flags else {
+            self.invalidate_flag_backing();
+            return;
+        };
+        self.flags.raw_flags = Some(self.write_raw_flag_bit(raw, value, bit));
+    }
     pub fn preserve_cf_backing(&mut self, carry: ValueId) {
         use crate::cpu::cpu::FLAG_CARRY;
         let (Some(raw), Some(mask)) = (self.flags.raw_flags, self.flags.lazy_mask) else {
