@@ -153,7 +153,7 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
         }
         imports.insert(call.name.to_owned(), call.signature.clone());
     }
-    let calls = region
+    let calls: Vec<_> = region
         .instructions
         .iter()
         .map(|inst| super::mir::call::lower(region, inst, &helpers))
