@@ -195,6 +195,20 @@ fn is_true(region: &Region, value: ValueId) -> bool {
     result == 0 && matches!(region.instructions[id.index()].op, Op::Const(1))
 }
 
+fn transparent_helper(region: &Region, inst: &crate::ir::hir::Instruction) -> bool {
+    let Op::CallHelper(id) = inst.op else { return false };
+    let Some(descriptor) = region.helpers.get(id.index()) else { return false };
+    descriptor.effects.is_pure()
+        && descriptor.exception_owner == ExceptionOwner::CannotFault
+        && matches!(
+            descriptor.abi,
+            HelperAbi::Outcome {
+                normal_preserves_state: true,
+                fault_delivery: None,
+            }
+        )
+}
+
 fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Plan, CompileError> {
     let mut left = work_limit;
     spend(&mut left, region.blocks.len() + region.states.len())?;
@@ -207,6 +221,7 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
             .any(|inst| {
                 (inst.state.is_some() || inst.commit.is_some())
                     && !matches!(inst.op, Op::PollBudget | Op::SseCheck)
+                    && !transparent_helper(region, inst)
             })
     {
         return Ok(disabled(states));
