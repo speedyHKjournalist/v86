@@ -282,6 +282,18 @@ fn plan_with_loops(
             }
             if let Some(memory) = memory {
                 let key = key_for(&addresses, memory);
+                #[cfg(test)]
+                if previous.is_some() {
+                    eprintln!(
+                        "IR11TRACE block={} inst={} memory load={} store={} key={:?} prev={:?}",
+                        block.instructions.first().map(|id| id.index()).unwrap_or(usize::MAX),
+                        index,
+                        eligible_load(memory),
+                        eligible_store(memory),
+                        key,
+                        previous
+                    );
+                }
                 if eligible_load(memory) {
                     if let Some((old_key, bytes, old)) = previous {
                         if alias(data, old_key, bytes, key, memory.guard.bytes) == AliasProof::Exact {
@@ -330,6 +342,17 @@ fn plan_with_loops(
                         continue;
                     }
                 }
+            }
+            #[cfg(test)]
+            if previous.is_some() {
+                eprintln!(
+                    "IR11TRACE kill inst={} effect={} call={} poll={} value={:?}",
+                    index,
+                    data.effects[index].is_some(),
+                    data.calls[index].is_some(),
+                    data.control.polls[index].is_some(),
+                    data.values[index]
+                );
             }
             previous = None;
         }
@@ -526,6 +549,16 @@ fn loop_plan(data: &MirData, work_limit: usize) -> Result<LoopPlan, CompileError
             .copied()
             .filter(|&p| members & (1u64 << p) == 0)
             .collect();
+        #[cfg(test)]
+        eprintln!(
+            "IR11LOOP header={} members={:#x} entries={:?} preds={:?} outside={:?} valid={}",
+            header,
+            members,
+            data.control.entries,
+            predecessors[header],
+            outside,
+            valid
+        );
         if outside.len() != 1 {
             continue;
         }
