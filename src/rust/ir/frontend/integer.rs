@@ -101,6 +101,31 @@ impl IntegerBuilder {
         let invalid = self.constant(0, Type::I1);
         self.flags.backing_valid = Some(invalid);
     }
+    fn write_raw_flag_bit(&mut self, raw: ValueId, value: ValueId, bit: u8) -> ValueId {
+        let mask = self.constant(!(1u32 << bit), Type::I32);
+        let cleared = self.binary(Binary::And, raw, mask);
+        let value = self.node(Op::Extend { signed: false }, vec![value], Type::I32);
+        let value = if bit == 0 {
+            value
+        } else {
+            let shift = self.constant(bit as u32, Type::I32);
+            self.binary(Binary::Shl, value, shift)
+        };
+        self.binary(Binary::Or, cleared, value)
+    }
+    pub fn preserve_incdec_backing(&mut self, carry: ValueId, dec: bool) {
+        use crate::cpu::cpu::{FLAGS_ALL, FLAG_CARRY, FLAG_SUB};
+        let Some(raw) = self.flags.raw_flags else {
+            self.invalidate_flag_backing();
+            return;
+        };
+        self.flags.raw_flags = Some(self.write_raw_flag_bit(raw, carry, 0));
+        let mut mask = FLAGS_ALL & !FLAG_CARRY;
+        if dec {
+            mask |= FLAG_SUB;
+        }
+        self.flags.lazy_mask = Some(self.constant(mask as u32, Type::I32));
+    }
     fn update_lazy_backing(&mut self, group: u8, result: ValueId, width: u8) {
         use crate::cpu::cpu::{FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAGS_ALL, FLAG_SUB};
         let result = self.as_i32(result);
@@ -123,6 +148,20 @@ impl IntegerBuilder {
                 FLAGS_ALL as u32
             };
             self.flags.lazy_mask = Some(self.constant(mask, Type::I32));
+        } else if matches!(group, 2 | 3) {
+            let Some(mut raw) = self.flags.raw_flags else {
+                self.invalidate_flag_backing();
+                return;
+            };
+            for (index, bit) in [(0usize, 0u8), (2, 4), (5, 11)] {
+                raw = self.write_raw_flag_bit(raw, self.flags.arithmetic[index], bit);
+            }
+            self.flags.raw_flags = Some(raw);
+            let mut mask = FLAGS_ALL & !FLAG_CARRY & !FLAG_ADJUST & !FLAG_OVERFLOW;
+            if group == 3 {
+                mask |= FLAG_SUB;
+            }
+            self.flags.lazy_mask = Some(self.constant(mask as u32, Type::I32));
         } else {
             self.invalidate_flag_backing();
         }
