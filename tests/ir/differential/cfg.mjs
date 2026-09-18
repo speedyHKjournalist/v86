@@ -62,8 +62,11 @@ try {
             reset(c,counter,flags,lazy,initialCount,cold);
             for(let j=0;j<count;j++) e.ir_test_step();
             assert.deepEqual(actual,state(),`CFG ${i}, ECX=${counter}, flags=${flags}, lazy=${lazy}, count=${count}`);
-            if(opt && program===19) {
-                assert.deepEqual(raw_after,raw_flags(),"supported ALU preserves exact interpreter lazy FLAGS backing");
+            if(opt && (program===19 || program===20 || program===21)) {
+                assert.deepEqual(raw_after,raw_flags(),
+                    program===19
+                        ? "supported ALU preserves exact interpreter lazy FLAGS backing"
+                        : "ADC/SBB/INC/DEC preserve exact interpreter mixed FLAGS backing");
             }
             // ir_test_step deliberately bypasses the interpreter scheduler counter.
             executions++; steps+=count;

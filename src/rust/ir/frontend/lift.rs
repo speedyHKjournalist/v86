@@ -467,7 +467,7 @@ fn lift_inner(
                 let one = b.constant(1, width_type(width));
                 let value = b.arithmetic(if dec { 5 } else { 0 }, a, one);
                 b.flags.arithmetic[0] = carry;
-                b.invalidate_flag_backing();
+                b.preserve_incdec_backing(carry, dec);
                 b.write(dst, width, value);
             },
             0xF6 | 0xF7 if reg == 2 || reg == 3 => {
@@ -614,7 +614,7 @@ fn memory_instruction(
                 let one = b.constant(1, ty);
                 let value = b.arithmetic(if group == 0 { 0 } else { 5 }, memory, one);
                 b.flags.arithmetic[0] = carry;
-                b.invalidate_flag_backing();
+                b.preserve_incdec_backing(carry, group == 1);
                 value
             } else if group == 2 {
                 let ones = b.constant(u32::MAX, ty);
