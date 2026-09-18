@@ -35,6 +35,8 @@ try {
     }
     const state=()=>({regs:Array.from(cpu.reg32,x=>x>>>0),flags:e.get_eflags()>>>0,last:words[104>>2],
         ip:cpu.instruction_pointer[0]>>>0, xmm:Array.from(words.slice(832>>2,960>>2)), data:view.getUint32(DATA,true)});
+    const raw_flags=()=>({flags:cpu.flags[0]>>>0,lazy_mask:cpu.flags_changed[0]>>>0,
+        last_result:words[112>>2]>>>0,last_op1:words[104>>2]>>>0,last_op_size:words[96>>2]>>>0});
     let executions=0, steps=0, budgetComparisons=0;
     let baseline=[];
     for(let i=0;i<cases.length;i++) {
@@ -44,9 +46,12 @@ try {
         for(const counter of [0,1,2,7,0x10001,0xFFFFFFFF]) for(const flags of [2,0x8D7])
         for(const lazy of [false,true]) for(const initialCount of [100,0xFFFFFFFC]) {
             const cold=!!(executions&1);
-            reset(c,counter,flags,lazy,initialCount,cold); const before=state();
+            reset(c,counter,flags,lazy,initialCount,cold); const before=state(), raw_before=raw_flags();
             instances[i].exports.f(0);
             const actual=state(), count=(words[664>>2]-initialCount)>>>0;
+            if(opt && program===3 && pc===0x1000) {
+                assert.deepEqual(raw_flags(),raw_before,"pure self-loop preserves exact lazy FLAGS backing");
+            }
             const observed={...actual,count,previous:words[560>>2]};
             if(opt) { assert.deepEqual(observed,baseline[trial],`optimization preserves exact budget exit: CFG ${i}`); budgetComparisons++; }
             else baseline.push(observed);
