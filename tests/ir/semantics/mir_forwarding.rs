@@ -26,6 +26,14 @@ fn loads(r: &crate::ir::hir::Region) -> Vec<InstId> {
         .filter(|id| matches!(r.instructions[id.index()].op, Op::GuestLoad { .. }))
         .collect()
 }
+fn stores(r: &crate::ir::hir::Region) -> Vec<InstId> {
+    r.blocks
+        .iter()
+        .flat_map(|b| b.instructions.iter())
+        .copied()
+        .filter(|id| matches!(r.instructions[id.index()].op, Op::GuestStore { .. }))
+        .collect()
+}
 
 #[test]
 fn repeated_reads_use_owned_machine_certificates_and_separate_cache_locals() {
@@ -59,6 +67,47 @@ fn repeated_reads_use_owned_machine_certificates_and_separate_cache_locals() {
         assert_eq!(
             m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(),
             ids.len() - 1
+        );
+    }
+}
+
+#[test]
+fn committed_scalar_store_can_seed_same_address_load_forwarding() {
+    for bytes in [
+        vec![0x88, 0x06, 0x8A, 0x1E],
+        vec![0x66, 0x89, 0x06, 0x66, 0x8B, 0x1E],
+        vec![0x89, 0x06, 0x8B, 0x1E],
+    ] {
+        let r = region(&bytes);
+        let store = stores(&r);
+        let load = loads(&r);
+        assert_eq!(store.len(), 1);
+        assert_eq!(load.len(), 1);
+        let store = store[0];
+        let load = load[0];
+        let mut m = lower(&r).unwrap();
+        drop(r);
+        assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 1);
+        assert_eq!(m.ram_forwarding(store), Some(Forwarding::Begin));
+        assert_eq!(
+            m.ram_forwarding(load),
+            Some(Forwarding::Reuse { previous: store })
+        );
+        emit_cpu(&m, 32).unwrap();
+    }
+
+    for bytes in [
+        vec![0x88, 0x06, 0x66, 0x8B, 0x1E], // different widths
+        vec![0x89, 0x06, 0x8B, 0x1F],       // ESI vs EDI
+        vec![0x89, 0x06, 0x64, 0x8B, 0x1E], // DS vs FS
+    ] {
+        let r = region(&bytes);
+        assert_eq!(
+            lower(&r)
+                .unwrap()
+                .forward_ram_reads(DEFAULT_WORK_LIMIT)
+                .unwrap(),
+            0
         );
     }
 }
