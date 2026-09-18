@@ -27,6 +27,8 @@ pub struct HelperCall {
 }
 pub struct MirData {
     pub value_types: Vec<Type>,
+    /// Defining block retained as owned provenance after HIR destruction.
+    pub(super) value_blocks: Vec<Option<super::ids::BlockId>>,
     pub allocation: Allocation,
     pub helpers: Vec<Option<HelperCall>>,
     pub memory: Vec<Option<memory::MemoryPlan>>,
@@ -36,6 +38,7 @@ pub struct MirData {
     pub values: Vec<Option<value::ValuePlan>>,
     pub states: Vec<materialize::StatePlan>,
     pub(super) ram_forwarding: Vec<Option<forwarding::Forwarding>>,
+    pub(super) ram_loop_cache: forwarding::LoopPlan,
     pub(super) state_elision: state_elision::Plan,
     pub(super) helper_state: helper_state::Plan,
     pub(super) cpu_liveness: cpu_liveness::Plan,
@@ -63,6 +66,27 @@ impl MirRegion {
     }
     pub fn has_ram_forwarding(&self) -> bool {
         self.data.ram_forwarding.iter().any(Option::is_some)
+    }
+
+    /// Cache loop-invariant ordinary-RAM loads only after their original native
+    /// guard succeeds. Preheaders reset cache validity on every loop entry.
+    pub fn cache_loop_invariant_ram_reads(
+        &mut self,
+        work_limit: usize,
+    ) -> Result<usize, CompileError> {
+        forwarding::optimize_loops(&mut self.data, work_limit)
+    }
+    pub(crate) fn ram_loop_cache(
+        &self,
+        id: super::ids::InstId,
+    ) -> Option<forwarding::LoopForwarding> {
+        self.data.ram_loop_cache.instructions[id.index()]
+    }
+    pub(crate) fn ram_loop_resets(&self, block: super::ids::BlockId) -> &[usize] {
+        &self.data.ram_loop_cache.resets[block.index()]
+    }
+    pub(crate) fn ram_loop_cache_slots(&self) -> usize {
+        self.data.ram_loop_cache.slots
     }
 
     /// Skip CPU state stores that are proven identical to the backing state at
@@ -127,7 +151,19 @@ impl Draft<'_> {
     pub fn finish(self) -> Result<MirRegion, CompileError> {
         super::verify::verify(self.hir).map_err(|e| CompileError::InvalidIr(e.0))?;
         let data = &self.data;
+        let value_blocks = self
+            .hir
+            .values
+            .iter()
+            .map(|value| match value.definition {
+                super::hir::Definition::Parameter(block, _) => Some(block),
+                super::hir::Definition::Instruction(id, _) => {
+                    Some(self.hir.instructions[id.index()].block)
+                },
+            })
+            .collect::<Vec<_>>();
         if data.value_types != self.hir.values.iter().map(|v| v.ty).collect::<Vec<_>>()
+            || data.value_blocks != value_blocks
             || data.allocation
                 != super::backend::locals::allocate(self.hir).map_err(CompileError::Budget)?
         {
