@@ -27,8 +27,9 @@ pub struct HelperCall {
 }
 pub struct MirData {
     pub value_types: Vec<Type>,
-    /// Defining block retained as owned provenance after HIR destruction.
+    /// Definition provenance retained as owned MIR data after HIR destruction.
     pub(super) value_blocks: Vec<Option<super::ids::BlockId>>,
+    pub(super) value_definitions: Vec<Option<super::ids::InstId>>,
     pub allocation: Allocation,
     pub helpers: Vec<Option<HelperCall>>,
     pub memory: Vec<Option<memory::MemoryPlan>>,
@@ -162,8 +163,18 @@ impl Draft<'_> {
                 },
             })
             .collect::<Vec<_>>();
+        let value_definitions = self
+            .hir
+            .values
+            .iter()
+            .map(|value| match value.definition {
+                super::hir::Definition::Parameter(_, _) => None,
+                super::hir::Definition::Instruction(id, _) => Some(id),
+            })
+            .collect::<Vec<_>>();
         if data.value_types != self.hir.values.iter().map(|v| v.ty).collect::<Vec<_>>()
             || data.value_blocks != value_blocks
+            || data.value_definitions != value_definitions
             || data.allocation
                 != super::backend::locals::allocate(self.hir).map_err(CompileError::Budget)?
         {
