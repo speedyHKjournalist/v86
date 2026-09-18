@@ -31,13 +31,18 @@ The first exact lazy-backing set is deliberately small:
 - SUB and CMP;
 - AND, OR and XOR;
 - TEST and NEG through the same audited arithmetic forms;
-- XADD/CMPXCHG where they reuse those arithmetic semantics.
+- XADD/CMPXCHG where they reuse those arithmetic semantics;
+- ADC/SBB, with eager CF/AF/OF stored in raw flags and PF/ZF/SF left lazy;
+- INC/DEC, with the incoming architectural CF stored eagerly and the remaining
+  arithmetic flags left lazy.
 
 Logical operations clear the eager CF/AF/OF bits and make only PF/ZF/SF lazy.
 ADD makes all arithmetic flags lazy. SUB/CMP additionally carry the baseline
-`FLAG_SUB` marker.
+`FLAG_SUB` marker. ADC/SBB use the baseline mixed mask that excludes
+CF/AF/OF, while SBB also carries `FLAG_SUB`. INC/DEC exclude only CF from the
+lazy mask and DEC carries `FLAG_SUB`.
 
-ADC/SBB, INC/DEC, shifts/rotates, bit operations, multiply, SAHF/BCD and other
+Shifts/rotates, bit operations, multiply, SAHF/BCD and other not-yet-audited
 partially eager flag layouts invalidate the proof. Once invalidated inside a
 region, later ALU instructions do not guess the backing valid again.
 
@@ -68,17 +73,19 @@ CPU value programs skipped by emission.
 
 Focused tests require an ADD -> ADD -> JNZ region to produce a smaller CPU Wasm
 module after CPU liveness while producing byte-identical standalone output.
-INC/JNZ is a negative case and must retain canonical recovery.
+A dedicated ADC/SBB/INC/DEC/JNZ region requires every audited recovery state to
+remain eligible for exact lazy backing.
 
-The existing reachable-CFG CPU differential also enables the certificate. An
-additional ADD/SUB/AND/CMP/JNZ fixture compares raw flags, `flags_changed`,
-`last_result`, `last_op1` and `last_op_size` against interpreter execution
-at the same budget exit.
+The existing reachable-CFG CPU differential also enables the certificate.
+ADD/SUB/AND/CMP/JNZ and mixed ADC/SBB/INC/DEC/JNZ fixtures compare raw flags,
+`flags_changed`, `last_result`, `last_op1` and `last_op_size` against
+interpreter execution at the same budget exit. The mixed fixture runs in both
+16/32-bit default modes and has an additional byte-width variant.
 
 ## Still open
 
 The validity model is intentionally conservative. Extending exact backing to
-ADC/SBB, INC/DEC, shifts, rotates and other mixed eager/lazy operations can
-unlock more partial FLAGS elimination. General dirty-state merging across
+shifts, rotates and other mixed eager/lazy operations can unlock more partial
+FLAGS elimination. General dirty-state merging across
 resumable helper/MMU callbacks, memory LICM, remaining ISA coverage, system and
 performance validation, and IR-14 retirement remain separate work.
