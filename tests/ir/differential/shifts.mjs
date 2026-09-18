@@ -90,6 +90,8 @@ try {
     function state(address=ADDRESS) {return [...Array.from(cpu.reg32,x=>x>>>0),e.get_eflags()>>>0,
         words[104>>2],cpu.instruction_pointer[0]>>>0,get32(address),cpu.cr[2]>>>0,
         ...Array.from(mem.slice(STACK-32,STACK))];}
+    const raw_state=()=>[cpu.flags[0]>>>0,cpu.flags_changed[0]>>>0,
+        words[112>>2]>>>0,words[104>>2]>>>0,words[96>>2]>>>0];
     let ordinary=0,native=0;
     for(let i=0;i<cases.length;i++) {
         const [bytes,,,group,dst,immediate]=cases[i];
@@ -97,13 +99,14 @@ try {
         for(const count of counts)for(const input of values)for(const opt of [0,1]) {
             reset(i,input,count,ADDRESS,true);
             const independent=reference(cases[i],Array.from(cpu.reg32,x=>x>>>0),e.get_eflags()>>>0,words[104>>2],get32(ADDRESS),count);
-            instances[i][opt].exports.f(0);const actual=state();
+            instances[i][opt].exports.f(0);const actual=state(),actual_raw=raw_state();
             assert.deepEqual(actual.slice(0,9),independent.slice(0,9),`bit-serial oracle case=${i} count=${count}`);
             if(dst>=8){const mask=cases[i][2]===32?0xFFFFFFFF:(1<<cases[i][2])-1;assert.equal((actual[11]&mask)>>>0,independent[9]);}
             assert.equal(words[664>>2],101);assert.equal(actual[10],PC+bytes.length);
             if(dst>=8){assert.equal(slow,0,"warm shift RMW remains native");native++;}
             reset(i,input,count,ADDRESS,true);e.ir_test_step();
-            assert.deepEqual(actual,state(),`shift ${i} group=${group} dst=${dst} count=${count} input=${input.toString(16)} opt=${opt}`);ordinary++;
+            assert.deepEqual(actual,state(),`shift ${i} group=${group} dst=${dst} count=${count} input=${input.toString(16)} opt=${opt}`);
+            assert.deepEqual(actual_raw,raw_state(),`raw shift backing ${i} group=${group} count=${count}`);ordinary++;
         }
     }
     console.log(`PASS: ${ordinary} CPU shift/rotate comparisons, all 256 CL counts for registers, ${native} native warm RMW executions`);
