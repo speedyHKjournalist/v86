@@ -210,5 +210,5 @@ pub(super) fn instruction_live(data: &MirData, id: InstId) -> bool {
             .get(id.index())
             .copied()
             .unwrap_or(true)
-        || data.values.get(id.index()).is_none_or(Option::is_none)
+        || !matches!(data.values.get(id.index()), Some(Some(_)))
 }
