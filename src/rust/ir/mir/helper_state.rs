@@ -104,6 +104,10 @@ pub(super) fn elided(data: &MirData, id: InstId) -> bool {
             .unwrap_or(false)
 }
 
+pub(super) fn plan_enabled(plan: &Plan) -> bool {
+    plan.enabled
+}
+
 pub(super) fn plan_eligible(plan: &Plan, id: InstId) -> bool {
     plan
         .eligible
