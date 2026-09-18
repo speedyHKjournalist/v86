@@ -21,12 +21,14 @@ The proof is intentionally narrow:
   a fixed point;
 - any conflicting predecessor, unknown origin or changed value remains materialized.
 
-The analysis recognizes entry sources for GPRs, XMM registers and FLAGS provenance,
-but this increment only elides exact GPR/XMM and `last_op1` backing writes. Full
-EFLAGS, `last_result`, `last_op_size` and `flags_changed` writes remain mandatory:
-StateMap currently keeps only the ZF lazy-provenance bit, so it cannot prove the
-complete lazy-FLAGS backing representation unchanged. EIP, previous-IP and
-retirement-count materialization are also never removed.
+The analysis now carries the complete entry lazy-FLAGS backing needed by v86:
+raw EFLAGS, the full `flags_changed` mask, `last_result`, `last_op1` and
+`last_op_size`, in addition to the six semantic arithmetic flags and system
+flags. When every one of those sources is still exactly entry-equivalent, Tier 2
+may leave the original lazy backing untouched instead of canonicalizing it.
+Any changed semantic flag or backing component disables that FLAGS elision and
+falls back to the existing full materialization path. EIP, previous-IP and
+retirement-count materialization are never removed.
 
 ## Why this is safe
 
@@ -61,10 +63,14 @@ dynamic execution count or performance claim.
 
 Native tests cover:
 
-- multi-block JECXZ/MOV control flow with entry-equivalent GPR/last_op1 sources;
+- multi-block JECXZ/MOV control flow with entry-equivalent GPR and complete
+  lazy-FLAGS backing sources;
 - an SSE loop where loop-carried XMM0 remains materialized while unchanged XMM1
   can be elided across the guarded SseCheck;
-- arithmetic FLAGS backing that must always remain materialized in this increment;
+- changed arithmetic FLAGS that must fall back to canonical materialization;
+- a real CPU pure-loop differential that requires raw EFLAGS, `flags_changed`,
+  `last_result`, `last_op1` and `last_op_size` to remain bit-for-bit equal
+  to their entry backing values;
 - memory-containing regions disabling the optimization;
 - bounded/atomic enabling.
 
@@ -75,8 +81,8 @@ existing fault cases.
 
 ## Still open
 
-Full lazy-FLAGS provenance and arithmetic FLAGS write elision, general backing-state
-dataflow across resumable MMU/helper observations, partial FLAGS demand/liveness,
-dirty-state merging after callbacks, broader cross-block
-state synchronization, memory LICM, complete ISA coverage, system/application
-acceptance and IR-14 retirement remain open.
+Partial FLAGS demand/liveness, selective materialization after changed flags,
+general backing-state dataflow across resumable MMU/helper observations,
+dirty-state merging after callbacks, broader cross-block state synchronization,
+memory LICM, complete ISA coverage, system/application acceptance and IR-14
+retirement remain open.

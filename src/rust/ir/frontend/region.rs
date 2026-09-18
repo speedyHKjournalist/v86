@@ -31,6 +31,10 @@ impl Frame {
                 last_op1: Some(r.param(block, Type::I32)),
                 raw_zero: Some(r.param(block, Type::I1)),
                 zero_is_lazy: Some(r.param(block, Type::I1)),
+                raw_flags: Some(r.param(block, Type::I32)),
+                lazy_mask: Some(r.param(block, Type::I32)),
+                last_result: Some(r.param(block, Type::I32)),
+                last_op_size: Some(r.param(block, Type::I32)),
             },
             xmm: if xmm { (0..8).map(|_| r.param(block, Type::V128)).collect() } else { vec![] },
             count: r.param(block, Type::I32),
@@ -44,6 +48,10 @@ impl Frame {
         args.push(self.flags.last_op1.unwrap());
         args.push(self.flags.raw_zero.unwrap());
         args.push(self.flags.zero_is_lazy.unwrap());
+        args.push(self.flags.raw_flags.unwrap());
+        args.push(self.flags.lazy_mask.unwrap());
+        args.push(self.flags.last_result.unwrap());
+        args.push(self.flags.last_op_size.unwrap());
         args.extend(&self.xmm);
         args.extend([self.count, self.effect]);
         args
@@ -251,6 +259,22 @@ fn graft(
             seed.flags.zero_is_lazy.unwrap(),
             frame.flags.zero_is_lazy.unwrap(),
         ),
+        (
+            seed.flags.raw_flags.unwrap(),
+            frame.flags.raw_flags.unwrap(),
+        ),
+        (
+            seed.flags.lazy_mask.unwrap(),
+            frame.flags.lazy_mask.unwrap(),
+        ),
+        (
+            seed.flags.last_result.unwrap(),
+            frame.flags.last_result.unwrap(),
+        ),
+        (
+            seed.flags.last_op_size.unwrap(),
+            frame.flags.last_op_size.unwrap(),
+        ),
         (seed.effect, frame.effect),
     ] {
         values[old.index()] = Some(new);
@@ -338,6 +362,10 @@ fn graft(
             &mut state.flags.last_op1,
             &mut state.flags.raw_zero,
             &mut state.flags.zero_is_lazy,
+            &mut state.flags.raw_flags,
+            &mut state.flags.lazy_mask,
+            &mut state.flags.last_result,
+            &mut state.flags.last_op_size,
             &mut state.next_value,
         ] {
             if let Some(value) = v {

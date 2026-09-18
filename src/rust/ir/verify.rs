@@ -122,11 +122,24 @@ pub fn verify(region: &Region) -> Result<()> {
             map.flags.raw_zero.is_some() == map.flags.zero_is_lazy.is_some(),
             "incomplete raw zero state",
         )?;
+        let backing = [
+            map.flags.raw_flags,
+            map.flags.lazy_mask,
+            map.flags.last_result,
+            map.flags.last_op_size,
+        ];
+        require(
+            backing.iter().all(Option::is_some) || backing.iter().all(Option::is_none),
+            "incomplete lazy flags backing",
+        )?;
         if let Some(value) = map.flags.zero_is_lazy {
             require(ty(value)? == Type::I1, "zero lazy flag type")?;
         }
         if let Some(value) = map.flags.raw_zero {
             require(ty(value)? == Type::I1, "raw zero flag type")?;
+        }
+        for value in backing.into_iter().flatten() {
+            require(ty(value)? == Type::I32, "lazy flags backing type")?;
         }
         require(
             map.xmm.is_empty() || map.xmm.len() == 8,
@@ -520,14 +533,17 @@ pub fn verify(region: &Region) -> Result<()> {
                         && region.entries.contains(&BlockId(b as u32)),
                     "GPR initialization outside entry",
                 )?,
-                Op::ReadFlags | Op::ReadRawFlags | Op::ReadFlagChanges | Op::ReadFlagOperand => {
-                    require(
-                        args.is_empty()
-                            && results == [Type::I32]
-                            && region.entries.contains(&BlockId(b as u32)),
-                        "flags initialization outside entry",
-                    )?
-                },
+                Op::ReadFlags
+                | Op::ReadRawFlags
+                | Op::ReadFlagChanges
+                | Op::ReadFlagOperand
+                | Op::ReadFlagResult
+                | Op::ReadFlagSize => require(
+                    args.is_empty()
+                        && results == [Type::I32]
+                        && region.entries.contains(&BlockId(b as u32)),
+                    "flags initialization outside entry",
+                )?,
                 Op::ReadSegment(segment) => require(
                     *segment < 6
                         && args.is_empty()

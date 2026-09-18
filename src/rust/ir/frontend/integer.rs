@@ -34,6 +34,8 @@ impl IntegerBuilder {
             None,
         )[0];
         let last_op1 = region.append(block, Op::ReadFlagOperand, vec![], &[Type::I32], None)[0];
+        let last_result = region.append(block, Op::ReadFlagResult, vec![], &[Type::I32], None)[0];
+        let last_op_size = region.append(block, Op::ReadFlagSize, vec![], &[Type::I32], None)[0];
         let bits = std::array::from_fn(|i| {
             region.append(
                 block,
@@ -57,6 +59,10 @@ impl IntegerBuilder {
                 last_op1: Some(last_op1),
                 raw_zero: Some(raw_zero),
                 zero_is_lazy: Some(zero_is_lazy),
+                raw_flags: Some(raw_flags),
+                lazy_mask: Some(changes),
+                last_result: Some(last_result),
+                last_op_size: Some(last_op_size),
             },
         }
     }

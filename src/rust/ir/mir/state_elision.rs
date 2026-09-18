@@ -29,6 +29,8 @@ enum Initial {
     RawZero,
     FlagChanges,
     ZeroLazy,
+    LastResult,
+    LastOpSize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +90,8 @@ fn special_origin(region: &Region, value: ValueId, origins: &[Origin]) -> Origin
         Op::ReadRawFlags => Origin::Initial(Initial::RawFlags),
         Op::ReadFlagOperand => Origin::Initial(Initial::FlagOperand),
         Op::ReadFlagChanges => Origin::Initial(Initial::FlagChanges),
+        Op::ReadFlagResult => Origin::Initial(Initial::LastResult),
+        Op::ReadFlagSize => Origin::Initial(Initial::LastOpSize),
         Op::Extract { lsb } if inst.args.len() == 1 => match origins[inst.args[0].index()] {
             Origin::Initial(Initial::FlagSystem) => [0u8, 2, 4, 6, 7, 11]
                 .iter()
@@ -210,11 +214,46 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
             .ok_or_else(|| CompileError::InvalidIr("state-elision plan/state mismatch".into()))?;
         spend(&mut left, plan.cpu.writes.len())?;
 
-        // Arithmetic FLAGS backing is deliberately not elided yet. StateMap
-        // currently retains only the ZF lazy-provenance bit, while the CPU
-        // flags_changed word may carry other lazy arithmetic bits. Replaying
-        // materialization canonicalizes those bits; skipping it would preserve
-        // a different internal representation without a complete proof.
+        // Full lazy backing may be left untouched only when both the semantic
+        // arithmetic flags and every captured backing component are still the
+        // exact entry values. Any changed flag falls back to canonical
+        // materialization, preserving the previous recovery contract.
+        let arithmetic_clean = state
+            .flags
+            .arithmetic
+            .iter()
+            .enumerate()
+            .all(|(bit, &value)| is_initial(&origins, value, Initial::FlagBit(bit as u8)));
+        let backing_clean = arithmetic_clean
+            && is_initial(&origins, state.flags.system, Initial::FlagSystem)
+            && state
+                .flags
+                .last_op1
+                .is_some_and(|value| is_initial(&origins, value, Initial::FlagOperand))
+            && state
+                .flags
+                .raw_zero
+                .is_some_and(|value| is_initial(&origins, value, Initial::RawZero))
+            && state
+                .flags
+                .zero_is_lazy
+                .is_some_and(|value| is_initial(&origins, value, Initial::ZeroLazy))
+            && state
+                .flags
+                .raw_flags
+                .is_some_and(|value| is_initial(&origins, value, Initial::RawFlags))
+            && state
+                .flags
+                .lazy_mask
+                .is_some_and(|value| is_initial(&origins, value, Initial::FlagChanges))
+            && state
+                .flags
+                .last_result
+                .is_some_and(|value| is_initial(&origins, value, Initial::LastResult))
+            && state
+                .flags
+                .last_op_size
+                .is_some_and(|value| is_initial(&origins, value, Initial::LastOpSize));
         let mut mask = vec![false; plan.cpu.writes.len()];
         for (write_index, write) in plan.cpu.writes.iter().enumerate() {
             mask[write_index] = match write.address {
@@ -226,13 +265,13 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
                     .flags
                     .last_op1
                     .is_some_and(|value| is_initial(&origins, value, Initial::FlagOperand)),
-                Address::Flags => false,
+                Address::Flags => backing_clean,
                 Address::Absolute(address)
                     if address == gp::last_result as u32
                         || address == gp::last_op_size as u32
                         || address == gp::flags_changed as u32 =>
                 {
-                    false
+                    backing_clean
                 },
                 Address::Absolute(address) => state.xmm.iter().enumerate().any(|(reg, &value)| {
                     address == gp::get_reg_xmm_offset(reg as u32)
@@ -326,13 +365,15 @@ mod tests {
     }
 
     #[test]
-    fn pure_cfg_elides_entry_equivalent_register_xmm_and_flag_operand_writes() {
-        // JECXZ and MOV do not modify GPRs other than EAX or the last_op1
-        // backing; the join therefore carries exact entry origins across blocks.
+    fn pure_cfg_elides_exact_entry_register_and_lazy_flags_backing() {
+        // JECXZ and MOV do not modify FLAGS. The join therefore carries both
+        // semantic flag values and the exact entry lazy backing through blocks.
         let mut mir = optimized(&[0xE3, 2, 0x89, 0xD8, 0x90]);
         let count = enable(&mut mir.data, DEFAULT_WORK_LIMIT).unwrap();
         assert!(count > 0);
         let mut skipped_flag_operand = 0;
+        let mut skipped_flags = 0;
+        let mut skipped_lazy = 0;
         let mut skipped_gprs = 0;
         for (state, mask) in mir.states.iter().zip(&mir.state_elision.masks) {
             for (write, &skip) in state.cpu.writes.iter().zip(mask) {
@@ -341,13 +382,13 @@ mod tests {
                 }
                 match write.address {
                     Address::FlagOperand => skipped_flag_operand += 1,
-                    Address::Flags => panic!("arithmetic FLAGS backing must not be elided"),
+                    Address::Flags => skipped_flags += 1,
                     Address::Absolute(a)
                         if a == gp::last_result as u32
                             || a == gp::last_op_size as u32
                             || a == gp::flags_changed as u32 =>
                     {
-                        panic!("lazy FLAGS backing must not be elided")
+                        skipped_lazy += 1;
                     },
                     Address::Gpr(_) => skipped_gprs += 1,
                     _ => (),
@@ -355,6 +396,8 @@ mod tests {
             }
         }
         assert!(skipped_flag_operand > 0);
+        assert!(skipped_flags > 0);
+        assert!(skipped_lazy > 0);
         assert!(skipped_gprs > 0);
         emit_cpu(&mir, 32).unwrap();
     }

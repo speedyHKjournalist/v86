@@ -18,6 +18,13 @@ pub struct FlagState {
     pub raw_zero: Option<ValueId>,
     /// Whether CPU getzf uses the computed value instead of the backing bit.
     pub zero_is_lazy: Option<ValueId>,
+    /// Exact CPU lazy-FLAGS backing captured at region entry. These values are
+    /// proof inputs for preserving an unchanged lazy representation; ordinary
+    /// materialization may still canonicalize changed arithmetic FLAGS.
+    pub raw_flags: Option<ValueId>,
+    pub lazy_mask: Option<ValueId>,
+    pub last_result: Option<ValueId>,
+    pub last_op_size: Option<ValueId>,
 }
 #[derive(Clone, Debug)]
 pub struct StateMap {
@@ -43,6 +50,10 @@ impl StateMap {
         values.extend(self.flags.last_op1);
         values.extend(self.flags.raw_zero);
         values.extend(self.flags.zero_is_lazy);
+        values.extend(self.flags.raw_flags);
+        values.extend(self.flags.lazy_mask);
+        values.extend(self.flags.last_result);
+        values.extend(self.flags.last_op_size);
         values.extend(&self.xmm);
         values.extend(&self.x87);
         values.extend(self.next_value);

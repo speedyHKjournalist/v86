@@ -226,6 +226,16 @@ fn rewrite_values(region: &mut Region, replace: impl Fn(&mut ValueId)) {
         if let Some(value) = &mut state.flags.zero_is_lazy {
             replace(value);
         }
+        for value in [
+            &mut state.flags.raw_flags,
+            &mut state.flags.lazy_mask,
+            &mut state.flags.last_result,
+            &mut state.flags.last_op_size,
+        ] {
+            if let Some(value) = value {
+                replace(value);
+            }
+        }
         if let Some(value) = &mut state.count_base {
             replace(value);
         }
