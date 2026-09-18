@@ -157,8 +157,13 @@ fn key_for(addresses: &[Option<AddressKey>], plan: &MemoryPlan) -> AddressKey {
         .unwrap_or(AddressKey::Value(plan.address))
 }
 
+fn value_plan(data: &MirData, value: ValueId) -> Option<&super::value::ValuePlan> {
+    let definition = data.value_definitions.get(value.index()).copied().flatten()?;
+    data.values.get(definition.index())?.as_ref()
+}
+
 fn constant_i32(data: &MirData, value: ValueId) -> Option<u32> {
-    let plan = data.values.get(value.index())?.as_ref()?;
+    let plan = value_plan(data, value)?;
     match plan.steps.as_slice() {
         [Step::I32(n)] => Some(*n as u32),
         _ => None,
@@ -221,6 +226,7 @@ fn validate_arenas(data: &MirData) -> Result<(), CompileError> {
         || n > 8192
         || data.value_types.len() > 16384
         || data.value_blocks.len() != data.value_types.len()
+        || data.value_definitions.len() != data.value_types.len()
     {
         return Err(CompileError::Budget("MIR RAM optimization region"));
     }
@@ -282,18 +288,6 @@ fn plan_with_loops(
             }
             if let Some(memory) = memory {
                 let key = key_for(&addresses, memory);
-                #[cfg(test)]
-                if previous.is_some() {
-                    eprintln!(
-                        "IR11TRACE block={} inst={} memory load={} store={} key={:?} prev={:?}",
-                        block.instructions.first().map(|id| id.index()).unwrap_or(usize::MAX),
-                        index,
-                        eligible_load(memory),
-                        eligible_store(memory),
-                        key,
-                        previous
-                    );
-                }
                 if eligible_load(memory) {
                     if let Some((old_key, bytes, old)) = previous {
                         if alias(data, old_key, bytes, key, memory.guard.bytes) == AliasProof::Exact {
@@ -343,17 +337,6 @@ fn plan_with_loops(
                     }
                 }
             }
-            #[cfg(test)]
-            if previous.is_some() {
-                eprintln!(
-                    "IR11TRACE kill inst={} effect={} call={} poll={} value={:?}",
-                    index,
-                    data.effects[index].is_some(),
-                    data.calls[index].is_some(),
-                    data.control.polls[index].is_some(),
-                    data.values[index]
-                );
-            }
             previous = None;
         }
     }
@@ -392,7 +375,7 @@ fn value_invariant(
         return Ok(false);
     }
     visiting[index] = true;
-    let invariant = match data.values.get(index).and_then(Option::as_ref) {
+    let invariant = match value_plan(data, value) {
         Some(plan) => {
             let mut ok = true;
             for step in &plan.steps {
@@ -540,7 +523,18 @@ fn loop_plan(data: &MirData, work_limit: usize) -> Result<LoopPlan, CompileError
         }
         let valid = (0..nblocks)
             .filter(|&b| members & (1u64 << b) != 0)
-            .all(|b| dominates[b] & (1u64 << header) != 0);
+            .all(|b| {
+                if dominates[b] & (1u64 << header) == 0 {
+                    return false;
+                }
+                // No internal side entry into the natural loop body. External
+                // compiled entry points are separate Wasm invocations and begin
+                // with invalid cache locals, so they do not violate this rule.
+                b == header
+                    || predecessors[b]
+                        .iter()
+                        .all(|&pred| members & (1u64 << pred) != 0)
+            });
         if !valid {
             continue;
         }
@@ -549,16 +543,6 @@ fn loop_plan(data: &MirData, work_limit: usize) -> Result<LoopPlan, CompileError
             .copied()
             .filter(|&p| members & (1u64 << p) == 0)
             .collect();
-        #[cfg(test)]
-        eprintln!(
-            "IR11LOOP header={} members={:#x} entries={:?} preds={:?} outside={:?} valid={}",
-            header,
-            members,
-            data.control.entries,
-            predecessors[header],
-            outside,
-            valid
-        );
         if outside.len() != 1 {
             continue;
         }
