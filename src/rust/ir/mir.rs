@@ -7,6 +7,7 @@ pub mod forwarding;
 pub mod materialize;
 pub mod memory;
 mod optimize;
+pub mod state_elision;
 pub mod value;
 pub mod vector;
 use super::{backend::locals::Allocation, hir::Region, lowering::CompileError, types::Type};
@@ -33,6 +34,7 @@ pub struct MirData {
     pub values: Vec<Option<value::ValuePlan>>,
     pub states: Vec<materialize::StatePlan>,
     pub(super) ram_forwarding: Vec<Option<forwarding::Forwarding>>,
+    pub(super) state_elision: state_elision::Plan,
 }
 
 /// Verified, owned MIR. No mutable dereference: transformations must preserve the
@@ -57,6 +59,23 @@ impl MirRegion {
     }
     pub fn has_ram_forwarding(&self) -> bool {
         self.data.ram_forwarding.iter().any(Option::is_some)
+    }
+
+    /// Skip CPU state stores that are proven identical to the backing state at
+    /// entry. The certificate is derived while HIR is still available; enabling
+    /// it later is bounded and does not rewrite SSA, recovery maps or CFG edges.
+    pub fn elide_redundant_cpu_state_writes(
+        &mut self,
+        work_limit: usize,
+    ) -> Result<usize, CompileError> {
+        state_elision::enable(&mut self.data, work_limit)
+    }
+    pub(crate) fn cpu_state_write_elided(
+        &self,
+        state: super::ids::StateId,
+        write: usize,
+    ) -> bool {
+        state_elision::elided(&self.data, state, write)
     }
 
     /// Fold literal machine operations without changing definitions, effects,
@@ -101,6 +120,7 @@ impl Draft<'_> {
         value::verify(self.hir, &data.values)?;
         materialize::verify(self.hir, &data.states)?;
         forwarding::verify(data)?;
+        state_elision::verify(self.hir, data)?;
         Ok(MirRegion { data: self.data })
     }
 }
