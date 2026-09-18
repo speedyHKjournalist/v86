@@ -447,10 +447,14 @@ fn lift_inner(
                 let value = b.node(Op::Select, vec![cc, a, old], width_type(i.operand_size));
                 b.write(reg, i.operand_size, value);
             },
-            0xF8 | 0xF9 => b.flags.arithmetic[0] = b.constant((op == 0xF9) as u32, Type::I1),
+            0xF8 | 0xF9 => {
+                b.flags.arithmetic[0] = b.constant((op == 0xF9) as u32, Type::I1);
+                b.invalidate_flag_backing();
+            },
             0xF5 => {
                 let one = b.constant(1, Type::I1);
                 b.flags.arithmetic[0] = b.binary(Binary::Xor, b.flags.arithmetic[0], one);
+                b.invalidate_flag_backing();
             },
             0x40..=0x4F | 0xFE | 0xFF if op < 0xFE || reg < 2 => {
                 let (dst, width, dec) = if op < 0xFE {
@@ -463,6 +467,7 @@ fn lift_inner(
                 let one = b.constant(1, width_type(width));
                 let value = b.arithmetic(if dec { 5 } else { 0 }, a, one);
                 b.flags.arithmetic[0] = carry;
+                b.invalidate_flag_backing();
                 b.write(dst, width, value);
             },
             0xF6 | 0xF7 if reg == 2 || reg == 3 => {
@@ -609,6 +614,7 @@ fn memory_instruction(
                 let one = b.constant(1, ty);
                 let value = b.arithmetic(if group == 0 { 0 } else { 5 }, memory, one);
                 b.flags.arithmetic[0] = carry;
+                b.invalidate_flag_backing();
                 value
             } else if group == 2 {
                 let ones = b.constant(u32::MAX, ty);
