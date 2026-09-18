@@ -19,7 +19,7 @@
 | IR-07 | 部分完成 | 近 CALL/RET、FF /2 与 /4 间接转移及动态 EIP StateMap；已增加单次 MOVS/CMPS/STOS/LODS/SCAS 原生执行；已增加标量 IN/OUT 和单次 INS/OUTS；已接入有界 REP HIR、进度映射及最终提交；已增加 CPUID/RDTSC/RDMSR/WRMSR 终端适配；已增加 SYSENTER/SYSEXIT、HLT/CLI/CLTS/WBINVD；已增加 CR/DR 传送与 CPU 地址映射变更适配；已增加描述符表、SMSW/LMSW 与 INVLPG；已增加 SLDT/STR 与 LLDT/LTR；已增加 LAR/LSL、VERR/VERW；在线 REP 调度、远转移及其余特权/系统指令待实现 |
 | IR-08 | 部分完成 | XMM V128 SSA、快照、typed locals/边复制，以及 packed/scalar SIMD 传送的原生 RAM 与精确慢路径已实现；已增加 38 种 packed integer 算术/比较/乘法/逻辑及 PS/PD 逻辑别名；已增加打包/解包、变量及立即数 packed 移位；已增加 PSHUF/SHUF 重排；已增加半部传送、MOVD/MOVQ 和重复 lane；已增加符号位掩码、PINSRW/PEXTRW、非临时存储和 LDDQU；已增加 MASKMOVDQU 原生 RAM 与有序慢路径；其余 SIMD 状态/传送、MMX、FP 控制、F80/x87 和无 SIMD 降级仍待实现 |
 | IR-09 | 部分基础 | 整数后端可执行 CFG 和寄存器代码；已增加冷 CPU 入口及真实状态 ABI，可执行具备完整动态计数映射的 CPU 循环；CompileRequest 产物已有显式入口键及执行前校验，实验 CPU Wasm 内可直接执行 IR 编译，显式发布的入口已参与正常 CPU 分派；已有可选的自动热度、区域编译和优化升档；完整 Tier 1 语义、成熟区域选择和系统验收仍未完成 |
-| IR-10 | 部分基础 | 有界常量折叠、支配关系 GVN、trivial phi 消除、StateMap-aware DCE、常量分支裁剪和保留预算检查的直线块合并；已有独立 MIR 字面量常量折叠；完整 lazy-FLAGS provenance 已进入 StateMap；CPU-only 跨块 liveness 证书现覆盖 ADD/SUB/CMP/AND/OR/XOR 及 ADC/SBB、INC/DEC 的精确 mixed eager/lazy backing，可在 recovery 直接恢复 raw flags/flags_changed/last_result/last_op1/last_op_size，并从 CPU Wasm 省略只为 concrete FLAGS recovery 服务的纯 SSA；shift/rotate 等其余混合布局仍保守 canonicalize；更广 FLAGS backing 覆盖及可继续 helper/MMU 观察后的 dirty-state 合流仍未完成 |
+| IR-10 | 部分基础 | 有界常量折叠、支配关系 GVN、trivial phi 消除、StateMap-aware DCE、常量分支裁剪和保留预算检查的直线块合并；已有独立 MIR 字面量常量折叠；完整 lazy-FLAGS provenance 已进入 StateMap；CPU-only 跨块 liveness 的精确 backing 已从基础 ALU、ADC/SBB、INC/DEC 扩展到 SHL/SHR/SAR、SHLD/SHRD、ROL/ROR/RCL/RCR、BT/BTS/BTR/BTC、BSF/BSR/POPCNT、MUL/IMUL 及 CLC/STC/CMC、CLD/STD，可在 recovery 恢复 raw flags/flags_changed/last_result/last_op1/last_op_size，并从 CPU Wasm 省略只为 concrete FLAGS recovery 服务的纯 SSA；SAHF/BCD 等特殊布局及可继续 helper/MMU 观察后的 dirty-state 合流仍未完成 |
 | IR-11 | 部分完成 | 已有受预算约束的纯 SSA LICM，以及 owned MIR 内带静态证书和动态 RAM 有效位的同块重复读取复用；现已支持严格同地址/同宽度、已提交 native 标量写入到后续普通读取的 store-to-load forwarding，慢路径、代码页物理别名和观察边界仍保持保守退出；仅优化 Tier 2 启用；通用别名/effect 证明、memory LICM 及其余循环/SIMD 优化仍待实现 |
 | IR-12 | 部分基础 | 不可变编译请求及 generation/dependency/入口/映射比较已实现；已有只读 CPU 代码快照、单个未发布产物句柄和重校验；共享在线 legacy 桥接已有票据校验、安装前拒绝、缓存取消和浏览器失败回收；已有共享槽池中的 IR 缓存、物理代码页监视和冷执行帧返回后的回收；已有有界自动编译、失败抑制和自动入口淘汰；完整共享版本/链接图及生产策略验收仍未完成 |
 | IR-13 | 完整矩阵未完成 | 已执行 IR 差分和部分生产 legacy/Worker/API 回归；GPU 间歇失败、PIC 跳过等结果有单独记录；已有 Node 中显式/自动 IR 缓存分派及升档测试，以及公开后端在真实浏览器主线程/Worker 的升档、SMC、双向跨后端快照和错误上报测试；完整在线 IR、XP、应用及性能矩阵未完成 |
@@ -812,3 +812,13 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
 - validity 不会从 false 自动恢复；只有从已知精确 backing 进入这些指令时才继续保持精确证明，先前发生未建模 FLAGS 修改后仍走 canonical materialization。
 - 真实 CFG differential 新增 ADC→SBB→INC→DEC→JNZ，覆盖 16/32 位默认模式，并增加 8 位 ADC/SBB/INC/DEC 版本；optimized raw flags、flags_changed、last_result、last_op1、last_op_size 与解释器在同一预算出口逐字段一致。
 - shift/rotate、bit、multiply、SAHF/BCD 等 mixed eager/lazy backing 仍待后续逐类审计；默认 backend、生产 coverage 与 IR-14 条件不变。
+
+
+## 后续推进：FLAGS backing 扩展批次
+
+- SHL/SHR/SAR、SHLD/SHRD 按有效 count 建模：count=0 完整保留输入 backing；非零时 raw EFLAGS 仅 eager 更新 CF/OF，flags_changed 保留 PF/AF/ZF/SF lazy，并精确更新 last_result 与 last_op_size。
+- ROL/ROR/RCL/RCR 仅更新 eager CF/OF 并从原 lazy mask 清除两位，不改变 last_result/last_op1/last_op_size；through-carry 继续使用 concrete architectural CF SSA。
+- BT/BTS/BTR/BTC 仅 eager 更新 CF；BSF/BSR eager 固定 CF/ZF 并保留基线 undefined FLAGS 的 lazy 规则；POPCNT 将全部 arithmetic flags 转为 eager。
+- MUL/IMUL 精确恢复 eager CF/OF、last_result/op-size，并保留基线对其余 undefined arithmetic flags 的 lazy 表示。
+- CLC/STC/CMC 只同步 raw CF 与 lazy mask；CLD/STD 同步 raw EFLAGS 的 DF bit 与 system flags，不再整体失效 backing。
+- shifts/bits/multiply 专项 differential 增加 raw EFLAGS、flags_changed、last_result、last_op1、last_op_size 与解释器逐字段比较；CFG 另覆盖 carry/direction 多 budget 边界。
