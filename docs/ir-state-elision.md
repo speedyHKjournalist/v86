@@ -14,6 +14,8 @@ The proof is intentionally narrow:
 - exactly one external IR entry;
 - no resumable memory, helper, commit or exception observation in the region;
 - `PollBudget` recovery is allowed because its materialization arm returns;
+- guarded `SseCheck` is also allowed: if it has to observe CPU state, that arm
+  materializes state and returns from the IR entry instead of resuming;
 - terminal region exits are allowed;
 - GPR, XMM and split FLAGS origins are propagated through CFG block parameters to
   a fixed point;
@@ -60,6 +62,8 @@ dynamic execution count or performance claim.
 Native tests cover:
 
 - multi-block JECXZ/MOV control flow with entry-equivalent GPR/last_op1 sources;
+- an SSE loop where loop-carried XMM0 remains materialized while unchanged XMM1
+  can be elided across the guarded SseCheck;
 - arithmetic FLAGS backing that must always remain materialized in this increment;
 - memory-containing regions disabling the optimization;
 - bounded/atomic enabling.
