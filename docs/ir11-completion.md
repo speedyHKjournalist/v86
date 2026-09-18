@@ -36,8 +36,10 @@ without changing the first observable fault point.
 
 ## MIR proof ownership
 
-The lowering boundary retains only the defining block of each SSA value as owned
-MIR provenance. HIR is still dropped before machine optimization/emission.
+The lowering boundary retains the defining block and defining instruction of
+each SSA value as owned MIR provenance. HIR is still dropped before machine
+optimization/emission; proof construction resolves `ValueId` through that owned
+definition map rather than indexing the instruction-plan arena directly.
 
 The RAM optimizer derives deterministic certificates from:
 
@@ -58,7 +60,9 @@ The current proof lattice is intentionally small:
 
 - `Exact`: identical canonical address identity and width;
 - `Disjoint`: constant byte ranges under the same canonical segment base (or
-  absolute constant linear values) do not overlap, including 32-bit wrap;
+  absolute constant linear values) have disjoint low-12-bit byte offsets.
+  Native page translation preserves those offsets, so the proof remains valid
+  even when distinct virtual pages alias the same physical page;
 - `MayAlias`: every relation not proven by the two rules above.
 
 No pointer-range speculation, profile assumption or host address comparison is
@@ -122,10 +126,12 @@ IR-11-specific native coverage additionally checks:
 - independent MIR/Wasm emission after HIR destruction;
 - forged loop-cache certificates being rejected.
 
-The existing forwarding CPU corpus continues to cover RAM, page crossings,
-#PF/#GP, MMIO/remapping callbacks, supervisor guards, code-page aliases and
-budget exits. The LICM/CFG corpus continues to cover later-iteration faults and
-recovery ordering.
+The forwarding CPU corpus covers RAM, page crossings, #PF/#GP,
+MMIO/remapping callbacks, supervisor guards, code-page aliases and budget exits.
+It also emits cache-disabled/cache-enabled loop modules and compares ordinary
+RAM, first-load #PF, repeated MMIO, MMIO-to-RAM remapping, callback unmapping and
+exact budget exits against the instruction-step interpreter. The LICM/CFG corpus
+continues to cover later-iteration faults and recovery ordering.
 
 ## What IR-11 completion does not mean
 
