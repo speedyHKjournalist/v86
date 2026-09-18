@@ -73,7 +73,8 @@ fn disabled(states: &[StatePlan]) -> Plan {
 }
 
 fn special_origin(region: &Region, value: ValueId, origins: &[Origin]) -> Origin {
-    let Definition::Instruction(id, result) = region.values[value.index()].definition else {
+    let Definition::Instruction(id, result) = region.values[value.index()].definition
+    else {
         return Origin::Unknown;
     };
     if result != 0 {
@@ -93,12 +94,8 @@ fn special_origin(region: &Region, value: ValueId, origins: &[Origin]) -> Origin
                 .position(|&bit| bit == lsb)
                 .map(|bit| Origin::Initial(Initial::FlagBit(bit as u8)))
                 .unwrap_or(Origin::Other),
-            Origin::Initial(Initial::RawFlags) if lsb == 6 => {
-                Origin::Initial(Initial::RawZero)
-            },
-            Origin::Initial(Initial::FlagChanges) if lsb == 6 => {
-                Origin::Initial(Initial::ZeroLazy)
-            },
+            Origin::Initial(Initial::RawFlags) if lsb == 6 => Origin::Initial(Initial::RawZero),
+            Origin::Initial(Initial::FlagChanges) if lsb == 6 => Origin::Initial(Initial::ZeroLazy),
             _ => Origin::Other,
         },
         _ => Origin::Other,
@@ -126,7 +123,8 @@ fn origins(region: &Region, left: &mut usize) -> Result<Vec<Origin>, CompileErro
             for (p, &param) in block.params.iter().enumerate() {
                 let next = if region.entries.contains(&crate::ir::ids::BlockId(b as u32)) {
                     Origin::Other
-                } else {
+                }
+                else {
                     let mut incoming = Origin::Unknown;
                     let mut seen = false;
                     for source in &region.blocks {
@@ -143,7 +141,12 @@ fn origins(region: &Region, left: &mut usize) -> Result<Vec<Origin>, CompileErro
                             }
                         }
                     }
-                    if seen { incoming } else { Origin::Other }
+                    if seen {
+                        incoming
+                    }
+                    else {
+                        Origin::Other
+                    }
                 };
                 if next != result[param.index()] {
                     result[param.index()] = next;
@@ -155,7 +158,10 @@ fn origins(region: &Region, left: &mut usize) -> Result<Vec<Origin>, CompileErro
         // Extracts of incoming flag bundles can become entry-equivalent after
         // phi facts settle. Re-evaluate all instruction-defined values.
         for index in 0..region.values.len() {
-            if matches!(region.values[index].definition, Definition::Instruction(_, _)) {
+            if matches!(
+                region.values[index].definition,
+                Definition::Instruction(_, _)
+            ) {
                 let next = special_origin(region, ValueId(index as u32), &result);
                 if next != result[index] {
                     result[index] = next;
@@ -199,9 +205,9 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
     let origins = origins(region, &mut left)?;
     let mut masks = Vec::with_capacity(region.states.len());
     for (index, state) in region.states.iter().enumerate() {
-        let plan = states.get(index).ok_or_else(|| {
-            CompileError::InvalidIr("state-elision plan/state mismatch".into())
-        })?;
+        let plan = states
+            .get(index)
+            .ok_or_else(|| CompileError::InvalidIr("state-elision plan/state mismatch".into()))?;
         spend(&mut left, plan.cpu.writes.len())?;
 
         // Arithmetic FLAGS backing is deliberately not elided yet. StateMap
@@ -270,7 +276,9 @@ pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, Com
         .state_elision
         .masks
         .iter()
-        .try_fold(data.state_elision.masks.len(), |n, mask| n.checked_add(mask.len()))
+        .try_fold(data.state_elision.masks.len(), |n, mask| {
+            n.checked_add(mask.len())
+        })
         .ok_or(CompileError::Budget("MIR state elision work"))?;
     if work > work_limit {
         return Err(CompileError::Budget("MIR state elision work"));
@@ -383,20 +391,33 @@ mod tests {
             .states
             .iter()
             .zip(&flags.state_elision.masks)
-            .any(|(state, mask)| state.cpu.writes.iter().zip(mask).any(
-                |(write, &skip)| write.address == Address::Flags && !skip
-            )));
+            .any(|(state, mask)| state
+                .cpu
+                .writes
+                .iter()
+                .zip(mask)
+                .any(|(write, &skip)| write.address == Address::Flags && !skip)));
 
         let mut memory = optimized(&[0x8B, 0x06, 0x90]);
         assert_eq!(enable(&mut memory.data, DEFAULT_WORK_LIMIT).unwrap(), 0);
-        assert!(memory.state_elision.masks.iter().flatten().all(|skip| !skip));
+        assert!(memory
+            .state_elision
+            .masks
+            .iter()
+            .flatten()
+            .all(|skip| !skip));
     }
 
     #[test]
     fn forged_lowering_certificate_is_rejected() {
-        let mut region =
-            lift_cpu_cfg(&[0xEB, 0xFE], GuestEip(0x1000), LinearAddress(0x100000), true, 8)
-                .unwrap();
+        let mut region = lift_cpu_cfg(
+            &[0xEB, 0xFE],
+            GuestEip(0x1000),
+            LinearAddress(0x100000),
+            true,
+            8,
+        )
+        .unwrap();
         run(&mut region, PassConfig::default()).unwrap();
         let mut draft = lower_draft(&region).unwrap();
         let (state, write) = draft
