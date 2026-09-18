@@ -44,6 +44,9 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         return;
     }
     let width = i.operand_size;
+    // Bit tests/scans/popcnt all modify at least one arithmetic flag, but their
+    // pinned baseline backing layouts are not yet represented by this pass.
+    b.invalidate_flag_backing();
     let group = i.modrm.unwrap() >> 3 & 7;
     let rm = i.modrm.unwrap() & 7;
     let scan = matches!(op, 0x0FBC | 0x0FBD | 0xF30FB8);
