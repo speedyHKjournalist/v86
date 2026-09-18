@@ -231,6 +231,7 @@ fn rewrite_values(region: &mut Region, replace: impl Fn(&mut ValueId)) {
             &mut state.flags.lazy_mask,
             &mut state.flags.last_result,
             &mut state.flags.last_op_size,
+            &mut state.flags.backing_valid,
         ] {
             if let Some(value) = value {
                 replace(value);
