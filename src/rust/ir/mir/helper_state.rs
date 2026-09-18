@@ -99,6 +99,14 @@ pub(super) fn elided(data: &MirData, id: InstId) -> bool {
             .unwrap_or(false)
 }
 
+pub(super) fn plan_eligible(plan: &Plan, id: InstId) -> bool {
+    plan
+        .eligible
+        .get(id.index())
+        .copied()
+        .unwrap_or(false)
+}
+
 pub(super) fn eligible(data: &MirData, id: InstId) -> bool {
     data.helper_state
         .eligible
