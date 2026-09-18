@@ -318,14 +318,7 @@ fn disjoint_constant_store_preserves_an_existing_load_chain() {
     let ids = loads(&r);
     assert_eq!(ids.len(), 2);
     let mut m = lower(&r).unwrap();
-    let forwarded = m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap();
-    if forwarded != 1 {
-        eprintln!(
-            "IR11 disjoint debug\nblocks={:#?}\nvalues={:#?}\neffects={:#?}\nmemory={:#?}",
-            m.control.blocks, m.values, m.effects, m.memory
-        );
-    }
-    assert_eq!(forwarded, 1);
+    assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 1);
     assert_eq!(m.ram_forwarding(ids[0]), Some(Forwarding::Begin));
     assert_eq!(
         m.ram_forwarding(ids[1]),
@@ -385,16 +378,11 @@ fn loop_invariant_load_cache_keeps_first_fault_point_and_resets_at_preheader() {
     let ids = loads(&r);
     assert_eq!(ids.len(), 1);
     let mut m = lower(&r).unwrap();
-    let cached = m
-        .cache_loop_invariant_ram_reads(DEFAULT_WORK_LIMIT)
-        .unwrap();
-    if cached != 1 {
-        eprintln!(
-            "IR11 loop debug\nblocks={:#?}\nvalue_blocks={:#?}\nvalues={:#?}\neffects={:#?}\ncalls={:#?}\nmemory={:#?}",
-            m.control.blocks, m.value_blocks, m.values, m.effects, m.calls, m.memory
-        );
-    }
-    assert_eq!(cached, 1);
+    assert_eq!(
+        m.cache_loop_invariant_ram_reads(DEFAULT_WORK_LIMIT)
+            .unwrap(),
+        1
+    );
     let proof = m.ram_loop_cache(ids[0]).expect("loop cache proof");
     assert_eq!(proof.slot, 0);
     let reset_blocks: Vec<_> = (0..m.control.blocks.len())
@@ -444,17 +432,6 @@ fn forged_loop_cache_certificate_is_rejected_atomically() {
     .unwrap();
     let mut draft = lower_draft(&r).unwrap();
     draft.ram_loop_cache = loop_plan(&draft, DEFAULT_WORK_LIMIT).unwrap();
-    if draft.ram_loop_cache.slots != 1 {
-        eprintln!(
-            "IR11 forged-loop debug\nblocks={:#?}\nvalue_blocks={:#?}\nvalues={:#?}\neffects={:#?}\ncalls={:#?}\nmemory={:#?}",
-            draft.control.blocks,
-            draft.value_blocks,
-            draft.values,
-            draft.effects,
-            draft.calls,
-            draft.memory
-        );
-    }
     assert_eq!(draft.ram_loop_cache.slots, 1);
     let reset = draft
         .ram_loop_cache
