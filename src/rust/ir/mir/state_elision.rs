@@ -228,6 +228,10 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
             && is_initial(&origins, state.flags.system, Initial::FlagSystem)
             && state
                 .flags
+                .last_op1
+                .is_some_and(|value| is_initial(&origins, value, Initial::FlagOperand))
+            && state
+                .flags
                 .raw_zero
                 .is_some_and(|value| is_initial(&origins, value, Initial::RawZero))
             && state
