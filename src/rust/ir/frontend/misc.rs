@@ -102,7 +102,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             b.write(4, 8, value);
         },
         0xFC | 0xFD => {
-            b.invalidate_flag_backing();
+            let direction = b.constant((op == 0xFD) as u32, Type::I1);
+            b.preserve_raw_flag_bit(direction, 10);
             b.flags.system = c(
                 b,
                 if op == 0xFC { Binary::And } else { Binary::Or },
