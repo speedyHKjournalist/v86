@@ -5,7 +5,7 @@
 //! resumable memory/helper/commit observation are rejected wholesale; budget
 //! recovery and terminal exits are the only observation sites allowed.
 
-use super::{value::Address, MirData};
+use super::{materialize::StatePlan, value::Address, MirData};
 use crate::{
     cpu::global_pointers as gp,
     ir::{
@@ -61,10 +61,9 @@ fn spend(left: &mut usize, amount: usize) -> Result<(), CompileError> {
     Ok(())
 }
 
-fn disabled(data: &MirData) -> Plan {
+fn disabled(states: &[StatePlan]) -> Plan {
     Plan {
-        masks: data
-            .states
+        masks: states
             .iter()
             .map(|state| vec![false; state.cpu.writes.len()])
             .collect(),
@@ -178,7 +177,7 @@ fn is_initial(origins: &[Origin], value: ValueId, initial: Initial) -> bool {
     origins[value.index()] == Origin::Initial(initial)
 }
 
-fn derive(region: &Region, data: &MirData, work_limit: usize) -> Result<Plan, CompileError> {
+fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Plan, CompileError> {
     let mut left = work_limit;
     spend(&mut left, region.blocks.len() + region.states.len())?;
     if region.entries.len() != 1
@@ -191,13 +190,13 @@ fn derive(region: &Region, data: &MirData, work_limit: usize) -> Result<Plan, Co
                 (inst.state.is_some() || inst.commit.is_some()) && inst.op != Op::PollBudget
             })
     {
-        return Ok(disabled(data));
+        return Ok(disabled(states));
     }
 
     let origins = origins(region, &mut left)?;
     let mut masks = Vec::with_capacity(region.states.len());
     for (index, state) in region.states.iter().enumerate() {
-        let plan = data.states.get(index).ok_or_else(|| {
+        let plan = states.get(index).ok_or_else(|| {
             CompileError::InvalidIr("state-elision plan/state mismatch".into())
         })?;
         spend(&mut left, plan.cpu.writes.len())?;
@@ -255,14 +254,14 @@ fn derive(region: &Region, data: &MirData, work_limit: usize) -> Result<Plan, Co
 
 pub(super) fn lower(
     region: &Region,
-    data: &MirData,
+    states: &[StatePlan],
     work_limit: usize,
 ) -> Result<Plan, CompileError> {
-    derive(region, data, work_limit)
+    derive(region, states, work_limit)
 }
 
 pub(super) fn verify(region: &Region, data: &MirData) -> Result<(), CompileError> {
-    let expected = derive(region, data, DEFAULT_WORK_LIMIT)?;
+    let expected = derive(region, &data.states, DEFAULT_WORK_LIMIT)?;
     if data.state_elision.enabled || data.state_elision.masks != expected.masks {
         return Err(CompileError::InvalidIr(
             "invalid CPU state-elision certificate".into(),
@@ -338,9 +337,8 @@ mod tests {
                     continue;
                 }
                 match write.address {
-                    Address::Flags
-                    | Address::FlagOperand
-                    | Address::Absolute(a)
+                    Address::Flags | Address::FlagOperand => skipped_flags += 1,
+                    Address::Absolute(a)
                         if a == gp::last_result as u32
                             || a == gp::last_op_size as u32
                             || a == gp::flags_changed as u32 =>
