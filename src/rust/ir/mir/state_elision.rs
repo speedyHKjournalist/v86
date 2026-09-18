@@ -112,7 +112,8 @@ fn origins(region: &Region, left: &mut usize) -> Result<Vec<Origin>, CompileErro
     // seeded immediately. Other instruction results are conservatively Other.
     for (index, value) in region.values.iter().enumerate() {
         if let Definition::Instruction(_, _) = value.definition {
-            result[index] = special_origin(region, ValueId(index as u32), &result);
+            let next = special_origin(region, ValueId(index as u32), &result);
+            result[index] = next;
         }
     }
 
