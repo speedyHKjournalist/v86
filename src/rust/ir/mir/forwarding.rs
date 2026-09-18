@@ -165,9 +165,15 @@ fn constant_i32(data: &MirData, value: ValueId) -> Option<u32> {
     }
 }
 
-fn byte_ranges_disjoint(a: u32, a_bytes: u8, b: u32, b_bytes: u8) -> bool {
+fn native_offsets_disjoint(a: u32, a_bytes: u8, b: u32, b_bytes: u8) -> bool {
+    // Native page translations preserve the low 12 address bits. Distinct
+    // virtual pages may alias the same physical page, so full linear-address
+    // inequality is insufficient; byte offsets within a physical page must be
+    // disjoint even under the worst-case page alias.
     (0..a_bytes).all(|i| {
-        (0..b_bytes).all(|j| a.wrapping_add(i as u32) != b.wrapping_add(j as u32))
+        (0..b_bytes).all(|j| {
+            (a.wrapping_add(i as u32) & 4095) != (b.wrapping_add(j as u32) & 4095)
+        })
     })
 }
 
@@ -202,7 +208,9 @@ fn alias(
         _ => None,
     };
     match constants {
-        Some((a, b)) if byte_ranges_disjoint(a, a_bytes, b, b_bytes) => AliasProof::Disjoint,
+        Some((a, b)) if native_offsets_disjoint(a, a_bytes, b, b_bytes) => {
+            AliasProof::Disjoint
+        },
         _ => AliasProof::MayAlias,
     }
 }
