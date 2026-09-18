@@ -278,14 +278,21 @@ mod tests {
     }
 
     #[test]
-    fn partial_flag_mutation_disables_lazy_recovery() {
-        // INC preserves CF with a mixed eager/lazy backing layout. Until that
-        // exact layout is modeled, its post-instruction state stays canonical.
-        let region = region(&[0x40, 0x75, 0x00, 0x90]);
+    fn mixed_eager_lazy_integer_flags_keep_exact_recovery() {
+        // ADC/SBB eagerly materialize CF/AF/OF; INC/DEC eagerly preserve CF.
+        // Their remaining arithmetic flags stay lazy in the baseline.
+        let region = region(&[
+            0x11, 0xD8, // ADC EAX, EBX
+            0x19, 0xD1, // SBB ECX, EDX
+            0x40,       // INC EAX
+            0x49,       // DEC ECX
+            0x75, 0x00, // JNZ
+            0x90,
+        ]);
         let mir = lower(&region).unwrap();
         assert!(
-            mir.states.iter().any(|state| !state.lazy_flags),
-            "INC path must retain at least one canonical FLAGS recovery state"
+            mir.states.iter().all(|state| state.lazy_flags),
+            "audited mixed eager/lazy integer states should use exact lazy recovery"
         );
     }
 }
