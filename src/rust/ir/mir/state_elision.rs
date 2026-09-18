@@ -258,11 +258,15 @@ pub(crate) fn lower(
     states: &[StatePlan],
     work_limit: usize,
 ) -> Result<Plan, CompileError> {
-    derive(region, states, work_limit)
+    match derive(region, states, work_limit) {
+        Ok(plan) => Ok(plan),
+        Err(CompileError::Budget(_)) => Ok(disabled(states)),
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn verify(region: &Region, data: &MirData) -> Result<(), CompileError> {
-    let expected = derive(region, &data.states, DEFAULT_WORK_LIMIT)?;
+    let expected = lower(region, &data.states, DEFAULT_WORK_LIMIT)?;
     if data.state_elision.enabled || data.state_elision.masks != expected.masks {
         return Err(CompileError::InvalidIr(
             "invalid CPU state-elision certificate".into(),
