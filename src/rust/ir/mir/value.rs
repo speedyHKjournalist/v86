@@ -184,6 +184,20 @@ pub fn lower(region: &Region, inst: &Instruction) -> Option<ValuePlan> {
             },
             standalone: Reading::Constant(0),
         }),
+        Op::ReadFlagResult => steps.push(Step::Read {
+            cpu: Reading::Memory {
+                address: Address::Absolute(gp::last_result as u32),
+                load: Load::I32,
+            },
+            standalone: Reading::Constant(0),
+        }),
+        Op::ReadFlagSize => steps.push(Step::Read {
+            cpu: Reading::Memory {
+                address: Address::Absolute(gp::last_op_size as u32),
+                load: Load::I32,
+            },
+            standalone: Reading::Constant(0),
+        }),
         Op::ReadFlags => steps.push(Step::Read {
             cpu: Reading::Call {
                 name: "get_eflags",
