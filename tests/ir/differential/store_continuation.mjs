@@ -119,7 +119,7 @@ try {
     }
 
     let fastContinuations = 0;
-    let storeLoadRuns = 0;
+    let store_load_runs = 0;
     let slowExits = 0;
     let aliasExits = 0;
     let preciseFaults = 0;
@@ -143,7 +143,7 @@ try {
         assert.equal(cpu.reg32[3] >>> 0, 0x12345690, "following byte load observes the stored value");
         assert.equal(cpu.instruction_pointer[0] >>> 0, PC + programs.store_load.length);
         assert.equal(words[664 >> 2], 102, "store and forwarded load retire exactly once each");
-        storeLoadRuns++;
+        store_load_runs++;
 
         reset("continue");
         instances.continue[opt].exports.f(0);
@@ -184,7 +184,7 @@ try {
     }
 
     console.log(
-        `PASS: ${fastContinuations} guarded fast-store continuations, ${storeLoadRuns} store-load runs, ` +
+        `PASS: ${fastContinuations} guarded fast-store continuations, ${store_load_runs} store-load runs, ` +
         `${slowExits} slow-path exits, ${aliasExits} physical-code-alias exits, ` +
         `${preciseFaults} precise post-store faults`,
     );
