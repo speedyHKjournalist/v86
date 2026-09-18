@@ -82,7 +82,7 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     let result =
         if width == 32 { low } else { b.node(Op::Extend { signed: false }, vec![low], Type::I32) };
     super::shift::shift_flags(b, result, overflow, overflow, width);
-    b.invalidate_flag_backing();
+    b.preserve_mul_backing(result, overflow, width);
     if implicit {
         if width == 8 {
             let ax = b.node(Op::Truncate, vec![product], Type::I16);
