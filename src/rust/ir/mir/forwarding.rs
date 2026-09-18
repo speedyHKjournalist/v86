@@ -1,7 +1,8 @@
-//! Guarded, intra-block ordinary-RAM read forwarding. A static chain is not a
-//! license to reuse a slow read: the emitter carries a separate runtime valid
-//! bit which is set ONLY by a successful native RAM guard/load. MMIO, callbacks,
-//! page crossings and faults keep their original ordered slow paths.
+//! Guarded, intra-block ordinary-RAM forwarding. A static chain is not a
+//! license to reuse a slow access: the emitter carries a separate runtime valid
+//! bit which is set ONLY by a successful native RAM guard/load or by a committed
+//! native scalar store that is allowed to continue. MMIO, callbacks, page
+//! crossings and faults keep their original ordered slow paths.
 use super::{
     effect::EffectPlan,
     memory::{Argument, MemoryPlan, NativeMemory, RamGuard, SlowResult},
@@ -14,9 +15,10 @@ pub const DEFAULT_WORK_LIMIT: usize = 262_144;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Forwarding {
-    /// Reset validity before the first guarded read of each chain, on every visit.
+    /// Reset validity before the first guarded source of each chain, on every visit.
+    /// The source may be an ordinary load or a committed scalar store.
     Begin,
-    /// A preceding candidate in this block, with the same address and width.
+    /// A preceding load/store source in this block, with the same address and width.
     Reuse { previous: InstId },
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,7 +31,7 @@ enum AddressKey {
     },
 }
 
-fn eligible(plan: &MemoryPlan) -> bool {
+fn eligible_load(plan: &MemoryPlan) -> bool {
     let NativeMemory::ScalarLoad {
         result,
         ticket: None,
@@ -47,6 +49,31 @@ fn eligible(plan: &MemoryPlan) -> bool {
             })
         && plan.call.name == "ir_memory_read"
         && plan.call.args == [Argument::Value(plan.address), Argument::I32(bytes as i32)]
+}
+
+fn eligible_store(plan: &MemoryPlan) -> bool {
+    let NativeMemory::ScalarStore {
+        value,
+        commit: Some(commit),
+    } = plan.native
+    else {
+        return false;
+    };
+    let bytes = plan.guard.bytes;
+    matches!(bytes, 1 | 2 | 4)
+        && plan.guard == RamGuard::new(bytes, true)
+        && plan.result
+            == (SlowResult::Store {
+                commit: Some(commit),
+                trap_after_fault: false,
+            })
+        && plan.call.name == "ir_memory_write"
+        && plan.call.args
+            == [
+                Argument::Value(plan.address),
+                Argument::Value(value),
+                Argument::I32(bytes as i32),
+            ]
 }
 fn segment(plan: &EffectPlan) -> Option<(ValueId, AddressKey)> {
     match *plan {
@@ -132,12 +159,12 @@ fn plan(data: &MirData, work_limit: usize) -> Result<Vec<Option<Forwarding>>, Co
                 continue;
             }
             if let Some(memory) = memory {
-                if eligible(memory) {
-                    let key = addresses
-                        .get(memory.address.index())
-                        .copied()
-                        .flatten()
-                        .unwrap_or(AddressKey::Value(memory.address));
+                let key = addresses
+                    .get(memory.address.index())
+                    .copied()
+                    .flatten()
+                    .unwrap_or(AddressKey::Value(memory.address));
+                if eligible_load(memory) {
                     if let Some((old_key, bytes, old)) = previous {
                         if key == old_key && bytes == memory.guard.bytes {
                             if result[old.index()].is_none() {
@@ -146,6 +173,13 @@ fn plan(data: &MirData, work_limit: usize) -> Result<Vec<Option<Forwarding>>, Co
                             result[index] = Some(Forwarding::Reuse { previous: old });
                         }
                     }
+                    previous = Some((key, memory.guard.bytes, id));
+                    continue;
+                }
+                if eligible_store(memory) {
+                    // A committed native store may seed exactly one subsequent
+                    // same-address/same-width load chain. Slow stores return from
+                    // the entry, while code-page aliases return before reuse.
                     previous = Some((key, memory.guard.bytes, id));
                     continue;
                 }
@@ -167,8 +201,9 @@ fn plan(data: &MirData, work_limit: usize) -> Result<Vec<Option<Forwarding>>, Co
                     }
                 }
             }
-            // Stores, RMW, checks, division, calls, vector reads and every
-            // unrecognized action terminate the chain regardless of alias class.
+            // Non-forwardable stores, RMW, checks, division, calls, vector
+            // memory and every unrecognized action terminate the chain regardless
+            // of alias class.
             previous = None;
         }
     }

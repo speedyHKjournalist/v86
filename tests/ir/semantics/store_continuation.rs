@@ -13,9 +13,10 @@ const CODE_PAGE: u32 = PC & !4095;
 
 #[test]
 fn scalar_store_continuation_fixtures() {
-    let cases: [(&str, &[u8]); 2] = [
+    let cases: [(&str, &[u8]); 3] = [
         ("continue", &[0x88, 0x11, 0x43]),
         ("fault_after", &[0x88, 0x11, 0x8B, 0x06]),
+        ("store_load", &[0x88, 0x11, 0x8A, 0x19]),
     ];
     std::fs::create_dir_all("build/ir-store-continuation").unwrap();
     for (name, bytes) in cases {
@@ -30,7 +31,13 @@ fn scalar_store_continuation_fixtures() {
             if optimize {
                 run(&mut region, PassConfig::default()).unwrap();
             }
-            let mir = lower(&region).unwrap();
+            let mut mir = lower(&region).unwrap();
+            if optimize {
+                let forwarded = mir
+                    .forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)
+                    .unwrap();
+                assert_eq!(forwarded, usize::from(name == "store_load"));
+            }
             let artifact = emit_cpu_with_code_pages(&mir, 100, &[CODE_PAGE]).unwrap();
             std::fs::write(
                 format!("build/ir-store-continuation/{name}-{}.wasm", u8::from(optimize)),

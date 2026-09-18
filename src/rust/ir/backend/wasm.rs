@@ -498,6 +498,17 @@ impl Emitter<'_> {
                     4 => self.w.store_unaligned_i32(0),
                     _ => unreachable!(),
                 }
+                if cache {
+                    // The write itself has completed on canonical same-page RAM.
+                    // A code-page alias may still force an immediate return below,
+                    // but only the continuing path can consume this cached value.
+                    self.get(*value);
+                    self.mask(self.mir.value_types[value.index()]);
+                    let (valid, cached) = self.read_cache.as_ref().unwrap();
+                    self.w.set_local(cached);
+                    self.w.const_i32(1);
+                    self.w.set_local(valid);
+                }
                 if let Some(commit) = commit {
                     let pointer = pointer.unwrap();
                     self.finish_scalar_store(*commit, &pointer);
@@ -593,8 +604,8 @@ impl Emitter<'_> {
         }
         self.w.else_();
         if cache {
-            // Clear BEFORE entering a callback or a page walk. Slow success is
-            // not evidence that RAM or its mapping remained stable.
+            // Clear BEFORE entering a callback or a page walk. Slow load/store
+            // success is not evidence that RAM or its mapping remained stable.
             self.w.const_i32(0);
             self.w.set_local(&self.read_cache.as_ref().unwrap().0);
         }
