@@ -89,6 +89,7 @@ fn derive(
     }
 
     let mut live = vec![false; region.instructions.len()];
+    let mut seen_values = vec![false; region.values.len()];
     let mut work = Vec::new();
 
     for state in used_states(region) {
@@ -119,10 +120,14 @@ fn derive(
 
     while let Some(value) = work.pop() {
         spend(&mut left, 1)?;
-        let data = region
-            .values
-            .get(value.index())
+        let seen = seen_values
+            .get_mut(value.index())
             .ok_or_else(|| CompileError::InvalidIr("CPU liveness value missing".into()))?;
+        if *seen {
+            continue;
+        }
+        *seen = true;
+        let data = &region.values[value.index()];
         match data.definition {
             Definition::Instruction(id, _) => {
                 if !live[id.index()] {
