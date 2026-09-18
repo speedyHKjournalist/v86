@@ -34,7 +34,16 @@ The first exact lazy-backing set is deliberately small:
 - XADD/CMPXCHG where they reuse those arithmetic semantics;
 - ADC/SBB, with eager CF/AF/OF stored in raw flags and PF/ZF/SF left lazy;
 - INC/DEC, with the incoming architectural CF stored eagerly and the remaining
-  arithmetic flags left lazy.
+  arithmetic flags left lazy;
+- SHL/SHR/SAR and SHLD/SHRD, with CF/OF eager and PF/AF/ZF/SF lazy, including
+  count-zero preservation of the complete incoming backing;
+- ROL/ROR/RCL/RCR, which update only eager CF/OF and preserve the previous lazy
+  mask, last_result, last_op1 and last_op_size;
+- BT/BTS/BTR/BTC, which update only eager CF;
+- BSF/BSR, with eager CF/ZF and the baseline undefined-flag lazy policy;
+- POPCNT, whose arithmetic flags are fully eager;
+- MUL/IMUL, with eager CF/OF and the baseline undefined PF/AF/ZF/SF lazy policy;
+- CLC/STC/CMC and CLD/STD raw-EFLAGS control-bit updates.
 
 Logical operations clear the eager CF/AF/OF bits and make only PF/ZF/SF lazy.
 ADD makes all arithmetic flags lazy. SUB/CMP additionally carry the baseline
@@ -42,8 +51,7 @@ ADD makes all arithmetic flags lazy. SUB/CMP additionally carry the baseline
 CF/AF/OF, while SBB also carries `FLAG_SUB`. INC/DEC exclude only CF from the
 lazy mask and DEC carries `FLAG_SUB`.
 
-Shifts/rotates, bit operations, multiply, SAHF/BCD and other not-yet-audited
-partially eager flag layouts invalidate the proof. Once invalidated inside a
+SAHF/BCD and other not-yet-audited partially eager flag layouts invalidate the proof. Once invalidated inside a
 region, later ALU instructions do not guess the backing valid again.
 
 ## Liveness certificate
@@ -73,8 +81,8 @@ CPU value programs skipped by emission.
 
 Focused tests require an ADD -> ADD -> JNZ region to produce a smaller CPU Wasm
 module after CPU liveness while producing byte-identical standalone output.
-A dedicated ADC/SBB/INC/DEC/JNZ region requires every audited recovery state to
-remain eligible for exact lazy backing.
+Dedicated ADC/SBB/INC/DEC/JNZ and SHL/ROR/BT/POPCNT/IMUL regions require every
+audited recovery state to remain eligible for exact lazy backing.
 
 The existing reachable-CFG CPU differential also enables the certificate.
 ADD/SUB/AND/CMP/JNZ and mixed ADC/SBB/INC/DEC/JNZ fixtures compare raw flags,
@@ -84,8 +92,27 @@ interpreter execution at the same budget exit. The mixed fixture runs in both
 
 ## Still open
 
-The validity model is intentionally conservative. Extending exact backing to
-shifts, rotates and other mixed eager/lazy operations can unlock more partial
-FLAGS elimination. General dirty-state merging across
+The validity model is intentionally conservative. SAHF/BCD and remaining
+special/undefined flag layouts still require separate auditing before they can
+participate in exact backing. General dirty-state merging across
 resumable helper/MMU callbacks, memory LICM, remaining ISA coverage, system and
 performance validation, and IR-14 retirement remain separate work.
+
+
+## Extended backing bundle
+
+The next bundled increment broadens exact CPU recovery without changing generic
+HIR or standalone materialization:
+
+- variable and immediate shifts preserve complete backing when the effective
+  count is zero, and otherwise update eager CF/OF plus last_result/op-size;
+- rotates and through-carry rotates update only raw CF/OF and clear those bits
+  from the previous lazy mask;
+- bit tests update only raw CF; scans use eager CF/ZF with the pinned baseline
+  undefined-flag lazy representation; POPCNT makes arithmetic flags fully eager;
+- MUL/IMUL use eager CF/OF while preserving the baseline lazy undefined flags;
+- carry and direction control instructions update the corresponding raw EFLAGS
+  bit instead of invalidating the whole certificate.
+
+Dedicated differential suites compare the raw CPU backing fields to the
+interpreter, not only architectural get_eflags().
