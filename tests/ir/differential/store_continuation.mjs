@@ -11,6 +11,7 @@ const MISSING = 0x320040;
 const programs = {
     continue: Uint8Array.from([0x88, 0x11, 0x43]),
     fault_after: Uint8Array.from([0x88, 0x11, 0x8B, 0x06]),
+    store_load: Uint8Array.from([0x88, 0x11, 0x8A, 0x19]),
 };
 const modules = Object.fromEntries(Object.keys(programs).map(name => [
     name,
@@ -118,6 +119,7 @@ try {
     }
 
     let fastContinuations = 0;
+    let storeLoadRuns = 0;
     let slowExits = 0;
     let aliasExits = 0;
     let preciseFaults = 0;
@@ -131,6 +133,17 @@ try {
         assert.equal(cpu.instruction_pointer[0] >>> 0, PC + programs.continue.length);
         assert.equal(words[664 >> 2], 102, "continued store and following instruction commit once");
         fastContinuations++;
+
+        reset("store_load");
+        primeWrite(DATA);
+        instances.store_load[opt].exports.f(0);
+        assert.equal(slowWrites, 0, "store-load case keeps the store on native RAM");
+        assert.equal(slowReads, 0, "same-address load does not fall back to the CPU slow path");
+        assert.equal(mem[DATA], 0x90, "store-load case commits the written byte");
+        assert.equal(cpu.reg32[3] >>> 0, 0x12345690, "following byte load observes the stored value");
+        assert.equal(cpu.instruction_pointer[0] >>> 0, PC + programs.store_load.length);
+        assert.equal(words[664 >> 2], 102, "store and forwarded load retire exactly once each");
+        storeLoadRuns++;
 
         reset("continue");
         instances.continue[opt].exports.f(0);
@@ -171,8 +184,9 @@ try {
     }
 
     console.log(
-        `PASS: ${fastContinuations} guarded fast-store continuations, ${slowExits} slow-path exits, ` +
-        `${aliasExits} physical-code-alias exits, ${preciseFaults} precise post-store faults`,
+        `PASS: ${fastContinuations} guarded fast-store continuations, ${storeLoadRuns} store-load runs, ` +
+        `${slowExits} slow-path exits, ${aliasExits} physical-code-alias exits, ` +
+        `${preciseFaults} precise post-store faults`,
     );
 } finally {
     await vm.destroy();
