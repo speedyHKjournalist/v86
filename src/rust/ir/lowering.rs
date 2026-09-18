@@ -209,6 +209,14 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
                     },
                 })
                 .collect(),
+            value_definitions: region
+                .values
+                .iter()
+                .map(|value| match value.definition {
+                    super::hir::Definition::Parameter(_, _) => None,
+                    super::hir::Definition::Instruction(id, _) => Some(id),
+                })
+                .collect(),
             allocation,
             helpers,
             memory,
