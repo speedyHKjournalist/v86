@@ -114,3 +114,135 @@ pub(super) fn eligible(data: &MirData, id: InstId) -> bool {
         .copied()
         .unwrap_or(false)
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{
+        backend::wasm::{emit, emit_cpu, StateLayout},
+        effects::{Effects, StateSet},
+        frontend::{decode::GuestEip, integer::IntegerBuilder},
+        helper::{ExceptionOwner, HelperAbi, HelperDescriptor},
+        hir::{Binary, Op, Terminator},
+        ids::HelperId,
+        lowering::lower,
+        state::{ResumeKind, StateMap},
+        types::Type,
+    };
+
+    fn region(reads_state: bool) -> crate::ir::hir::Region {
+        let mut b = IntegerBuilder::new();
+        let input = b.gpr;
+        let one = b.constant(1, Type::I32);
+        let dead = b.binary(Binary::Add, input[7], one);
+        let mut before_gpr = input;
+        before_gpr[7] = dead;
+        let before = b.region.state(StateMap {
+            instruction_pc: GuestEip(0x1000),
+            next_pc: GuestEip(0x1001),
+            next_value: None,
+            resume: ResumeKind::BeforeInstruction,
+            gpr: before_gpr,
+            flags: b.flags.clone(),
+            xmm: vec![],
+            x87: vec![],
+            committed_instructions: 0,
+            count_base: None,
+            rep_progress: None,
+        });
+        let mut effects = Effects::pure();
+        if reads_state {
+            effects.reads_state = StateSet::ALL;
+        }
+        b.region.helpers.push(HelperDescriptor {
+            name: "ir10_pure_helper".into(),
+            params: vec![Type::I32],
+            results: vec![Type::I32],
+            effects,
+            exception_owner: ExceptionOwner::CannotFault,
+            abi: HelperAbi::Outcome {
+                fault_delivery: None,
+                normal_preserves_state: true,
+            },
+        });
+        let values = b.region.append(
+            b.block,
+            Op::CallHelper(HelperId(0)),
+            vec![input[0], b.effect],
+            &[Type::I32, Type::Effect],
+            Some(before),
+        );
+        b.effect = values[1];
+        let mut after_gpr = input;
+        after_gpr[0] = values[0];
+        let after = b.region.state(StateMap {
+            instruction_pc: GuestEip(0x1000),
+            next_pc: GuestEip(0x1001),
+            next_value: None,
+            resume: ResumeKind::AfterInstruction,
+            gpr: after_gpr,
+            flags: b.flags,
+            xmm: vec![],
+            x87: vec![],
+            committed_instructions: 1,
+            count_base: None,
+            rep_progress: None,
+        });
+        b.region.terminate(b.block, Terminator::Exit(after));
+        b.region
+    }
+
+    fn layout() -> StateLayout {
+        StateLayout {
+            gpr: 256,
+            flags: 288,
+            eip: 292,
+            committed: 296,
+            flag_operand: 300,
+        }
+    }
+
+    #[test]
+    fn pure_helper_trim_reduces_cpu_state_and_liveness_only() {
+        let region = region(false);
+
+        let mut baseline = lower(&region).unwrap();
+        let baseline_dead = baseline
+            .elide_dead_cpu_values(crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT)
+            .unwrap();
+        let baseline_cpu = emit_cpu(&baseline, 100).unwrap().bytes;
+        let baseline_standalone = emit(&baseline, layout(), 100).unwrap().bytes;
+
+        let mut optimized = lower(&region).unwrap();
+        assert_eq!(
+            optimized
+                .elide_helper_state_observations(DEFAULT_WORK_LIMIT)
+                .unwrap(),
+            1
+        );
+        let optimized_dead = optimized
+            .elide_dead_cpu_values(crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT)
+            .unwrap();
+        assert!(
+            optimized_dead > baseline_dead,
+            "trimmed helper snapshot should release recovery-only SSA"
+        );
+        let optimized_cpu = emit_cpu(&optimized, 100).unwrap().bytes;
+        let optimized_standalone = emit(&optimized, layout(), 100).unwrap().bytes;
+        assert!(optimized_cpu.len() < baseline_cpu.len());
+        assert_eq!(optimized_standalone, baseline_standalone);
+    }
+
+    #[test]
+    fn helper_state_reads_are_a_hard_negative_barrier() {
+        let region = region(true);
+        let mut mir = lower(&region).unwrap();
+        assert_eq!(
+            mir.elide_helper_state_observations(DEFAULT_WORK_LIMIT)
+                .unwrap(),
+            0
+        );
+        emit_cpu(&mir, 100).unwrap();
+    }
+}
