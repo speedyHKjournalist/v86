@@ -248,7 +248,7 @@ pub(super) fn verify(region: &Region, data: &MirData) -> Result<(), CompileError
 }
 
 pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
-    let use_trimmed = data.helper_state.enabled;
+    let use_trimmed = helper_state::plan_enabled(&data.helper_state);
     let live = if use_trimmed {
         &data.cpu_liveness.trimmed_live
     } else {
