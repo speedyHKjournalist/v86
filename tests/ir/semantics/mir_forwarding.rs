@@ -306,12 +306,12 @@ fn emits_guarded_forwarding_cpu_corpus_after_dropping_hir() {
 
 #[test]
 fn disjoint_constant_store_preserves_an_existing_load_chain() {
-    // MOV EAX,[0x2000]; MOV [0x3000],EBX; MOV ECX,[0x2000].
-    // The middle store is a different constant byte range under the same
-    // segment base. Its slow path returns; only the proven-disjoint native
-    // continuation can reach the final load.
+    // MOV EAX,[0x2000]; MOV [0x2010],EBX; MOV ECX,[0x2000].
+    // The middle store has a distinct page offset even if two virtual pages
+    // alias the same physical page. Its slow path returns; only the proven
+    // disjoint native continuation can reach the final load.
     let bytes = [
-        0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x00, 0x30, 0x00, 0x00, 0x8B, 0x0D,
+        0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x10, 0x20, 0x00, 0x00, 0x8B, 0x0D,
         0x00, 0x20, 0x00, 0x00,
     ];
     let r = region(&bytes);
@@ -326,7 +326,22 @@ fn disjoint_constant_store_preserves_an_existing_load_chain() {
     );
     emit_cpu(&m, 32).unwrap();
 
-    // Overlap is deliberately MayAlias and therefore kills the old proof.
+    // A different virtual page with the same page offset may physically alias
+    // the first load, so it is deliberately MayAlias and kills the old proof.
+    let page_alias = [
+        0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x00, 0x30, 0x00, 0x00, 0x8B, 0x0D,
+        0x00, 0x20, 0x00, 0x00,
+    ];
+    let r = region(&page_alias);
+    assert_eq!(
+        lower(&r)
+            .unwrap()
+            .forward_ram_reads(DEFAULT_WORK_LIMIT)
+            .unwrap(),
+        0
+    );
+
+    // Overlap in the same page is also MayAlias.
     let overlapping = [
         0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x02, 0x20, 0x00, 0x00, 0x8B, 0x0D,
         0x00, 0x20, 0x00, 0x00,
