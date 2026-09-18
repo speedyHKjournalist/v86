@@ -212,3 +212,75 @@ pub(super) fn instruction_live(data: &MirData, id: InstId) -> bool {
             .unwrap_or(true)
         || !matches!(data.values.get(id.index()), Some(Some(_)))
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{
+        backend::wasm::{emit, emit_cpu, StateLayout},
+        frontend::{
+            decode::{GuestEip, LinearAddress},
+            region::lift_cpu_cfg,
+        },
+        lowering::lower,
+        passes::{run, PassConfig},
+    };
+
+    fn region(bytes: &[u8]) -> crate::ir::hir::Region {
+        let mut region =
+            lift_cpu_cfg(bytes, GuestEip(0x1000), LinearAddress(0x100000), true, 8).unwrap();
+        run(&mut region, PassConfig::default()).unwrap();
+        region
+    }
+
+    fn layout() -> StateLayout {
+        StateLayout {
+            gpr: 256,
+            flags: 288,
+            eip: 292,
+            committed: 296,
+            flag_operand: 300,
+        }
+    }
+
+    #[test]
+    fn cpu_liveness_elides_concrete_flags_without_changing_standalone() {
+        // ADD EAX,EBX; ADD ECX,EDX; JNZ +2; NOP; NOP; NOP.
+        // CPU recovery can carry exact lazy backing across both arithmetic
+        // boundaries, while JNZ explicitly demands only ZF from the second ADD.
+        let region = region(&[0x01, 0xD8, 0x01, 0xD1, 0x75, 0x02, 0x90, 0x90, 0x90]);
+        let baseline = lower(&region).unwrap();
+        let baseline_cpu = emit_cpu(&baseline, 100).unwrap().bytes;
+        let baseline_standalone = emit(&baseline, layout(), 100).unwrap().bytes;
+
+        let mut optimized = lower(&region).unwrap();
+        let count = optimized
+            .elide_dead_cpu_values(DEFAULT_WORK_LIMIT)
+            .unwrap();
+        assert!(count > 0, "scalar ALU should expose CPU-only dead flag values");
+        let optimized_cpu = emit_cpu(&optimized, 100).unwrap().bytes;
+        let optimized_standalone = emit(&optimized, layout(), 100).unwrap().bytes;
+
+        assert!(
+            optimized_cpu.len() < baseline_cpu.len(),
+            "CPU liveness should remove emitted value programs"
+        );
+        assert_eq!(
+            optimized_standalone, baseline_standalone,
+            "CPU-only liveness must not alter standalone emission"
+        );
+    }
+
+    #[test]
+    fn partial_flag_mutation_disables_lazy_recovery() {
+        // INC preserves CF with a mixed eager/lazy backing layout. Until that
+        // exact layout is modeled, its post-instruction state stays canonical.
+        let region = region(&[0x40, 0x75, 0x00, 0x90]);
+        let mir = lower(&region).unwrap();
+        assert!(
+            mir.states.iter().any(|state| !state.lazy_flags),
+            "INC path must retain at least one canonical FLAGS recovery state"
+        );
+    }
+}
