@@ -69,17 +69,20 @@ try {
     }
     const state=()=>({regs:Array.from(cpu.reg32,x=>x>>>0),flags:e.get_eflags()>>>0,last:words[104>>2],ip:cpu.instruction_pointer[0]>>>0,cr2:cpu.cr[2]>>>0,
         data:target<mem.length?Array.from(mem.slice(target-4,target+8)):[],stack:Array.from(mem.slice(STACK-32,STACK))});
+    const raw_state=()=>[cpu.flags[0]>>>0,cpu.flags_changed[0]>>>0,
+        words[112>>2]>>>0,words[104>>2]>>>0,words[96>>2]>>>0];
     const values=[0,1,2,0xFFFFFFFF,0x80000000,0x80000001,0xFFFF,0x8000,0xAA55FF80,0x12345678];
     const indices=[-32768,-257,-33,-17,-9,-8,-1,0,1,7,8,15,16,31,32,63,255,256,32767,32768,65535];
     let ordinary=0,native=0;
     for(let i=0;i<cases.length;i++)for(const input of values)for(const index of cases[i][3]<4&&cases[i][5]<0?indices:[0,0xDEADBEEF])for(const opt of [0,1]) {
         reset(i,input,index,BASE,true);
         const expected=reference(cases[i],Array.from(cpu.reg32,x=>x>>>0),e.get_eflags()>>>0,words[104>>2],get32(target),bitIndex);
-        instances[i][opt].exports.f(0);const actual=state();assert.equal(words[664>>2],101);assert.equal(actual.ip,PC+cases[i][0].length);
+        instances[i][opt].exports.f(0);const actual=state(),actual_raw=raw_state();assert.equal(words[664>>2],101);assert.equal(actual.ip,PC+cases[i][0].length);
         assert.deepEqual(actual.regs,expected.regs,`reference bits ${i} input=${input} index=${index}`);assert.equal(actual.flags,expected.flags);
         if(cases[i][4]>=8&&cases[i][3]<4)assert.equal(mem[target],expected.data);
         if(cases[i][4]>=8){assert.equal(slow,0);native++;}
-        reset(i,input,index,BASE,true);e.ir_test_step();assert.deepEqual(actual,state(),`CPU bits ${i} input=${input.toString(16)} index=${index} opt=${opt}`);ordinary++;
+        reset(i,input,index,BASE,true);e.ir_test_step();assert.deepEqual(actual,state(),`CPU bits ${i} input=${input.toString(16)} index=${index} opt=${opt}`);
+        assert.deepEqual(actual_raw,raw_state(),`raw bit backing ${i} kind=${cases[i][3]}`);ordinary++;
     }
     console.log(`PASS: ${ordinary} bit/string/scan/POPCNT/BSWAP comparisons, ${native} native warm memory paths`);
     const observe=(kind,a,value)=>events.push({kind,a,value,regs:Array.from(cpu.reg32,x=>x>>>0),flags:e.get_eflags()>>>0,ip:cpu.instruction_pointer[0]>>>0});

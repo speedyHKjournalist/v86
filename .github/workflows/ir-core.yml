@@ -51,6 +51,13 @@ jobs:
           set -o pipefail
           tools/ir-licm-tests.sh 2>&1 | tee build/ir-licm-cpu.log
           node tests/ir/differential/cfg.mjs
+      - name: Extended FLAGS backing differentials
+        run: |
+          set -o pipefail
+          make build/v86-ir-test.wasm build/libv86.mjs build/jit-capacity.bin
+          node tests/ir/differential/shifts.mjs 2>&1 | tee build/ir-flags-shifts.log
+          node tests/ir/differential/bits.mjs 2>&1 | tee build/ir-flags-bits.log
+          node tests/ir/differential/multiply.mjs 2>&1 | tee build/ir-flags-multiply.log
       - name: Guarded RAM forwarding and callback recovery
         run: |
           set -o pipefail

@@ -278,6 +278,26 @@ mod tests {
     }
 
     #[test]
+    fn extended_integer_flag_families_keep_exact_recovery() {
+        let region = region(&[
+            0xD1, 0xE0,             // SHL EAX, 1
+            0xD1, 0xC9,             // ROR ECX, 1
+            0x0F, 0xA3, 0xC8,       // BT EAX, ECX
+            0xF3, 0x0F, 0xB8, 0xD8, // POPCNT EBX, EAX
+            0x0F, 0xAF, 0xC3,       // IMUL EAX, EBX
+            0xF8,                   // CLC
+            0xFC,                   // CLD
+            0x75, 0x00,             // JNZ
+            0x90,
+        ]);
+        let mir = lower(&region).unwrap();
+        assert!(
+            mir.states.iter().all(|state| state.lazy_flags),
+            "audited shift/bit/multiply/control states should keep exact recovery"
+        );
+    }
+
+    #[test]
     fn mixed_eager_lazy_integer_flags_keep_exact_recovery() {
         // ADC/SBB eagerly materialize CF/AF/OF; INC/DEC eagerly preserve CF.
         // Their remaining arithmetic flags stay lazy in the baseline.

@@ -448,13 +448,15 @@ fn lift_inner(
                 b.write(reg, i.operand_size, value);
             },
             0xF8 | 0xF9 => {
-                b.flags.arithmetic[0] = b.constant((op == 0xF9) as u32, Type::I1);
-                b.invalidate_flag_backing();
+                let carry = b.constant((op == 0xF9) as u32, Type::I1);
+                b.flags.arithmetic[0] = carry;
+                b.preserve_cf_backing(carry);
             },
             0xF5 => {
                 let one = b.constant(1, Type::I1);
-                b.flags.arithmetic[0] = b.binary(Binary::Xor, b.flags.arithmetic[0], one);
-                b.invalidate_flag_backing();
+                let carry = b.binary(Binary::Xor, b.flags.arithmetic[0], one);
+                b.flags.arithmetic[0] = carry;
+                b.preserve_cf_backing(carry);
             },
             0x40..=0x4F | 0xFE | 0xFF if op < 0xFE || reg < 2 => {
                 let (dst, width, dec) = if op < 0xFE {

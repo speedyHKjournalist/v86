@@ -113,6 +113,116 @@ impl IntegerBuilder {
         };
         self.binary(Binary::Or, cleared, value)
     }
+    fn select_backing(&mut self, condition: ValueId, yes: ValueId, no: ValueId) -> ValueId {
+        self.node(Op::Select, vec![condition, yes, no], self.ty(yes))
+    }
+    pub fn preserve_shift_backing(
+        &mut self,
+        unchanged: ValueId,
+        raw_result: ValueId,
+        carry: ValueId,
+        overflow: ValueId,
+        width: u8,
+    ) {
+        use crate::cpu::cpu::{FLAGS_ALL, FLAG_CARRY, FLAG_OVERFLOW};
+        let (Some(old_raw), Some(old_mask), Some(old_result), Some(old_size)) = (
+            self.flags.raw_flags,
+            self.flags.lazy_mask,
+            self.flags.last_result,
+            self.flags.last_op_size,
+        ) else {
+            self.invalidate_flag_backing();
+            return;
+        };
+        let mut raw = self.write_raw_flag_bit(old_raw, carry, 0);
+        raw = self.write_raw_flag_bit(raw, overflow, 11);
+        let mask = self.constant((FLAGS_ALL & !FLAG_CARRY & !FLAG_OVERFLOW) as u32, Type::I32);
+        let result = self.as_i32(raw_result);
+        let size = self.constant((width - 1) as u32, Type::I32);
+        self.flags.raw_flags = Some(self.select_backing(unchanged, old_raw, raw));
+        self.flags.lazy_mask = Some(self.select_backing(unchanged, old_mask, mask));
+        self.flags.last_result = Some(self.select_backing(unchanged, old_result, result));
+        self.flags.last_op_size = Some(self.select_backing(unchanged, old_size, size));
+    }
+    pub fn preserve_rotate_backing(
+        &mut self,
+        unchanged: ValueId,
+        carry: ValueId,
+        overflow: ValueId,
+    ) {
+        use crate::cpu::cpu::{FLAG_CARRY, FLAG_OVERFLOW};
+        let (Some(old_raw), Some(old_mask)) = (self.flags.raw_flags, self.flags.lazy_mask) else {
+            self.invalidate_flag_backing();
+            return;
+        };
+        let mut raw = self.write_raw_flag_bit(old_raw, carry, 0);
+        raw = self.write_raw_flag_bit(raw, overflow, 11);
+        let clear = self.constant(!(FLAG_CARRY | FLAG_OVERFLOW) as u32, Type::I32);
+        let mask = self.binary(Binary::And, old_mask, clear);
+        self.flags.raw_flags = Some(self.select_backing(unchanged, old_raw, raw));
+        self.flags.lazy_mask = Some(self.select_backing(unchanged, old_mask, mask));
+    }
+    pub fn preserve_raw_flag_bit(&mut self, value: ValueId, bit: u8) {
+        let Some(raw) = self.flags.raw_flags else {
+            self.invalidate_flag_backing();
+            return;
+        };
+        self.flags.raw_flags = Some(self.write_raw_flag_bit(raw, value, bit));
+    }
+    pub fn preserve_cf_backing(&mut self, carry: ValueId) {
+        use crate::cpu::cpu::FLAG_CARRY;
+        let (Some(raw), Some(mask)) = (self.flags.raw_flags, self.flags.lazy_mask) else {
+            self.invalidate_flag_backing();
+            return;
+        };
+        self.flags.raw_flags = Some(self.write_raw_flag_bit(raw, carry, 0));
+        let clear = self.constant(!FLAG_CARRY as u32, Type::I32);
+        self.flags.lazy_mask = Some(self.binary(Binary::And, mask, clear));
+    }
+    pub fn preserve_mul_backing(&mut self, result: ValueId, overflow: ValueId, width: u8) {
+        use crate::cpu::cpu::{FLAGS_ALL, FLAG_CARRY, FLAG_OVERFLOW};
+        let Some(mut raw) = self.flags.raw_flags else {
+            self.invalidate_flag_backing();
+            return;
+        };
+        raw = self.write_raw_flag_bit(raw, overflow, 0);
+        raw = self.write_raw_flag_bit(raw, overflow, 11);
+        self.flags.raw_flags = Some(raw);
+        self.flags.lazy_mask = Some(self.constant(
+            (FLAGS_ALL & !FLAG_CARRY & !FLAG_OVERFLOW) as u32,
+            Type::I32,
+        ));
+        self.flags.last_result = Some(self.as_i32(result));
+        self.flags.last_op_size = Some(self.constant((width - 1) as u32, Type::I32));
+    }
+    pub fn preserve_scan_backing(&mut self, result: ValueId, is_zero: ValueId, width: u8) {
+        use crate::cpu::cpu::{FLAGS_ALL, FLAG_CARRY, FLAG_ZERO};
+        let Some(mut raw) = self.flags.raw_flags else {
+            self.invalidate_flag_backing();
+            return;
+        };
+        let clear = self.constant(0, Type::I1);
+        raw = self.write_raw_flag_bit(raw, clear, 0);
+        raw = self.write_raw_flag_bit(raw, is_zero, 6);
+        self.flags.raw_flags = Some(raw);
+        self.flags.lazy_mask = Some(self.constant(
+            (FLAGS_ALL & !FLAG_ZERO & !FLAG_CARRY) as u32,
+            Type::I32,
+        ));
+        self.flags.last_result = Some(self.as_i32(result));
+        self.flags.last_op_size = Some(self.constant((width - 1) as u32, Type::I32));
+    }
+    pub fn preserve_popcnt_backing(&mut self, is_zero: ValueId) {
+        use crate::cpu::cpu::FLAGS_ALL;
+        let Some(raw) = self.flags.raw_flags else {
+            self.invalidate_flag_backing();
+            return;
+        };
+        let clear = self.constant(!(FLAGS_ALL as u32), Type::I32);
+        let raw = self.binary(Binary::And, raw, clear);
+        self.flags.raw_flags = Some(self.write_raw_flag_bit(raw, is_zero, 6));
+        self.flags.lazy_mask = Some(self.constant(0, Type::I32));
+    }
     pub fn preserve_incdec_backing(&mut self, carry: ValueId, dec: bool) {
         use crate::cpu::cpu::{FLAGS_ALL, FLAG_CARRY, FLAG_SUB};
         let Some(raw) = self.flags.raw_flags else {

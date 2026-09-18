@@ -44,9 +44,6 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         return;
     }
     let width = i.operand_size;
-    // Bit tests/scans/popcnt all modify at least one arithmetic flag, but their
-    // pinned baseline backing layouts are not yet represented by this pass.
-    b.invalidate_flag_backing();
     let group = i.modrm.unwrap() >> 3 & 7;
     let rm = i.modrm.unwrap() & 7;
     let scan = matches!(op, 0x0FBC | 0x0FBD | 0xF30FB8);
@@ -121,6 +118,11 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             b.flags.arithmetic[3] = is_zero;
         }
         b.flags.zero_is_lazy = Some(clear);
+        if op == 0xF30FB8 {
+            b.preserve_popcnt_backing(is_zero);
+        } else {
+            b.preserve_scan_backing(result, is_zero, width);
+        }
         let result =
             if width == 32 { result } else { b.node(Op::Truncate, vec![result], Type::I16) };
         let result = if op == 0xF30FB8 {
@@ -132,7 +134,9 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         b.write(group, width, result);
     } else {
         let shifted = b.binary(Binary::Shr, value, bit);
-        b.flags.arithmetic[0] = b.extract(shifted, 0, Type::I1);
+        let carry = b.extract(shifted, 0, Type::I1);
+        b.flags.arithmetic[0] = carry;
+        b.preserve_cf_backing(carry);
         if modifies {
             let one = b.constant(1, Type::I32);
             let mask = b.binary(Binary::Shl, one, bit);
