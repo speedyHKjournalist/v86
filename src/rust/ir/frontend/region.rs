@@ -35,6 +35,7 @@ impl Frame {
                 lazy_mask: Some(r.param(block, Type::I32)),
                 last_result: Some(r.param(block, Type::I32)),
                 last_op_size: Some(r.param(block, Type::I32)),
+                backing_valid: Some(r.param(block, Type::I1)),
             },
             xmm: if xmm { (0..8).map(|_| r.param(block, Type::V128)).collect() } else { vec![] },
             count: r.param(block, Type::I32),
@@ -52,6 +53,7 @@ impl Frame {
         args.push(self.flags.lazy_mask.unwrap());
         args.push(self.flags.last_result.unwrap());
         args.push(self.flags.last_op_size.unwrap());
+        args.push(self.flags.backing_valid.unwrap());
         args.extend(&self.xmm);
         args.extend([self.count, self.effect]);
         args
@@ -275,6 +277,10 @@ fn graft(
             seed.flags.last_op_size.unwrap(),
             frame.flags.last_op_size.unwrap(),
         ),
+        (
+            seed.flags.backing_valid.unwrap(),
+            frame.flags.backing_valid.unwrap(),
+        ),
         (seed.effect, frame.effect),
     ] {
         values[old.index()] = Some(new);
@@ -366,6 +372,7 @@ fn graft(
             &mut state.flags.lazy_mask,
             &mut state.flags.last_result,
             &mut state.flags.last_op_size,
+            &mut state.flags.backing_valid,
             &mut state.next_value,
         ] {
             if let Some(value) = v {
