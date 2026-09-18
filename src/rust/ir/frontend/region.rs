@@ -259,10 +259,22 @@ fn graft(
             seed.flags.zero_is_lazy.unwrap(),
             frame.flags.zero_is_lazy.unwrap(),
         ),
-        (seed.flags.raw_flags.unwrap(), frame.flags.raw_flags.unwrap()),
-        (seed.flags.lazy_mask.unwrap(), frame.flags.lazy_mask.unwrap()),
-        (seed.flags.last_result.unwrap(), frame.flags.last_result.unwrap()),
-        (seed.flags.last_op_size.unwrap(), frame.flags.last_op_size.unwrap()),
+        (
+            seed.flags.raw_flags.unwrap(),
+            frame.flags.raw_flags.unwrap(),
+        ),
+        (
+            seed.flags.lazy_mask.unwrap(),
+            frame.flags.lazy_mask.unwrap(),
+        ),
+        (
+            seed.flags.last_result.unwrap(),
+            frame.flags.last_result.unwrap(),
+        ),
+        (
+            seed.flags.last_op_size.unwrap(),
+            frame.flags.last_op_size.unwrap(),
+        ),
         (seed.effect, frame.effect),
     ] {
         values[old.index()] = Some(new);
