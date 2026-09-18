@@ -921,6 +921,9 @@ impl Emitter<'_> {
         } else if let Some(plan) = &mir.calls[id.index()] {
             self.planned_call(plan);
         } else {
+            if self.cpu && !mir.cpu_instruction_live(id) {
+                return;
+            }
             self.planned_value(mir.values[id.index()].as_ref().unwrap());
         }
     }
