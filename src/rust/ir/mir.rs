@@ -5,6 +5,7 @@ pub mod control;
 pub mod cpu_liveness;
 pub mod effect;
 pub mod forwarding;
+pub mod helper_state;
 pub mod materialize;
 pub mod memory;
 mod optimize;
@@ -36,6 +37,7 @@ pub struct MirData {
     pub states: Vec<materialize::StatePlan>,
     pub(super) ram_forwarding: Vec<Option<forwarding::Forwarding>>,
     pub(super) state_elision: state_elision::Plan,
+    pub(super) helper_state: helper_state::Plan,
     pub(super) cpu_liveness: cpu_liveness::Plan,
 }
 
@@ -74,6 +76,18 @@ impl MirRegion {
     }
     pub(crate) fn cpu_state_write_elided(&self, state: super::ids::StateId, write: usize) -> bool {
         state_elision::elided(&self.data, state, write)
+    }
+
+    /// Enable audited omission of pre-call CPU StateMap writes for helpers that
+    /// are proven pure and state-independent.
+    pub fn elide_helper_state_observations(
+        &mut self,
+        work_limit: usize,
+    ) -> Result<usize, CompileError> {
+        helper_state::enable(&mut self.data, work_limit)
+    }
+    pub(crate) fn helper_state_observation_elided(&self, id: super::ids::InstId) -> bool {
+        helper_state::elided(&self.data, id)
     }
 
     /// Enable CPU-only post-lowering liveness. Standalone emission keeps the
@@ -129,6 +143,7 @@ impl Draft<'_> {
         materialize::verify(self.hir, &data.states)?;
         forwarding::verify(data)?;
         state_elision::verify(self.hir, data)?;
+        helper_state::verify(self.hir, data)?;
         cpu_liveness::verify(self.hir, data)?;
         Ok(MirRegion { data: self.data })
     }
