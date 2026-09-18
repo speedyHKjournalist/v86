@@ -316,7 +316,7 @@ mod tests {
             decode::{GuestEip, LinearAddress},
             region::lift_cpu_cfg,
         },
-        lowering::lower,
+        lowering::{lower, lower_draft},
         passes::{run, PassConfig},
     };
 
@@ -375,6 +375,28 @@ mod tests {
         let mut memory = optimized(&[0x8B, 0x06, 0x90]);
         assert_eq!(enable(&mut memory.data, DEFAULT_WORK_LIMIT).unwrap(), 0);
         assert!(memory.state_elision.masks.iter().flatten().all(|skip| !skip));
+    }
+
+    #[test]
+    fn forged_lowering_certificate_is_rejected() {
+        let mut region =
+            lift_cpu_cfg(&[0xEB, 0xFE], GuestEip(0x1000), LinearAddress(0x100000), true, 8)
+                .unwrap();
+        run(&mut region, PassConfig::default()).unwrap();
+        let mut draft = lower_draft(&region).unwrap();
+        let (state, write) = draft
+            .state_elision
+            .masks
+            .iter()
+            .enumerate()
+            .find_map(|(state, mask)| {
+                mask.iter()
+                    .position(|&skip| skip)
+                    .map(|write| (state, write))
+            })
+            .expect("pure self-loop must have an elision candidate");
+        draft.state_elision.masks[state][write] = false;
+        assert!(draft.finish().is_err());
     }
 
     #[test]
