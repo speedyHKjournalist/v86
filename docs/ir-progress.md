@@ -802,4 +802,4 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
 - lowering 生成有界 CPU-only SSA liveness 证书，从 CPU StatePlan、显式条件分支、ordered/effect/helper/poll 反向追踪；对 block parameter 仅沿各 predecessor 的对应 edge arg 回溯，并用 visited value 集保证循环固定点有界。
 - Tier 2 CPU emitter 仅跳过证书判定 dead 的纯 value program；访存、effect、helper、预算检查及 Tier 1 不受影响。新增 passes.cpu_values_elided 作为静态省略计数。
 - focused 回归要求 ADD→ADD→JNZ 的 CPU Wasm 变小而 standalone byte-identical；INC 保持 canonical recovery。真实 CFG 差分新增 ADD/SUB/AND/CMP/JNZ，对同一预算出口逐字段比较 raw flags、flags_changed、last_result、last_op1、last_op_size 与解释器。
-- 本增量仍不是完整 FLAGS liveness：需继续覆盖 ADC/SBB、INC/DEC、shift/rotate 等 backing 形式，并处理 resumable helper/MMU callback 后的 dirty-state 合流。
+- 本增量仍不是完整 FLAGS liveness：需继续覆盖 ADC/SBB、INC/DEC、shift/rotate 等 backing 形式，并处理 resumable helper/MMU callback 后的 dirty-state 合流。详见 [partial FLAGS liveness](ir-flags-liveness.md)。
