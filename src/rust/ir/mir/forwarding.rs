@@ -35,7 +35,7 @@ pub struct LoopPlan {
     pub(super) slots: usize,
 }
 impl LoopPlan {
-    pub(super) fn disabled(instructions: usize, blocks: usize) -> Self {
+    pub(crate) fn disabled(instructions: usize, blocks: usize) -> Self {
         Self {
             instructions: vec![None; instructions],
             resets: vec![vec![]; blocks],
