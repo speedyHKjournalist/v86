@@ -33,6 +33,12 @@ fn region(mode: u8, xmm: bool, backing: bool) -> Region {
     };
     let vectors = if xmm { (0..8).map(|r| vectors[(r + 1) % 8]).collect() } else { vectors };
     b.flags.last_op1 = if backing { Some(input[0]) } else { None };
+    if backing {
+        // This fixture intentionally varies semantic ZF independently from
+        // last_result/last_op_size, so it is not an exact v86 lazy-backing
+        // certificate and must continue exercising canonical materialization.
+        b.flags.backing_valid = Some(b.constant(0, Type::I1));
+    }
     if !backing {
         b.flags.raw_zero = None;
         b.flags.zero_is_lazy = None;
