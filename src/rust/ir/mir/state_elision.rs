@@ -202,23 +202,11 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
         })?;
         spend(&mut left, plan.cpu.writes.len())?;
 
-        let arithmetic_clean = state
-            .flags
-            .arithmetic
-            .iter()
-            .enumerate()
-            .all(|(bit, &value)| is_initial(&origins, value, Initial::FlagBit(bit as u8)));
-        let flags_clean = arithmetic_clean
-            && is_initial(&origins, state.flags.system, Initial::FlagSystem)
-            && state
-                .flags
-                .raw_zero
-                .is_some_and(|value| is_initial(&origins, value, Initial::RawZero))
-            && state
-                .flags
-                .zero_is_lazy
-                .is_some_and(|value| is_initial(&origins, value, Initial::ZeroLazy));
-
+        // Arithmetic FLAGS backing is deliberately not elided yet. StateMap
+        // currently retains only the ZF lazy-provenance bit, while the CPU
+        // flags_changed word may carry other lazy arithmetic bits. Replaying
+        // materialization canonicalizes those bits; skipping it would preserve
+        // a different internal representation without a complete proof.
         let mut mask = vec![false; plan.cpu.writes.len()];
         for (write_index, write) in plan.cpu.writes.iter().enumerate() {
             mask[write_index] = match write.address {
@@ -230,13 +218,13 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
                     .flags
                     .last_op1
                     .is_some_and(|value| is_initial(&origins, value, Initial::FlagOperand)),
-                Address::Flags => flags_clean,
+                Address::Flags => false,
                 Address::Absolute(address)
                     if address == gp::last_result as u32
                         || address == gp::last_op_size as u32
                         || address == gp::flags_changed as u32 =>
                 {
-                    flags_clean
+                    false
                 },
                 Address::Absolute(address) => state.xmm.iter().enumerate().any(|(reg, &value)| {
                     address == gp::get_reg_xmm_offset(reg as u32)
