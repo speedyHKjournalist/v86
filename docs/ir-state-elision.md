@@ -19,9 +19,12 @@ The proof is intentionally narrow:
   a fixed point;
 - any conflicting predecessor, unknown origin or changed value remains materialized.
 
-The pass recognizes the entry sources for GPRs, XMM registers, EFLAGS system
-bits, CF/PF/AF/ZF/SF/OF, `last_op1`, raw ZF and the lazy-ZF marker. It never
-removes EIP, previous-IP or retirement-count materialization.
+The analysis recognizes entry sources for GPRs, XMM registers and FLAGS provenance,
+but this increment only elides exact GPR/XMM and `last_op1` backing writes. Full
+EFLAGS, `last_result`, `last_op_size` and `flags_changed` writes remain mandatory:
+StateMap currently keeps only the ZF lazy-provenance bit, so it cannot prove the
+complete lazy-FLAGS backing representation unchanged. EIP, previous-IP and
+retirement-count materialization are also never removed.
 
 ## Why this is safe
 
@@ -56,8 +59,8 @@ dynamic execution count or performance claim.
 
 Native tests cover:
 
-- multi-block JECXZ/MOV control flow where FLAGS remain entry-equivalent;
-- changed arithmetic FLAGS that must still be materialized;
+- multi-block JECXZ/MOV control flow with entry-equivalent GPR/last_op1 sources;
+- arithmetic FLAGS backing that must always remain materialized in this increment;
 - memory-containing regions disabling the optimization;
 - bounded/atomic enabling.
 
@@ -68,7 +71,8 @@ existing fault cases.
 
 ## Still open
 
-General backing-state dataflow across resumable MMU/helper observations, partial
-FLAGS demand/liveness, dirty-state merging after callbacks, broader cross-block
+Full lazy-FLAGS provenance and arithmetic FLAGS write elision, general backing-state
+dataflow across resumable MMU/helper observations, partial FLAGS demand/liveness,
+dirty-state merging after callbacks, broader cross-block
 state synchronization, memory LICM, complete ISA coverage, system/application
 acceptance and IR-14 retirement remain open.
