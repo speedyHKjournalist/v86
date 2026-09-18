@@ -538,14 +538,12 @@ pub fn verify(region: &Region) -> Result<()> {
                 | Op::ReadFlagChanges
                 | Op::ReadFlagOperand
                 | Op::ReadFlagResult
-                | Op::ReadFlagSize => {
-                    require(
-                        args.is_empty()
-                            && results == [Type::I32]
-                            && region.entries.contains(&BlockId(b as u32)),
-                        "flags initialization outside entry",
-                    )?
-                },
+                | Op::ReadFlagSize => require(
+                    args.is_empty()
+                        && results == [Type::I32]
+                        && region.entries.contains(&BlockId(b as u32)),
+                    "flags initialization outside entry",
+                )?,
                 Op::ReadSegment(segment) => require(
                     *segment < 6
                         && args.is_empty()
