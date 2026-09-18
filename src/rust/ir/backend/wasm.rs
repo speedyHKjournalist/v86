@@ -780,12 +780,16 @@ impl Emitter<'_> {
             },
         }
     }
-    fn planned_call(&mut self, plan: &CallPlan) {
+    fn planned_call(&mut self, id: InstId, plan: &CallPlan) {
         let call = self.mir.helpers[plan.helper.index()].as_ref().unwrap();
-        let observation = if self.cpu { plan.cpu_observation } else { plan.standalone_observation };
-        match observation {
-            Observation::CapturedState => self.state(plan.state),
-            Observation::DecodedNextPc => self.prepare_memory_call(plan.state),
+        let trim_state = self.cpu && self.mir.helper_state_observation_elided(id);
+        if !trim_state {
+            let observation =
+                if self.cpu { plan.cpu_observation } else { plan.standalone_observation };
+            match observation {
+                Observation::CapturedState => self.state(plan.state),
+                Observation::DecodedNextPc => self.prepare_memory_call(plan.state),
+            }
         }
         for &arg in &plan.args {
             self.get(arg);
@@ -919,7 +923,7 @@ impl Emitter<'_> {
         } else if let Some(plan) = &mir.effects[id.index()] {
             self.planned_effect(plan);
         } else if let Some(plan) = &mir.calls[id.index()] {
-            self.planned_call(plan);
+            self.planned_call(id, plan);
         } else {
             if self.cpu && !mir.cpu_instruction_live(id) {
                 return;

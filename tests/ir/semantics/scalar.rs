@@ -59,6 +59,9 @@ fn config() -> PassConfig {
         prune: false,
         merge: false,
         phis: false,
+        copy: true,
+        flags: false,
+        helper_state: false,
         fold: true,
         gvn: false,
         dce: true,
@@ -362,13 +365,19 @@ fn ignored_load_result_does_not_erase_the_memory_observation() {
     lower(&r).unwrap();
 }
 #[test]
-fn fold_disable_switch_disables_scalar_canonicalization() {
+fn copy_and_fold_switches_are_independent() {
     let mut r = fixture(32, "add-r0");
-    let stats = passes::run(&mut r, PassConfig { fold: false, ..config() }).unwrap();
+    let stats = passes::run(&mut r, PassConfig { copy: false, ..config() }).unwrap();
     assert_eq!(stats.scalar_aliases, 0);
+    assert_eq!(stats.copied, 0);
+
+    let mut r = fixture(32, "sub-self");
+    let stats = passes::run(&mut r, PassConfig { fold: false, ..config() }).unwrap();
     assert_eq!(stats.scalar_constants, 0);
+
+    let mut r = fixture(32, "add-r0");
     let stats = passes::run(&mut r, config()).unwrap();
-    assert!(stats.scalar_aliases > 0);
+    assert!(stats.scalar_aliases > 0 && stats.copied > 0);
 }
 #[test]
 fn cross_block_aliases_rewrite_edges_conditions_and_entry_states() {

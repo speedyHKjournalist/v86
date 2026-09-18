@@ -6,7 +6,13 @@
 //! plan and explicit guest semantics, allowing the CPU emitter to skip pure
 //! value programs that are needed solely by standalone/concrete FLAGS recovery.
 
-use super::{materialize::StatePlan, value::Step, MirData};
+use super::{
+    call::CallPlan,
+    helper_state,
+    materialize::StatePlan,
+    value::Step,
+    MirData,
+};
 use crate::ir::{
     hir::{Definition, Region, Terminator},
     ids::{InstId, StateId, ValueId},
@@ -18,8 +24,10 @@ pub const DEFAULT_WORK_LIMIT: usize = 262_144;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Plan {
-    live: Vec<bool>,
+    baseline_live: Vec<bool>,
+    trimmed_live: Vec<bool>,
     enabled: bool,
+    use_trimmed: bool,
 }
 
 fn spend(left: &mut usize, amount: usize) -> Result<(), CompileError> {
@@ -56,7 +64,12 @@ fn state_values(plan: &StatePlan, work: &mut Vec<ValueId>) {
     expression_values(&plan.decoded_next.expression, work);
 }
 
-fn used_states(region: &Region) -> BTreeSet<StateId> {
+fn used_states(
+    region: &Region,
+    calls: &[Option<CallPlan>],
+    helper_plan: &helper_state::Plan,
+    trim_helpers: bool,
+) -> BTreeSet<StateId> {
     let mut states = BTreeSet::new();
     for block in &region.blocks {
         states.extend(block.entry_state);
@@ -65,18 +78,28 @@ fn used_states(region: &Region) -> BTreeSet<StateId> {
         }
         for id in &block.instructions {
             let inst = &region.instructions[id.index()];
-            states.extend(inst.state);
             states.extend(inst.commit);
+            if let Some(state) = inst.state {
+                let trimmed_call = trim_helpers
+                    && calls.get(id.index()).and_then(Option::as_ref).is_some()
+                    && helper_state::plan_eligible(helper_plan, *id);
+                if !trimmed_call {
+                    states.insert(state);
+                }
+            }
         }
     }
     states
 }
 
-fn derive(
+fn derive_mask(
     region: &Region,
     states: &[StatePlan],
+    calls: &[Option<CallPlan>],
+    helper_plan: &helper_state::Plan,
+    trim_helpers: bool,
     work_limit: usize,
-) -> Result<Plan, CompileError> {
+) -> Result<Vec<bool>, CompileError> {
     let mut left = work_limit;
     spend(
         &mut left,
@@ -92,7 +115,7 @@ fn derive(
     let mut seen_values = vec![false; region.values.len()];
     let mut work = Vec::new();
 
-    for state in used_states(region) {
+    for state in used_states(region, calls, helper_plan, trim_helpers) {
         let plan = states
             .get(state.index())
             .ok_or_else(|| CompileError::InvalidIr("CPU liveness state missing".into()))?;
@@ -161,30 +184,62 @@ fn derive(
         }
     }
 
-    Ok(Plan {
-        live,
-        enabled: false,
-    })
+    Ok(live)
 }
 
 pub(crate) fn lower(
     region: &Region,
     states: &[StatePlan],
+    calls: &[Option<CallPlan>],
+    helper_plan: &helper_state::Plan,
     work_limit: usize,
 ) -> Result<Plan, CompileError> {
-    match derive(region, states, work_limit) {
-        Ok(plan) => Ok(plan),
-        Err(CompileError::Budget(_)) => Ok(Plan {
-            live: vec![true; region.instructions.len()],
-            enabled: false,
-        }),
-        Err(error) => Err(error),
-    }
+    let fallback = || vec![true; region.instructions.len()];
+    let baseline_live = match derive_mask(
+        region,
+        states,
+        calls,
+        helper_plan,
+        false,
+        work_limit,
+    ) {
+        Ok(live) => live,
+        Err(CompileError::Budget(_)) => fallback(),
+        Err(error) => return Err(error),
+    };
+    let trimmed_live = match derive_mask(
+        region,
+        states,
+        calls,
+        helper_plan,
+        true,
+        work_limit,
+    ) {
+        Ok(live) => live,
+        Err(CompileError::Budget(_)) => fallback(),
+        Err(error) => return Err(error),
+    };
+    Ok(Plan {
+        baseline_live,
+        trimmed_live,
+        enabled: false,
+        use_trimmed: false,
+    })
 }
 
 pub(super) fn verify(region: &Region, data: &MirData) -> Result<(), CompileError> {
-    let expected = lower(region, &data.states, DEFAULT_WORK_LIMIT)?;
-    if data.cpu_liveness.enabled || data.cpu_liveness.live != expected.live {
+    let expected = lower(
+        region,
+        &data.states,
+        &data.calls,
+        &data.helper_state,
+        DEFAULT_WORK_LIMIT,
+    )?;
+    if data.cpu_liveness.enabled
+        || data.cpu_liveness.use_trimmed
+        || data.cpu_liveness.baseline_live != expected.baseline_live
+        || data.cpu_liveness.trimmed_live != expected.trimmed_live
+    {
         return Err(CompileError::InvalidIr(
             "invalid CPU liveness certificate".into(),
         ));
@@ -193,28 +248,33 @@ pub(super) fn verify(region: &Region, data: &MirData) -> Result<(), CompileError
 }
 
 pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
-    if data.cpu_liveness.live.len() > work_limit {
+    let use_trimmed = helper_state::plan_enabled(&data.helper_state);
+    let live = if use_trimmed {
+        &data.cpu_liveness.trimmed_live
+    } else {
+        &data.cpu_liveness.baseline_live
+    };
+    if live.len() > work_limit {
         return Err(CompileError::Budget("CPU liveness work"));
     }
-    let count = data
-        .cpu_liveness
-        .live
+    let count = live
         .iter()
         .enumerate()
         .filter(|(index, live)| !**live && data.values[*index].is_some())
         .count();
     data.cpu_liveness.enabled = true;
+    data.cpu_liveness.use_trimmed = use_trimmed;
     Ok(count)
 }
 
 pub(super) fn instruction_live(data: &MirData, id: InstId) -> bool {
+    let live = if data.cpu_liveness.use_trimmed {
+        &data.cpu_liveness.trimmed_live
+    } else {
+        &data.cpu_liveness.baseline_live
+    };
     !data.cpu_liveness.enabled
-        || data
-            .cpu_liveness
-            .live
-            .get(id.index())
-            .copied()
-            .unwrap_or(true)
+        || live.get(id.index()).copied().unwrap_or(true)
         || !matches!(data.values.get(id.index()), Some(Some(_)))
 }
 

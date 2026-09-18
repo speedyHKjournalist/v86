@@ -58,6 +58,11 @@ jobs:
           node tests/ir/differential/shifts.mjs 2>&1 | tee build/ir-flags-shifts.log
           node tests/ir/differential/bits.mjs 2>&1 | tee build/ir-flags-bits.log
           node tests/ir/differential/multiply.mjs 2>&1 | tee build/ir-flags-multiply.log
+      - name: IR-10 per-pass differential
+        run: |
+          set -o pipefail
+          make build/v86-ir-test.wasm build/libv86.mjs build/jit-capacity.bin
+          node tests/ir/differential/ir10.mjs 2>&1 | tee build/ir10-per-pass.log
       - name: Guarded RAM forwarding and callback recovery
         run: |
           set -o pipefail

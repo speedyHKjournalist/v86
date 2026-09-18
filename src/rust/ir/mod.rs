@@ -7,6 +7,9 @@ pub mod builder;
 #[path = "../../../tests/ir/semantics/control.rs"]
 mod control_tests;
 #[cfg(test)]
+#[path = "../../../tests/ir/semantics/copy.rs"]
+mod copy_tests;
+#[cfg(test)]
 #[path = "../../../tests/ir/semantics/core.rs"]
 mod core_tests;
 pub mod dump;
@@ -74,6 +77,9 @@ mod string_tests;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/io.rs"]
 mod io_tests;
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/ir10.rs"]
+mod ir10_tests;
 
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/rep.rs"]
