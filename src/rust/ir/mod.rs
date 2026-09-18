@@ -77,6 +77,9 @@ mod string_tests;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/io.rs"]
 mod io_tests;
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/ir10.rs"]
+mod ir10_tests;
 
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/rep.rs"]
