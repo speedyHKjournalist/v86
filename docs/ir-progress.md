@@ -780,7 +780,7 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
 ## 后续推进：保守 CPU state-write elision
 
 - lowering 在 HIR/CFG edge 仍可见时，对 GPR、XMM 及 FLAGS provenance 来源做固定点传播，生成每个 StateMap 的 CPU write 省略证书；本轮实际只允许 GPR/XMM/last_op1 省略，完整 arithmetic FLAGS backing 保持强制写回。
-- 当前只对单外部入口、没有可继续 memory/helper/commit 观察点的纯 CPU CFG 生效；PollBudget 的恢复分支允许，因为物化后立即返回。遇到可继续慢路径则整区使用全 false 证书，不猜测 CPU backing 历史。
+- 当前只对单外部入口、没有可继续 memory/helper/commit 观察点的 CPU CFG 生效；PollBudget 与 guarded SseCheck 的观察分支允许，因为一旦物化就立即退出当前 IR entry。遇到可继续慢路径则整区使用全 false 证书，不猜测 CPU backing 历史。
 - EFLAGS、last_result、last_op_size、flags_changed、EIP、previous_ip 与退休计数永远保留；发生寄存器变化时对应 GPR/XMM 写回继续保留。Tier 1、standalone、关闭优化和 zero-round 配置不启用。
 - optimized Tier 2 记录 passes.state_writes_elided；现有 CFG CPU differential 同时覆盖优化前后精确预算出口、FLAGS/XMM、previous_ip、退休计数及既有 fault case。
 - 该增量为后续跨块 FLAGS demand/liveness 和 resumable observer dirty-state 合流建立基础，不改变 ISA coverage、默认 backend 或 IR-14 退役门槛。详见 [state-write elision](ir-state-elision.md)。
