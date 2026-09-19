@@ -120,8 +120,13 @@ fn helper_outcome_modules_and_snapshot_slot_reuse() {
             )
             .unwrap();
             assert!(
-                artifact.locals >= mir.allocation.local_types.len() + 5,
-                "local metrics include dispatcher, outcome and staged return values"
+                artifact.structured_cfg,
+                "single-entry helper fixture should use the completed structured backend"
+            );
+            assert_eq!(artifact.generic_dispatch_edges, 0);
+            assert!(
+                artifact.locals >= mir.allocation.local_types.len() + 4,
+                "local metrics include execution budget, helper outcome and staged return values without a pc dispatcher local"
             );
             std::fs::write(
                 format!("build/ir-helpers/{name}-{opt}.wasm"),
