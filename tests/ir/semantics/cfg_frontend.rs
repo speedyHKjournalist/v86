@@ -92,19 +92,20 @@ fn reachable_cfg_fixtures() {
                         }
                         assert!(mir.control.dynamic_counts);
                         let artifact = emit_cpu(&mir, budget).unwrap();
-                        // Relative branch targets use architectural operand
-                        // width. In 16-bit mode at a high EIP, the taken target can
-                        // wrap outside this immutable snapshot and must not be
-                        // mistaken for an internal structured edge.
-                        let internal_relative_target = mode || pc <= u16::MAX as u32;
+                        // Relative targets use architectural width and the CFG
+                        // snapshot itself may cross the 32-bit EIP wrap. Self/back
+                        // edges to the high start address leave the snapshot after
+                        // 16-bit truncation, while the case-6 forward target wraps
+                        // to offset 5 and remains inside the same byte snapshot.
+                        let internal_backedge_target = mode || pc <= u16::MAX as u32;
                         if matches!(n, 3 | 4 | 5) {
                             assert_eq!(
                                 artifact.structured_cfg,
-                                internal_relative_target,
+                                internal_backedge_target,
                                 "self-loop structuring must follow architectural target width: case {n}, mode {mode}, pc {pc:x}: {:?}",
                                 mir.control
                             );
-                            if internal_relative_target {
+                            if internal_backedge_target {
                                 assert_eq!(artifact.structured_backedges, 1);
                                 assert!(artifact.structured_edges > 0);
                                 assert_eq!(artifact.generic_dispatch_edges, 0);
@@ -112,7 +113,7 @@ fn reachable_cfg_fixtures() {
                         }
                         if matches!(n, 0 | 1 | 2 | 12 | 13 | 17 | 18 | 23) {
                             let expected = if matches!(n, 0 | 23) {
-                                internal_relative_target
+                                internal_backedge_target
                             } else {
                                 true
                             };
@@ -129,11 +130,7 @@ fn reachable_cfg_fixtures() {
                             }
                         }
                         if matches!(n, 6 | 14 | 15) {
-                            let expected = if n == 6 {
-                                internal_relative_target
-                            } else {
-                                true
-                            };
+                            let expected = true;
                             assert_eq!(
                                 artifact.structured_cfg,
                                 expected,
