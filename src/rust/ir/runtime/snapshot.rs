@@ -83,6 +83,53 @@ pub unsafe fn mappings_cached(snapshot: &ImmutableCodeSnapshot) -> bool {
                 == mapping.physical.0
     })
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CachedMatch {
+    Match,
+    Unavailable,
+    Stale,
+}
+/// Fast execution-time validation for already-visible code pages. This preserves
+/// raw/unnotified SMC detection by comparing the authoritative physical RAM bytes,
+/// but avoids allocating a new snapshot or walking page tables on a hot admission.
+/// A missing cached translation is not stale: callers may fall back to capture()
+/// before the architectural fetch, or simply decline admission afterward.
+pub unsafe fn cached_match(
+    linear: u32,
+    snapshot: &ImmutableCodeSnapshot,
+) -> CachedMatch {
+    if !mappings_cached(snapshot) {
+        return CachedMatch::Unavailable;
+    }
+    let mut offset = 0usize;
+    for mapping in &snapshot.mappings {
+        if offset >= snapshot.bytes.len() {
+            return CachedMatch::Stale;
+        }
+        let address = linear.wrapping_add(offset as u32);
+        if mapping.linear.0 != address & !4095 {
+            return CachedMatch::Stale;
+        }
+        let page_offset = (address & 4095) as usize;
+        let chunk = (4096 - page_offset).min(snapshot.bytes.len() - offset);
+        let Some(physical) = mapping.physical.0.checked_add(page_offset as u32) else {
+            return CachedMatch::Stale;
+        };
+        let Ok(current) = ram(physical, chunk) else {
+            return CachedMatch::Stale;
+        };
+        if current != &snapshot.bytes[offset..offset + chunk] {
+            return CachedMatch::Stale;
+        }
+        offset += chunk;
+    }
+    if offset == snapshot.bytes.len() {
+        CachedMatch::Match
+    } else {
+        CachedMatch::Stale
+    }
+}
 pub unsafe fn capture(linear: u32, length: usize) -> Result<ImmutableCodeSnapshot, CaptureError> {
     if length == 0 || length > 15 * 128 {
         return Err(CaptureError::Size);
