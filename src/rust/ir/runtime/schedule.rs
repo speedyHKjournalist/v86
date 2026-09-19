@@ -250,8 +250,12 @@ pub unsafe fn visit() {
         tier: if tier == 1 { Tier::One } else { Tier::Two },
     };
     let config = IrConfig {
-        optimize: tier == 2,
-        passes: Default::default(),
+        optimize: true,
+        passes: if tier == 1 {
+            crate::ir::passes::PassConfig::tier1()
+        } else {
+            Default::default()
+        },
         execution_budget: config.budget,
         rep_iteration_budget: config.rep,
         max_code_bytes: 960,
