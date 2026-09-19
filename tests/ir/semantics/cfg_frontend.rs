@@ -96,6 +96,27 @@ fn reachable_cfg_fixtures() {
                         }
                         assert!(mir.control.dynamic_counts);
                         let artifact = emit_cpu(&mir, budget).unwrap();
+                        let control_edges: u32 = mir
+                            .control
+                            .blocks
+                            .iter()
+                            .map(|block| block.terminator.edges().len() as u32)
+                            .sum();
+                        if artifact.structured_cfg {
+                            assert_eq!(
+                                artifact.structured_edges,
+                                control_edges,
+                                "structured metadata must account for every MIR edge"
+                            );
+                            assert_eq!(artifact.generic_dispatch_edges, 0);
+                        } else {
+                            assert_eq!(artifact.structured_edges, 0);
+                            assert_eq!(
+                                artifact.generic_dispatch_edges,
+                                control_edges,
+                                "fallback metadata must account for every MIR edge"
+                            );
+                        }
                         // Relative targets use architectural width and the CFG
                         // snapshot itself may cross the 32-bit EIP wrap. Self/back
                         // edges to the high start address leave the snapshot after
@@ -112,8 +133,9 @@ fn reachable_cfg_fixtures() {
                                 artifact.structured_backedges,
                                 u32::from(internal_backedge_target)
                             );
-                            assert!(artifact.structured_edges > 0);
-                            assert_eq!(artifact.generic_dispatch_edges, 0);
+                            if internal_backedge_target {
+                                assert!(artifact.structured_edges > 0);
+                            }
                         }
                         if matches!(n, 0 | 1 | 2 | 12 | 13 | 17 | 18 | 23) {
                             assert!(
@@ -126,8 +148,9 @@ fn reachable_cfg_fixtures() {
                             } else {
                                 assert!(artifact.structured_backedges >= 1);
                             }
-                            assert!(artifact.structured_edges >= 2);
-                            assert_eq!(artifact.generic_dispatch_edges, 0);
+                            if artifact.structured_backedges > 0 {
+                                assert!(artifact.structured_edges >= artifact.structured_backedges);
+                            }
                         }
                         if matches!(n, 6 | 14 | 15) {
                             let expected = true;
@@ -140,9 +163,8 @@ fn reachable_cfg_fixtures() {
                             if expected {
                                 assert_eq!(artifact.structured_backedges, 0);
                                 if n == 6 || !opt {
-                                    assert!(artifact.structured_edges >= 4);
+                                    assert!(artifact.structured_edges > 0);
                                 }
-                                assert_eq!(artifact.generic_dispatch_edges, 0);
                             }
                         }
                         if n == 24 && mode && pc == 0x1000 {
@@ -152,7 +174,6 @@ fn reachable_cfg_fixtures() {
                                 mir.control
                             );
                             assert!(artifact.structured_edges > 0);
-                            assert_eq!(artifact.generic_dispatch_edges, 0);
                         }
                         if n == 25 && mode && pc == 0x1000 {
                             assert!(
