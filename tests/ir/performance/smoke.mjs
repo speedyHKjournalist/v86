@@ -91,6 +91,9 @@ function target_entry_stats(exports)
         max_guest_steps: read(3),
         zero_step_exits: read(4),
         tier: read(5),
+        structured_cfg: read(6),
+        structured_backedges: read(7),
+        generic_dispatch_edges: read(8),
     };
 }
 
@@ -131,6 +134,10 @@ async function sample_ir(execution_budget, round)
         const target_before = target_entry_stats(exports);
         assert.equal(target_before.present, 1);
         assert.equal(target_before.tier, 2);
+        assert.equal(target_before.structured_cfg, 1,
+            "budget matrix target uses structured CFG emission");
+        assert.equal(target_before.structured_backedges, 1);
+        assert.equal(target_before.generic_dispatch_edges, 0);
 
         const warm = await warm_rate(vm);
         await vm.stop();
@@ -167,6 +174,9 @@ async function sample_ir(execution_budget, round)
                 max_guest_steps: target_after.max_guest_steps,
                 zero_step_exits: target_zero_step_exits,
                 average_guest_steps_per_activation: target_average_guest_steps_per_activation,
+                structured_cfg: target_after.structured_cfg,
+                structured_backedges: target_after.structured_backedges,
+                generic_dispatch_edges: target_after.generic_dispatch_edges,
             },
             global_ir: {
                 tier1_attempts: after.ir.tier1_attempts - before.ir.tier1_attempts,
@@ -246,6 +256,12 @@ function summarize_ir(samples, execution_budget)
             median(samples.map(sample => sample.target_entry.max_guest_steps)),
         median_target_entry_zero_step_exits:
             median(samples.map(sample => sample.target_entry.zero_step_exits)),
+        structured_cfg_samples:
+            samples.filter(sample => sample.target_entry.structured_cfg === 1).length,
+        median_structured_backedges:
+            median(samples.map(sample => sample.target_entry.structured_backedges)),
+        median_generic_dispatch_edges:
+            median(samples.map(sample => sample.target_entry.generic_dispatch_edges)),
         median_global_cache_capture_fallbacks:
             median(samples.map(sample => sample.global_ir.cache_capture_fallbacks)),
     };
