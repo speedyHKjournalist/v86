@@ -110,6 +110,12 @@ fn x87_register_terminal_contract() {
     assert!(lift_cpu(&[0x67, 0xD8, 0xC1], GuestEip(0), LinearAddress(0), true).is_ok());
     // This PR intentionally owns register forms only. Keep a concrete memory
     // x87 form Pending so lifecycle compile-stop suppression has a stable oracle.
-    assert!(lift_cpu(&[0xD9, 0x05, 0, 0, 0, 0], GuestEip(0), LinearAddress(0), true).is_err());
+    assert!(lift_cpu(
+        &[0xD9, 0x05, 0, 0, 0, 0],
+        GuestEip(0),
+        LinearAddress(0),
+        true
+    )
+    .is_err());
 
 }
