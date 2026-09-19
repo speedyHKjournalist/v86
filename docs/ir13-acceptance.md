@@ -45,6 +45,19 @@ papered over in IR-13. In particular:
 The gate therefore extends IR-09 system-level evidence, but it does not declare
 IR-09 complete while ISA/Tier-1 coverage remains incomplete.
 
+## First coverage backfill from the acceptance phase
+
+The initial coverage audit found 1,142 forms that were still experimental `Pending`
+inside the 3,728 production-Pending forms. Opcode `0x82`, the baseline-supported
+group-1 imm8 alias of `0x80`, was one low-risk gap: all 32 of its register/memory
+forms were missing only from the IR allowlists.
+
+IR-13 now feeds that gap back into the earlier compiler packages: `0x82` reuses the
+existing group-1 integer HIR for register and CPU-memory operands, has explicit Rust
+semantic fixtures, and is catalogued as 16 `NativeHIR` plus 16 `CpuMemoryHIR`
+forms. Experimental Pending therefore drops to 1,110 while production Pending stays
+3,728. This is a coverage backfill, not an IR-14 production-default claim.
+
 ## Remaining IR-13 completion cells
 
 This initial gate does **not** satisfy the full IR-13 completion condition. Still
