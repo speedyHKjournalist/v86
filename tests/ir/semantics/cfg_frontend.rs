@@ -103,41 +103,31 @@ fn reachable_cfg_fixtures() {
                         // to offset 5 and remains inside the same byte snapshot.
                         let internal_backedge_target = mode || pc <= u16::MAX as u32;
                         if matches!(n, 3 | 4 | 5) {
-                            let linear_external_jump = n == 3 && !internal_backedge_target;
-                            let expected_structured =
-                                internal_backedge_target || linear_external_jump;
-                            assert_eq!(
+                            assert!(
                                 artifact.structured_cfg,
-                                expected_structured,
-                                "self-loop/external-target structuring must follow the actual CFG: case {n}, mode {mode}, pc {pc:x}: {:?}",
+                                "self-loop or width-truncated acyclic CFG must use the general structurer: case {n}, mode {mode}, pc {pc:x}: {:?}",
                                 mir.control
                             );
-                            if internal_backedge_target {
-                                assert_eq!(artifact.structured_backedges, 1);
-                                assert!(artifact.structured_edges > 0);
-                                assert_eq!(artifact.generic_dispatch_edges, 0);
-                            } else if linear_external_jump {
-                                assert_eq!(artifact.structured_backedges, 0);
-                                assert_eq!(artifact.generic_dispatch_edges, 0);
-                            }
+                            assert_eq!(
+                                artifact.structured_backedges,
+                                u32::from(internal_backedge_target)
+                            );
+                            assert!(artifact.structured_edges > 0);
+                            assert_eq!(artifact.generic_dispatch_edges, 0);
                         }
                         if matches!(n, 0 | 1 | 2 | 12 | 13 | 17 | 18 | 23) {
-                            let expected = if matches!(n, 0 | 23) {
-                                internal_backedge_target
-                            } else {
-                                true
-                            };
-                            assert_eq!(
+                            assert!(
                                 artifact.structured_cfg,
-                                expected,
-                                "multi-block/epilogue loop structuring: case {n}, mode {mode}, pc {pc:x}: {:?}",
+                                "multi-block loop or width-truncated acyclic form must structure: case {n}, mode {mode}, pc {pc:x}: {:?}",
                                 mir.control
                             );
-                            if expected {
-                                assert_eq!(artifact.structured_backedges, 1);
-                                assert!(artifact.structured_edges >= 2);
-                                assert_eq!(artifact.generic_dispatch_edges, 0);
+                            if matches!(n, 0 | 23) && !internal_backedge_target {
+                                assert_eq!(artifact.structured_backedges, 0);
+                            } else {
+                                assert!(artifact.structured_backedges >= 1);
                             }
+                            assert!(artifact.structured_edges >= 2);
+                            assert_eq!(artifact.generic_dispatch_edges, 0);
                         }
                         if matches!(n, 6 | 14 | 15) {
                             let expected = true;
