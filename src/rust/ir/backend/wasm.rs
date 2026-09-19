@@ -597,13 +597,8 @@ impl Emitter<'_> {
         self.emit_linear_exit_path(path, remaining);
     }
     fn emit_structured_loop(&mut self, plan: &StructuredLoop, remaining: &WasmLocal) {
-        self.emit_block_body(plan.entry, remaining);
-        let entry_terminator = self.mir.control.blocks[plan.entry.index()].terminator.clone();
-        let MirTerminator::Jump(entry_edge) = entry_terminator else {
-            unreachable!("verified structured entry");
-        };
-        debug_assert_eq!(entry_edge.target, plan.header);
-        self.copy_edge_values(&entry_edge);
+        debug_assert!(!plan.preheader.is_empty());
+        self.emit_linear_jump_path(&plan.preheader, plan.header, remaining);
 
         let loop_label = self.w.loop_void();
         for (index, id) in plan.chain.iter().copied().enumerate() {
