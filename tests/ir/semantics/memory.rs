@@ -37,6 +37,8 @@ fn cpu_integer_memory_fixtures() {
         }
         for (prefix, opcode, immediate) in [
             (false, 0x80, vec![0x81]),
+            (false, 0x82, vec![0x81]),
+            (true, 0x82, vec![0x7F]),
             (true, 0x81, vec![0x01, 0x80]),
             (false, 0x81, vec![0x01, 0, 0, 0x80]),
             (true, 0x83, vec![0x80]),

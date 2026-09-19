@@ -497,7 +497,7 @@ fn lift_inner(
                     b.write(dst, width, value);
                 }
             },
-            0x80 | 0x81 | 0x83 => {
+            0x80 | 0x81 | 0x82 | 0x83 => {
                 let a = b.read(rm, width);
                 let source = b.constant(i.immediate.unwrap(), width_type(width));
                 let value = b.arithmetic(reg, a, source);
@@ -541,7 +541,7 @@ fn memory_instruction(
         && !unary
         && !test
         && !matches!(op,
-        0x80 | 0x81 | 0x83 | 0x88..=0x8B | 0xC6 | 0xC7 | 0x0FB6 | 0x0FB7 | 0x0FBE | 0x0FBF | 0x0F40..=0x0F4F | 0x0F90..=0x0F9F)
+        0x80 | 0x81 | 0x82 | 0x83 | 0x88..=0x8B | 0xC6 | 0xC7 | 0x0FB6 | 0x0FB7 | 0x0FBE | 0x0FBF | 0x0F40..=0x0F4F | 0x0F90..=0x0F9F)
     {
         return Err(CompileError::Unsupported(
             "memory instruction lowering pending",
@@ -605,7 +605,7 @@ fn memory_instruction(
         };
         b.write(reg, if extended { i.operand_size } else { width }, value);
     } else {
-        let immediate = matches!(op, 0x80 | 0x81 | 0x83);
+        let immediate = matches!(op, 0x80 | 0x81 | 0x82 | 0x83);
         let alu_group = if alu { (op >> 3) as u8 } else { group };
         let memory_destination = unary || immediate || alu && op & 2 == 0;
         let rmw = unary || memory_destination && alu_group != 7 && !test;

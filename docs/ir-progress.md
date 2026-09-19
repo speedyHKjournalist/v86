@@ -22,12 +22,12 @@
 | IR-10 | 完成 | Tier 2 基础数据流优化已按实施计划的 FLAGS / DCE / GVN / copy / CFG / helper-state 六类验收收口：CFG 清理、trivial phi、常量与独立 copy propagation、逐位 FLAGS demand/CPU liveness、StateMap-aware DCE、支配关系 GVN/CSE、经审计 pure helper 的 CPU state observation trimming 均有独立开关/计数、正例/负例与逐-pass differential；特殊 FLAGS 或读取/写入 CPU state 的 helper 继续保守 materialize，不猜测未证明状态。IR-11 的 RAM proof/forwarding、LICM、强度削弱和高级 SIMD/循环优化不计入 IR-10 |
 | IR-11 | 完成 | Tier 2 已收口受预算约束的纯 SSA LICM、整数 SIMD peephole、owned-MIR RAM 证明与 fault-preserving memory LICM：地址关系按 Exact/Disjoint/MayAlias 保守分类，已证明不相交的 native 标量 store 可保留既有 load cache；自然循环采用唯一 preheader 重置的 loop cache，首次访问仍在原故障点执行且只有成功 native RAM guard/load 才建立有效值，任一慢速 guest-memory 路径在 MMIO/page-walk 前清空全部 loop cache；含 store/RMW/vector memory/未知 helper/effect 的循环不做 memory LICM。证书由 verifier 独立重算，伪造/预算失败不会部分发布。详见 ir11-completion.md |
 | IR-12 | 完成 | 区域/缓存/链接/发布生命周期已按计划收口：不可变请求与 VM generation、物理页 dependency/mapping identity、非回绕 publication/slot owner、三阶段发布重校验、冷点回收与活动帧延迟释放形成统一失效协议；自动 Tier1/Tier2 调度保持 128 heat/单 pending/单帧扫描上限，失败输入抑制并以单调 use stamp 做确定性自动入口淘汰；新增 cache-owned validated link lookup，只对精确 CpuEntryKey 返回当前候选，并重新检查 generation、bytes、mapping identity；cached-TLB 可见性仍由实际执行 admission 检查，绝不作为 unchecked call_indirect；SMC、reset/restore、映射变化、浏览器失败、ABA 槽复用和同步 I/O 失效均由 lifecycle matrix 覆盖。IR-core 现强制运行 ir-live/cache/auto tests。详见 ir12-completion.md |
-| IR-13 | 完整矩阵未完成 | 已执行 IR 差分和部分生产 legacy/Worker/API 回归；GPU 间歇失败、PIC 跳过等结果有单独记录；已有 Node 中显式/自动 IR 缓存分派及升档测试，以及公开后端在真实浏览器主线程/Worker 的升档、SMC、双向跨后端快照和错误上报测试；完整在线 IR、XP、应用及性能矩阵未完成 |
+| IR-13 | 完整矩阵未完成 | 已加入第一阶段 host/browser/device acceptance gate：Node invariant debug/experimental release、Chromium 主线程/Worker、IR Worker 的 DOM 键盘/鼠标→guest PS/2、VGA/virtio graphics/SB16/磁盘与文件 RPC/快照跨线程恢复，以及 IR AudioWorklet；每个 IR 场景要求 legacy generation 关闭且 legacy compile request 为零。该 gate 已接入 IR-core，但 XP、应用/游戏及受控冷热性能矩阵仍未完成，详见 ir13-acceptance.md |
 | IR-14 | 未实现 | 默认后端仍为 legacy，旧 emitter 未退役 |
 
 覆盖目录共 864 条编码记录、3,830 个粗粒度形式，其中 102 个是明确的
 baseline-UD reg/mem 形式，**3,728 个生产形式仍为 Pending**。实验前端具有
-838 个原生寄存器/EA 形式、622 个实验 CPU 访存形式、156 个实验栈形式、28 个实验近控制形式、14 个 CPU 算术形式、28 个 CPU 状态形式、30 个单次字符串形式、36 个 I/O 形式、84 个 REP helper 形式、8 个 CPU 信息 helper 形式、12 个 CPU 系统 helper 形式、8 个 CR/DR helper 形式、56 个描述符/机器状态 helper 形式、32 个任务/LDTR helper 形式、32 个选择子查询 helper 形式、450 个 XMM SIMD 形式和 152 个终端分支形式的实现能力；这不是对全部
+854 个原生寄存器/EA 形式、638 个实验 CPU 访存形式、156 个实验栈形式、28 个实验近控制形式、14 个 CPU 算术形式、28 个 CPU 状态形式、30 个单次字符串形式、36 个 I/O 形式、84 个 REP helper 形式、8 个 CPU 信息 helper 形式、12 个 CPU 系统 helper 形式、8 个 CR/DR helper 形式、56 个描述符/机器状态 helper 形式、32 个任务/LDTR helper 形式、32 个选择子查询 helper 形式、450 个 XMM SIMD 形式和 152 个终端分支形式的实现能力；尚有 1110 个 experimental Pending 形式；这不是对全部
 前缀、特权、子编码组合逐一完成测试的声明。JSON 分别记录生产状态与实验状态。
 
 `make ir-default-gate` 在生产 Pending 非零时按预期失败。`ir-experimental`
@@ -36,7 +36,7 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
 没有宣称 XP 兼容、游戏加载改善或 IR 提速。
 
 下一依赖：继续完善 IR-02/03/04 契约、MIR 图变换/分配调度及未覆盖 ISA。
-下一步需完善区域选择、共享失效图、链接及调度恢复，补齐未覆盖 ISA 和系统/性能验收；
+下一步以 IR-13 acceptance matrix 暴露的问题为入口，反向补 IR-02～IR-09 的 decoder/ISA/helper/Tier-1/系统覆盖缺口，并继续 XP、应用与冷热性能验收；
 可选的自动 IR 策略不等于完成生产默认 Tier 的全面迁移。
 
 详见 [测试报告](ir-validation.md)、[实现说明](ir-design.md)、

@@ -7,14 +7,16 @@ without a ModRM group. It does not depend on table ordering.
 
 `lowering` is the **production** status. `experimental_lowering` separately records
 experimental capability. Of 3,830 coarse forms, 102 explicit invalid reg/mem forms
-are BaselineUD and **3,728 production forms remain Pending**. Current experimental
-capabilities are:
+are BaselineUD and **3,728 production forms remain Pending**. Of those production-
+Pending forms, 1,110 are still `experimental_lowering: Pending`; the rest have an
+experimental native/helper implementation but have not passed the production-default
+gate. Current experimental capabilities are:
 
 | Category | Forms | Contract / evidence |
 |---|---:|---|
-| NativeHIR | 838 | [Design](ir-design.md), [shifts](ir-shifts.md), [multiply](ir-multiply.md), [bits](ir-bits.md), [exchange](ir-exchange.md), [scalar/BCD](ir-misc.md) |
+| NativeHIR | 854 | [Design](ir-design.md), [shifts](ir-shifts.md), [multiply](ir-multiply.md), [bits](ir-bits.md), [exchange](ir-exchange.md), [scalar/BCD](ir-misc.md) |
 | CpuSimdHIR | 450 | [Moves](ir-simd-moves.md), [integer arithmetic](ir-simd-integer.md), [packing/shifts](ir-simd-permute.md), [shuffles](ir-simd-shuffle.md), [half/scalar transfers](ir-simd-transfer.md), [word lanes and sign masks](ir-simd-lane.md), [masked stores](ir-simd-masked.md) |
-| CpuMemoryHIR | 622 | [RAM/MMU/RMW](ir-memory.md) and the instruction-family contracts above |
+| CpuMemoryHIR | 638 | [RAM/MMU/RMW](ir-memory.md) and the instruction-family contracts above |
 | CpuStackHIR | 156 | [Stack](ir-stack.md), [ENTER](ir-enter.md), [FLAGS/segment stacks](ir-system-stack.md) |
 | CpuRepHelper | 84 | [REP HIR and terminal batch ABI](ir-rep.md) |
 | CpuInfoHelper | 8 | [CPUID, timestamp and MSR terminal adapters](ir-cpu-info.md) |

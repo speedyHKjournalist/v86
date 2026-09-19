@@ -285,6 +285,8 @@ fn register_lowering_corpus() {
     for group in 0..8u8 {
         for (prefix, opcode, imm) in [
             (vec![], 0x80, vec![0xFF]),
+            (vec![], 0x82, vec![0x81]),
+            (vec![0x66], 0x82, vec![0x7F]),
             (vec![0x66], 0x81, vec![0xFF, 0x7F]),
             (vec![], 0x81, vec![0xFF, 0xFF, 0xFF, 0x7F]),
             (vec![], 0x83, vec![0xFF]),
