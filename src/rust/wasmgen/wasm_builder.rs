@@ -767,17 +767,29 @@ impl WasmBuilder {
     }
 
     pub fn add_i32(&mut self) { self.instruction_body.push(op::OP_I32ADD); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn clz_i32(&mut self) { self.instruction_body.push(op::OP_I32CLZ); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn ctz_i32(&mut self) { self.instruction_body.push(op::OP_I32CTZ); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn popcnt_i32(&mut self) { self.instruction_body.push(op::OP_I32POPCNT); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn clz_i64(&mut self) { self.instruction_body.push(op::OP_I64CLZ); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn ctz_i64(&mut self) { self.instruction_body.push(op::OP_I64CTZ); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn popcnt_i64(&mut self) { self.instruction_body.push(op::OP_I64POPCNT); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn sub_i64(&mut self) { self.instruction_body.push(op::OP_I64SUB); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn div_s_i64(&mut self) { self.instruction_body.push(op::OP_I64DIVS); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn rem_s_i64(&mut self) { self.instruction_body.push(op::OP_I64REMS); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn shr_s_i64(&mut self) { self.instruction_body.push(op::OP_I64SHRS); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn lt_i64(&mut self) { self.instruction_body.push(op::OP_I64LTS); }
+    #[cfg(any(test, feature = "ir-experimental"))]
     pub fn ltu_i64(&mut self) { self.instruction_body.push(op::OP_I64LTU); }
     pub fn add_i64(&mut self) { self.instruction_body.push(op::OP_I64ADD); }
     pub fn sub_i32(&mut self) { self.instruction_body.push(op::OP_I32SUB); }
