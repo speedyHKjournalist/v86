@@ -42,7 +42,8 @@ enum StructuredPlan {
 
 #[derive(Clone, Debug)]
 struct StructuredLoop {
-    entry: BlockId,
+    /// Jump-only path from the external entry to the natural-loop header.
+    preheader: Vec<BlockId>,
     header: BlockId,
     chain: Vec<BlockId>,
     tail: StructuredTail,
@@ -69,8 +70,11 @@ struct StructuredDiamond {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum Arm {
-    Backedge(Vec<BlockId>),
+enum LoopArm {
+    Backedge {
+        header_index: usize,
+        path: Vec<BlockId>,
+    },
     Exit(Vec<BlockId>),
 }
 
@@ -84,32 +88,64 @@ fn mark_unique(used: &mut [bool], blocks: &[BlockId]) -> bool {
     true
 }
 
+/// Follow a conditional arm until it either reaches a block already present on
+/// the entry-to-tail spine or exits. Hitting the spine proves the backedge target;
+/// a branch or a cycle wholly inside the arm is outside this structured subset.
 fn linear_loop_arm(
     control: &ControlFlow,
     start: BlockId,
-    header: BlockId,
-    forbidden: &[BlockId],
-) -> Option<Arm> {
-    if start == header {
-        return Some(Arm::Backedge(vec![]));
-    }
+    spine: &[BlockId],
+) -> Option<LoopArm> {
     let mut path = Vec::new();
     let mut current = start;
     loop {
-        if current == header {
-            return Some(Arm::Backedge(path));
+        if let Some(header_index) = spine.iter().position(|id| *id == current) {
+            return Some(LoopArm::Backedge { header_index, path });
         }
-        if forbidden.contains(&current) || path.contains(&current) {
+        if path.contains(&current) {
             return None;
         }
         let block = control.blocks.get(current.index())?;
         path.push(current);
         match &block.terminator {
             MirTerminator::Jump(edge) => current = edge.target,
-            MirTerminator::Exit(_) => return Some(Arm::Exit(path)),
+            MirTerminator::Exit(_) => return Some(LoopArm::Exit(path)),
             MirTerminator::Branch { .. } => return None,
         }
     }
+}
+
+fn finish_structured_loop(
+    control: &ControlFlow,
+    spine: Vec<BlockId>,
+    header_index: usize,
+    tail: StructuredTail,
+    backedge: &[BlockId],
+    exit: &[BlockId],
+) -> Option<StructuredLoop> {
+    // External entries must not gain an internal predecessor. A natural loop
+    // therefore starts strictly after the first block on this single-entry path.
+    if header_index == 0 || header_index >= spine.len() {
+        return None;
+    }
+    let preheader = spine[..header_index].to_vec();
+    let chain = spine[header_index..].to_vec();
+    let header = chain[0];
+    let mut used = vec![false; control.blocks.len()];
+    if !mark_unique(&mut used, &preheader)
+        || !mark_unique(&mut used, &chain)
+        || !mark_unique(&mut used, backedge)
+        || !mark_unique(&mut used, exit)
+        || !used.iter().all(|used| *used)
+    {
+        return None;
+    }
+    Some(StructuredLoop {
+        preheader,
+        header,
+        chain,
+        tail,
+    })
 }
 
 fn structured_loop_plan(mir: &MirRegion) -> Option<StructuredLoop> {
@@ -117,74 +153,61 @@ fn structured_loop_plan(mir: &MirRegion) -> Option<StructuredLoop> {
     if control.entries.len() != 1 || control.blocks.len() < 2 {
         return None;
     }
-    let entry = control.entries[0];
-    let MirTerminator::Jump(entry_edge) = &control.blocks.get(entry.index())?.terminator else {
-        return None;
-    };
-    let header = entry_edge.target;
-    if header == entry {
-        return None;
-    }
 
-    let mut chain = Vec::new();
-    let mut current = header;
+    // Build the unique entry-to-tail spine. A backward Jump into this spine is
+    // an unconditional natural-loop backedge. A Branch is accepted only when
+    // exactly one arm reaches the spine and the other reaches Exit.
+    let mut spine = Vec::new();
+    let mut current = control.entries[0];
     loop {
-        if current == entry || chain.contains(&current) {
+        if spine.contains(&current) {
             return None;
         }
-        chain.push(current);
+        spine.push(current);
         let block = control.blocks.get(current.index())?;
         match &block.terminator {
-            MirTerminator::Jump(edge) if edge.target == header => {
-                let mut used = vec![false; control.blocks.len()];
-                if !mark_unique(&mut used, &[entry]) || !mark_unique(&mut used, &chain) {
-                    return None;
+            MirTerminator::Jump(edge) => {
+                if let Some(header_index) = spine.iter().position(|id| *id == edge.target) {
+                    return finish_structured_loop(
+                        control,
+                        spine,
+                        header_index,
+                        StructuredTail::Backedge,
+                        &[],
+                        &[],
+                    );
                 }
-                if used.iter().all(|used| *used) {
-                    return Some(StructuredLoop {
-                        entry,
-                        header,
-                        chain,
-                        tail: StructuredTail::Backedge,
-                    });
-                }
-                return None;
+                current = edge.target;
             },
-            MirTerminator::Jump(edge) => current = edge.target,
             MirTerminator::Branch {
                 taken, not_taken, ..
             } => {
-                let mut forbidden = Vec::with_capacity(chain.len() + 1);
-                forbidden.push(entry);
-                forbidden.extend(chain.iter().copied());
-                let taken_arm =
-                    linear_loop_arm(control, taken.target, header, &forbidden)?;
-                let not_taken_arm =
-                    linear_loop_arm(control, not_taken.target, header, &forbidden)?;
-                let (backedge_taken, backedge, exit) = match (taken_arm, not_taken_arm) {
-                    (Arm::Backedge(backedge), Arm::Exit(exit)) => (true, backedge, exit),
-                    (Arm::Exit(exit), Arm::Backedge(backedge)) => (false, backedge, exit),
-                    _ => return None,
-                };
-                let mut used = vec![false; control.blocks.len()];
-                if !mark_unique(&mut used, &[entry])
-                    || !mark_unique(&mut used, &chain)
-                    || !mark_unique(&mut used, &backedge)
-                    || !mark_unique(&mut used, &exit)
-                    || !used.iter().all(|used| *used)
-                {
-                    return None;
-                }
-                return Some(StructuredLoop {
-                    entry,
-                    header,
-                    chain,
-                    tail: StructuredTail::Conditional {
+                let taken_arm = linear_loop_arm(control, taken.target, &spine)?;
+                let not_taken_arm = linear_loop_arm(control, not_taken.target, &spine)?;
+                let (backedge_taken, header_index, backedge, exit) =
+                    match (taken_arm, not_taken_arm) {
+                        (
+                            LoopArm::Backedge { header_index, path },
+                            LoopArm::Exit(exit),
+                        ) => (true, header_index, path, exit),
+                        (
+                            LoopArm::Exit(exit),
+                            LoopArm::Backedge { header_index, path },
+                        ) => (false, header_index, path, exit),
+                        _ => return None,
+                    };
+                return finish_structured_loop(
+                    control,
+                    spine,
+                    header_index,
+                    StructuredTail::Conditional {
                         backedge_taken,
-                        backedge,
-                        exit,
+                        backedge: backedge.clone(),
+                        exit: exit.clone(),
                     },
-                });
+                    &backedge,
+                    &exit,
+                );
             },
             MirTerminator::Exit(_) => return None,
         }
