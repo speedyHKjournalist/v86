@@ -151,6 +151,7 @@ pub unsafe fn ir_test_x87_seed() {
     use crate::softfloat::F80;
 
     fpu::fpu_discard_cache();
+    F80::clear_exception_flags();
     fpu::fpu_finit();
     *gp::fpu_stack_ptr = 0;
     *gp::fpu_stack_empty = 0;
