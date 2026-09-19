@@ -55,12 +55,14 @@ fn reachable_cfg_fixtures() {
         vec![0x74, 0x02, 0x75, 0x02, 0x40, 0x90, 0x48, 0x90],
         // Irreducible SCC: block 0 enters the 1/2/3 cycle through two headers.
         vec![0x74, 0x02, 0xEB, 0x02, 0xEB, 0xFC, 0xEB, 0xFC],
+        // Nested reducible loops: reset EDX for each outer ECX iteration.
+        vec![0xBA, 2, 0, 0, 0, 0x4A, 0x75, 0xFD, 0x49, 0x75, 0xF5, 0x90],
     ];
     let mut cases = vec![];
     for (n, bytes) in programs.iter().enumerate() {
         for mode in [false, true] {
             // Memory fixture uses [ESI] and the vector prefix requires 32-bit default.
-            if !mode && matches!(n, 1 | 2 | 10 | 12..=18) {
+            if !mode && matches!(n, 1 | 2 | 10 | 12..=18 | 26) {
                 continue;
             }
             for pc in [0x1000u32, 0xFFFFFFFC] {
@@ -168,6 +170,16 @@ fn reachable_cfg_fixtures() {
                                 "multi-entry irreducible SCC must retain dispatcher fallback"
                             );
                             assert!(artifact.generic_dispatch_edges > 0);
+                        }
+                        if n == 26 && mode {
+                            assert!(
+                                artifact.structured_cfg,
+                                "nested reducible loops must use the general structurer: {:?}",
+                                mir.control
+                            );
+                            assert!(artifact.structured_backedges >= 2);
+                            assert!(artifact.structured_edges > 0);
+                            assert_eq!(artifact.generic_dispatch_edges, 0);
                         }
                         std::fs::write(
                             format!("build/ir-cfg/{}.wasm", cases.len()),
