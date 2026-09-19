@@ -336,7 +336,12 @@ pub fn ir_cache_stat(field: u32) -> u32 {
 /// before execution. This never publishes, compiles or holds a cache lock across
 /// guest activation.
 pub unsafe fn link_target() -> Option<(u32, u64)> {
-    if !cold() {
+    // This is a cold graph lookup, not a guest activation. Unlike execute(),
+    // requiring JIT_STATE try_lock here would race the immediately following
+    // dependency query with our own short-lived cache inspection and makes the
+    // diagnostic/link API spuriously miss. All mutation/publication still uses
+    // the normal quiescent protocols.
+    if cpu::in_jit || busy() {
         return None;
     }
     let entry = live::entry();
