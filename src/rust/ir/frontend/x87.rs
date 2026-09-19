@@ -3,12 +3,7 @@
 //! This first IR-08 x87 slice deliberately excludes guest-memory operands.
 //! The CPU helper owns the architectural F80 stack/status state and terminates
 //! the current IR region, so no cached SSA x87 value can survive the call.
-use super::{
-    adapters::call,
-    decode::DecodedInstruction,
-    integer::IntegerBuilder,
-    lift::snapshot,
-};
+use super::{adapters::call, decode::DecodedInstruction, integer::IntegerBuilder, lift::snapshot};
 use crate::ir::{state::ResumeKind, types::Type};
 
 pub fn supports(i: &DecodedInstruction) -> bool {
