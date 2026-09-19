@@ -818,6 +818,19 @@ ir-backend-integration-tests: build/v86-ir-cache-test.wasm build/v86-ir-runtime.
 ir-backend-browser-tests: build/v86-ir-runtime.wasm build/v86.wasm build/libv86.mjs build/cpu-worker.js build/cpu-worker-test.bin
 	node tests/glbridge/gl_multipass_browser_runner.js ir_backend_browser_test.html
 
+# IR-13 host/device acceptance deliberately reuses the production Worker/browser
+# integration scenarios instead of a reduced IR-only fixture. The query string
+# selects the experimental core while preserving the exact graphics/audio/state
+# workload used by the legacy regression.
+.PHONY: ir13-host-tests ir13-browser-tests
+ir13-host-tests: ir-backend-integration-tests
+	@echo "PASS: IR-13 Node host/backend integration"
+
+ir13-browser-tests: build/v86-ir-runtime.wasm build/v86.wasm build/libv86.mjs build/cpu-worker.js build/cpu-worker-test.bin
+	node tests/glbridge/gl_multipass_browser_runner.js ir_backend_browser_test.html
+	node tests/glbridge/gl_multipass_browser_runner.js 'cpu_worker_browser_test.html?jit_backend=ir'
+	node tests/glbridge/gl_multipass_browser_runner.js 'cpu_worker_audio_browser_test.html?jit_backend=ir'
+
 .PHONY: jit-disabled-tests
 jit-disabled-tests: build/v86-jit-test.wasm build/v86-publication-test-release.wasm build/libv86.mjs build/cpu-worker-test.bin
 	node tests/rust/jit_disabled_promotion.mjs build/v86-jit-test.wasm
