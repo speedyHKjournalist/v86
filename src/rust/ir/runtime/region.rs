@@ -37,11 +37,7 @@ fn target_offset(
     displacement: i32,
 ) -> usize {
     let target = instruction.next_pc.0.wrapping_add(displacement as u32);
-    let target = if instruction.operand_size == 16 {
-        target & 0xFFFF
-    } else {
-        target
-    };
+    let target = if instruction.operand_size == 16 { target & 0xFFFF } else { target };
     target.wrapping_sub(start.0) as usize
 }
 
@@ -72,7 +68,8 @@ pub fn reachable_length(
             GuestEip(pc.0.wrapping_add(at as u32)),
             LinearAddress(linear.0.wrapping_add(at as u32)),
             default_32,
-        ) else {
+        )
+        else {
             continue;
         };
         let end = at + instruction.length as usize;
