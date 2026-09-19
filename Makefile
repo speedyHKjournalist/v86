@@ -831,6 +831,11 @@ ir13-browser-tests: build/v86-ir-runtime.wasm build/v86.wasm build/libv86.mjs bu
 	node tests/glbridge/gl_multipass_browser_runner.js 'cpu_worker_browser_test.html?jit_backend=ir'
 	node tests/glbridge/gl_multipass_browser_runner.js 'cpu_worker_audio_browser_test.html?jit_backend=ir'
 
+.PHONY: ir13-budget-matrix
+ir13-budget-matrix: build/v86-ir-runtime.wasm build/libv86.mjs build/cpu-worker-test.bin
+	node tests/ir/performance/smoke.mjs > build/ir13-performance-smoke.json
+	cat build/ir13-performance-smoke.json
+
 .PHONY: jit-disabled-tests
 jit-disabled-tests: build/v86-jit-test.wasm build/v86-publication-test-release.wasm build/libv86.mjs build/cpu-worker-test.bin
 	node tests/rust/jit_disabled_promotion.mjs build/v86-jit-test.wasm
