@@ -254,183 +254,142 @@ impl Emitter<'_> {
             self.instruction(id, remaining);
         }
     }
-    fn emit_linear_jump_path(
-        &mut self,
-        path: &[BlockId],
-        final_target: BlockId,
-        remaining: &WasmLocal,
-    ) {
-        for (index, id) in path.iter().copied().enumerate() {
-            self.emit_block_body(id, remaining);
-            let terminator = self.mir.control.blocks[id.index()].terminator.clone();
-            let MirTerminator::Jump(edge) = terminator else {
-                unreachable!("verified structured linear path");
-            };
-            let expected = path.get(index + 1).copied().unwrap_or(final_target);
-            debug_assert_eq!(edge.target, expected);
-            self.copy_edge_values(&edge);
-        }
-    }
-    fn emit_linear_exit_path(&mut self, path: &[BlockId], remaining: &WasmLocal) {
-        debug_assert!(!path.is_empty());
-        for (index, id) in path.iter().copied().enumerate() {
-            self.emit_block_body(id, remaining);
-            let terminator = self.mir.control.blocks[id.index()].terminator.clone();
-            if index + 1 == path.len() {
-                let MirTerminator::Exit(state) = terminator else {
-                    unreachable!("verified structured exit path");
-                };
-                self.state(state);
-                self.w.return_();
-            } else {
-                let MirTerminator::Jump(edge) = terminator else {
-                    unreachable!("verified structured exit chain");
-                };
-                debug_assert_eq!(edge.target, path[index + 1]);
-                self.copy_edge_values(&edge);
-            }
-        }
-    }
-    fn emit_backedge_arm(
+    fn emit_structured_edge(
         &mut self,
         edge: &MirEdge,
-        path: &[BlockId],
-        header: BlockId,
-        remaining: &WasmLocal,
-        loop_label: Label,
+        next: &[BlockId],
+        labels: &BTreeMap<BlockId, Label>,
     ) {
-        debug_assert_eq!(edge.target, path.first().copied().unwrap_or(header));
         self.copy_edge_values(edge);
-        self.emit_linear_jump_path(path, header, remaining);
-        self.w.br(loop_label);
+        if next.contains(&edge.target) {
+            return;
+        }
+        let label = *labels
+            .get(&edge.target)
+            .expect("verified structure provides a branch label");
+        self.w.br(label);
     }
-    fn emit_exit_arm(
-        &mut self,
-        edge: &MirEdge,
-        path: &[BlockId],
-        remaining: &WasmLocal,
-    ) {
-        debug_assert_eq!(edge.target, path[0]);
-        self.copy_edge_values(edge);
-        self.emit_linear_exit_path(path, remaining);
-    }
-    fn emit_structured_loop(&mut self, plan: &StructuredLoop, remaining: &WasmLocal) {
-        debug_assert!(!plan.preheader.is_empty());
-        self.emit_linear_jump_path(&plan.preheader, plan.header, remaining);
+    fn emit_structured(&mut self, roots: &[Structure], remaining: &WasmLocal) {
+        #[derive(Clone)]
+        enum Work {
+            Node(Structure),
+            BlockEnd {
+                label: Label,
+                targets: Vec<BlockId>,
+                old: Vec<(BlockId, Label)>,
+            },
+            LoopEnd {
+                label: Label,
+                entries: Vec<BlockId>,
+                old: Vec<(BlockId, Label)>,
+            },
+        }
 
-        let loop_label = self.w.loop_void();
-        for (index, id) in plan.chain.iter().copied().enumerate() {
-            self.emit_block_body(id, remaining);
-            let terminator = self.mir.control.blocks[id.index()].terminator.clone();
-            let tail = index + 1 == plan.chain.len();
-            if !tail {
-                let MirTerminator::Jump(edge) = terminator else {
-                    unreachable!("verified structured loop chain");
-                };
-                debug_assert_eq!(edge.target, plan.chain[index + 1]);
-                self.copy_edge_values(&edge);
-                continue;
-            }
-            match (&plan.tail, terminator) {
-                (StructuredTail::Backedge, MirTerminator::Jump(edge)) => {
-                    debug_assert_eq!(edge.target, plan.header);
-                    self.copy_edge_values(&edge);
-                    self.w.br(loop_label);
-                },
-                (
-                    StructuredTail::Conditional {
-                        backedge_taken,
-                        backedge,
-                        exit,
-                    },
-                    MirTerminator::Branch {
-                        condition,
-                        taken,
-                        not_taken,
-                    },
-                ) => {
-                    self.get_local(condition);
-                    self.w.if_void();
-                    if *backedge_taken {
-                        self.emit_backedge_arm(
-                            &taken,
-                            backedge,
-                            plan.header,
-                            remaining,
-                            loop_label,
-                        );
-                    } else {
-                        self.emit_exit_arm(&taken, exit, remaining);
+        let mut labels = BTreeMap::<BlockId, Label>::new();
+        let mut work: VecDeque<Work> = roots.iter().cloned().map(Work::Node).collect();
+        while let Some(item) = work.pop_front() {
+            let next = work
+                .iter()
+                .find_map(|item| match item {
+                    Work::Node(node) => Some(node.head()),
+                    Work::BlockEnd { .. } | Work::LoopEnd { .. } => None,
+                })
+                .unwrap_or_default();
+
+            match item {
+                Work::Node(Structure::BasicBlock(id)) => {
+                    self.emit_block_body(id, remaining);
+                    match self.mir.control.blocks[id.index()].terminator.clone() {
+                        MirTerminator::Exit(state) => {
+                            self.state(state);
+                            self.w.return_();
+                        },
+                        MirTerminator::Jump(edge) => {
+                            self.emit_structured_edge(&edge, &next, &labels);
+                        },
+                        MirTerminator::Branch {
+                            condition,
+                            taken,
+                            not_taken,
+                        } => {
+                            self.get_local(condition);
+                            self.w.if_void();
+                            self.emit_structured_edge(&taken, &next, &labels);
+                            self.w.else_();
+                            self.emit_structured_edge(&not_taken, &next, &labels);
+                            self.w.block_end();
+                        },
                     }
-                    self.w.else_();
-                    if *backedge_taken {
-                        self.emit_exit_arm(&not_taken, exit, remaining);
-                    } else {
-                        self.emit_backedge_arm(
-                            &not_taken,
-                            backedge,
-                            plan.header,
-                            remaining,
-                            loop_label,
-                        );
+                },
+                Work::Node(Structure::Loop(children)) => {
+                    let entries = children
+                        .first()
+                        .expect("verified non-empty loop")
+                        .head();
+                    let label = self.w.loop_void();
+                    let mut old = Vec::new();
+                    for target in &entries {
+                        if let Some(previous) = labels.insert(*target, label) {
+                            old.push((*target, previous));
+                        }
+                    }
+                    work.push_front(Work::LoopEnd {
+                        label,
+                        entries,
+                        old,
+                    });
+                    for child in children.into_iter().rev() {
+                        work.push_front(Work::Node(child));
+                    }
+                },
+                Work::LoopEnd {
+                    label,
+                    entries,
+                    old,
+                } => {
+                    for target in entries {
+                        debug_assert_eq!(labels.remove(&target), Some(label));
+                    }
+                    for (target, previous) in old {
+                        debug_assert!(labels.insert(target, previous).is_none());
                     }
                     self.w.block_end();
-                    self.w.unreachable();
                 },
-                _ => unreachable!("verified structured loop tail"),
+                Work::Node(Structure::Block(children)) => {
+                    debug_assert!(!children.is_empty());
+                    debug_assert!(!next.is_empty());
+                    let label = self.w.block_void();
+                    let mut old = Vec::new();
+                    for target in &next {
+                        if let Some(previous) = labels.insert(*target, label) {
+                            old.push((*target, previous));
+                        }
+                    }
+                    work.push_front(Work::BlockEnd {
+                        label,
+                        targets: next,
+                        old,
+                    });
+                    for child in children.into_iter().rev() {
+                        work.push_front(Work::Node(child));
+                    }
+                },
+                Work::BlockEnd {
+                    label,
+                    targets,
+                    old,
+                } => {
+                    for target in targets {
+                        debug_assert_eq!(labels.remove(&target), Some(label));
+                    }
+                    for (target, previous) in old {
+                        debug_assert!(labels.insert(target, previous).is_none());
+                    }
+                    self.w.block_end();
+                },
             }
         }
-        self.w.unreachable();
-        self.w.block_end();
-    }
-    fn emit_arm_to_join(
-        &mut self,
-        edge: &MirEdge,
-        path: &[BlockId],
-        join: BlockId,
-        remaining: &WasmLocal,
-    ) {
-        debug_assert_eq!(edge.target, path.first().copied().unwrap_or(join));
-        self.copy_edge_values(edge);
-        self.emit_linear_jump_path(path, join, remaining);
-    }
-    fn emit_structured_diamond(&mut self, plan: &StructuredDiamond, remaining: &WasmLocal) {
-        debug_assert!(!plan.prefix.is_empty() && !plan.tail.is_empty());
-        for (index, id) in plan.prefix.iter().copied().enumerate() {
-            self.emit_block_body(id, remaining);
-            let terminator = self.mir.control.blocks[id.index()].terminator.clone();
-            if index + 1 != plan.prefix.len() {
-                let MirTerminator::Jump(edge) = terminator else {
-                    unreachable!("verified structured diamond prefix");
-                };
-                debug_assert_eq!(edge.target, plan.prefix[index + 1]);
-                self.copy_edge_values(&edge);
-                continue;
-            }
-            let MirTerminator::Branch {
-                condition,
-                taken,
-                not_taken,
-            } = terminator
-            else {
-                unreachable!("verified structured diamond branch");
-            };
-            let join = plan.tail[0];
-            self.get_local(condition);
-            self.w.if_void();
-            self.emit_arm_to_join(&taken, &plan.taken, join, remaining);
-            self.w.else_();
-            self.emit_arm_to_join(&not_taken, &plan.not_taken, join, remaining);
-            self.w.block_end();
-        }
-        self.emit_linear_exit_path(&plan.tail, remaining);
-    }
-    fn emit_structured_plan(&mut self, plan: &StructuredPlan, remaining: &WasmLocal) {
-        match plan {
-            StructuredPlan::Loop(loop_plan) => self.emit_structured_loop(loop_plan, remaining),
-            StructuredPlan::Diamond(diamond) => self.emit_structured_diamond(diamond, remaining),
-            StructuredPlan::Linear(path) => self.emit_linear_exit_path(path, remaining),
-        }
+        debug_assert!(labels.is_empty());
     }
     /// Decode the packed CPU adapter result without touching any SSA result slot.
     fn packed_cpu_result(&mut self, result: ValueId, trap_after_fault: bool) {
