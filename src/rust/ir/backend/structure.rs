@@ -8,7 +8,7 @@ use crate::ir::{
     ids::BlockId,
     mir::control::{ControlFlow, Terminator},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 type Set = BTreeSet<BlockId>;
 type Graph = BTreeMap<BlockId, Set>;
@@ -275,6 +275,131 @@ fn verify_structure(nodes: &[Structure], blocks: usize, expected: &Set) -> bool 
         && seen.iter().all(|id| id.index() < blocks)
 }
 
+fn verify_control_targets(nodes: &[Structure], graph: &Graph) -> bool {
+    #[derive(Clone)]
+    enum Work {
+        Node(Structure),
+        BlockEnd {
+            label: usize,
+            targets: Vec<BlockId>,
+            old: Vec<(BlockId, usize)>,
+        },
+        LoopEnd {
+            label: usize,
+            entries: Vec<BlockId>,
+            old: Vec<(BlockId, usize)>,
+        },
+    }
+
+    let mut labels = BTreeMap::<BlockId, usize>::new();
+    let mut next_label = 0usize;
+    let mut work: VecDeque<Work> = nodes.iter().cloned().map(Work::Node).collect();
+    while let Some(item) = work.pop_front() {
+        let next = work
+            .iter()
+            .find_map(|item| match item {
+                Work::Node(node) => Some(node.head()),
+                Work::BlockEnd { .. } | Work::LoopEnd { .. } => None,
+            })
+            .unwrap_or_default();
+
+        match item {
+            Work::Node(Structure::BasicBlock(id)) => {
+                let Some(edges) = graph.get(&id)
+                else {
+                    return false;
+                };
+                if edges
+                    .iter()
+                    .any(|target| !next.contains(target) && !labels.contains_key(target))
+                {
+                    return false;
+                }
+            },
+            Work::Node(Structure::Loop(children)) => {
+                let Some(first) = children.first()
+                else {
+                    return false;
+                };
+                let entries = first.head();
+                if entries.is_empty() {
+                    return false;
+                }
+                let label = next_label;
+                next_label = next_label.saturating_add(1);
+                let mut old = Vec::new();
+                for target in &entries {
+                    if let Some(previous) = labels.insert(*target, label) {
+                        old.push((*target, previous));
+                    }
+                }
+                work.push_front(Work::LoopEnd {
+                    label,
+                    entries,
+                    old,
+                });
+                for child in children.into_iter().rev() {
+                    work.push_front(Work::Node(child));
+                }
+            },
+            Work::LoopEnd {
+                label,
+                entries,
+                old,
+            } => {
+                for target in entries {
+                    if labels.remove(&target) != Some(label) {
+                        return false;
+                    }
+                }
+                for (target, previous) in old {
+                    if labels.insert(target, previous).is_some() {
+                        return false;
+                    }
+                }
+            },
+            Work::Node(Structure::Block(children)) => {
+                if children.is_empty() || next.is_empty() {
+                    return false;
+                }
+                let label = next_label;
+                next_label = next_label.saturating_add(1);
+                let mut old = Vec::new();
+                for target in &next {
+                    if let Some(previous) = labels.insert(*target, label) {
+                        old.push((*target, previous));
+                    }
+                }
+                work.push_front(Work::BlockEnd {
+                    label,
+                    targets: next,
+                    old,
+                });
+                for child in children.into_iter().rev() {
+                    work.push_front(Work::Node(child));
+                }
+            },
+            Work::BlockEnd {
+                label,
+                targets,
+                old,
+            } => {
+                for target in targets {
+                    if labels.remove(&target) != Some(label) {
+                        return false;
+                    }
+                }
+                for (target, previous) in old {
+                    if labels.insert(target, previous).is_some() {
+                        return false;
+                    }
+                }
+            },
+        }
+    }
+    labels.is_empty()
+}
+
 pub fn structure(control: &ControlFlow) -> Option<Plan> {
     if control.entries.len() != 1 || control.blocks.is_empty() {
         return None;
@@ -288,7 +413,9 @@ pub fn structure(control: &ControlFlow) -> Option<Plan> {
     let mut backedges = 0;
     let mut roots = loopify(&graph, &entries, &mut backedges)?;
     blockify(&mut roots, &graph);
-    if !verify_structure(&roots, control.blocks.len(), &reachable) {
+    if !verify_structure(&roots, control.blocks.len(), &reachable)
+        || !verify_control_targets(&roots, &graph)
+    {
         return None;
     }
     let edges = graph.values().map(|edges| edges.len() as u32).sum();
@@ -384,6 +511,52 @@ mod tests {
             block(Terminator::Exit(StateId(0))),
         ]);
         assert!(structure(&nested_loops).is_some());
+
+        // Two distinct latches continue to one loop header while the header
+        // also has a side exit. Both continues and the exit must have an open
+        // structured label when their MIR edges are emitted.
+        let multiple_latches = control(vec![
+            block(Terminator::Jump(edge(1))),
+            block(Terminator::Branch {
+                condition: 0,
+                taken: edge(2),
+                not_taken: edge(4),
+            }),
+            block(Terminator::Branch {
+                condition: 0,
+                taken: edge(3),
+                not_taken: edge(1),
+            }),
+            block(Terminator::Jump(edge(1))),
+            block(Terminator::Exit(StateId(0))),
+        ]);
+        let plan = structure(&multiple_latches).unwrap();
+        assert_eq!(plan.edges, 6);
+        assert!(plan.backedges >= 2);
+
+        // The inner loop exits to an outer-loop latch, while the outer header
+        // can leave the complete region. This exercises nested continue and
+        // break label scopes without duplicating MIR blocks.
+        let nested_side_exits = control(vec![
+            block(Terminator::Jump(edge(1))),
+            block(Terminator::Branch {
+                condition: 0,
+                taken: edge(2),
+                not_taken: edge(6),
+            }),
+            block(Terminator::Jump(edge(3))),
+            block(Terminator::Branch {
+                condition: 0,
+                taken: edge(4),
+                not_taken: edge(5),
+            }),
+            block(Terminator::Jump(edge(3))),
+            block(Terminator::Jump(edge(1))),
+            block(Terminator::Exit(StateId(0))),
+        ]);
+        let plan = structure(&nested_side_exits).unwrap();
+        assert_eq!(plan.edges, 8);
+        assert!(plan.backedges >= 2);
     }
 
     #[test]
