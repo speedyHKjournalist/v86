@@ -79,6 +79,10 @@ jobs:
         run: |
           set -o pipefail
           tools/ir-forwarding-tests.sh 2>&1 | tee build/ir-forwarding-cpu.log
+      - name: IR-08 x87 register differential
+        run: |
+          set -o pipefail
+          make ir-x87-tests 2>&1 | tee build/ir08-x87.log
       - name: SIMD state-elision CPU differential
         run: |
           set -o pipefail
