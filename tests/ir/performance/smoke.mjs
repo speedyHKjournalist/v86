@@ -34,7 +34,7 @@ const base_budget = {
     max_source_bytes: 96,
     rep_iterations: 8,
 };
-const execution_budgets = [128, 256, 512, 1024];
+const execution_budgets = [128, 256, 512, 1024, 2048, 4096];
 const repetitions = 3;
 const warm_window_ms = 250;
 
@@ -81,12 +81,28 @@ async function warm_rate(vm, duration_ms = warm_window_ms)
     return { elapsed_ms, instruction_steps: steps, instruction_steps_per_ms: steps / elapsed_ms };
 }
 
+function target_entry_stats(exports)
+{
+    const read = field => exports.ir_cache_entry_stat(loop_pc, 0, 1, field) >>> 0;
+    return {
+        present: read(0),
+        hits: read(1),
+        guest_steps: read(2),
+        max_guest_steps: read(3),
+        zero_step_exits: read(4),
+        tier: read(5),
+    };
+}
+
 async function sample_ir(execution_budget, round)
 {
     const budget = { ...base_budget, execution_budget };
     const { vm, load_ms } = await create({ jit_backend: "ir", ir_region_budget: budget });
     try
     {
+        const exports = vm.v86.cpu.wm.exports;
+        assert.equal(typeof exports.ir_cache_entry_stat, "function",
+            "experimental core exposes entry-scoped IR cache diagnostics");
         const boot_ms = await boot(vm);
         const before = await vm.get_jit_info();
         assert.equal(before.backend, "ir");
@@ -108,24 +124,36 @@ async function sample_ir(execution_budget, round)
         const tier1_ms = performance.now() - cold_started;
         await until(async () => {
             const info = await vm.get_jit_info();
-            return info.ir.tier2_published > before.ir.tier2_published && info.ir.cache_hits > before.ir.cache_hits;
-        }, "IR Tier 2 publication/cache execution in performance smoke");
+            return info.ir.tier2_published > before.ir.tier2_published
+                && target_entry_stats(exports).tier === 2;
+        }, "target loop Tier 2 publication in performance smoke");
         const tier2_ms = performance.now() - cold_started;
+        const target_before = target_entry_stats(exports);
+        assert.equal(target_before.present, 1);
+        assert.equal(target_before.tier, 2);
+
         const warm = await warm_rate(vm);
         await vm.stop();
+        const target_after = target_entry_stats(exports);
         const report = recorder.stop("ir13_budget_matrix");
         const after = await vm.get_jit_info();
 
         assert.equal(after.backend, "ir");
         assert.equal(after.legacy_generation_enabled, false);
         assert.equal(after.legacy_compile_requests, 0);
-        assert(after.ir.cache_hits > before.ir.cache_hits);
+        assert.equal(target_after.present, 1, "target Tier 2 record survives warm window");
+        assert.equal(target_after.tier, 2, "target record remains Tier 2");
         assert.equal(report.metadata.jit_backend, "ir");
         assert(report.execution_counters_available);
 
-        const cache_hits = after.ir.cache_hits - before.ir.cache_hits;
-        const cache_guest_steps = (after.ir.cache_guest_steps - before.ir.cache_guest_steps) >>> 0;
-        const average_guest_steps_per_activation = cache_guest_steps / Math.max(1, cache_hits);
+        const target_hits = (target_after.hits - target_before.hits) >>> 0;
+        const target_guest_steps = (target_after.guest_steps - target_before.guest_steps) >>> 0;
+        const target_zero_step_exits =
+            (target_after.zero_step_exits - target_before.zero_step_exits) >>> 0;
+        assert(target_hits > 0, "target Tier 2 entry executes during warm window");
+        assert(target_guest_steps > 0, "target Tier 2 entry retires guest instructions");
+        const target_average_guest_steps_per_activation = target_guest_steps / target_hits;
+
         return {
             round,
             execution_budget,
@@ -133,19 +161,25 @@ async function sample_ir(execution_budget, round)
             boot_ms,
             cold_region: { tier1_ms, tier2_ms },
             warm,
-            ir: {
+            target_entry: {
+                hits: target_hits,
+                guest_steps: target_guest_steps,
+                max_guest_steps: target_after.max_guest_steps,
+                zero_step_exits: target_zero_step_exits,
+                average_guest_steps_per_activation: target_average_guest_steps_per_activation,
+            },
+            global_ir: {
                 tier1_attempts: after.ir.tier1_attempts - before.ir.tier1_attempts,
                 tier1_published: after.ir.tier1_published - before.ir.tier1_published,
                 tier2_attempts: after.ir.tier2_attempts - before.ir.tier2_attempts,
                 tier2_published: after.ir.tier2_published - before.ir.tier2_published,
-                cache_hits,
+                cache_hits: after.ir.cache_hits - before.ir.cache_hits,
                 cache_cached_checks: after.ir.cache_cached_checks - before.ir.cache_cached_checks,
                 cache_capture_fallbacks: after.ir.cache_capture_fallbacks - before.ir.cache_capture_fallbacks,
-                cache_guest_steps,
+                cache_guest_steps: (after.ir.cache_guest_steps - before.ir.cache_guest_steps) >>> 0,
                 cache_max_guest_steps: after.ir.cache_max_guest_steps,
-                cache_zero_step_exits: (after.ir.cache_zero_step_exits - before.ir.cache_zero_step_exits) >>> 0,
-                average_guest_steps_per_activation,
-                activation_budget_utilization: average_guest_steps_per_activation / execution_budget,
+                cache_zero_step_exits:
+                    (after.ir.cache_zero_step_exits - before.ir.cache_zero_step_exits) >>> 0,
             },
             recorder: {
                 duration_ms: report.duration_ms,
@@ -204,14 +238,16 @@ function summarize_ir(samples, execution_budget)
         median_tier1_ms: median(samples.map(sample => sample.cold_region.tier1_ms)),
         median_tier2_ms: median(samples.map(sample => sample.cold_region.tier2_ms)),
         median_instruction_steps_per_ms: median(samples.map(sample => sample.warm.instruction_steps_per_ms)),
-        median_cache_hits: median(samples.map(sample => sample.ir.cache_hits)),
-        median_average_guest_steps_per_activation:
-            median(samples.map(sample => sample.ir.average_guest_steps_per_activation)),
-        median_activation_budget_utilization:
-            median(samples.map(sample => sample.ir.activation_budget_utilization)),
-        median_cache_max_guest_steps: median(samples.map(sample => sample.ir.cache_max_guest_steps)),
-        median_cache_zero_step_exits: median(samples.map(sample => sample.ir.cache_zero_step_exits)),
-        median_cache_capture_fallbacks: median(samples.map(sample => sample.ir.cache_capture_fallbacks)),
+        median_target_entry_hits: median(samples.map(sample => sample.target_entry.hits)),
+        median_target_entry_guest_steps: median(samples.map(sample => sample.target_entry.guest_steps)),
+        median_target_entry_average_guest_steps_per_activation:
+            median(samples.map(sample => sample.target_entry.average_guest_steps_per_activation)),
+        median_target_entry_max_guest_steps:
+            median(samples.map(sample => sample.target_entry.max_guest_steps)),
+        median_target_entry_zero_step_exits:
+            median(samples.map(sample => sample.target_entry.zero_step_exits)),
+        median_global_cache_capture_fallbacks:
+            median(samples.map(sample => sample.global_ir.cache_capture_fallbacks)),
     };
 }
 
@@ -247,25 +283,32 @@ for(const execution_budget of execution_budgets)
 }
 const legacy_summary = summarize_legacy(legacy_runs);
 const baseline_128 = ir_summary["128"].median_instruction_steps_per_ms;
+let previous;
 for(const execution_budget of execution_budgets)
 {
     const summary = ir_summary[String(execution_budget)];
     summary.throughput_relative_to_ir_128 = summary.median_instruction_steps_per_ms / baseline_128;
     summary.throughput_relative_to_legacy =
         summary.median_instruction_steps_per_ms / legacy_summary.median_instruction_steps_per_ms;
+    summary.throughput_relative_to_previous_budget = previous
+        ? summary.median_instruction_steps_per_ms / previous.median_instruction_steps_per_ms
+        : 1;
+    previous = summary;
 }
 
 const result = {
     format: "v86-ir13-execution-budget-matrix",
-    version: 2,
+    version: 3,
     policy: {
         note: "Diagnostic matrix only; CI timing has no release threshold and is not an end-to-end speed claim.",
+        accounting_note: "execution_budget is dispatcher work units, not guest instructions; no guest-step/budget utilization percentage is reported.",
         core: "build/v86-ir-runtime.wasm",
         base_ir_region_budget: base_budget,
         execution_budgets,
         repetitions,
         warm_window_ms,
         fresh_vm_per_sample: true,
+        target_entry_scoped: true,
         order: "legacy once per round; IR budgets alternate ascending/descending to reduce fixed order bias",
     },
     summary: {
