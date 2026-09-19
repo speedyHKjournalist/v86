@@ -91,6 +91,40 @@ end-to-end investigations should therefore focus on activation frequency and
 IR-to-IR continuation/link consumption, region/execution-budget policy, and
 per-activation state materialization before attempting smaller peephole tuning.
 
+## Activation diagnostics and warning-free production build
+
+The next tuning step instruments the amount of guest work completed by each
+published IR activation instead of inferring activation pressure from cache-hit
+counts alone. The cache now exposes cumulative retired guest instructions,
+maximum retired instructions in one activation, and zero-step exits. The public
+`get_jit_info()` snapshot and IR-13 performance smoke report those values and
+derive average guest instructions per activation.
+
+These counters do not alter region selection, execution budgets or scheduling.
+They are intended to decide whether the next optimization should be a larger
+execution budget, direct IR-to-IR continuation, or reduced entry/exit
+materialization. The cache differential also checks that a normal one-instruction
+activation increments retired work and does not look like a zero-step exit.
+
+The ordinary production Wasm build had also started warning that twelve
+WasmBuilder numeric helpers were unused. They are required by the IR backend but
+the entire IR module is excluded from a normal production build. Those helpers are
+now compiled only for tests or `ir-experimental`, matching the existing module
+boundary rather than globally suppressing `dead_code`. IR-core additionally runs
+production and experimental release `cargo check` with `RUSTFLAGS="-D warnings"`
+so the warning cannot silently return.
+
+The release Makefile also no longer implements an optional disabled `wasm-opt`
+step by executing `false` under make's ignored-error prefix. When
+`WASM_OPT=false` (the default), optimization is skipped with a successful shell
+conditional, so a normal build no longer prints the misleading
+`Error 1 (ignored)` line. Enabling the existing `WASM_OPT` command path retains
+the previous `wasm-opt -O2 --strip-debug` behavior.
+
+The IR-13 smoke already subsumes the separate Node and Chromium host/browser
+acceptance commands. The workflow now runs that complete smoke once rather than
+executing the same host/browser matrix three times.
+
 Further tuning remains separate: safe IR-to-IR continuation/link consumption,
 Tier-1/Tier-2 region/budget policy, compiler-stage timing, and controlled XP/
 application benchmarks.

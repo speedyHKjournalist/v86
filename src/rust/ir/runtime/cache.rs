@@ -40,6 +40,9 @@ struct Cache {
     link_misses: u32,
     cached_checks: u32,
     capture_fallbacks: u32,
+    guest_steps: u32,
+    max_guest_steps: u32,
+    zero_step_exits: u32,
 }
 static CACHE: Mutex<Cache> = Mutex::new(Cache {
     records: Vec::new(),
@@ -53,6 +56,9 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     link_misses: 0,
     cached_checks: 0,
     capture_fallbacks: 0,
+    guest_steps: 0,
+    max_guest_steps: 0,
+    zero_step_exits: 0,
 });
 const CAPACITY: usize = 32;
 extern "C" {
@@ -342,6 +348,9 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         7 => cache.link_misses,
         8 => cache.cached_checks,
         9 => cache.capture_fallbacks,
+        10 => cache.guest_steps,
+        11 => cache.max_guest_steps,
+        12 => cache.zero_step_exits,
         _ => 0,
     }
 }
@@ -530,6 +539,11 @@ pub unsafe fn execute() -> bool {
     {
         let mut cache = CACHE.try_lock().unwrap();
         cache.active = false;
+        cache.guest_steps = cache.guest_steps.wrapping_add(steps);
+        cache.max_guest_steps = cache.max_guest_steps.max(steps);
+        if steps == 0 {
+            cache.zero_step_exits = cache.zero_step_exits.wrapping_add(1);
+        }
         // Zero-budget REP and other no-retirement exits must not trap scheduling
         // in a repeatedly admitted entry. The next cycle may interpret instead.
         if steps == 0 {

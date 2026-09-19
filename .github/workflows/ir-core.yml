@@ -37,6 +37,10 @@ jobs:
           mkdir -p build
           make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
           make ir-generated-check
+      - name: Warning-free production and experimental Rust
+        run: |
+          RUSTFLAGS="-D warnings" cargo check --release --target wasm32-unknown-unknown
+          RUSTFLAGS="-D warnings" cargo check --release --target wasm32-unknown-unknown --features ir-experimental
       - name: Focused IR-11 RAM proof regressions
         run: |
           set -o pipefail
@@ -84,16 +88,6 @@ jobs:
         run: |
           set -o pipefail
           make ir-live-tests ir-cache-tests ir-auto-tests 2>&1 | tee build/ir12-lifecycle.log
-      - name: IR-13 Node host acceptance
-        run: |
-          set -o pipefail
-          make ir13-host-tests 2>&1 | tee build/ir13-host.log
-      - name: IR-13 Chromium main-thread, Worker, graphics and audio acceptance
-        run: |
-          set -o pipefail
-          export GL_CHROME="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
-          test -n "$GL_CHROME"
-          make ir13-browser-tests 2>&1 | tee build/ir13-browser.log
       - name: IR-13 host, browser and device acceptance smoke
         run: |
           set -o pipefail
