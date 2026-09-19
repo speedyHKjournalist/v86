@@ -114,6 +114,13 @@ boundary rather than globally suppressing `dead_code`. IR-core additionally runs
 production and experimental release `cargo check` with `RUSTFLAGS="-D warnings"`
 so the warning cannot silently return.
 
+The release Makefile also no longer implements an optional disabled `wasm-opt`
+step by executing `false` under make's ignored-error prefix. When
+`WASM_OPT=false` (the default), optimization is skipped with a successful shell
+conditional, so a normal build no longer prints the misleading
+`Error 1 (ignored)` line. Enabling the existing `WASM_OPT` command path retains
+the previous `wasm-opt -O2 --strip-debug` behavior.
+
 The IR-13 smoke already subsumes the separate Node and Chromium host/browser
 acceptance commands. The workflow now runs that complete smoke once rather than
 executing the same host/browser matrix three times.
