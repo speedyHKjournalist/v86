@@ -1052,6 +1052,9 @@ CPU.prototype.get_jit_info = function()
         ir["cache_hits"] = exports["ir_cache_stat"](2) >>> 0;
         ir["cache_cached_checks"] = exports["ir_cache_stat"](8) >>> 0;
         ir["cache_capture_fallbacks"] = exports["ir_cache_stat"](9) >>> 0;
+        ir["cache_guest_steps"] = exports["ir_cache_stat"](10) >>> 0;
+        ir["cache_max_guest_steps"] = exports["ir_cache_stat"](11) >>> 0;
+        ir["cache_zero_step_exits"] = exports["ir_cache_stat"](12) >>> 0;
     }
     return {
         "backend": this.jit_backend,
