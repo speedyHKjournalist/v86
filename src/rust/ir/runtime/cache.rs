@@ -31,10 +31,6 @@ struct Record {
     guest_steps: u32,
     max_guest_steps: u32,
     zero_step_exits: u32,
-    structured_publications: u32,
-    generic_publications: u32,
-    structured_backedges: u32,
-    generic_dispatch_edges: u32,
 }
 struct Cache {
     records: Vec<Record>,
@@ -51,6 +47,10 @@ struct Cache {
     guest_steps: u32,
     max_guest_steps: u32,
     zero_step_exits: u32,
+    structured_publications: u32,
+    generic_publications: u32,
+    structured_backedges: u32,
+    generic_dispatch_edges: u32,
 }
 static CACHE: Mutex<Cache> = Mutex::new(Cache {
     records: Vec::new(),
