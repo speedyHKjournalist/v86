@@ -72,6 +72,7 @@ try {
     assert.equal(e.ir_cache_entry_stat(PC,0,1,6),1,"self-loop publication uses structured CFG");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,7),1,"structured self-loop records one backedge");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,8),0,"structured self-loop bypasses generic dispatch edges");
+    assert(e.ir_cache_entry_stat(PC,0,1,9)>0,"structured self-loop records directly emitted edges");
     clear();
     console.log(`PASS: ${wasm}: simple published self-loop selects direct structured Wasm control flow`);
     // Entry fetch has architectural A-bit effects. A cold secondary page is not
