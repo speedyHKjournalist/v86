@@ -106,7 +106,7 @@ pub fn reachable_length(
                     pending.insert(end);
                 }
             },
-            Flow::Boundary | Flow::Stop | Flow::Sti => {},
+            Flow::Next | Flow::Boundary | Flow::Stop | Flow::Sti => {},
         }
     }
     max_end
