@@ -1050,6 +1050,8 @@ CPU.prototype.get_jit_info = function()
         fields.forEach((name, index) => { ir[name] = exports["ir_auto_stat"](index) >>> 0; });
         ir["cache_entries"] = exports["ir_cache_stat"](0) >>> 0;
         ir["cache_hits"] = exports["ir_cache_stat"](2) >>> 0;
+        ir["cache_cached_checks"] = exports["ir_cache_stat"](8) >>> 0;
+        ir["cache_capture_fallbacks"] = exports["ir_cache_stat"](9) >>> 0;
     }
     return {
         "backend": this.jit_backend,
