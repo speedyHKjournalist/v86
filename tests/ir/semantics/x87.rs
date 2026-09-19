@@ -46,11 +46,8 @@ fn x87_register_fixtures() {
     let mut cases = Vec::new();
 
     for opcode in 0xD8u32..=0xDF {
-        let operand_prefixes: &[&[u8]] = if matches!(opcode, 0xD9 | 0xDD) {
-            &[&[], &[0x66]]
-        } else {
-            &[&[]]
-        };
+        let operand_prefixes: &[&[u8]] =
+            if matches!(opcode, 0xD9 | 0xDD) { &[&[], &[0x66]] } else { &[&[]] };
         for &prefix in operand_prefixes {
             for group in 0u32..8 {
                 for r in 0u32..8 {
@@ -91,11 +88,7 @@ fn x87_register_fixtures() {
         }
     }
 
-    std::fs::write(
-        "build/ir-x87/cases.json",
-        format!("[{}]", cases.join(",")),
-    )
-    .unwrap();
+    std::fs::write("build/ir-x87/cases.json", format!("[{}]", cases.join(","))).unwrap();
 }
 
 #[test]
@@ -114,11 +107,5 @@ fn x87_register_terminal_contract() {
 
     // Address-size override is semantically inert for mod=3, but must remain
     // accepted by the shared decoder/frontend.
-    assert!(lift_cpu(
-        &[0x67, 0xD8, 0xC1],
-        GuestEip(0),
-        LinearAddress(0),
-        true
-    )
-    .is_ok());
+    assert!(lift_cpu(&[0x67, 0xD8, 0xC1], GuestEip(0), LinearAddress(0), true).is_ok());
 }
