@@ -49,13 +49,22 @@ try {
     prepare([0x40,0xF4]);assert(await request(1));await run();
     let cachedChecks=e.ir_cache_stat(8),captureFallbacks=e.ir_cache_stat(9),warmHits=e.ir_cache_stat(2);
     let guestSteps=e.ir_cache_stat(10),zeroStepExits=e.ir_cache_stat(12);
+    const entryHits=e.ir_cache_entry_stat(PC,0,1,1),entrySteps=e.ir_cache_entry_stat(PC,0,1,2);
+    const entryZero=e.ir_cache_entry_stat(PC,0,1,4);
+    assert.equal(e.ir_cache_entry_stat(PC,0,1,0),1);
+    assert.equal(e.ir_cache_entry_stat(PC,0,1,5),1);
     await run();assert.equal(e.ir_cache_stat(2)-warmHits,1);
     assert(e.ir_cache_stat(8)-cachedChecks>=2,"warm admission uses cached pre/post source validation");
     assert.equal(e.ir_cache_stat(9),captureFallbacks,"warm admission avoids read-only snapshot fallback");
     assert.equal((e.ir_cache_stat(10)-guestSteps)>>>0,1,"activation diagnostics count the retired INC");
     assert(e.ir_cache_stat(11)>=1,"activation diagnostics retain the maximum retired work");
     assert.equal(e.ir_cache_stat(12),zeroStepExits,"normal activation is not a zero-step exit");
-    console.log(`PASS: ${wasm}: warm one-page IR admission validates cached mapping/source bytes without recapture and records activation work`);
+    assert.equal((e.ir_cache_entry_stat(PC,0,1,1)-entryHits)>>>0,1,"entry-scoped hit count isolates the selected region");
+    assert.equal((e.ir_cache_entry_stat(PC,0,1,2)-entrySteps)>>>0,1,"entry-scoped guest steps isolate the selected region");
+    assert(e.ir_cache_entry_stat(PC,0,1,3)>=1,"entry-scoped maximum records retired work");
+    assert.equal(e.ir_cache_entry_stat(PC,0,1,4),entryZero,"normal entry activation is not a zero-step exit");
+    assert.equal(e.ir_cache_entry_stat(PC+1,0,1,0),0,"entry diagnostics require an exact entry key");
+    console.log(`PASS: ${wasm}: warm one-page IR admission validates cached mapping/source bytes without recapture and records entry-scoped activation work`);
     // Entry fetch has architectural A-bit effects. A cold secondary page is not
     // eagerly fetched just because it belongs to the immutable request window.
     prepare([0xB8,...u32(0x12345678),0xF4],PC+4094);assert(await request(5));
