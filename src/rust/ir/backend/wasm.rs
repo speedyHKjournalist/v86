@@ -37,6 +37,7 @@ pub struct Artifact {
 enum StructuredPlan {
     Loop(StructuredLoop),
     Diamond(StructuredDiamond),
+    Linear(Vec<BlockId>),
 }
 
 #[derive(Clone, Debug)]
@@ -264,10 +265,33 @@ fn structured_diamond_plan(mir: &MirRegion) -> Option<StructuredDiamond> {
     })
 }
 
+fn structured_linear_plan(mir: &MirRegion) -> Option<Vec<BlockId>> {
+    let control = &mir.control;
+    if control.entries.len() != 1 {
+        return None;
+    }
+    let mut path = Vec::new();
+    let mut current = control.entries[0];
+    loop {
+        if path.contains(&current) {
+            return None;
+        }
+        let block = control.blocks.get(current.index())?;
+        path.push(current);
+        match &block.terminator {
+            MirTerminator::Jump(edge) => current = edge.target,
+            MirTerminator::Exit(_) => break,
+            MirTerminator::Branch { .. } => return None,
+        }
+    }
+    (path.len() == control.blocks.len()).then_some(path)
+}
+
 fn structured_plan(mir: &MirRegion) -> Option<StructuredPlan> {
     structured_loop_plan(mir)
         .map(StructuredPlan::Loop)
         .or_else(|| structured_diamond_plan(mir).map(StructuredPlan::Diamond))
+        .or_else(|| structured_linear_plan(mir).map(StructuredPlan::Linear))
 }
 
 fn control_edge_count(mir: &MirRegion) -> u32 {
@@ -669,6 +693,7 @@ impl Emitter<'_> {
         match plan {
             StructuredPlan::Loop(loop_plan) => self.emit_structured_loop(loop_plan, remaining),
             StructuredPlan::Diamond(diamond) => self.emit_structured_diamond(diamond, remaining),
+            StructuredPlan::Linear(path) => self.emit_linear_exit_path(path, remaining),
         }
     }
     /// Decode the packed CPU adapter result without touching any SSA result slot.
