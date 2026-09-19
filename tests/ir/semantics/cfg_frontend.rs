@@ -51,8 +51,10 @@ fn reachable_cfg_fixtures() {
         vec![0xF8, 0xF9, 0xF5, 0xFC, 0xFD, 0x90],
         // Conditional loop with an in-region epilogue after the loop exit.
         vec![0x40, 0x49, 0x75, 0xFC, 0x90],
-        // Nested branch remains outside the first diamond structuring subset.
+        // Nested reducible branch: the general IR-09 structurer must own it.
         vec![0x74, 0x02, 0x75, 0x02, 0x40, 0x90, 0x48, 0x90],
+        // Irreducible SCC: block 0 enters the 1/2/3 cycle through two headers.
+        vec![0x74, 0x02, 0xEB, 0x02, 0xEB, 0xFC, 0xEB, 0xFC],
     ];
     let mut cases = vec![];
     for (n, bytes) in programs.iter().enumerate() {
@@ -151,10 +153,19 @@ fn reachable_cfg_fixtures() {
                                 assert_eq!(artifact.generic_dispatch_edges, 0);
                             }
                         }
-                        if n == 24 {
+                        if n == 24 && mode && pc == 0x1000 {
+                            assert!(
+                                artifact.structured_cfg,
+                                "nested reducible branch must use the general structurer: {:?}",
+                                mir.control
+                            );
+                            assert!(artifact.structured_edges > 0);
+                            assert_eq!(artifact.generic_dispatch_edges, 0);
+                        }
+                        if n == 25 && mode && pc == 0x1000 {
                             assert!(
                                 !artifact.structured_cfg,
-                                "nested branch remains on the generic dispatcher fallback"
+                                "multi-entry irreducible SCC must retain dispatcher fallback"
                             );
                             assert!(artifact.generic_dispatch_edges > 0);
                         }
