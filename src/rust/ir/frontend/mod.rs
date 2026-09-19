@@ -35,6 +35,8 @@ pub mod task_regs;
 
 pub mod selector_query;
 
+mod x87;
+
 mod simd_integer;
 mod simd_moves;
 
