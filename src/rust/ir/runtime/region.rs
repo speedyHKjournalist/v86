@@ -209,10 +209,10 @@ mod tests {
 
     #[test]
     fn explicit_semantic_boundary_stops_region_growth() {
-        // CPUID is deliberately a frontend/runtime observation boundary. Bytes
-        // after it may be present in the immutable candidate but are not part of
-        // this automatic region.
-        let bytes = [0x0F, 0xA2, 0x40];
+        // POP FS is explicitly marked block_boundary by the shared encoding
+        // catalogue. Automatic source selection must not speculate past that
+        // decoder-owned boundary.
+        let bytes = [0x0F, 0xA1, 0x40];
         assert_eq!(
             reachable_length(
                 &bytes,
