@@ -127,51 +127,64 @@ executing the same host/browser matrix three times.
 
 ## Execution-budget activation matrix
 
-The next IR-13 experiment varies only `execution_budget` while keeping the
-experimental release core, guest program and all other region-policy inputs fixed.
-The matrix uses:
+IR-core run 352 completed the first same-core matrix from PR #44:
+
+| Dispatcher budget | Median IR steps/ms | vs IR-128 | vs paired legacy |
+|---:|---:|---:|---:|
+| 128 | 363,779 | 1.00x | 29.1% |
+| 256 | 499,802 | 1.37x | 40.0% |
+| 512 | 612,676 | 1.68x | 49.0% |
+| 1024 | 691,443 | 1.90x | 55.4% |
+| legacy | 1,249,203 | - | 100% |
+
+Throughput rises materially as the execution budget increases, so repeated IR
+activation/return is a real end-to-end cost. The gain is also diminishing:
+roughly +37% from 128 to 256, +23% from 256 to 512, and +13% from 512 to 1024.
+This makes it unlikely that simply increasing the runtime default budget can close
+the remaining gap by itself.
+
+The first matrix also reported an apparent activation utilization near 50% because
+it divided retired guest instructions by `execution_budget`. That percentage is
+not dimensionally valid. MIR defines `execution_budget` as dispatcher work units,
+and each lowered block currently has its own `budget_cost`; it is not a guest
+instruction count. PR #45 therefore removes that utilization percentage rather
+than reinterpreting it.
+
+The replacement matrix scopes activation counters to the exact published target
+entry. Each cache record keeps its own hit count, retired guest steps, maximum
+guest steps and zero-step exits, and an experimental query reads those counters by
+the exact `CpuEntryKey`. The performance test waits until the target loop itself
+has a Tier-2 record before taking the warm sample. This prevents BIOS, mailbox or
+other automatically compiled entries from contaminating the activation average.
+
+The upper-bound matrix now uses:
 
 ```text
-128 / 256 / 512 / 1024
+128 / 256 / 512 / 1024 / 2048 / 4096
 ```
 
-with three independent samples per value. Every sample constructs and destroys a
-fresh VM, so IR cache state, TLB state, Tier publication and browser/runtime state
-do not leak between budget values. Each round also creates a fresh same-core legacy
-VM. IR budget order alternates ascending and descending across rounds to reduce a
-fixed ordering bias on shared CI runners.
+with three fresh-VM samples per value and the same alternating order used by PR
+#44. It reports target-entry guest steps per activation as an observed property,
+not as a percentage of dispatcher budget. It also records throughput relative to
+the previous budget so diminishing returns are explicit.
 
-The structured JSON keeps every raw sample and reports medians for warm
-instruction-counter steps/ms, Tier 1/Tier 2 publication time, cache hits,
-average retired guest steps per activation, maximum retired steps and zero-step
-exits. It additionally reports:
-
-```text
-activation_budget_utilization =
-    average_guest_steps_per_activation / execution_budget
-```
-
-and throughput relative to both the 128-budget median and the paired legacy
-median. No CI pass/fail threshold is attached to these timing values.
-
-The matrix is reproducible independently with:
+The matrix remains reproducible with:
 
 ```sh
 make ir13-budget-matrix
 ```
 
-which writes `build/ir13-performance-smoke.json`. The full IR-13 smoke invokes
-the same target before the browser/Worker/device acceptance cells, so the JSON is
-also retained as a workflow artifact.
+and writes `build/ir13-performance-smoke.json`. There is deliberately no timing
+pass/fail threshold and no change to the runtime default budget.
 
-This experiment does not change the runtime default budget or scheduler behavior.
-If average retired work closely tracks each configured budget and throughput rises
-materially with the budget, activation/entry-exit amortization becomes the next
-runtime optimization target. If average retired work saturates well below the
-configured budget, region exits, helpers, faults or unsupported semantics should
-be investigated instead. A flat throughput curve despite high utilization would
-point away from simple budget tuning and toward per-activation materialization,
-dispatcher cost or generated-code quality.
+Interpretation for the next step:
+
+- if 2048/4096 continue to improve materially, entry/exit amortization remains a
+  large target but device/scheduling fairness must be measured before changing policy;
+- if throughput flattens, the asymptote estimates how much activation overhead can
+  plausibly explain and attention should move to CFG dispatch/state materialization;
+- entry-scoped average/max guest-step data distinguishes the target hot loop from
+  unrelated compiled work, but it is not a direct count of dispatcher budget units.
 
 Further tuning remains separate: safe IR-to-IR continuation/link consumption,
 Tier-1/Tier-2 region/budget policy, compiler-stage timing, and controlled XP/
