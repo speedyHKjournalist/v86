@@ -25,6 +25,8 @@ struct Record {
     slot: u32,
     phase: Phase,
     automatic: bool,
+    /// Monotonic use stamp for deterministic cold-point eviction.
+    last_used: u64,
 }
 struct Cache {
     records: Vec<Record>,
@@ -33,6 +35,9 @@ struct Cache {
     rejected: u32,
     failed: u32,
     reclaimed: u32,
+    clock: u64,
+    links: u32,
+    link_misses: u32,
 }
 static CACHE: Mutex<Cache> = Mutex::new(Cache {
     records: Vec::new(),
@@ -41,6 +46,9 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     rejected: 0,
     failed: 0,
     reclaimed: 0,
+    clock: 0,
+    links: 0,
+    link_misses: 0,
 });
 const CAPACITY: usize = 32;
 extern "C" {
@@ -144,11 +152,15 @@ pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
     // IDs never repeat in this Wasm instance, including reset. They also identify
     // this reservation generation; a reused slot must have a different owner.
     job.artifact.key.slot_generation = id;
-    CACHE.try_lock().unwrap().records.push(Record {
+    let mut cache = CACHE.try_lock().unwrap();
+    cache.clock = cache.clock.wrapping_add(1);
+    let last_used = cache.clock;
+    cache.records.push(Record {
         job,
         slot,
         phase: Phase::Pending,
         automatic,
+        last_used,
     });
     slot
 }
@@ -173,11 +185,19 @@ pub(super) unsafe fn make_room(entry: super::entry::CpuEntryKey) -> bool {
         if cache.records.len() < CAPACITY {
             return true;
         }
-        if let Some(r) = cache.records.iter_mut().find(|r| {
-            r.automatic
-                && r.phase == Phase::Published
-                && r.job.artifact.entry != EntryContract::Cpu(entry)
-        }) {
+        let victim = cache
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                r.automatic
+                    && r.phase == Phase::Published
+                    && r.job.artifact.entry != EntryContract::Cpu(entry)
+            })
+            .min_by_key(|(_, r)| (r.last_used, r.job.artifact.key.job))
+            .map(|(index, _)| index);
+        if let Some(index) = victim {
+            let r = &mut cache.records[index];
             r.phase = Phase::Retired;
             Some(r.job.artifact.entry)
         } else {
@@ -305,9 +325,76 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         3 => cache.rejected,
         4 => cache.failed,
         5 => cache.reclaimed,
+        6 => cache.links,
+        7 => cache.link_misses,
         _ => 0,
     }
 }
+
+/// Cold lookup used by a compiled-exit/link bridge. The returned slot is only a
+/// hint: the callee still performs its normal entry/generation/mapping admission
+/// before execution. This never publishes, compiles or holds a cache lock across
+/// guest activation.
+pub unsafe fn link_target() -> Option<(u32, u64)> {
+    // This is a cold graph lookup, not a guest activation. Unlike execute(),
+    // requiring JIT_STATE try_lock here would race the immediately following
+    // dependency query with our own short-lived cache inspection and makes the
+    // diagnostic/link API spuriously miss. All mutation/publication still uses
+    // the normal quiescent protocols.
+    if cpu::in_jit || busy() {
+        return None;
+    }
+    let entry = live::entry();
+    let candidate = {
+        let cache = CACHE.try_lock().unwrap();
+        cache
+            .records
+            .iter()
+            .find(|r| {
+                r.phase == Phase::Published && r.job.artifact.entry == EntryContract::Cpu(entry)
+            })
+            .map(|r| (r.job.artifact.key.job, r.job.artifact.key, r.job.source.clone()))
+    };
+    let Some((id, key, source)) = candidate else {
+        let mut cache = CACHE.try_lock().unwrap();
+        cache.link_misses = cache.link_misses.wrapping_add(1);
+        return None;
+    };
+    let valid = live::generation_current(key)
+        && capture(entry.linear.0, source.bytes.len())
+            .is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings);
+    let mut cache = CACHE.try_lock().unwrap();
+    let Some(index) = cache
+        .records
+        .iter()
+        .position(|r| r.job.artifact.key.job == id && r.phase == Phase::Published)
+    else {
+        cache.link_misses = cache.link_misses.wrapping_add(1);
+        return None;
+    };
+    if !valid {
+        cache.records[index].phase = Phase::Retired;
+        cache.link_misses = cache.link_misses.wrapping_add(1);
+        return None;
+    }
+    cache.clock = cache.clock.wrapping_add(1);
+    let stamp = cache.clock;
+    cache.records[index].last_used = stamp;
+    cache.links = cache.links.wrapping_add(1);
+    Some((cache.records[index].slot, id))
+}
+
+#[no_mangle]
+pub unsafe fn ir_cache_link_target() -> u64 {
+    let Some((slot, id)) = link_target() else {
+        return 0;
+    };
+    // Slot zero is never allocated. Pack slot and a truncated owner witness for
+    // diagnostics; execution must still use normal cache admission, never this
+    // value as an unchecked call target.
+    ((id as u32 as u64) << 32) | slot as u64
+}
+
 /// Called by the ordinary CPU dispatcher, before legacy cache lookup.
 /// No request means no IR entry; compilation policy/tier promotion remain separate.
 pub unsafe fn execute() -> bool {
@@ -366,6 +453,15 @@ pub unsafe fn execute() -> bool {
             false
         };
         if valid {
+            cache.clock = cache.clock.wrapping_add(1);
+            let stamp = cache.clock;
+            if let Some(r) = cache
+                .records
+                .iter_mut()
+                .find(|r| r.job.artifact.key.job == id)
+            {
+                r.last_used = stamp;
+            }
             cache.active = true;
             cache.hits = cache.hits.wrapping_add(1);
         }

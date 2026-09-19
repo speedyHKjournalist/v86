@@ -80,6 +80,10 @@ jobs:
         run: |
           set -o pipefail
           sh tools/ir-store-continuation-tests.sh 2>&1 | tee build/ir-store-continuation-cpu.log
+      - name: IR-12 cache, publication and scheduling lifecycle
+        run: |
+          set -o pipefail
+          make ir-live-tests ir-cache-tests ir-auto-tests 2>&1 | tee build/ir12-lifecycle.log
       - name: Generated sources and whitespace
         run: |
           git diff --exit-code
