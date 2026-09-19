@@ -27,7 +27,7 @@
 
 覆盖目录共 864 条编码记录、3,830 个粗粒度形式，其中 102 个是明确的
 baseline-UD reg/mem 形式，**3,728 个生产形式仍为 Pending**。实验前端具有
-838 个原生寄存器/EA 形式、622 个实验 CPU 访存形式、156 个实验栈形式、28 个实验近控制形式、14 个 CPU 算术形式、28 个 CPU 状态形式、30 个单次字符串形式、36 个 I/O 形式、84 个 REP helper 形式、8 个 CPU 信息 helper 形式、12 个 CPU 系统 helper 形式、8 个 CR/DR helper 形式、56 个描述符/机器状态 helper 形式、32 个任务/LDTR helper 形式、32 个选择子查询 helper 形式、450 个 XMM SIMD 形式和 152 个终端分支形式的实现能力；这不是对全部
+854 个原生寄存器/EA 形式、638 个实验 CPU 访存形式、156 个实验栈形式、28 个实验近控制形式、14 个 CPU 算术形式、28 个 CPU 状态形式、30 个单次字符串形式、36 个 I/O 形式、84 个 REP helper 形式、8 个 CPU 信息 helper 形式、12 个 CPU 系统 helper 形式、8 个 CR/DR helper 形式、56 个描述符/机器状态 helper 形式、32 个任务/LDTR helper 形式、32 个选择子查询 helper 形式、450 个 XMM SIMD 形式和 152 个终端分支形式的实现能力；尚有 1110 个 experimental Pending 形式；这不是对全部
 前缀、特权、子编码组合逐一完成测试的声明。JSON 分别记录生产状态与实验状态。
 
 `make ir-default-gate` 在生产 Pending 非零时按预期失败。`ir-experimental`
