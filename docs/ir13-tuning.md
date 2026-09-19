@@ -125,6 +125,54 @@ The IR-13 smoke already subsumes the separate Node and Chromium host/browser
 acceptance commands. The workflow now runs that complete smoke once rather than
 executing the same host/browser matrix three times.
 
+## Execution-budget activation matrix
+
+The next IR-13 experiment varies only `execution_budget` while keeping the
+experimental release core, guest program and all other region-policy inputs fixed.
+The matrix uses:
+
+```text
+128 / 256 / 512 / 1024
+```
+
+with three independent samples per value. Every sample constructs and destroys a
+fresh VM, so IR cache state, TLB state, Tier publication and browser/runtime state
+do not leak between budget values. Each round also creates a fresh same-core legacy
+VM. IR budget order alternates ascending and descending across rounds to reduce a
+fixed ordering bias on shared CI runners.
+
+The structured JSON keeps every raw sample and reports medians for warm
+instruction-counter steps/ms, Tier 1/Tier 2 publication time, cache hits,
+average retired guest steps per activation, maximum retired steps and zero-step
+exits. It additionally reports:
+
+```text
+activation_budget_utilization =
+    average_guest_steps_per_activation / execution_budget
+```
+
+and throughput relative to both the 128-budget median and the paired legacy
+median. No CI pass/fail threshold is attached to these timing values.
+
+The matrix is reproducible independently with:
+
+```sh
+make ir13-budget-matrix
+```
+
+which writes `build/ir13-performance-smoke.json`. The full IR-13 smoke invokes
+the same target before the browser/Worker/device acceptance cells, so the JSON is
+also retained as a workflow artifact.
+
+This experiment does not change the runtime default budget or scheduler behavior.
+If average retired work closely tracks each configured budget and throughput rises
+materially with the budget, activation/entry-exit amortization becomes the next
+runtime optimization target. If average retired work saturates well below the
+configured budget, region exits, helpers, faults or unsupported semantics should
+be investigated instead. A flat throughput curve despite high utilization would
+point away from simple budget tuning and toward per-activation materialization,
+dispatcher cost or generated-code quality.
+
 Further tuning remains separate: safe IR-to-IR continuation/link consumption,
 Tier-1/Tier-2 region/budget policy, compiler-stage timing, and controlled XP/
 application benchmarks.

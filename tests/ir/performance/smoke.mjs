@@ -20,10 +20,23 @@ const word = async (vm, address) => {
 };
 const counter = async vm => Number(await vm.get_instruction_counter()) >>> 0;
 const delta32 = (after, before) => (after - before) >>> 0;
+const median = values => {
+    assert(values.length > 0, "median requires values");
+    const sorted = [...values].sort((a, b) => a - b);
+    const middle = sorted.length >> 1;
+    return sorted.length & 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
 const bios = Uint8Array.from(fs.readFileSync("build/cpu-worker-test.bin")).buffer;
 const loop_pc = 0x1200000;
-const smoke_budget = { hot_threshold: 2, promotion_threshold: 4, max_source_bytes: 96,
-    execution_budget: 128, rep_iterations: 8 };
+const base_budget = {
+    hot_threshold: 2,
+    promotion_threshold: 4,
+    max_source_bytes: 96,
+    rep_iterations: 8,
+};
+const execution_budgets = [128, 256, 512, 1024];
+const repetitions = 3;
+const warm_window_ms = 250;
 
 async function create(extra)
 {
@@ -55,7 +68,7 @@ async function boot(vm)
     return performance.now() - started;
 }
 
-async function warm_rate(vm, duration_ms = 250)
+async function warm_rate(vm, duration_ms = warm_window_ms)
 {
     await sleep(25);
     const before = await counter(vm);
@@ -68,9 +81,10 @@ async function warm_rate(vm, duration_ms = 250)
     return { elapsed_ms, instruction_steps: steps, instruction_steps_per_ms: steps / elapsed_ms };
 }
 
-async function sample_ir()
+async function sample_ir(execution_budget, round)
 {
-    const { vm, load_ms } = await create({ jit_backend: "ir", ir_region_budget: smoke_budget });
+    const budget = { ...base_budget, execution_budget };
+    const { vm, load_ms } = await create({ jit_backend: "ir", ir_region_budget: budget });
     try
     {
         const boot_ms = await boot(vm);
@@ -78,9 +92,13 @@ async function sample_ir()
         assert.equal(before.backend, "ir");
         assert.equal(before.legacy_generation_enabled, false);
         assert.equal(before.legacy_compile_requests, 0);
+        assert.equal(before.ir_region_budget.execution_budget, execution_budget);
 
         await vm.write_memory(Uint8Array.of(0x40, 0xEB, 0xFD), loop_pc);
-        const recorder = new PerformanceRecorder(vm, { max_ms: 30000, metadata: { purpose: "ir13-cold-warm-smoke" } });
+        const recorder = new PerformanceRecorder(vm, {
+            max_ms: 30000,
+            metadata: { purpose: "ir13-execution-budget-matrix", execution_budget, round },
+        });
         recorder.start();
         const cold_started = performance.now();
         await vm.write_memory(bytes(loop_pc), 0x600);
@@ -95,7 +113,7 @@ async function sample_ir()
         const tier2_ms = performance.now() - cold_started;
         const warm = await warm_rate(vm);
         await vm.stop();
-        const report = recorder.stop("ir13_smoke");
+        const report = recorder.stop("ir13_budget_matrix");
         const after = await vm.get_jit_info();
 
         assert.equal(after.backend, "ir");
@@ -105,7 +123,12 @@ async function sample_ir()
         assert.equal(report.metadata.jit_backend, "ir");
         assert(report.execution_counters_available);
 
+        const cache_hits = after.ir.cache_hits - before.ir.cache_hits;
+        const cache_guest_steps = (after.ir.cache_guest_steps - before.ir.cache_guest_steps) >>> 0;
+        const average_guest_steps_per_activation = cache_guest_steps / Math.max(1, cache_hits);
         return {
+            round,
+            execution_budget,
             load_ms,
             boot_ms,
             cold_region: { tier1_ms, tier2_ms },
@@ -115,15 +138,14 @@ async function sample_ir()
                 tier1_published: after.ir.tier1_published - before.ir.tier1_published,
                 tier2_attempts: after.ir.tier2_attempts - before.ir.tier2_attempts,
                 tier2_published: after.ir.tier2_published - before.ir.tier2_published,
-                cache_hits: after.ir.cache_hits - before.ir.cache_hits,
+                cache_hits,
                 cache_cached_checks: after.ir.cache_cached_checks - before.ir.cache_cached_checks,
                 cache_capture_fallbacks: after.ir.cache_capture_fallbacks - before.ir.cache_capture_fallbacks,
-                cache_guest_steps: (after.ir.cache_guest_steps - before.ir.cache_guest_steps) >>> 0,
+                cache_guest_steps,
                 cache_max_guest_steps: after.ir.cache_max_guest_steps,
                 cache_zero_step_exits: (after.ir.cache_zero_step_exits - before.ir.cache_zero_step_exits) >>> 0,
-                average_guest_steps_per_activation:
-                    ((after.ir.cache_guest_steps - before.ir.cache_guest_steps) >>> 0) /
-                    Math.max(1, after.ir.cache_hits - before.ir.cache_hits),
+                average_guest_steps_per_activation,
+                activation_budget_utilization: average_guest_steps_per_activation / execution_budget,
             },
             recorder: {
                 duration_ms: report.duration_ms,
@@ -138,7 +160,7 @@ async function sample_ir()
     finally { await vm.destroy(); }
 }
 
-async function sample_legacy()
+async function sample_legacy(round)
 {
     // Use the same experimental release core so host/core build differences do not
     // contaminate this smoke. Only the selected compiler policy differs.
@@ -160,6 +182,7 @@ async function sample_legacy()
         await vm.stop();
         const after = await vm.get_jit_info();
         return {
+            round,
             load_ms,
             boot_ms,
             cold_region: { first_compile_ms },
@@ -170,16 +193,88 @@ async function sample_legacy()
     finally { await vm.destroy(); }
 }
 
+function summarize_ir(samples, execution_budget)
+{
+    assert.equal(samples.length, repetitions, "IR budget matrix requires every repetition");
+    return {
+        samples: samples.length,
+        execution_budget,
+        median_load_ms: median(samples.map(sample => sample.load_ms)),
+        median_boot_ms: median(samples.map(sample => sample.boot_ms)),
+        median_tier1_ms: median(samples.map(sample => sample.cold_region.tier1_ms)),
+        median_tier2_ms: median(samples.map(sample => sample.cold_region.tier2_ms)),
+        median_instruction_steps_per_ms: median(samples.map(sample => sample.warm.instruction_steps_per_ms)),
+        median_cache_hits: median(samples.map(sample => sample.ir.cache_hits)),
+        median_average_guest_steps_per_activation:
+            median(samples.map(sample => sample.ir.average_guest_steps_per_activation)),
+        median_activation_budget_utilization:
+            median(samples.map(sample => sample.ir.activation_budget_utilization)),
+        median_cache_max_guest_steps: median(samples.map(sample => sample.ir.cache_max_guest_steps)),
+        median_cache_zero_step_exits: median(samples.map(sample => sample.ir.cache_zero_step_exits)),
+        median_cache_capture_fallbacks: median(samples.map(sample => sample.ir.cache_capture_fallbacks)),
+    };
+}
+
+function summarize_legacy(samples)
+{
+    assert.equal(samples.length, repetitions, "legacy matrix requires every repetition");
+    return {
+        samples: samples.length,
+        median_load_ms: median(samples.map(sample => sample.load_ms)),
+        median_boot_ms: median(samples.map(sample => sample.boot_ms)),
+        median_first_compile_ms: median(samples.map(sample => sample.cold_region.first_compile_ms)),
+        median_instruction_steps_per_ms: median(samples.map(sample => sample.warm.instruction_steps_per_ms)),
+        median_legacy_compile_requests: median(samples.map(sample => sample.legacy_compile_requests)),
+    };
+}
+
+const ir_runs = Object.fromEntries(execution_budgets.map(budget => [String(budget), []]));
+const legacy_runs = [];
+for(let round = 0; round < repetitions; round++)
+{
+    legacy_runs.push(await sample_legacy(round));
+    const order = round & 1 ? [...execution_budgets].reverse() : execution_budgets;
+    for(const execution_budget of order)
+    {
+        ir_runs[String(execution_budget)].push(await sample_ir(execution_budget, round));
+    }
+}
+
+const ir_summary = {};
+for(const execution_budget of execution_budgets)
+{
+    ir_summary[String(execution_budget)] = summarize_ir(ir_runs[String(execution_budget)], execution_budget);
+}
+const legacy_summary = summarize_legacy(legacy_runs);
+const baseline_128 = ir_summary["128"].median_instruction_steps_per_ms;
+for(const execution_budget of execution_budgets)
+{
+    const summary = ir_summary[String(execution_budget)];
+    summary.throughput_relative_to_ir_128 = summary.median_instruction_steps_per_ms / baseline_128;
+    summary.throughput_relative_to_legacy =
+        summary.median_instruction_steps_per_ms / legacy_summary.median_instruction_steps_per_ms;
+}
+
 const result = {
-    format: "v86-ir13-performance-smoke",
-    version: 1,
+    format: "v86-ir13-execution-budget-matrix",
+    version: 2,
     policy: {
-        note: "Diagnostic smoke only; CI timing has no release threshold and is not an end-to-end speed claim.",
+        note: "Diagnostic matrix only; CI timing has no release threshold and is not an end-to-end speed claim.",
         core: "build/v86-ir-runtime.wasm",
-        ir_region_budget: smoke_budget,
-        warm_window_ms: 250,
+        base_ir_region_budget: base_budget,
+        execution_budgets,
+        repetitions,
+        warm_window_ms,
+        fresh_vm_per_sample: true,
+        order: "legacy once per round; IR budgets alternate ascending/descending to reduce fixed order bias",
     },
-    ir: await sample_ir(),
-    legacy: await sample_legacy(),
+    summary: {
+        legacy: legacy_summary,
+        ir: ir_summary,
+    },
+    raw: {
+        legacy: legacy_runs,
+        ir: ir_runs,
+    },
 };
 console.log(JSON.stringify(result, null, 2));

@@ -21,7 +21,7 @@ tests instead of introducing a smaller synthetic-only harness.
 | Chromium dedicated CPU Worker | experimental release | public backend scenario, Worker ownership, Tier 1/2, SMC, snapshots, zero legacy generation |
 | Chromium dedicated CPU Worker + device transport | experimental release | DOM keyboard make/break + mouse movement through Worker into guest PS/2, VGA/canvas, virtio graphics backpressure, disk/filesystem RPC, SB16 PCM, save/restore, rejected-restore recovery, main-thread/Worker snapshot interchange |
 | Chromium AudioWorklet + CPU Worker | experimental release | AudioWorklet construction plus save/restore while the Worker CPU uses the IR backend |
-| Node cold/warm diagnostic | experimental release, paired policies | same-core legacy/IR load + boot, first compile/Tier 1/Tier 2 publication, short warm instruction-rate window and recorder/codegen counters; no CI speed threshold |
+| Node execution-budget matrix | experimental release, paired policies | same-core legacy plus IR execution budgets 128/256/512/1024, three fresh-VM samples each, alternating budget order, raw runs + median warm throughput/activation utilization/publication counters; no CI speed threshold |
 
 The Worker/device and AudioWorklet pages are parameterized. Their default invocation
 continues to exercise the existing legacy production core; adding

@@ -8,11 +8,9 @@ mkdir -p build
 # snapshots, backend crossing and initialization failures.
 make ir-backend-integration-tests
 
-# Record paired cold/warm diagnostics on the same experimental release core.
-# There is deliberately no timing threshold in CI; this is evidence for later
-# controlled performance comparisons, not a speed claim.
-node tests/ir/performance/smoke.mjs > build/ir13-performance-smoke.json
-cat build/ir13-performance-smoke.json
+# Record the repeated same-core execution-budget matrix. Every sample uses a
+# fresh VM; CI keeps raw runs and medians but deliberately has no speed threshold.
+make ir13-budget-matrix
 
 # The large Worker screen transport regression is host-only and catches ordering /
 # stale-generation failures before starting a browser.
