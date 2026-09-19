@@ -17,7 +17,7 @@
 | IR-05 | 部分完成 | 寄存器算术、FLAGS、别名、条件码、移位/旋转、SHLD/SHRD、乘除法及终端分支可生成 Wasm；last_op1 和原始 ZF 来源已进入 SSA/快照；已增加位测试/修改、位扫描、POPCNT、BSWAP、XADD、CMPXCHG、BCD、FLAGS 传送、符号扩展和计数分支；已增加可达直接 CFG 字节 lifting；其余整数指令、多入口和在线区域选择未完成 |
 | IR-06 | 部分完成 | MOV/moffs/XLAT、整数 ALU/比较/条件操作及 INC/DEC/NEG/NOT 访存；成对 RMW ticket、原生 RAM 和精确 MMU/MMIO；已增加 PUSH/POP、PUSHA/POPA、LEAVE、ENTER 和多次访存提交；已增加交换指令、原生 RAM CMPXCHG8B 及非共享单线程 ABI 下经审计的 LOCK；已增加 FLAGS/段栈操作、段 MOV 和远指针加载；通用 proof 及其余访存待实现 |
 | IR-07 | 部分完成 | 近 CALL/RET、FF /2 与 /4 间接转移及动态 EIP StateMap；已增加单次 MOVS/CMPS/STOS/LODS/SCAS 原生执行；已增加标量 IN/OUT 和单次 INS/OUTS；已接入有界 REP HIR、进度映射及最终提交；已增加 CPUID/RDTSC/RDMSR/WRMSR 终端适配；已增加 SYSENTER/SYSEXIT、HLT/CLI/CLTS/WBINVD；已增加 CR/DR 传送与 CPU 地址映射变更适配；已增加描述符表、SMSW/LMSW 与 INVLPG；已增加 SLDT/STR 与 LLDT/LTR；已增加 LAR/LSL、VERR/VERW；在线 REP 调度、远转移及其余特权/系统指令待实现 |
-| IR-08 | 部分完成 | XMM V128 SSA、快照、typed locals/边复制，以及 packed/scalar SIMD 传送的原生 RAM 与精确慢路径已实现；已增加 38 种 packed integer 算术/比较/乘法/逻辑及 PS/PD 逻辑别名；已增加打包/解包、变量及立即数 packed 移位；已增加 PSHUF/SHUF 重排；已增加半部传送、MOVD/MOVQ 和重复 lane；已增加符号位掩码、PINSRW/PEXTRW、非临时存储和 LDDQU；已增加 MASKMOVDQU 原生 RAM 与有序慢路径；其余 SIMD 状态/传送、MMX、FP 控制、F80/x87 和无 SIMD 降级仍待实现 |
+| IR-08 | 部分完成 | XMM V128 SSA、快照、typed locals/边复制，以及 packed/scalar SIMD 传送的原生 RAM 与精确慢路径已实现；已增加 38 种 packed integer 算术/比较/乘法/逻辑及 PS/PD 逻辑别名、打包/解包与 packed 移位、PSHUF/SHUF、半部传送、MOVD/MOVQ、lane、MASKMOVDQU 等；新增 D8-DF x87 寄存器形式的 terminal CpuX87Helper，复用 canonical F80 CPU 语义并显式处理 CR0.EM/TS #NM、legacy x87 cache barrier 与 nested #UD。x87 memory/environment、MMX、其余 SIMD/FP 控制和无 SIMD 降级仍待实现 |
 | IR-09 | backend/Tier-1 infrastructure 完成 | IR 自有 Wasm backend 已形成完整路径：typed locals、MIR parallel-copy/phi edge、StateMap/预算/故障出口统一发射；新增通用 single-entry reducible CFG structurer，以 SCC/唯一循环入口递归生成 Wasm Block/Loop，nested branch/nested loop 均不再依赖逐 case detector，多入口/irreducible SCC 才使用 IR 自有 pc-local dispatcher fallback；`src/rust/ir` completion gate 禁止引用 legacy `jit_instruction`/`jit_instructions`/`codegen`/`control_flow` emitter。自动 Tier 1/2 均使用共享 decoder 的 bounded reachable-CFG region formation 和同一 HIR→MIR→Wasm backend；Tier 1 固定一轮低成本 prune/merge/phi/copy canonicalization，Tier-2-only FLAGS/GVN/DCE/helper-state/LICM/RAM forwarding 保持隔离。IR-09 对当前可 lowering 语义的 backend/Tier-1 职责完成；IR-05～IR-08 尚未清零的 ISA/system/FP/SIMD Pending 仍是后续覆盖工作，不在 IR-09 中虚报完成。详见 ir09-completion.md |
 | IR-10 | 完成 | Tier 2 基础数据流优化已按实施计划的 FLAGS / DCE / GVN / copy / CFG / helper-state 六类验收收口：CFG 清理、trivial phi、常量与独立 copy propagation、逐位 FLAGS demand/CPU liveness、StateMap-aware DCE、支配关系 GVN/CSE、经审计 pure helper 的 CPU state observation trimming 均有独立开关/计数、正例/负例与逐-pass differential；特殊 FLAGS 或读取/写入 CPU state 的 helper 继续保守 materialize，不猜测未证明状态。IR-11 的 RAM proof/forwarding、LICM、强度削弱和高级 SIMD/循环优化不计入 IR-10 |
 | IR-11 | 完成 | Tier 2 已收口受预算约束的纯 SSA LICM、整数 SIMD peephole、owned-MIR RAM 证明与 fault-preserving memory LICM：地址关系按 Exact/Disjoint/MayAlias 保守分类，已证明不相交的 native 标量 store 可保留既有 load cache；自然循环采用唯一 preheader 重置的 loop cache，首次访问仍在原故障点执行且只有成功 native RAM guard/load 才建立有效值，任一慢速 guest-memory 路径在 MMIO/page-walk 前清空全部 loop cache；含 store/RMW/vector memory/未知 helper/effect 的循环不做 memory LICM。证书由 verifier 独立重算，伪造/预算失败不会部分发布。详见 ir11-completion.md |
@@ -27,7 +27,7 @@
 
 覆盖目录共 864 条编码记录、3,830 个粗粒度形式，其中 102 个是明确的
 baseline-UD reg/mem 形式，**3,728 个生产形式仍为 Pending**。实验前端具有
-854 个原生寄存器/EA 形式、638 个实验 CPU 访存形式、156 个实验栈形式、28 个实验近控制形式、14 个 CPU 算术形式、28 个 CPU 状态形式、30 个单次字符串形式、36 个 I/O 形式、84 个 REP helper 形式、8 个 CPU 信息 helper 形式、12 个 CPU 系统 helper 形式、8 个 CR/DR helper 形式、56 个描述符/机器状态 helper 形式、32 个任务/LDTR helper 形式、32 个选择子查询 helper 形式、450 个 XMM SIMD 形式和 152 个终端分支形式的实现能力；尚有 1110 个 experimental Pending 形式；这不是对全部
+854 个原生寄存器/EA 形式、638 个实验 CPU 访存形式、156 个实验栈形式、28 个实验近控制形式、14 个 CPU 算术形式、28 个 CPU 状态形式、30 个单次字符串形式、36 个 I/O 形式、84 个 REP helper 形式、8 个 CPU 信息 helper 形式、12 个 CPU 系统 helper 形式、8 个 CR/DR helper 形式、56 个描述符/机器状态 helper 形式、32 个任务/LDTR helper 形式、32 个选择子查询 helper 形式、450 个 XMM SIMD 形式、160 个 x87 register helper 形式和 152 个终端分支形式的实现能力；尚有 950 个 experimental Pending 形式；这不是对全部
 前缀、特权、子编码组合逐一完成测试的声明。JSON 分别记录生产状态与实验状态。
 
 `make ir-default-gate` 在生产 Pending 非零时按预期失败。`ir-experimental`
@@ -476,6 +476,13 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
   `build/ir-simd-masked-full-suite.log`；feature 编译见 `build/ir-simd-masked-check.log`。
   目录归属、普通构建导出隔离及 diff 检查通过。
 
+
+## 后续推进：x87 寄存器形式
+
+- 新增 D8-DF `mod=3` 的 terminal CpuX87Helper；成功路径直接复用解释器的 F80 指令体，不将 x87 降成 host f64，也不调用 legacy JIT emitter。
+- CR0.EM/TS 先通过 x87 task-switch guard 交付 #NM；随后同步并清空 legacy x87 f64 shadow cache，再进入 canonical F80 状态。nested 非法子编码在调用语义体前显式判定，#UD 不会误提交指令。
+- experimental catalogue 新增 160 个 CpuX87Helper coarse forms，experimental Pending 从 1110 降至 950；生产 Pending 仍为 3,728。x87 memory/environment、MMX 和剩余 FP/SIMD 工作继续属于 IR-08。
+- `make ir-x87-tests` 作为 IR-core 门禁，使用全部 D8-DF register subencoding、D9/DD operand-size 变体、F80/TOP/tag/status、FCMOV/FCOMI flags、nested #UD 与 EM/TS #NM priority 做 interpreter differential。契约见 [ir-x87.md](ir-x87.md)。
 
 ## 后续推进：显式 MIR 访存计划
 

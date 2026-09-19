@@ -8,7 +8,7 @@ without a ModRM group. It does not depend on table ordering.
 `lowering` is the **production** status. `experimental_lowering` separately records
 experimental capability. Of 3,830 coarse forms, 102 explicit invalid reg/mem forms
 are BaselineUD and **3,728 production forms remain Pending**. Of those production-
-Pending forms, 1,110 are still `experimental_lowering: Pending`; the rest have an
+Pending forms, 950 are still `experimental_lowering: Pending`; the rest have an
 experimental native/helper implementation but have not passed the production-default
 gate. Current experimental capabilities are:
 
@@ -16,6 +16,7 @@ gate. Current experimental capabilities are:
 |---|---:|---|
 | NativeHIR | 854 | [Design](ir-design.md), [shifts](ir-shifts.md), [multiply](ir-multiply.md), [bits](ir-bits.md), [exchange](ir-exchange.md), [scalar/BCD](ir-misc.md) |
 | CpuSimdHIR | 450 | [Moves](ir-simd-moves.md), [integer arithmetic](ir-simd-integer.md), [packing/shifts](ir-simd-permute.md), [shuffles](ir-simd-shuffle.md), [half/scalar transfers](ir-simd-transfer.md), [word lanes and sign masks](ir-simd-lane.md), [masked stores](ir-simd-masked.md) |
+| CpuX87Helper | 160 | [Register-form terminal F80 helper](ir-x87.md); D8-DF mod=3 including nested #UD and #NM priority |
 | CpuMemoryHIR | 638 | [RAM/MMU/RMW](ir-memory.md) and the instruction-family contracts above |
 | CpuStackHIR | 156 | [Stack](ir-stack.md), [ENTER](ir-enter.md), [FLAGS/segment stacks](ir-system-stack.md) |
 | CpuRepHelper | 84 | [REP HIR and terminal batch ABI](ir-rep.md) |

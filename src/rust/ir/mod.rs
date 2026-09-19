@@ -118,6 +118,10 @@ mod verr_tests;
 mod cmpxchg8b_tests;
 
 #[cfg(test)]
+#[path = "../../../tests/ir/semantics/x87.rs"]
+mod x87_tests;
+
+#[cfg(test)]
 #[path = "../../../tests/ir/semantics/simd_moves.rs"]
 mod simd_move_tests;
 

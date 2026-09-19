@@ -746,6 +746,11 @@ ir-cmpxchg8b-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-
 	cargo test ir::cmpxchg8b_tests
 	node tests/ir/differential/cmpxchg8b.mjs
 
+.PHONY: ir-x87-tests
+ir-x87-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::x87_tests
+	node tests/ir/differential/x87.mjs
+
 .PHONY: ir-simd-move-tests
 ir-simd-move-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
 	cargo test ir::simd_move_tests

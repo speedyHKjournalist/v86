@@ -41,6 +41,10 @@ jobs:
         run: |
           RUSTFLAGS="-D warnings" cargo check --release --target wasm32-unknown-unknown
           RUSTFLAGS="-D warnings" cargo check --release --target wasm32-unknown-unknown --features ir-experimental
+      - name: IR-08 x87 register differential
+        run: |
+          set -o pipefail
+          make ir-x87-tests 2>&1 | tee build/ir08-x87.log
       - name: IR-09 backend completion gate
         run: |
           set -o pipefail

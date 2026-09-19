@@ -128,6 +128,15 @@ fn lift_inner(
             }
             continue;
         }
+        if super::x87::supports(&i) {
+            if !cpu || offset != bytes.len() {
+                return Err(CompileError::Unsupported(
+                    "x87 register form requires terminal CPU region",
+                ));
+            }
+            super::x87::lift(&mut b, &i, count);
+            return Ok(b.region);
+        }
         if super::misc::supports(&i) {
             if !cpu && super::misc::needs_cpu(&i) {
                 return Err(CompileError::Unsupported(
