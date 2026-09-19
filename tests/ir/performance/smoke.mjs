@@ -190,6 +190,14 @@ async function sample_ir(execution_budget, round)
                 cache_max_guest_steps: after.ir.cache_max_guest_steps,
                 cache_zero_step_exits:
                     (after.ir.cache_zero_step_exits - before.ir.cache_zero_step_exits) >>> 0,
+                structured_publications:
+                    (after.ir.structured_publications - before.ir.structured_publications) >>> 0,
+                generic_publications:
+                    (after.ir.generic_publications - before.ir.generic_publications) >>> 0,
+                structured_backedges:
+                    (after.ir.structured_backedges - before.ir.structured_backedges) >>> 0,
+                generic_dispatch_edges:
+                    (after.ir.generic_dispatch_edges - before.ir.generic_dispatch_edges) >>> 0,
             },
             recorder: {
                 duration_ms: report.duration_ms,
@@ -264,6 +272,10 @@ function summarize_ir(samples, execution_budget)
             median(samples.map(sample => sample.target_entry.generic_dispatch_edges)),
         median_global_cache_capture_fallbacks:
             median(samples.map(sample => sample.global_ir.cache_capture_fallbacks)),
+        median_structured_publications:
+            median(samples.map(sample => sample.global_ir.structured_publications)),
+        median_generic_publications:
+            median(samples.map(sample => sample.global_ir.generic_publications)),
     };
 }
 
