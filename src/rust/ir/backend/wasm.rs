@@ -1463,7 +1463,7 @@ fn emit_inner(
     }
     let structured = if cpu { structured_loop_plan(mir) } else { None };
     let structured_cfg = structured.is_some();
-    let structured_backedges = u32::from(structured_cfg);
+    let structured_backedges = if structured_cfg { 1 } else { 0 };
     let generic_dispatch_edges = if structured_cfg { 0 } else { control_edge_count(mir) };
 
     e.w.const_i32(budget as i32);
