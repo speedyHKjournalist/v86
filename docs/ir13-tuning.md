@@ -68,6 +68,29 @@ The optimization is accepted only if the full IR-12 cache/auto lifecycle, raw SM
 page-table alias/A-bit, cold cross-page, restore and browser/Worker acceptance
 matrices remain green.
 
+## Hosted-runner observation after the change
+
+The green IR-core run for this PR recorded the following same-core diagnostic:
+
+- Tier 1 publication: 28.44 ms
+- Tier 2 publication: 52.07 ms
+- IR warm window: about 454.5k instruction-counter steps/ms
+- paired legacy warm window: about 1.445M steps/ms
+- IR cache hits: 1,884,623
+- cached mapping/source checks: 3,769,246
+- pre-fetch full-capture fallbacks: 0
+
+Compared with the earlier hosted smoke, the IR warm diagnostic moved from roughly
+192k to 454.5k steps/ms while the full-capture fallback counter stayed at zero in
+the warmed one-page case. This is useful evidence that admission revalidation was
+a real hot-path cost, but it is **not** a stable performance ratio: GitHub runner
+timing is noisy and the synthetic loop is not an XP/application workload.
+
+The remaining same-run gap to the paired legacy policy is still large. The next
+end-to-end investigations should therefore focus on activation frequency and
+IR-to-IR continuation/link consumption, region/execution-budget policy, and
+per-activation state materialization before attempting smaller peephole tuning.
+
 Further tuning remains separate: safe IR-to-IR continuation/link consumption,
 Tier-1/Tier-2 region/budget policy, compiler-stage timing, and controlled XP/
 application benchmarks.
