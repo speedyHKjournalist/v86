@@ -118,6 +118,12 @@ async function sample_ir()
                 cache_hits: after.ir.cache_hits - before.ir.cache_hits,
                 cache_cached_checks: after.ir.cache_cached_checks - before.ir.cache_cached_checks,
                 cache_capture_fallbacks: after.ir.cache_capture_fallbacks - before.ir.cache_capture_fallbacks,
+                cache_guest_steps: (after.ir.cache_guest_steps - before.ir.cache_guest_steps) >>> 0,
+                cache_max_guest_steps: after.ir.cache_max_guest_steps,
+                cache_zero_step_exits: (after.ir.cache_zero_step_exits - before.ir.cache_zero_step_exits) >>> 0,
+                average_guest_steps_per_activation:
+                    ((after.ir.cache_guest_steps - before.ir.cache_guest_steps) >>> 0) /
+                    Math.max(1, after.ir.cache_hits - before.ir.cache_hits),
             },
             recorder: {
                 duration_ms: report.duration_ms,
