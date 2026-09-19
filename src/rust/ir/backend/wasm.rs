@@ -1649,9 +1649,13 @@ fn emit_inner(
             e.locals.push(Local::I32(e.w.set_new_local()));
         }
     }
-    let structured = if cpu { structured_loop_plan(mir) } else { None };
+    let structured = if cpu { structured_plan(mir) } else { None };
     let structured_cfg = structured.is_some();
-    let structured_backedges = if structured_cfg { 1 } else { 0 };
+    let structured_backedges = match &structured {
+        Some(StructuredPlan::Loop(_)) => 1,
+        _ => 0,
+    };
+    let structured_edges = if structured_cfg { control_edge_count(mir) } else { 0 };
     let generic_dispatch_edges = if structured_cfg { 0 } else { control_edge_count(mir) };
 
     e.w.const_i32(budget as i32);
@@ -1666,7 +1670,7 @@ fn emit_inner(
             e.w.return_();
             e.w.block_end();
         }
-        e.emit_structured_loop(plan, &remaining);
+        e.emit_structured_plan(plan, &remaining);
     } else {
         e.w.const_i32(-1);
         let pc_local = e.w.set_new_local();
@@ -1766,6 +1770,7 @@ fn emit_inner(
         locals,
         structured_cfg,
         structured_backedges,
+        structured_edges,
         generic_dispatch_edges,
     })
 }
