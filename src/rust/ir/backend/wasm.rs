@@ -1369,28 +1369,26 @@ fn emit_inner(
             e.locals.push(Local::I32(e.w.set_new_local()));
         }
     }
-    let structured = if cpu { structured_plan(mir) } else { None };
+    let structured = structure::structure(&mir.control);
     let structured_cfg = structured.is_some();
-    let structured_backedges = match &structured {
-        Some(StructuredPlan::Loop(_)) => 1,
-        _ => 0,
-    };
-    let structured_edges = if structured_cfg { control_edge_count(mir) } else { 0 };
+    let structured_backedges = structured.as_ref().map_or(0, |plan| plan.backedges);
+    let structured_edges = structured.as_ref().map_or(0, |plan| plan.edges);
     let generic_dispatch_edges = if structured_cfg { 0 } else { control_edge_count(mir) };
 
     e.w.const_i32(budget as i32);
     let remaining = e.w.set_new_local();
     let mut pc = None;
     if let Some(plan) = &structured {
-        if entry.is_none() {
-            // The generic single-entry dispatcher accepts only initial_state=0.
-            // Keep that external ABI while removing the internal pc local.
+        if mir.control.entries.len() == 1 {
+            // A direct structured function has exactly one external entry.
+            // Preserve the generic dispatcher's initial_state ABI: entry zero is
+            // valid, every other selector returns without guest side effects.
             e.w.get_local(&e.w.arg_local_initial_state.unsafe_clone());
             e.w.if_void();
             e.w.return_();
             e.w.block_end();
         }
-        e.emit_structured_plan(plan, &remaining);
+        e.emit_structured(&plan.roots, &remaining);
     } else {
         e.w.const_i32(-1);
         let pc_local = e.w.set_new_local();
