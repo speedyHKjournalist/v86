@@ -348,7 +348,7 @@ impl Emitter<'_> {
                     old,
                 } => {
                     for target in entries {
-                        debug_assert_eq!(labels.remove(&target), Some(label));
+                        debug_assert!(labels.remove(&target) == Some(label));
                     }
                     for (target, previous) in old {
                         debug_assert!(labels.insert(target, previous).is_none());
@@ -380,7 +380,7 @@ impl Emitter<'_> {
                     old,
                 } => {
                     for target in targets {
-                        debug_assert_eq!(labels.remove(&target), Some(label));
+                        debug_assert!(labels.remove(&target) == Some(label));
                     }
                     for (target, previous) in old {
                         debug_assert!(labels.insert(target, previous).is_none());
