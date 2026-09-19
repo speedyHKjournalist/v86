@@ -50,6 +50,7 @@ struct Cache {
     structured_publications: u32,
     generic_publications: u32,
     structured_backedges: u32,
+    structured_edges: u32,
     generic_dispatch_edges: u32,
 }
 static CACHE: Mutex<Cache> = Mutex::new(Cache {
@@ -70,6 +71,7 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     structured_publications: 0,
     generic_publications: 0,
     structured_backedges: 0,
+    structured_edges: 0,
     generic_dispatch_edges: 0,
 });
 const CAPACITY: usize = 32;
@@ -332,10 +334,12 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
     cache.records[index].phase = Phase::Published;
     let structured = cache.records[index].job.artifact.code.structured_cfg;
     let backedges = cache.records[index].job.artifact.code.structured_backedges;
+    let structured_edges = cache.records[index].job.artifact.code.structured_edges;
     let dispatch_edges = cache.records[index].job.artifact.code.generic_dispatch_edges;
     if structured {
         cache.structured_publications = cache.structured_publications.wrapping_add(1);
         cache.structured_backedges = cache.structured_backedges.wrapping_add(backedges);
+        cache.structured_edges = cache.structured_edges.wrapping_add(structured_edges);
     } else {
         cache.generic_publications = cache.generic_publications.wrapping_add(1);
         cache.generic_dispatch_edges = cache.generic_dispatch_edges.wrapping_add(dispatch_edges);
@@ -381,6 +385,7 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         14 => cache.generic_publications,
         15 => cache.structured_backedges,
         16 => cache.generic_dispatch_edges,
+        17 => cache.structured_edges,
         _ => 0,
     }
 }
@@ -422,6 +427,7 @@ pub fn ir_cache_entry_stat(
         6 => u32::from(record.job.artifact.code.structured_cfg),
         7 => record.job.artifact.code.structured_backedges,
         8 => record.job.artifact.code.generic_dispatch_edges,
+        9 => record.job.artifact.code.structured_edges,
         _ => 0,
     }
 }
