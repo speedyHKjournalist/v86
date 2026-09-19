@@ -191,10 +191,32 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
         hir: region,
         data: MirData {
             ram_forwarding: vec![None; region.instructions.len()],
+            ram_loop_cache: super::mir::forwarding::LoopPlan::disabled(
+                region.instructions.len(),
+                region.blocks.len(),
+            ),
             state_elision,
             helper_state,
             cpu_liveness,
             value_types: region.values.iter().map(|v| v.ty).collect(),
+            value_blocks: region
+                .values
+                .iter()
+                .map(|value| match value.definition {
+                    super::hir::Definition::Parameter(block, _) => Some(block),
+                    super::hir::Definition::Instruction(id, _) => {
+                        Some(region.instructions[id.index()].block)
+                    },
+                })
+                .collect(),
+            value_definitions: region
+                .values
+                .iter()
+                .map(|value| match value.definition {
+                    super::hir::Definition::Parameter(_, _) => None,
+                    super::hir::Definition::Instruction(id, _) => Some(id),
+                })
+                .collect(),
             allocation,
             helpers,
             memory,

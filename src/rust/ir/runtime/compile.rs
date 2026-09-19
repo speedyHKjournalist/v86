@@ -232,7 +232,12 @@ fn compile_inner(
                     mir.elide_dead_cpu_values(crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT)?;
             }
         }
-        passes.ram_forwarded =
+        // Loop certificates are installed first so ordinary forwarding can
+        // derive a non-overlapping intra-block certificate around them.
+        passes.ram_forwarded = mir.cache_loop_invariant_ram_reads(
+            crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT,
+        )?;
+        passes.ram_forwarded +=
             mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?;
     }
     let code = if cpu {

@@ -1,9 +1,9 @@
 # IR-11: bounded integer SIMD simplification
 
-This supplements the baseline status in `ir-progress.md` and the LICM increment
-in `ir-licm.md`. IR-11 is now **partially implemented**, not complete. No ISA
-coverage classification, CPU ABI, default backend or legacy-retirement gate is
-changed. The full IR-00–IR-14 request remains open.
+This documents the bounded integer-SIMD simplification component of IR-11.
+IR-11 is now complete at the package boundary in `ir11-completion.md`; the
+full IR-00–IR-14 request remains open. No ISA coverage classification, CPU ABI,
+default backend or legacy-retirement gate is changed.
 
 ## Implementation
 
@@ -67,9 +67,10 @@ measurement of this pass alone, guest throughput or application/game speedup.
 
 ## Remaining scope
 
-Proof-carrying memory reuse, load elimination/store forwarding, memory LICM,
-additional loop/vector transformations, remaining ISA and full x87/MMX/FP
-semantics, general MIR scheduling, version/link management, XP/application
-acceptance, performance measurement and legacy-JIT retirement remain incomplete.
-The production coverage gate must remain closed until its separate criteria are
-met. These tests do not change the definition of overall roadmap completion.
+IR-11's proof-carrying RAM reuse and fault-preserving loop cache are documented
+separately in `ir11-completion.md`. Additional speculative vector/loop
+transformations are not part of the completed conservative boundary. Remaining
+ISA and full x87/MMX/FP semantics, general MIR scheduling, version/link
+management, XP/application acceptance, performance measurement and legacy-JIT
+retirement remain incomplete. The production coverage gate stays closed until
+its separate criteria are met.

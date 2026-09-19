@@ -8,6 +8,15 @@ const modules = cases.map((_, i) => [false, true].map(forward => {
     assert(WebAssembly.validate(bytes));
     return new WebAssembly.Module(bytes);
 }));
+const loopCorpus = JSON.parse(fs.readFileSync("build/ir-forwarding/loops.json"));
+const loopModules = loopCorpus.cases.map((_, caseIndex) => new Map(
+    loopCorpus.budgets.map(budget => [budget, [false, true].map(cached => {
+        const bytes = fs.readFileSync(
+            `build/ir-forwarding/loop-${caseIndex}-${budget}-${cached}.wasm`);
+        assert(WebAssembly.validate(bytes));
+        return new WebAssembly.Module(bytes);
+    })])
+));
 const vm = new V86({wasm_path: "build/v86-ir-test.wasm", memory_size: 32 << 20,
     bios: {buffer: Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
     disable_keyboard: true, disable_mouse: true, disable_speaker: true,
@@ -35,6 +44,12 @@ try {
         return e.ir_memory_read(...args);
     }};
     const instances = modules.map(pair => pair.map(module => new WebAssembly.Instance(module, {e: imports})));
+    const loopInstances = loopModules.map(byBudget => new Map(
+        [...byBudget].map(([budget, pair]) => [
+            budget,
+            pair.map(module => new WebAssembly.Instance(module, {e: imports})),
+        ])
+    ));
     function reset(index, address, hot, fault = "none") {
         e.ir_test_set_cr0(initialCr0 | 0x10000);
         cpu.segment_offsets.fill(0, 0, 6);
@@ -176,6 +191,102 @@ try {
             mmio++;
         }
     }
+    // The loop-cache corpus keeps the first dynamic load at its original
+    // fault point and reuses only a successful native-RAM result on later
+    // iterations. Compare cache-disabled/cache-enabled modules against the
+    // independent instruction-step interpreter across RAM, faults, callbacks
+    // and exact budget exits.
+    function resetLoop(caseIndex, count, hot = false, fault = "none") {
+        const spec = loopCorpus.cases[caseIndex];
+        reset(2, spec.address, hot, fault);
+        mem.set(spec.bytes, PC);
+        cpu.reg32[1] = count;
+        slowReads = 0;
+        callbacks = 0;
+        events = [];
+    }
+    let loopRam = 0, loopFaults = 0, loopMmio = 0, loopBudgets = 0;
+    const fullBudgetPair = loopInstances[0].get(64);
+    for(const count of [1, 2, 4]) for(const hot of [false, true]) {
+        let expected;
+        for(const instance of fullBudgetPair) {
+            resetLoop(0, count, hot);
+            instance.exports.f(0);
+            const actual = snapshot(loopCorpus.cases[0].address);
+            assert.equal(actual.ip, PC + loopCorpus.cases[0].bytes.length);
+            assert.equal(actual.committed, 100 + 1 + 3 * count);
+            if(expected) assert.deepEqual(actual, expected, "loop cache preserves RAM execution");
+            else expected = actual;
+            resetLoop(0, count, hot);
+            interpret(1 + 3 * count);
+            assert.deepEqual(actual, snapshot(loopCorpus.cases[0].address));
+            loopRam++;
+        }
+    }
+    for(const instance of fullBudgetPair) {
+        resetLoop(0, 3, false, "missing");
+        instance.exports.f(0);
+        const actual = snapshot(loopCorpus.cases[0].address);
+        assert.equal(actual.ip, HANDLER);
+        assert.equal(actual.committed, 101, "NOP retires before the first faulting loop load");
+        assert.equal(get(STACK - 12), PC + 1, "loop cache must not advance the first fault point");
+        resetLoop(0, 3, false, "missing");
+        interpret(2);
+        assert.deepEqual(actual, snapshot(loopCorpus.cases[0].address));
+        loopFaults++;
+    }
+    const mmioPair = loopInstances[1].get(64);
+    for(const callbackMode of ["ordinary", "remap", "unmap"]) {
+        for(const instance of mmioPair) {
+            const configure = () => {
+                resetLoop(1, 3, false);
+                mode = callbackMode;
+            };
+            configure();
+            instance.exports.f(0);
+            const actual = snapshot(loopCorpus.cases[1].address);
+            const observed = events.slice();
+            if(callbackMode === "ordinary") {
+                assert.equal(callbacks, 3, "MMIO loop loads may never become cache-valid");
+                assert.equal(actual.committed, 110);
+            } else if(callbackMode === "remap") {
+                assert.equal(callbacks, 1, "only the first MMIO load precedes remapping to RAM");
+                assert.equal(actual.committed, 110);
+            } else {
+                assert.equal(callbacks, 1);
+                assert.equal(actual.ip, HANDLER, "second loop load sees callback-induced unmapping");
+                assert.equal(actual.committed, 104);
+                assert.equal(get(STACK - 12), PC + 1);
+                loopFaults++;
+            }
+            configure();
+            interpret(callbackMode === "unmap" ? 5 : 10);
+            assert.deepEqual(actual, snapshot(loopCorpus.cases[1].address),
+                `loop MMIO ${callbackMode} cache differential`);
+            assert.deepEqual(observed, events, "loop cache preserves MMIO callback order/state");
+            loopMmio++;
+        }
+    }
+    for(const budget of loopCorpus.budgets) {
+        const pair = loopInstances[0].get(budget);
+        let expected;
+        for(const instance of pair) {
+            resetLoop(0, 3, false);
+            instance.exports.f(0);
+            const actual = snapshot(loopCorpus.cases[0].address);
+            const completed = actual.committed - 100;
+            assert(completed >= 0 && completed <= 10);
+            if(budget === 64) assert.equal(completed, 10);
+            if(expected) assert.deepEqual(actual, expected,
+                `loop cache preserves exact budget exit at budget=${budget}`);
+            else expected = actual;
+            resetLoop(0, 3, false);
+            interpret(completed);
+            assert.deepEqual(actual, snapshot(loopCorpus.cases[0].address));
+            loopBudgets++;
+        }
+    }
+
     // A warmed supervisor mapping must still be checked at CPL3 before a chain
     // can obtain its first valid native-RAM result. No TSS is needed for this test.
     for(const opt of [0, 1]) {
@@ -189,7 +300,7 @@ try {
         try { assert.throws(() => guarded.exports.f(0), error => error === stop); }
         finally { cpl[0] = 0; }
     }
-    console.log(`PASS: ${ram} guarded-read RAM differentials, ${faultCases} real fault cases, ${mmio} MMIO/callback-remapping differentials, ${budgetExits} exact merged-block budget exits and CPL guards`);
+    console.log(`PASS: ${ram} guarded-read RAM differentials, ${faultCases} real fault cases, ${mmio} MMIO/callback-remapping differentials, ${budgetExits} exact merged-block budget exits; loop cache ${loopRam} RAM, ${loopFaults} fault, ${loopMmio} MMIO/remap and ${loopBudgets} budget differentials; CPL guards passed`);
 } finally {
     await vm.destroy();
 }

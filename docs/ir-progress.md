@@ -1,6 +1,6 @@
 # IR-00–IR-14 实施状态
 
-更新：2026-09-18。固定基线：`8ee73e538daaab15411344d39a1f271e778ac7f3`。
+更新：2026-09-19。固定基线：`8ee73e538daaab15411344d39a1f271e778ac7f3`。
 
 **完整请求尚未完成。** 本次落地了可执行的实验性 IR 编译器与 WasmBuilder
 前置改造。默认后端仍为 legacy；显式选择 IR 时已有自动编译和升档，
@@ -20,7 +20,7 @@
 | IR-08 | 部分完成 | XMM V128 SSA、快照、typed locals/边复制，以及 packed/scalar SIMD 传送的原生 RAM 与精确慢路径已实现；已增加 38 种 packed integer 算术/比较/乘法/逻辑及 PS/PD 逻辑别名；已增加打包/解包、变量及立即数 packed 移位；已增加 PSHUF/SHUF 重排；已增加半部传送、MOVD/MOVQ 和重复 lane；已增加符号位掩码、PINSRW/PEXTRW、非临时存储和 LDDQU；已增加 MASKMOVDQU 原生 RAM 与有序慢路径；其余 SIMD 状态/传送、MMX、FP 控制、F80/x87 和无 SIMD 降级仍待实现 |
 | IR-09 | 部分基础 | 整数后端可执行 CFG 和寄存器代码；已增加冷 CPU 入口及真实状态 ABI，可执行具备完整动态计数映射的 CPU 循环；CompileRequest 产物已有显式入口键及执行前校验，实验 CPU Wasm 内可直接执行 IR 编译，显式发布的入口已参与正常 CPU 分派；已有可选的自动热度、区域编译和优化升档；完整 Tier 1 语义、成熟区域选择和系统验收仍未完成 |
 | IR-10 | 完成 | Tier 2 基础数据流优化已按实施计划的 FLAGS / DCE / GVN / copy / CFG / helper-state 六类验收收口：CFG 清理、trivial phi、常量与独立 copy propagation、逐位 FLAGS demand/CPU liveness、StateMap-aware DCE、支配关系 GVN/CSE、经审计 pure helper 的 CPU state observation trimming 均有独立开关/计数、正例/负例与逐-pass differential；特殊 FLAGS 或读取/写入 CPU state 的 helper 继续保守 materialize，不猜测未证明状态。IR-11 的 RAM proof/forwarding、LICM、强度削弱和高级 SIMD/循环优化不计入 IR-10 |
-| IR-11 | 部分完成 | 已有受预算约束的纯 SSA LICM，以及 owned MIR 内带静态证书和动态 RAM 有效位的同块重复读取复用；现已支持严格同地址/同宽度、已提交 native 标量写入到后续普通读取的 store-to-load forwarding，慢路径、代码页物理别名和观察边界仍保持保守退出；仅优化 Tier 2 启用；通用别名/effect 证明、memory LICM 及其余循环/SIMD 优化仍待实现 |
+| IR-11 | 完成 | Tier 2 已收口受预算约束的纯 SSA LICM、整数 SIMD peephole、owned-MIR RAM 证明与 fault-preserving memory LICM：地址关系按 Exact/Disjoint/MayAlias 保守分类，已证明不相交的 native 标量 store 可保留既有 load cache；自然循环采用唯一 preheader 重置的 loop cache，首次访问仍在原故障点执行且只有成功 native RAM guard/load 才建立有效值，任一慢速 guest-memory 路径在 MMIO/page-walk 前清空全部 loop cache；含 store/RMW/vector memory/未知 helper/effect 的循环不做 memory LICM。证书由 verifier 独立重算，伪造/预算失败不会部分发布。详见 ir11-completion.md |
 | IR-12 | 部分基础 | 不可变编译请求及 generation/dependency/入口/映射比较已实现；已有只读 CPU 代码快照、单个未发布产物句柄和重校验；共享在线 legacy 桥接已有票据校验、安装前拒绝、缓存取消和浏览器失败回收；已有共享槽池中的 IR 缓存、物理代码页监视和冷执行帧返回后的回收；已有有界自动编译、失败抑制和自动入口淘汰；完整共享版本/链接图及生产策略验收仍未完成 |
 | IR-13 | 完整矩阵未完成 | 已执行 IR 差分和部分生产 legacy/Worker/API 回归；GPU 间歇失败、PIC 跳过等结果有单独记录；已有 Node 中显式/自动 IR 缓存分派及升档测试，以及公开后端在真实浏览器主线程/Worker 的升档、SMC、双向跨后端快照和错误上报测试；完整在线 IR、XP、应用及性能矩阵未完成 |
 | IR-14 | 未实现 | 默认后端仍为 legacy，旧 emitter 未退役 |

@@ -37,6 +37,10 @@ jobs:
           mkdir -p build
           make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
           make ir-generated-check
+      - name: Focused IR-11 RAM proof regressions
+        run: |
+          set -o pipefail
+          env RUSTFLAGS="-D warnings" cargo test ir::mir::forwarding -- --nocapture 2>&1 | tee build/ir11-native.log
       - name: Native regressions
         run: |
           set -o pipefail
