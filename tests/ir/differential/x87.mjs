@@ -84,6 +84,7 @@ for(const release of [false,true]){
             cpu.flags_changed[0]=0;
             linear32[104>>2]=0x76543210;
             cpu.instruction_pointer[0]=PC;
+            cpu.in_hlt[0]=0;
             linear32[664>>2]=100;
             mem.set(bytes,PC);
             mem.fill(0xCC,STACK-96,STACK+16);
