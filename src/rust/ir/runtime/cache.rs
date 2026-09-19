@@ -362,8 +362,7 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
     };
     let valid = live::generation_current(key)
         && capture(entry.linear.0, source.bytes.len())
-            .is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings)
-        && super::snapshot::mappings_cached(&source);
+            .is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings);
     let mut cache = CACHE.try_lock().unwrap();
     let Some(index) = cache
         .records
