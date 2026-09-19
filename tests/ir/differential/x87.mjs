@@ -14,7 +14,7 @@ for(const release of [false,true]){
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         net_device:{type:"none"},autostart:false,
     });
-    try{
+    try {
         await new Promise(resolve=>vm.add_listener("emulator-loaded",resolve));
         const cpu=vm.v86.cpu,e=cpu.wm.exports,mem=cpu.mem8;
         const linear8=new Uint8Array(e.memory.buffer),linear32=new Uint32Array(e.memory.buffer);
@@ -37,7 +37,7 @@ for(const release of [false,true]){
             set32(0x3000+n*8,(base<<16)|0xFFFF);
             set32(0x3004+n*8,(base&0xFF000000)|(base>>>16&255)|access<<8|0xCF0000);
         }
-        function fpuState(){
+        function fpu_state(){
             return {
                 empty:linear8[816],
                 top:linear8[1032],
@@ -62,7 +62,7 @@ for(const release of [false,true]){
                 previous:linear32[560>>2]>>>0,
                 count:linear32[664>>2]>>>0,
                 cr2:cpu.cr[2]>>>0,
-                fpu:fpuState(),
+                fpu:fpu_state(),
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
@@ -112,14 +112,14 @@ for(const release of [false,true]){
             e.ir_test_step();
             return state();
         }
-        function compare(i,configure,expectedCount){
+        function compare(i,configure,expected_count){
             configure();
             const expected=interpreter(i);
-            assert.equal(expected.count,expectedCount);
+            assert.equal(expected.count,expected_count);
             for(const opt of [0,1]){
                 configure();
                 instances[i][opt].exports.f(0);
-                assert.equal(linear32[664>>2],expectedCount);
+                assert.equal(linear32[664>>2],expected_count);
                 assert.deepEqual(state(),expected,`x87 case ${i}/${opt}`);
             }
             return expected;
@@ -139,7 +139,7 @@ for(const release of [false,true]){
         let flags=0;
         for(let i=0;i<cases.length;i++){
             const [,opcode,group,,valid]=cases[i];
-            if(!valid||!([0xDA,0xDB].includes(opcode)&&group<=3||[0xDB,0xDF].includes(opcode)&&[5,6].includes(group)))continue;
+            if(!valid||!([0xDA,0xDB].includes(opcode)&&group<=3||[0xDB,0xDF].includes(opcode)&&[5,6].includes(group))) continue;
             for(const eflags of [2,3,6,0x42,0x46,0x82,0x86]){
                 compare(i,()=>reset(i,{flags:eflags}),102);
                 flags++;
@@ -150,18 +150,18 @@ for(const release of [false,true]){
         let task=0;
         const selected=new Set();
         for(let opcode=0xD8;opcode<=0xDF;opcode++){
-            const validIndex=cases.findIndex(c=>c[1]===opcode&&c[4]);
-            const invalidIndex=cases.findIndex(c=>c[1]===opcode&&!c[4]);
-            if(validIndex>=0)selected.add(validIndex);
-            if(invalidIndex>=0)selected.add(invalidIndex);
+            const valid_index=cases.findIndex(c=>c[1]===opcode&&c[4]);
+            const invalid_index=cases.findIndex(c=>c[1]===opcode&&!c[4]);
+            if(valid_index>=0)selected.add(valid_index);
+            if(invalid_index>=0)selected.add(invalid_index);
         }
-        for(const i of selected)for(const cr0Bits of [4,8,12]){
-            const expected=compare(i,()=>reset(i,{task:cr0Bits}),101);
+        for(const i of selected) for(const cr0_bits of [4,8,12]) {
+            const expected=compare(i,()=>reset(i,{task:cr0_bits}),101);
             assert.equal(expected.ip,NM,"CR0.EM/TS must raise #NM before nested x87 #UD");
             task++;
         }
         console.log(`PASS (${release?"release":"debug"}): ${task} CR0.EM/TS priority cases`);
-    }finally{
+    } finally {
         await vm.destroy();
     }
 }
