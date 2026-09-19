@@ -89,13 +89,22 @@ fn reachable_cfg_fixtures() {
                         assert!(mir.control.dynamic_counts);
                         let artifact = emit_cpu(&mir, budget).unwrap();
                         if matches!(n, 3 | 4 | 5) {
-                            assert!(
+                            // These branches are operand-size sensitive. At a high
+                            // 32-bit EIP in 16-bit mode, the taken target truncates
+                            // to 16 bits and is therefore outside this snapshot.
+                            let internal_self_loop = mode || pc <= u16::MAX as u32;
+                            assert_eq!(
                                 artifact.structured_cfg,
-                                "simple self-loop fixture {n} should use structured control flow: {:?}",
+                                internal_self_loop,
+                                "self-loop structuring must follow architectural target width: case {n}, mode {mode}, pc {pc:x}: {:?}",
                                 mir.control
                             );
-                            assert_eq!(artifact.structured_backedges, 1);
-                            assert_eq!(artifact.generic_dispatch_edges, 0);
+                            if internal_self_loop {
+                                assert_eq!(artifact.structured_backedges, 1);
+                                assert_eq!(artifact.generic_dispatch_edges, 0);
+                            } else {
+                                assert!(artifact.generic_dispatch_edges > 0);
+                            }
                         }
                         if n == 6 {
                             assert!(
