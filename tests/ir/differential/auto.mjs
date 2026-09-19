@@ -50,14 +50,16 @@ try{
     const offset=cpu.instruction_pointer[0]-PC;assert(offset>=0&&offset<=41);
     assert.equal(new Uint32Array(e.memory.buffer)[664>>2],((cpu.reg32[0]-(offset?1:0))*42+offset)>>>0);
     console.log(`PASS: ${wasm}: a 42-instruction loop spans lightweight regions and preserves exact retirement through the larger optimized region`);
-    await prepare([0xEB,0x02,0xCC,0xCC,0x40,0xEB,0xFD]);let before=stats();let reachableHits=e.ir_cache_stat(2);configure();vm.run();
-    await until(()=>e.ir_auto_stat(5)>before[5]&&e.ir_cache_stat(2)>reachableHits,"reachable forward-edge Tier 1/2 region");await vm.stop();
-    assert([PC+4,PC+5].includes(cpu.instruction_pointer[0]),"forward target remains inside the compiled region");
+    await prepare([0xEB,0x02,0xCC,0xCC,0x40,0xEB,0xF9]);let before=stats();let reachable_hits=e.ir_cache_stat(2);configure();vm.run();
+    await until(()=>e.ir_cache_entry_stat(PC,0,1,5)===2&&e.ir_cache_stat(2)>reachable_hits,"reachable forward-edge Tier 1/2 region");await vm.stop();
+    assert([PC,PC+4,PC+5].includes(cpu.instruction_pointer[0]),"forward target and loop header remain inside the compiled region");
     assert(cpu.reg32[0]>>>0>0,"reachable loop executes after the forward jump");
+    assert.equal(e.ir_cache_entry_stat(PC,0,1,0),1,"hot entry publishes an exact cache record");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,6),1,"entry region uses structured backend");
+    assert(e.ir_cache_entry_stat(PC,0,1,7)>=1,"entry region records the loop backedge");
     assert(e.ir_cache_entry_stat(PC,0,1,9)>=2,"entry region contains multiple directly structured edges");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,8),0,"reachable reducible region avoids generic dispatcher edges");
-    console.log(`PASS: ${wasm}: Tier-aware region formation follows a forward jump over dead bytes into an internal hot loop`);
+    console.log(`PASS: ${wasm}: Tier-aware region formation follows a forward jump over dead bytes and publishes the hot reducible loop entry`);
     // Unsupported x87 semantics are suppressed until their actual source changes.
     await prepare([0xD9,0xEE,0xDD,0xD8,0xEB,0xFA]);before=stats();configure();vm.run();
     await until(()=>e.ir_auto_stat(6)>before[6]&&e.ir_auto_stat(8)>before[8],"compile-stop suppression");await sleep(80);
