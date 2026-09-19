@@ -187,7 +187,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn boundary_memory_form_keeps_candidate_fallthrough() {
         // MOV EAX,[ESI]; INC EAX. The shared decoder marks the memory form as a
         // legacy block boundary, but the IR CFG frontend can decide whether its
@@ -208,6 +207,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn keeps_external_targets_as_region_exits() {
         let bytes = [0xEB, 0x7F, 0x40, 0x40];
         assert_eq!(
