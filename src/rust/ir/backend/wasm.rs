@@ -3,7 +3,7 @@ use crate::ir::mir::arithmetic::{
     ArithmeticPlan, CompareExchange, Division, QuotientRange, RegisterPair,
 };
 use crate::ir::mir::call::{CallPlan, Observation};
-use crate::ir::mir::control::{Copy, Edge as MirEdge, Source, Terminator as MirTerminator};
+use crate::ir::mir::control::{ControlFlow, Copy, Edge as MirEdge, Source, Terminator as MirTerminator};
 use crate::ir::mir::effect::EffectPlan;
 use crate::ir::mir::forwarding::{Forwarding, LoopForwarding};
 use crate::ir::mir::materialize::{Count, CountMode, Store, Write};
@@ -28,7 +28,15 @@ pub struct Artifact {
     /// True when this CPU CFG bypasses the generic pc-local block dispatcher.
     pub structured_cfg: bool,
     pub structured_backedges: u32,
+    /// Number of MIR control edges emitted directly rather than through the pc dispatcher.
+    pub structured_edges: u32,
     pub generic_dispatch_edges: u32,
+}
+
+#[derive(Clone, Debug)]
+enum StructuredPlan {
+    Loop(StructuredLoop),
+    Diamond(StructuredDiamond),
 }
 
 #[derive(Clone, Debug)]
@@ -44,15 +52,63 @@ enum StructuredTail {
     Backedge,
     Conditional {
         backedge_taken: bool,
-        backedge_block: Option<BlockId>,
-        exit_block: BlockId,
+        backedge: Vec<BlockId>,
+        exit: Vec<BlockId>,
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
+struct StructuredDiamond {
+    /// Linear prefix including the conditional branch as its final block.
+    prefix: Vec<BlockId>,
+    taken: Vec<BlockId>,
+    not_taken: Vec<BlockId>,
+    /// Common linear suffix beginning at the join and ending in Exit.
+    tail: Vec<BlockId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Arm {
-    Backedge(Option<BlockId>),
-    Exit(BlockId),
+    Backedge(Vec<BlockId>),
+    Exit(Vec<BlockId>),
+}
+
+fn mark_unique(used: &mut [bool], blocks: &[BlockId]) -> bool {
+    for id in blocks {
+        if id.index() >= used.len() || used[id.index()] {
+            return false;
+        }
+        used[id.index()] = true;
+    }
+    true
+}
+
+fn linear_loop_arm(
+    control: &ControlFlow,
+    start: BlockId,
+    header: BlockId,
+    forbidden: &[BlockId],
+) -> Option<Arm> {
+    if start == header {
+        return Some(Arm::Backedge(vec![]));
+    }
+    let mut path = Vec::new();
+    let mut current = start;
+    loop {
+        if current == header {
+            return Some(Arm::Backedge(path));
+        }
+        if forbidden.contains(&current) || path.contains(&current) {
+            return None;
+        }
+        let block = control.blocks.get(current.index())?;
+        path.push(current);
+        match &block.terminator {
+            MirTerminator::Jump(edge) => current = edge.target,
+            MirTerminator::Exit(_) => return Some(Arm::Exit(path)),
+            MirTerminator::Branch { .. } => return None,
+        }
+    }
 }
 
 fn structured_loop_plan(mir: &MirRegion) -> Option<StructuredLoop> {
@@ -69,20 +125,6 @@ fn structured_loop_plan(mir: &MirRegion) -> Option<StructuredLoop> {
         return None;
     }
 
-    let classify = |target: BlockId| -> Option<Arm> {
-        if target == header {
-            return Some(Arm::Backedge(None));
-        }
-        let block = control.blocks.get(target.index())?;
-        match &block.terminator {
-            MirTerminator::Jump(edge) if edge.target == header => {
-                Some(Arm::Backedge(Some(target)))
-            },
-            MirTerminator::Exit(_) => Some(Arm::Exit(target)),
-            _ => None,
-        }
-    };
-
     let mut chain = Vec::new();
     let mut current = header;
     loop {
@@ -94,12 +136,8 @@ fn structured_loop_plan(mir: &MirRegion) -> Option<StructuredLoop> {
         match &block.terminator {
             MirTerminator::Jump(edge) if edge.target == header => {
                 let mut used = vec![false; control.blocks.len()];
-                used[entry.index()] = true;
-                for id in &chain {
-                    if used[id.index()] {
-                        return None;
-                    }
-                    used[id.index()] = true;
+                if !mark_unique(&mut used, &[entry]) || !mark_unique(&mut used, &chain) {
+                    return None;
                 }
                 if used.iter().all(|used| *used) {
                     return Some(StructuredLoop {
@@ -115,32 +153,25 @@ fn structured_loop_plan(mir: &MirRegion) -> Option<StructuredLoop> {
             MirTerminator::Branch {
                 taken, not_taken, ..
             } => {
-                let taken = classify(taken.target)?;
-                let not_taken = classify(not_taken.target)?;
-                let (backedge_taken, backedge_block, exit_block) = match (taken, not_taken) {
+                let mut forbidden = Vec::with_capacity(chain.len() + 1);
+                forbidden.push(entry);
+                forbidden.extend(chain.iter().copied());
+                let taken_arm =
+                    linear_loop_arm(control, taken.target, header, &forbidden)?;
+                let not_taken_arm =
+                    linear_loop_arm(control, not_taken.target, header, &forbidden)?;
+                let (backedge_taken, backedge, exit) = match (taken_arm, not_taken_arm) {
                     (Arm::Backedge(backedge), Arm::Exit(exit)) => (true, backedge, exit),
                     (Arm::Exit(exit), Arm::Backedge(backedge)) => (false, backedge, exit),
                     _ => return None,
                 };
                 let mut used = vec![false; control.blocks.len()];
-                used[entry.index()] = true;
-                for id in &chain {
-                    if used[id.index()] {
-                        return None;
-                    }
-                    used[id.index()] = true;
-                }
-                if let Some(id) = backedge_block {
-                    if used[id.index()] {
-                        return None;
-                    }
-                    used[id.index()] = true;
-                }
-                if used[exit_block.index()] {
-                    return None;
-                }
-                used[exit_block.index()] = true;
-                if !used.iter().all(|used| *used) {
+                if !mark_unique(&mut used, &[entry])
+                    || !mark_unique(&mut used, &chain)
+                    || !mark_unique(&mut used, &backedge)
+                    || !mark_unique(&mut used, &exit)
+                    || !used.iter().all(|used| *used)
+                {
                     return None;
                 }
                 return Some(StructuredLoop {
@@ -149,14 +180,94 @@ fn structured_loop_plan(mir: &MirRegion) -> Option<StructuredLoop> {
                     chain,
                     tail: StructuredTail::Conditional {
                         backedge_taken,
-                        backedge_block,
-                        exit_block,
+                        backedge,
+                        exit,
                     },
                 });
             },
             MirTerminator::Exit(_) => return None,
         }
     }
+}
+
+fn linear_exit_path(
+    control: &ControlFlow,
+    start: BlockId,
+    forbidden: &[BlockId],
+) -> Option<Vec<BlockId>> {
+    let mut path = Vec::new();
+    let mut current = start;
+    loop {
+        if forbidden.contains(&current) || path.contains(&current) {
+            return None;
+        }
+        let block = control.blocks.get(current.index())?;
+        path.push(current);
+        match &block.terminator {
+            MirTerminator::Jump(edge) => current = edge.target,
+            MirTerminator::Exit(_) => return Some(path),
+            MirTerminator::Branch { .. } => return None,
+        }
+    }
+}
+
+fn structured_diamond_plan(mir: &MirRegion) -> Option<StructuredDiamond> {
+    let control = &mir.control;
+    if control.entries.len() != 1 || control.blocks.len() < 4 {
+        return None;
+    }
+    let mut prefix = Vec::new();
+    let mut current = control.entries[0];
+    let (taken_target, not_taken_target) = loop {
+        if prefix.contains(&current) {
+            return None;
+        }
+        prefix.push(current);
+        let block = control.blocks.get(current.index())?;
+        match &block.terminator {
+            MirTerminator::Jump(edge) => current = edge.target,
+            MirTerminator::Branch {
+                taken, not_taken, ..
+            } => break (taken.target, not_taken.target),
+            MirTerminator::Exit(_) => return None,
+        }
+    };
+
+    let taken_path = linear_exit_path(control, taken_target, &prefix)?;
+    let not_taken_path = linear_exit_path(control, not_taken_target, &prefix)?;
+    let taken_join = taken_path
+        .iter()
+        .position(|id| not_taken_path.contains(id))?;
+    let join = taken_path[taken_join];
+    let not_taken_join = not_taken_path.iter().position(|id| *id == join)?;
+    if taken_path[taken_join..] != not_taken_path[not_taken_join..] {
+        return None;
+    }
+
+    let taken = taken_path[..taken_join].to_vec();
+    let not_taken = not_taken_path[..not_taken_join].to_vec();
+    let tail = taken_path[taken_join..].to_vec();
+    let mut used = vec![false; control.blocks.len()];
+    if !mark_unique(&mut used, &prefix)
+        || !mark_unique(&mut used, &taken)
+        || !mark_unique(&mut used, &not_taken)
+        || !mark_unique(&mut used, &tail)
+        || !used.iter().all(|used| *used)
+    {
+        return None;
+    }
+    Some(StructuredDiamond {
+        prefix,
+        taken,
+        not_taken,
+        tail,
+    })
+}
+
+fn structured_plan(mir: &MirRegion) -> Option<StructuredPlan> {
+    structured_loop_plan(mir)
+        .map(StructuredPlan::Loop)
+        .or_else(|| structured_diamond_plan(mir).map(StructuredPlan::Diamond))
 }
 
 fn control_edge_count(mir: &MirRegion) -> u32 {
