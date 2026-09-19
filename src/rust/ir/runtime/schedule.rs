@@ -236,12 +236,14 @@ pub unsafe fn visit() {
         let mut s = SCHEDULER.try_lock().unwrap();
         s.stats[tier as usize + 1] = s.stats[tier as usize + 1].wrapping_add(1);
     }
+    let compile_tier = if tier == 1 { Tier::One } else { Tier::Two };
+    let region_policy = region::Policy::for_tier(compile_tier, config.window);
     let request = CompileRequest {
         key,
         pc: entry.pc,
         linear: entry.linear,
         default_32: entry.default_32,
-        tier: if tier == 1 { Tier::One } else { Tier::Two },
+        tier: compile_tier,
     };
     let config = IrConfig {
         optimize: true,
@@ -252,7 +254,7 @@ pub unsafe fn visit() {
         },
         execution_budget: config.budget,
         rep_iteration_budget: config.rep,
-        max_code_bytes: if tier == 1 { 960 } else { 1920 },
+        max_code_bytes: region_policy.max_bytes,
         layout: StateLayout {
             gpr: 0,
             flags: 32,
