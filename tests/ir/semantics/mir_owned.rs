@@ -366,3 +366,43 @@ fn work_budget_failure_does_not_commit_earlier_rewrites() {
     );
     assert_eq!(mir.values[later].as_ref().unwrap().steps.len(), 1_000_001);
 }
+
+#[test]
+fn post_lowering_stack_and_local_allocation_are_owned_and_transactional() {
+    std::fs::create_dir_all("build/ir-mir-owned").unwrap();
+    let mut regions = vec![crate::ir::core_tests::loop_region()];
+    for bytes in [
+        vec![0xB8, 1, 0, 0, 0, 0x05, 0x78, 0x56, 0x34, 0x12],
+        vec![0x31, 0xC0, 0x83, 0xC0, 7, 0xC1, 0xE0, 3],
+        vec![0x40, 0x43, 0x31, 0xD8],
+    ] {
+        regions.push(lift(&bytes, GuestEip(0x1000), LinearAddress(0x1000), true).unwrap());
+    }
+    let count = regions.len();
+    let mut total = 0;
+    for (n, region) in regions.into_iter().enumerate() {
+        let mut mir = lower(&region).unwrap();
+        drop(region);
+        let original = emit(&mir, layout(), 40).unwrap().bytes;
+        assert!(mir.schedule_operand_stack(0).is_err());
+        assert_eq!(emit(&mir, layout(), 40).unwrap().bytes, original);
+        total += mir.schedule_operand_stack(262_144).unwrap();
+        let fused = emit(&mir, layout(), 40).unwrap().bytes;
+        assert!(mir.allocate_machine_locals(0).is_err());
+        assert_eq!(emit(&mir, layout(), 40).unwrap().bytes, fused);
+        mir.allocate_machine_locals(4_000_000).unwrap();
+        let allocated = emit(&mir, layout(), 40).unwrap().bytes;
+        assert_eq!(mir.schedule_operand_stack(262_144).unwrap(), 0);
+        mir.allocate_machine_locals(4_000_000).unwrap();
+        assert_eq!(emit(&mir, layout(), 40).unwrap().bytes, allocated);
+        for (variant, bytes) in [original, fused, allocated].into_iter().enumerate() {
+            std::fs::write(
+                format!("build/ir-mir-owned/stack-{n}-{variant}.wasm"),
+                bytes,
+            )
+            .unwrap();
+        }
+    }
+    assert!(total > 0);
+    std::fs::write("build/ir-mir-owned/stack.json", count.to_string()).unwrap();
+}

@@ -217,6 +217,10 @@ fn compile_inner(
     let mut mir = lower(&region)?;
     drop(region);
     let mir_folds = if config.optimize { mir.fold_constants()? } else { 0 };
+    if config.optimize {
+        mir.schedule_operand_stack(262_144)?;
+        mir.allocate_machine_locals(4_000_000)?;
+    }
     if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
         if cpu {
             passes.state_writes_elided = mir.elide_redundant_cpu_state_writes(
@@ -234,9 +238,8 @@ fn compile_inner(
         }
         // Loop certificates are installed first so ordinary forwarding can
         // derive a non-overlapping intra-block certificate around them.
-        passes.ram_forwarded = mir.cache_loop_invariant_ram_reads(
-            crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT,
-        )?;
+        passes.ram_forwarded =
+            mir.cache_loop_invariant_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?;
         passes.ram_forwarded +=
             mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?;
     }

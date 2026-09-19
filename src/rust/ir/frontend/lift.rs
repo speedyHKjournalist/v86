@@ -89,6 +89,22 @@ fn lift_inner(
         if i.baseline_ud || i.prefixes.lock && !super::exchange::lock_supported(&i) {
             return Err(CompileError::Unsupported("LOCK or invalid operand"));
         }
+        if i.encoding.opcode == 0xFB {
+            if !cpu {
+                return Err(CompileError::Unsupported("STI requires CPU ABI"));
+            }
+            let start = offset - i.length as usize;
+            if start
+                + super::sti::extent(&bytes[start..], i.instruction_pc, i.linear_pc, default_32)?
+                != bytes.len()
+            {
+                return Err(CompileError::Unsupported(
+                    "STI fragment must end after shadow",
+                ));
+            }
+            super::sti::lift(&mut b, &i, count);
+            continue;
+        }
         let op = i.encoding.opcode;
         let rm = i.modrm.map_or(0, |m| m & 7);
         let reg = i.modrm.map_or(0, |m| m >> 3 & 7);
@@ -128,10 +144,40 @@ fn lift_inner(
             }
             continue;
         }
+        if super::coverage::supports(&i) {
+            if !cpu || offset != bytes.len() {
+                return Err(CompileError::Unsupported(
+                    "coverage adapter requires terminal CPU region",
+                ));
+            }
+            super::coverage::lift(&mut b, &i, count);
+            return Ok(b.region);
+        }
+        if super::mmx::supports(&i) {
+            if !cpu || offset != bytes.len() {
+                return Err(CompileError::Unsupported(
+                    "MMX requires terminal CPU region",
+                ));
+            }
+            super::mmx::lift(&mut b, &i, count);
+            return Ok(b.region);
+        }
+        if super::sse_fp::supports(&i) {
+            if !cpu {
+                return Err(CompileError::Unsupported("SSE FP requires CPU ABI"));
+            }
+            super::sse_fp::lift(&mut b, &i, count);
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+                return Ok(b.region);
+            }
+            continue;
+        }
         if super::x87::supports(&i) {
             if !cpu || offset != bytes.len() {
                 return Err(CompileError::Unsupported(
-                    "x87 register form requires terminal CPU region",
+                    "x87 requires terminal CPU region",
                 ));
             }
             super::x87::lift(&mut b, &i, count);
@@ -228,6 +274,24 @@ fn lift_inner(
                 ));
             }
             super::control_regs::lift(&mut b, &i, count);
+            return Ok(b.region);
+        }
+        if super::fp_state::supports(&i) {
+            if !cpu || offset != bytes.len() {
+                return Err(CompileError::Unsupported(
+                    "FP state requires terminal CPU region",
+                ));
+            }
+            super::fp_state::lift(&mut b, &i, count);
+            return Ok(b.region);
+        }
+        if super::far_control::supports(&i) {
+            if !cpu || offset != bytes.len() {
+                return Err(CompileError::Unsupported(
+                    "far control requires terminal CPU region",
+                ));
+            }
+            super::far_control::lift(&mut b, &i, count);
             return Ok(b.region);
         }
         if super::cpu_system::supports(&i) {
@@ -514,7 +578,7 @@ fn lift_inner(
                     b.write(rm, width, value);
                 }
             },
-            0x84 | 0x85 | 0xA8 | 0xA9 | 0xF6 | 0xF7 if op < 0xF6 || reg == 0 => {
+            0x84 | 0x85 | 0xA8 | 0xA9 | 0xF6 | 0xF7 if op < 0xF6 || reg <= 1 => {
                 let (a, source) = if op == 0x84 || op == 0x85 {
                     (b.read(rm, width), b.read(reg, width))
                 } else {
@@ -545,7 +609,7 @@ fn memory_instruction(
     let alu = op <= 0x3B && op & 7 <= 3;
     let unary = matches!(op, 0xFE | 0xFF) && group < 2
         || matches!(op, 0xF6 | 0xF7) && matches!(group, 2 | 3);
-    let test = matches!(op, 0x84 | 0x85) || matches!(op, 0xF6 | 0xF7) && group == 0;
+    let test = matches!(op, 0x84 | 0x85) || matches!(op, 0xF6 | 0xF7) && group <= 1;
     if !alu
         && !unary
         && !test

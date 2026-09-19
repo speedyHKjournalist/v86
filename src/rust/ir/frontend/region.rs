@@ -76,6 +76,7 @@ impl Frame {
 }
 struct Fragment {
     decoded: DecodedInstruction,
+    span: usize,
     ir: Region,
     stop: bool,
 }
@@ -121,10 +122,20 @@ pub fn lift_cpu_cfg(
             default_32,
         )
         .map_err(|_| invalid("CFG decode stop"))?;
-        let end = at + decoded.length as usize;
+        let span = if decoded.encoding.opcode == 0xFB {
+            super::sti::extent(
+                &bytes[at..],
+                decoded.instruction_pc,
+                decoded.linear_pc,
+                default_32,
+            )?
+        } else {
+            decoded.length as usize
+        };
+        let end = at + span;
         if fragments
             .iter()
-            .any(|(&other, f)| at < other + f.decoded.length as usize && other < end)
+            .any(|(&other, f)| at < other + f.span && other < end)
         {
             return Err(invalid("overlapping guest instruction streams"));
         }
@@ -136,9 +147,19 @@ pub fn lift_cpu_cfg(
             rep_budget,
         )?;
         // These adapters already own completion/exit; do not create an internal continuation.
-        let stop = ir.instructions.iter().any(|i| {
-            i.commit.is_some() || matches!(i.op, Op::CallHelper(_) | Op::CompareExchange8B { .. })
-        });
+        let stop = decoded.encoding.opcode == 0xFB
+            || ir.instructions.iter().any(|i| {
+                i.commit.is_some()
+                    || matches!(i.op, Op::CompareExchange8B { .. })
+                    || match i.op {
+                        Op::CallHelper(id) => matches!(
+                            ir.helpers[id.index()].abi,
+                            crate::ir::helper::HelperAbi::CpuExit
+                                | crate::ir::helper::HelperAbi::CpuRep
+                        ),
+                        _ => false,
+                    }
+            });
         if !stop {
             for block in &ir.blocks {
                 if let Some(Terminator::Exit(state)) = block.terminator {
@@ -148,16 +169,26 @@ pub fn lift_cpu_cfg(
                 }
             }
         }
-        fragments.insert(at, Fragment { decoded, ir, stop });
+        fragments.insert(
+            at,
+            Fragment {
+                decoded,
+                span,
+                ir,
+                stop,
+            },
+        );
     }
     let block_count = 1 + fragments.values().map(|f| f.ir.blocks.len()).sum::<usize>();
     if block_count > 64 {
         return Err(CompileError::Budget("CFG block count"));
     }
     let xmm = fragments.values().any(|f| {
-        f.ir.instructions
-            .iter()
-            .any(|i| matches!(i.op, Op::ReadXmm(_)))
+        f.ir.states.iter().any(|s| !s.xmm.is_empty())
+            || f.ir
+                .instructions
+                .iter()
+                .any(|i| matches!(i.op, Op::ReadXmm(_)))
     });
     let seed = IntegerBuilder::new();
     let mut b = IntegerBuilder::new();

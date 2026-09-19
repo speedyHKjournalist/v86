@@ -68,10 +68,11 @@ fn simd_masked_contracts() {
     for bytes in [
         vec![0x66, 0x0F, 0xF7, 0x00],
         vec![0xF0, 0x66, 0x0F, 0xF7, 0xC0],
-        vec![0x0F, 0xF7, 0xC0],
     ] {
         assert!(lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
     }
+    let mmx = lift_cpu(&[0x0F, 0xF7, 0xC0], GuestEip(0), LinearAddress(0), true).unwrap();
+    assert!(mmx.helpers.iter().any(|h| h.name == "ir_mmx_mask"));
     let valid = lift_cpu(
         &[0x66, 0x0F, 0xF7, 0xC1],
         GuestEip(0),

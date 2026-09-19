@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
           node-version: '24.17.0'
@@ -45,6 +46,18 @@ jobs:
         run: |
           set -o pipefail
           make ir-x87-tests 2>&1 | tee build/ir08-x87.log
+      - name: Control, x87 memory and FP state with pinned semantic reference
+        run: |
+          set -o pipefail
+          make ir-control-reference-tests 2>&1 | tee build/ir-control-reference.log
+      - name: SSE FP, MMX and remaining baseline forms
+        run: |
+          set -o pipefail
+          make ir-sse-fp-tests ir-mmx-tests ir-coverage-tests 2>&1 | tee build/ir-coverage-increment.log
+      - name: STI shadow, helper continuation and machine allocation
+        run: |
+          set -o pipefail
+          make ir-sti-tests ir-helper-reload-tests ir-mir-owned-tests 2>&1 | tee build/ir-continuation-machine.log
       - name: IR-09 backend completion gate
         run: |
           set -o pipefail

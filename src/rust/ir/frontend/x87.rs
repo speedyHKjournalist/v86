@@ -1,13 +1,15 @@
-//! Terminal x87 register-form lowering.
-//!
-//! This first IR-08 x87 slice deliberately excludes guest-memory operands.
-//! The CPU helper owns the architectural F80 stack/status state and terminates
-//! the current IR region, so no cached SSA x87 value can survive the call.
-use super::{adapters::call, decode::DecodedInstruction, integer::IntegerBuilder, lift::snapshot};
+//! Terminal x87 register/memory lowering with CPU-owned F80 stack/status.
+//! Memory helpers resolve segments after the #NM guard and own precise faults.
+use super::{
+    adapters::call,
+    decode::DecodedInstruction,
+    integer::IntegerBuilder,
+    lift::{effective_offset, snapshot},
+};
 use crate::ir::{state::ResumeKind, types::Type};
 
 pub fn supports(i: &DecodedInstruction) -> bool {
-    (0xD8..=0xDF).contains(&i.encoding.opcode) && i.ea.is_none()
+    (0xD8..=0xDF).contains(&i.encoding.opcode)
 }
 
 pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
@@ -16,6 +18,22 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     b.region.states[state.index()].resume = ResumeKind::BeforeInstruction;
 
     let modrm = i.modrm.expect("x87 register form has ModRM");
+    if let Some(ea) = i.ea {
+        // Segment resolution belongs to the helper: #NM precedes segment faults.
+        let offset = effective_offset(b, &ea);
+        let opcode = b.constant(i.encoding.opcode, Type::I32);
+        let group = b.constant((modrm >> 3 & 7) as u32, Type::I32);
+        let segment = b.constant(ea.segment as u32, Type::I32);
+        let width = b.constant(i.operand_size as u32, Type::I32);
+        call(
+            b,
+            "ir_x87_mem",
+            vec![opcode, group, offset, segment, width],
+            state,
+            true,
+        );
+        return;
+    }
     let args = [
         i.encoding.opcode,
         (modrm >> 3 & 7) as u32,

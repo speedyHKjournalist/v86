@@ -187,8 +187,9 @@ fn bit_count_widths_folding_and_memory_access_contract() {
             Op::GuestLoad { bytes: 2 | 4 } | Op::RmwLoad { bytes: 2 | 4, .. }
         )));
     }
+    let invalid = lift_cpu(&[0x0F, 0xB8, 0xC0], GuestEip(0), LinearAddress(0), true).unwrap();
     assert!(
-        lift_cpu(&[0x0F, 0xB8, 0xC0], GuestEip(0), LinearAddress(0), true).is_err(),
-        "POPCNT requires mandatory F3"
+        invalid.helpers.iter().any(|h| h.name == "ir_reserved_form"),
+        "missing F3 must lower to explicit #UD, never POPCNT"
     );
 }

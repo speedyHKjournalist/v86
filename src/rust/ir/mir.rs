@@ -1,4 +1,5 @@
 //! Owned machine plans. HIR is borrowed only while checking the lowering boundary.
+pub mod allocation;
 pub mod arithmetic;
 pub mod call;
 pub mod control;
@@ -9,6 +10,7 @@ pub mod helper_state;
 pub mod materialize;
 pub mod memory;
 mod optimize;
+pub mod stack;
 pub mod state_elision;
 pub mod value;
 pub mod vector;
@@ -21,6 +23,8 @@ pub struct HelperCall {
     pub name: String,
     /// CpuExit or CpuRep: no cached SSA state may resume after this call.
     pub cpu_exit: bool,
+    pub starts_interrupt_shadow: bool,
+    pub cpu_reload: bool,
     pub signature: Signature,
     pub fault_delivery: Option<String>,
     pub exit_outcomes: Vec<u32>,
@@ -31,6 +35,8 @@ pub struct MirData {
     pub(super) value_blocks: Vec<Option<super::ids::BlockId>>,
     pub(super) value_definitions: Vec<Option<super::ids::InstId>>,
     pub allocation: Allocation,
+    pub(super) allocation_graph: allocation::Graph,
+    pub(super) stack_elided: Vec<bool>,
     pub helpers: Vec<Option<HelperCall>>,
     pub memory: Vec<Option<memory::MemoryPlan>>,
     pub effects: Vec<Option<effect::EffectPlan>>,
@@ -125,6 +131,18 @@ impl MirRegion {
         cpu_liveness::instruction_live(&self.data, id)
     }
 
+    /// Fuse adjacent single-use scalar programs after HIR has been discarded.
+    pub fn schedule_operand_stack(&mut self, work_limit: usize) -> Result<usize, CompileError> {
+        stack::schedule(&mut self.data, work_limit)
+    }
+    /// Recompute typed interference and phi-copy schedules from owned MIR facts.
+    pub fn allocate_machine_locals(&mut self, work_limit: usize) -> Result<usize, CompileError> {
+        allocation::reallocate(&mut self.data, work_limit)
+    }
+    pub(crate) fn stack_instruction_elided(&self, id: super::ids::InstId) -> bool {
+        self.data.stack_elided[id.index()]
+    }
+
     /// Fold literal machine operations without changing definitions, effects,
     /// local assignments or recovery points. The update is transactional.
     pub fn fold_constants(&mut self) -> Result<usize, CompileError> {
@@ -182,6 +200,13 @@ impl Draft<'_> {
                 "invalid machine types or local allocation".into(),
             ));
         }
+        if data.allocation_graph != allocation::capture(self.hir)
+            || data.stack_elided != vec![false; self.hir.instructions.len()]
+        {
+            return Err(CompileError::InvalidIr(
+                "invalid initial machine use/definition facts".into(),
+            ));
+        }
         memory::verify(self.hir, &data.memory)?;
         effect::verify(self.hir, &data.effects)?;
         call::verify(self.hir, &data.helpers, &data.calls)?;
@@ -200,6 +225,7 @@ impl Draft<'_> {
 pub const CPU_IMPORTS: &[&str] = &[
     "ir_pop_address",
     "ir_enter",
+    "ir_sti_finish",
     "ir_entry_matches",
     "ir_divide_fault",
     "ir_tlb_base",

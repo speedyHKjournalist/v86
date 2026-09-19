@@ -65,3 +65,21 @@ for(const program of [0, 1, 2]) for(const optimized of [0, 1]) {
     }
 }
 console.log(`PASS: ${cases.length * 2} independent BigInt/Wasm literal executions and ${executions} HIR-free MIR rewrite executions; literal modules ${sizes[0]} -> ${sizes[1]} bytes`);
+
+const stackCount=JSON.parse(fs.readFileSync(`${directory}/stack.json`));
+for(let program=0;program<stackCount;program++) {
+    const modules=[0,1,2].map(v=>new WebAssembly.Module(fs.readFileSync(`${directory}/stack-${program}-${v}.wasm`)));
+    for(let seed=0;seed<64;seed++) {
+        let expected;
+        for(const module of modules) {
+            const m=new WebAssembly.Memory({initial:64}),words=new Uint32Array(m.buffer);
+            for(let n=0;n<8;n++) words[n]=(seed*0x1234567+n*0x7654321)>>>0;
+            words[8]=seed&1?0x8D7:2;
+            new WebAssembly.Instance(module,{e:{m}}).exports.f(0);
+            const actual=Array.from(words.slice(0,16));
+            if(expected) assert.deepEqual(actual,expected,`owned MIR allocation ${program}/${seed}`);
+            else expected=actual;
+        }
+    }
+}
+console.log(`PASS: ${stackCount*64*3} stack scheduling/reallocation executions, including typed phi-copy cycles`);

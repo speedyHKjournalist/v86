@@ -61,10 +61,12 @@ fn cpu_integer_memory_fixtures() {
         let mut bytes = if width == 16 { vec![0x66] } else { vec![] };
         bytes.extend([if width == 8 { 0x84 } else { 0x85 }, 0x11]);
         forms.push(bytes);
-        let mut bytes = if width == 16 { vec![0x66] } else { vec![] };
-        bytes.extend([if width == 8 { 0xF6 } else { 0xF7 }, 0x01]);
-        bytes.extend(vec![0xA5; width / 8]);
-        forms.push(bytes);
+        for group in [0, 1] {
+            let mut bytes = if width == 16 { vec![0x66] } else { vec![] };
+            bytes.extend([if width == 8 { 0xF6 } else { 0xF7 }, group << 3 | 1]);
+            bytes.extend(vec![0xA5; width / 8]);
+            forms.push(bytes);
+        }
     }
     for cc in 0..16 {
         forms.push(vec![0x0F, 0x90 | cc, 0x01]);

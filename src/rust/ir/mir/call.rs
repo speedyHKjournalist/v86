@@ -13,11 +13,9 @@ pub fn legalize(descriptor: &HelperDescriptor) -> Result<HelperCall, CompileErro
     descriptor
         .validate()
         .map_err(|message| CompileError::InvalidIr(message.into()))?;
-    if descriptor
-        .params
-        .iter()
-        .chain(&descriptor.results)
-        .any(|t| *t == Type::V128)
+    let reload = matches!(descriptor.abi, HelperAbi::CpuReload);
+    if descriptor.params.iter().any(|t| *t == Type::V128)
+        || !reload && descriptor.results.iter().any(|t| *t == Type::V128)
     {
         return Err(CompileError::Unsupported(
             "vector helper requires explicit scratch ABI",
@@ -28,6 +26,7 @@ pub fn legalize(descriptor: &HelperDescriptor) -> Result<HelperCall, CompileErro
             fault_delivery,
             normal_preserves_state,
         } => (fault_delivery.clone(), *normal_preserves_state, false),
+        HelperAbi::CpuReload => (None, true, false),
         HelperAbi::CpuExit | HelperAbi::CpuRep => (None, false, true),
         HelperAbi::Unadapted => return Err(CompileError::Unsupported("unadapted helper ABI")),
     };
@@ -45,12 +44,14 @@ pub fn legalize(descriptor: &HelperDescriptor) -> Result<HelperCall, CompileErro
     let wasm_type = |t: &Type| if *t == Type::I64 { WasmType::I64 } else { WasmType::I32 };
     let params: Vec<_> = descriptor.params.iter().map(wasm_type).collect();
     let results: Vec<_> = std::iter::once(WasmType::I32)
-        .chain(descriptor.results.iter().map(wasm_type))
+        .chain(descriptor.results.iter().filter(|_| !reload).map(wasm_type))
         .collect();
     let signature = Signature::new(&params, &results);
     Ok(HelperCall {
         name: descriptor.name.clone(),
         cpu_exit,
+        cpu_reload: reload,
+        starts_interrupt_shadow: descriptor.name == "ir_sti_check",
         signature,
         fault_delivery: fault_delivery.clone(),
         exit_outcomes: [
@@ -90,6 +91,7 @@ pub struct CallPlan {
     pub args: Vec<ValueId>,
     /// Pop order for multi-results; assignments occur only after the outcome check.
     pub staged: Vec<ResultSlot>,
+    pub reload: Vec<(ValueId, super::value::Reading)>,
     pub delivery: Option<Delivery>,
     pub exits: Vec<u32>,
     pub normal: Option<u32>,
@@ -120,11 +122,21 @@ pub fn lower(
         staged: inst.results[..inst.results.len() - 1]
             .iter()
             .rev()
+            .filter(|_| !call.cpu_reload)
             .map(|&value| ResultSlot {
                 value,
                 ty: region.values[value.index()].ty,
             })
             .collect(),
+        reload: if call.cpu_reload {
+            inst.results
+                .iter()
+                .copied()
+                .zip(reload_readings())
+                .collect()
+        } else {
+            vec![]
+        },
         delivery: call.fault_delivery.as_ref().map(|name| Delivery {
             outcome: Outcome::FaultNeedsDelivery as u32,
             restore: state,
@@ -165,4 +177,30 @@ pub fn verify(
         }
     }
     Ok(())
+}
+
+fn reload_readings() -> Vec<super::value::Reading> {
+    use super::value::{Address, Load, Reading};
+    use crate::cpu::global_pointers as gp;
+    let read = |address| Reading::Memory {
+        address,
+        load: Load::I32,
+    };
+    let mut reads: Vec<_> = (0..8).map(|r| read(Address::Gpr(r))).collect();
+    reads.push(Reading::Call {
+        name: "get_eflags",
+        signature: Signature::new(&[], &[WasmType::I32]),
+    });
+    reads.extend([
+        read(Address::Flags),
+        read(Address::Absolute(gp::flags_changed as u32)),
+        read(Address::FlagOperand),
+        read(Address::Absolute(gp::last_result as u32)),
+        read(Address::Absolute(gp::last_op_size as u32)),
+    ]);
+    reads.extend((0..8).map(|r| Reading::Memory {
+        address: Address::Absolute(gp::get_reg_xmm_offset(r)),
+        load: Load::V128,
+    }));
+    reads
 }

@@ -108,14 +108,13 @@ fn x87_register_terminal_contract() {
     // Address-size override is semantically inert for mod=3, but must remain
     // accepted by the shared decoder/frontend.
     assert!(lift_cpu(&[0x67, 0xD8, 0xC1], GuestEip(0), LinearAddress(0), true).is_ok());
-    // This PR intentionally owns register forms only. Keep a concrete memory
-    // x87 form Pending so lifecycle compile-stop suppression has a stable oracle.
-    assert!(lift_cpu(
+    // Memory forms use their own terminal ABI, including #NM-before-segment order.
+    let memory = lift_cpu(
         &[0xD9, 0x05, 0, 0, 0, 0],
         GuestEip(0),
         LinearAddress(0),
-        true
+        true,
     )
-    .is_err());
-
+    .unwrap();
+    assert_eq!(memory.helpers[0].name, "ir_x87_mem");
 }

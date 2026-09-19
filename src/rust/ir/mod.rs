@@ -14,6 +14,9 @@ mod copy_tests;
 mod core_tests;
 pub mod dump;
 pub mod effects;
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/far_control.rs"]
+mod far_control_tests;
 pub mod frontend;
 pub mod helper;
 #[cfg(test)]
@@ -25,9 +28,6 @@ pub mod lowering;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/memory.rs"]
 mod memory_tests;
-#[cfg(test)]
-#[path = "../../../tests/ir/semantics/store_continuation.rs"]
-mod store_continuation_tests;
 pub mod mir;
 pub mod passes;
 pub mod runtime;
@@ -36,6 +36,9 @@ pub mod simd;
 #[path = "../../../tests/ir/semantics/stack.rs"]
 mod stack_tests;
 pub mod state;
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/store_continuation.rs"]
+mod store_continuation_tests;
 pub mod types;
 pub mod verify;
 
@@ -192,3 +195,27 @@ mod dataflow_tests;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/entry.rs"]
 mod entry_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/x87_memory.rs"]
+mod x87_memory_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/fp_state.rs"]
+mod fp_state_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/sse_fp.rs"]
+mod sse_fp_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/mmx.rs"]
+mod mmx_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/coverage.rs"]
+mod coverage_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/sti.rs"]
+mod sti_tests;

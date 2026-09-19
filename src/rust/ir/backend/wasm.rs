@@ -68,8 +68,19 @@ struct Emitter<'a> {
     loop_read_caches: Vec<(WasmLocal, WasmLocal)>,
     code_pages: &'a [u32],
     memory_base: Option<WasmLocal>,
+    interrupt_shadow: Option<WasmLocal>,
 }
 impl Emitter<'_> {
+    fn return_to_cpu(&mut self) {
+        if let Some(depth) = &self.interrupt_shadow {
+            self.w.get_local(depth);
+            self.w.if_void();
+            self.w.get_local(depth);
+            self.w.call_fn1("ir_sti_finish");
+            self.w.block_end();
+        }
+        self.w.return_();
+    }
     fn get(&mut self, value: ValueId) {
         self.get_local(self.mir.allocation.value_local[value.index()].unwrap());
     }
@@ -302,7 +313,7 @@ impl Emitter<'_> {
                     match self.mir.control.blocks[id.index()].terminator.clone() {
                         MirTerminator::Exit(state) => {
                             self.state(state);
-                            self.w.return_();
+                            self.return_to_cpu();
                         },
                         MirTerminator::Jump(edge) => {
                             self.emit_structured_edge(&edge, &next, &labels);
@@ -403,7 +414,7 @@ impl Emitter<'_> {
         if trap_after_fault {
             self.w.unreachable();
         } else {
-            self.w.return_();
+            self.return_to_cpu();
         }
         self.w.block_end();
         self.w.get_local(&outcome);
@@ -456,7 +467,7 @@ impl Emitter<'_> {
         if self.code_pages.is_empty() {
             // Standalone/test emitters without an immutable code snapshot keep
             // the historical conservative boundary.
-            self.w.return_();
+            self.return_to_cpu();
             return;
         }
         // TLB entries contain Wasm-linear pointers (`mem8 + physical`), while
@@ -477,7 +488,7 @@ impl Emitter<'_> {
             }
         }
         self.w.if_void();
-        self.w.return_();
+        self.return_to_cpu();
         self.w.block_end();
     }
     fn compare_exchange8b(&mut self, plan: &CompareExchange) {
@@ -554,7 +565,7 @@ impl Emitter<'_> {
         self.w.free_local(outcome);
         self.w.block_end();
         self.w.free_local(entry);
-        self.w.return_();
+        self.return_to_cpu();
     }
     fn cpu_register_pair(&mut self, pair: &RegisterPair) {
         self.w.load_fixed_i32(pair.low);
@@ -569,7 +580,7 @@ impl Emitter<'_> {
         self.w.if_void();
         self.prepare_memory_call(plan.before);
         self.runtime_call(&plan.fault);
-        self.w.return_();
+        self.return_to_cpu();
         self.w.block_end();
     }
     fn divide(&mut self, plan: &Division) {
@@ -787,7 +798,7 @@ impl Emitter<'_> {
                     }
                 }
                 self.state(*commit);
-                self.w.return_();
+                self.return_to_cpu();
             },
             NativeMemory::VectorLoad { result, combine } => {
                 if let VectorCombine::ReplaceWord { old, lane } = combine {
@@ -858,7 +869,7 @@ impl Emitter<'_> {
                 self.w.const_i64(-1);
                 self.w.eq_i64();
                 self.w.if_void();
-                self.w.return_();
+                self.return_to_cpu();
                 self.w.block_end();
                 self.w.get_local_i64(&staged);
                 self.set(*ticket);
@@ -878,7 +889,7 @@ impl Emitter<'_> {
                 self.w.if_void();
                 if let Some(commit) = commit {
                     self.state(*commit);
-                    self.w.return_();
+                    self.return_to_cpu();
                 }
                 self.w.else_();
                 self.w.get_local(&outcome);
@@ -890,7 +901,7 @@ impl Emitter<'_> {
                 if *trap_after_fault {
                     self.w.unreachable();
                 } else {
-                    self.w.return_();
+                    self.return_to_cpu();
                 }
                 self.w.block_end();
                 self.w.free_local(outcome);
@@ -908,7 +919,7 @@ impl Emitter<'_> {
                 self.w.unreachable();
                 self.w.block_end();
                 self.w.free_local(outcome);
-                self.w.return_();
+                self.return_to_cpu();
             },
         }
         self.w.block_end();
@@ -969,7 +980,7 @@ impl Emitter<'_> {
                 self.w.if_void();
                 self.w.unreachable();
                 self.w.block_end();
-                self.w.return_();
+                self.return_to_cpu();
                 if success.is_some() {
                     self.w.block_end();
                 }
@@ -1005,7 +1016,7 @@ impl Emitter<'_> {
                 }
                 self.w.block_end();
                 self.state(*commit);
-                self.w.return_();
+                self.return_to_cpu();
             },
         }
     }
@@ -1039,7 +1050,7 @@ impl Emitter<'_> {
             self.state(delivery.restore);
             self.w
                 .call_signature(&delivery.name, delivery.signature.clone());
-            self.w.return_();
+            self.return_to_cpu();
             self.w.block_end();
         }
         for &exit in &plan.exits {
@@ -1047,7 +1058,7 @@ impl Emitter<'_> {
             self.w.const_i32(exit as i32);
             self.w.eq_i32();
             self.w.if_void();
-            self.w.return_();
+            self.return_to_cpu();
             self.w.block_end();
         }
         if let Some(normal) = plan.normal {
@@ -1059,6 +1070,17 @@ impl Emitter<'_> {
             self.w.block_end();
         } else {
             self.w.unreachable();
+        }
+        if call.starts_interrupt_shadow {
+            let depth = self.interrupt_shadow.as_ref().expect("STI local");
+            self.w.get_local(depth);
+            self.w.const_i32(1);
+            self.w.add_i32();
+            self.w.set_local(depth);
+        }
+        for (value, reading) in &plan.reload {
+            self.read_value(reading);
+            self.set(*value);
         }
         for (slot, temp) in staged {
             self.get_temporary(&temp);
@@ -1133,9 +1155,14 @@ impl Emitter<'_> {
         if let Some(state) = state {
             self.w.get_local(remaining);
             self.w.eqz_i32();
+            if let Some(depth) = &self.interrupt_shadow {
+                self.w.get_local(depth);
+                self.w.eqz_i32();
+                self.w.and_i32();
+            }
             self.w.if_void();
             self.state(state);
-            self.w.return_();
+            self.return_to_cpu();
             self.w.block_end();
         }
         self.w.get_local(remaining);
@@ -1144,6 +1171,9 @@ impl Emitter<'_> {
         self.w.set_local(remaining);
     }
     fn instruction(&mut self, id: InstId, remaining: &WasmLocal) {
+        if self.mir.stack_instruction_elided(id) {
+            return;
+        }
         let mir = self.mir;
         if let Some(plan) = &mir.control.polls[id.index()] {
             self.poll(Some(plan.recovery), plan.cost, remaining);
@@ -1241,7 +1271,13 @@ fn emit_inner(
     if !cpu && mir.states.iter().any(|state| state.requires_cpu) {
         return Err(CompileError::Unsupported("XMM state requires CPU ABI"));
     }
-    if !cpu && mir.helpers.iter().flatten().any(|call| call.cpu_exit) {
+    if !cpu
+        && mir
+            .helpers
+            .iter()
+            .flatten()
+            .any(|call| call.cpu_exit || call.cpu_reload)
+    {
         return Err(CompileError::Unsupported(
             "terminal helper requires CPU ABI",
         ));
@@ -1312,13 +1348,26 @@ fn emit_inner(
         loop_read_caches: vec![],
         code_pages,
         memory_base: None,
+        interrupt_shadow: None,
     };
+    if mir
+        .helpers
+        .iter()
+        .flatten()
+        .any(|call| call.starts_interrupt_shadow)
+    {
+        if !cpu {
+            return Err(CompileError::Unsupported("STI requires CPU ABI"));
+        }
+        e.w.const_i32(0);
+        e.interrupt_shadow = Some(e.w.set_new_local());
+    }
     if let Some(entry) = entry {
         // Reject before ir_enter (which writes previous_ip and clears REP results),
         // before any state loads/materialization, and before any guest access/helper.
         e.w.get_local(&e.w.arg_local_initial_state.unsafe_clone());
         e.w.if_void();
-        e.w.return_();
+        e.return_to_cpu();
         e.w.block_end();
         e.w.const_i32(entry.linear.0 as i32);
         e.w.const_i32(entry.cs_base() as i32);
@@ -1326,7 +1375,7 @@ fn emit_inner(
         e.w.call_fn3_ret("ir_entry_matches");
         e.w.eqz_i32();
         e.w.if_void();
-        e.w.return_();
+        e.return_to_cpu();
         e.w.block_end();
     }
     if cpu {
@@ -1382,7 +1431,7 @@ fn emit_inner(
             // valid, every other selector returns without guest side effects.
             e.w.get_local(&e.w.arg_local_initial_state.unsafe_clone());
             e.w.if_void();
-            e.w.return_();
+            e.return_to_cpu();
             e.w.block_end();
         }
         e.emit_structured(&plan.roots, &remaining);
@@ -1402,7 +1451,7 @@ fn emit_inner(
         e.w.const_i32(-1);
         e.w.eq_i32();
         e.w.if_void();
-        e.w.return_();
+        e.return_to_cpu();
         e.w.block_end();
         let dispatch = e.w.loop_void();
         for (b, block) in mir.control.blocks.iter().enumerate() {
@@ -1420,7 +1469,7 @@ fn emit_inner(
             match &block.terminator {
                 MirTerminator::Exit(state) => {
                     e.state(*state);
-                    e.w.return_();
+                    e.return_to_cpu();
                 },
                 MirTerminator::Jump(edge) => {
                     e.copy_edge(edge, &pc_local);
@@ -1458,6 +1507,9 @@ fn emit_inner(
         e.w.free_local(pc);
     }
     e.w.free_local(remaining);
+    if let Some(local) = e.interrupt_shadow {
+        e.w.free_local(local);
+    }
     if let Some(local) = e.accounted {
         e.w.free_local(local);
     }

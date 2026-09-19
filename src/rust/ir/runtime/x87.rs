@@ -160,3 +160,164 @@ pub unsafe fn ir_test_x87_seed() {
         fpu::fpu_write_st(index, F80::of_i32(index + 1));
     }
 }
+
+/// Memory x87 stays in canonical F80 state. A successful data access is required
+/// before committing the instruction; fault delivery is owned by safe_*.
+#[no_mangle]
+pub unsafe fn ir_x87_mem(opcode: u32, group: u32, offset: u32, segment: u32, width: u32) -> u32 {
+    assert!(
+        !cpu::in_jit
+            && (0xD8..=0xDF).contains(&opcode)
+            && group < 8
+            && segment < 6
+            && matches!(width, 16 | 32)
+    );
+    if !cpu::task_switch_test() {
+        return Outcome::ControlTransferred as u32;
+    }
+    let Ok(base) = cpu::get_seg(segment as i32) else {
+        return Outcome::ControlTransferred as u32;
+    };
+    let address = offset.wrapping_add(base as u32) as i32;
+    fpu::fpu_cache_barrier();
+    if matches!((opcode, group), (0xD9, 1) | (0xDB, 4 | 6) | (0xDD, 5)) {
+        return ud();
+    }
+    // These are explicitly unsupported in the pinned CPU, including its debug
+    // assertion. Preserve that baseline behavior rather than invent new ISA.
+    if opcode == 0xDF && group == 4 || opcode == 0xDD && matches!(group, 4 | 6) && width == 16 {
+        fpu::fpu_unimpl();
+        return Outcome::ControlTransferred as u32;
+    }
+    if memory_semantics(opcode, group, address, width).is_err() {
+        Outcome::ControlTransferred as u32
+    } else {
+        commit()
+    }
+}
+
+unsafe fn memory_semantics(opcode: u32, group: u32, address: i32, width: u32) -> Result<(), ()> {
+    use crate::cpu::fpu::*;
+    if matches!(opcode, 0xD8 | 0xDA | 0xDC | 0xDE) {
+        let value = match opcode {
+            0xD8 => fpu_load_m32(address)?,
+            0xDA => fpu_load_i32(address)?,
+            0xDC => fpu_load_m64(address)?,
+            0xDE => fpu_load_i16(address)?,
+            _ => unreachable!(),
+        };
+        match group {
+            0 => fpu_fadd(0, value),
+            1 => fpu_fmul(0, value),
+            2 => fpu_fcom(value),
+            3 => fpu_fcomp(value),
+            4 => fpu_fsub(0, value),
+            5 => fpu_fsubr(0, value),
+            6 => fpu_fdiv(0, value),
+            7 => fpu_fdivr(0, value),
+            _ => unreachable!(),
+        }
+        return Ok(());
+    }
+    match (opcode, group) {
+        (0xD9, 0) => {
+            crate::softfloat::F80::clear_exception_flags();
+            fpu_push_m32_bits(cpu::safe_read32s(address)?);
+        },
+        (0xDD, 0) => {
+            crate::softfloat::F80::clear_exception_flags();
+            fpu_push_m64_bits(cpu::safe_read64s(address)?);
+        },
+        (0xDB, 0) => fpu_push(fpu_load_i32(address)?),
+        (0xDF, 0) => fpu_push(fpu_load_i16(address)?),
+        (0xDF, 5) => fpu_push(fpu_load_i64(address)?),
+        (0xDB, 5) => {
+            cpu::readable_or_pagefault(address, 10)?;
+            fpu_push(fpu_load_m80(address)?);
+        },
+        (0xD9, 2 | 3) => {
+            fpu_store_m32(address, fpu_get_st0())?;
+            if group == 3 {
+                fpu_pop();
+            }
+        },
+        (0xDD, 2 | 3) => {
+            fpu_store_m64(address, fpu_get_st0())?;
+            if group == 3 {
+                fpu_pop();
+            }
+        },
+        (0xDB, 7) => {
+            cpu::writable_or_pagefault(address, 10)?;
+            fpu_store_m80(address, fpu_get_st0());
+            fpu_pop();
+        },
+        (0xDB | 0xDF, 1..=3) | (0xDD, 1) | (0xDF, 7) => {
+            let bytes = match opcode {
+                0xDB => 4,
+                0xDD => 8,
+                _ if group == 7 => 8,
+                _ => 2,
+            };
+            cpu::writable_or_pagefault(address, bytes)?;
+            let value = fpu_get_st0();
+            match bytes {
+                2 => {
+                    let v = if group == 1 {
+                        fpu_truncate_to_i16(value)
+                    } else {
+                        fpu_convert_to_i16(value)
+                    };
+                    cpu::safe_write16(address, v as i32 & 65535).unwrap();
+                },
+                4 => {
+                    let v = if group == 1 {
+                        fpu_truncate_to_i32(value)
+                    } else {
+                        fpu_convert_to_i32(value)
+                    };
+                    cpu::safe_write32(address, v).unwrap();
+                },
+                8 => {
+                    let v = if group == 1 {
+                        fpu_truncate_to_i64(value)
+                    } else {
+                        fpu_convert_to_i64(value)
+                    };
+                    cpu::safe_write64(address, v as u64).unwrap();
+                },
+                _ => unreachable!(),
+            }
+            if group != 2 {
+                fpu_pop();
+            }
+        },
+        (0xD9, 4) => {
+            cpu::readable_or_pagefault(address, if width == 16 { 14 } else { 28 })?;
+            if width == 16 {
+                fpu_fldenv16(address);
+            } else {
+                fpu_fldenv32(address);
+            }
+        },
+        (0xD9, 5) => set_control_word(cpu::safe_read16(address)? as u16),
+        (0xD9, 6) => {
+            cpu::writable_or_pagefault(address, if width == 16 { 14 } else { 28 })?;
+            if width == 16 {
+                fpu_fstenv16(address);
+            } else {
+                fpu_fstenv32(address);
+            }
+        },
+        (0xD9, 7) => cpu::safe_write16(address, (*gp::fpu_control_word).into())?,
+        (0xDD, 4) => fpu_frstor32_checked(address)?,
+        (0xDD, 6) => fpu_fsave32_checked(address)?,
+        (0xDD, 7) => cpu::safe_write16(address, fpu_load_status_word().into())?,
+        (0xDF, 6) => {
+            cpu::writable_or_pagefault(address, 10)?;
+            fpu_fbstp(address);
+        },
+        _ => unreachable!(),
+    }
+    Ok(())
+}

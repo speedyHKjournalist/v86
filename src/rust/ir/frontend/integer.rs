@@ -68,6 +68,31 @@ impl IntegerBuilder {
             },
         }
     }
+    pub fn reload_cpu_state(&mut self, values: &[ValueId]) {
+        assert_eq!(values.len(), 22);
+        self.gpr.copy_from_slice(&values[..8]);
+        let flags = values[8];
+        let raw = values[9];
+        let changes = values[10];
+        let arithmetic =
+            std::array::from_fn(|i| self.extract(flags, [0, 2, 4, 6, 7, 11][i], Type::I1));
+        let raw_zero = self.extract(raw, 6, Type::I1);
+        let zero_is_lazy = self.extract(changes, 6, Type::I1);
+        let valid = self.constant(1, Type::I1);
+        self.flags = FlagState {
+            arithmetic,
+            system: flags,
+            last_op1: Some(values[11]),
+            raw_zero: Some(raw_zero),
+            zero_is_lazy: Some(zero_is_lazy),
+            raw_flags: Some(raw),
+            lazy_mask: Some(changes),
+            last_result: Some(values[12]),
+            last_op_size: Some(values[13]),
+            backing_valid: Some(valid),
+        };
+        self.xmm = values[14..].to_vec();
+    }
     pub fn ty(&self, value: ValueId) -> Type {
         self.region.values[value.index()].ty
     }
@@ -188,10 +213,8 @@ impl IntegerBuilder {
         raw = self.write_raw_flag_bit(raw, overflow, 0);
         raw = self.write_raw_flag_bit(raw, overflow, 11);
         self.flags.raw_flags = Some(raw);
-        self.flags.lazy_mask = Some(self.constant(
-            (FLAGS_ALL & !FLAG_CARRY & !FLAG_OVERFLOW) as u32,
-            Type::I32,
-        ));
+        self.flags.lazy_mask =
+            Some(self.constant((FLAGS_ALL & !FLAG_CARRY & !FLAG_OVERFLOW) as u32, Type::I32));
         self.flags.last_result = Some(self.as_i32(result));
         self.flags.last_op_size = Some(self.constant((width - 1) as u32, Type::I32));
     }
@@ -205,10 +228,8 @@ impl IntegerBuilder {
         raw = self.write_raw_flag_bit(raw, clear, 0);
         raw = self.write_raw_flag_bit(raw, is_zero, 6);
         self.flags.raw_flags = Some(raw);
-        self.flags.lazy_mask = Some(self.constant(
-            (FLAGS_ALL & !FLAG_ZERO & !FLAG_CARRY) as u32,
-            Type::I32,
-        ));
+        self.flags.lazy_mask =
+            Some(self.constant((FLAGS_ALL & !FLAG_ZERO & !FLAG_CARRY) as u32, Type::I32));
         self.flags.last_result = Some(self.as_i32(result));
         self.flags.last_op_size = Some(self.constant((width - 1) as u32, Type::I32));
     }
@@ -237,7 +258,7 @@ impl IntegerBuilder {
         self.flags.lazy_mask = Some(self.constant(mask as u32, Type::I32));
     }
     fn update_lazy_backing(&mut self, group: u8, result: ValueId, width: u8) {
-        use crate::cpu::cpu::{FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAGS_ALL, FLAG_SUB};
+        use crate::cpu::cpu::{FLAGS_ALL, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SUB};
         let result = self.as_i32(result);
         self.flags.last_result = Some(result);
         self.flags.last_op_size = Some(self.constant((width - 1) as u32, Type::I32));

@@ -64,10 +64,133 @@ fn cs_base() -> Step {
     }
 }
 fn constant_true(region: &Region, value: crate::ir::ids::ValueId) -> bool {
-    let Definition::Instruction(id, result) = region.values[value.index()].definition else {
-        return false;
+    constant_bool(region, value, true)
+}
+// Prove a constant through phi cycles only when every external input agrees.
+// Unknown inputs and exhausted work retain the dynamic recovery path.
+fn constant_bool(region: &Region, value: crate::ir::ids::ValueId, expected: bool) -> bool {
+    let mut pending = vec![value];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut found_constant = false;
+    let mut work = 4096usize;
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        let Some(left) = work.checked_sub(1) else {
+            return false;
+        };
+        work = left;
+        match region.values[value.index()].definition {
+            Definition::Instruction(id, result) => {
+                if result != 0
+                    || !matches!(region.instructions[id.index()].op, Op::Const(n) if n == expected as u64)
+                {
+                    return false;
+                }
+                found_constant = true;
+            },
+            Definition::Parameter(block, index) => {
+                if region.entries.contains(&block) {
+                    return false;
+                }
+                let mut incoming = false;
+                for source in &region.blocks {
+                    let Some(left) = work.checked_sub(1) else {
+                        return false;
+                    };
+                    work = left;
+                    for edge in source.terminator.as_ref().unwrap().edges() {
+                        if edge.target == block {
+                            pending.push(edge.args[index as usize]);
+                            incoming = true;
+                        }
+                    }
+                }
+                if !incoming {
+                    return false;
+                }
+            },
+        }
+    }
+    found_constant
+}
+
+#[cfg(test)]
+mod backing_tests {
+    use super::*;
+    use crate::ir::{
+        hir::{Edge, Terminator},
+        types::Type,
     };
-    result == 0 && matches!(region.instructions[id.index()].op, Op::Const(1))
+
+    #[test]
+    fn phi_backing_requires_agreeing_external_constants() {
+        let mut r = Region::default();
+        let entry = r.block(true);
+        let loop_block = r.block(false);
+        let external = r.param(entry, Type::I1);
+        let valid = r.append(entry, Op::Const(1), vec![], &[Type::I1], None)[0];
+        let invalid = r.append(entry, Op::Const(0), vec![], &[Type::I1], None)[0];
+        let phi = r.param(loop_block, Type::I1);
+        r.terminate(
+            entry,
+            Terminator::Branch(Edge {
+                target: loop_block,
+                args: vec![valid],
+            }),
+        );
+        r.terminate(
+            loop_block,
+            Terminator::Branch(Edge {
+                target: loop_block,
+                args: vec![phi],
+            }),
+        );
+        assert!(constant_bool(&r, phi, true));
+        assert!(!constant_bool(&r, phi, false));
+        assert!(!constant_bool(&r, external, true));
+        r.blocks[loop_block.index()].terminator = Some(Terminator::Branch(Edge {
+            target: loop_block,
+            args: vec![invalid],
+        }));
+        assert!(!constant_bool(&r, phi, true));
+        assert!(!constant_bool(&r, phi, false));
+        r.blocks[entry.index()].terminator = Some(Terminator::Branch(Edge {
+            target: loop_block,
+            args: vec![external],
+        }));
+        assert!(!constant_bool(&r, phi, false));
+    }
+
+    #[test]
+    fn dynamic_backing_without_raw_zero_restores_all_slots() {
+        use crate::ir::frontend::{
+            decode::{GuestEip, LinearAddress},
+            lift::lift_cpu,
+        };
+        let mut r = lift_cpu(&[0x90], GuestEip(0), LinearAddress(0), true).unwrap();
+        let valid = r.param(r.entries[0], Type::I1);
+        let mut state = r.states.last().unwrap().clone();
+        state.flags.backing_valid = Some(valid);
+        state.flags.raw_zero = None;
+        state.flags.zero_is_lazy = None;
+        let plan = lower(&r, &state);
+        assert!(!plan.lazy_flags);
+        for (address, value) in [
+            (gp::last_result as u32, state.flags.last_result.unwrap()),
+            (gp::last_op_size as u32, state.flags.last_op_size.unwrap()),
+        ] {
+            let write = plan
+                .cpu
+                .writes
+                .iter()
+                .find(|w| w.address == Address::Absolute(address))
+                .unwrap();
+            assert_eq!(write.expression.first(), Some(&Step::Value(value)));
+            assert_eq!(write.expression.last(), Some(&Step::Scalar(Scalar::Select)));
+        }
+    }
 }
 fn exact_lazy_backing(region: &Region, state: &StateMap) -> bool {
     state
@@ -80,7 +203,7 @@ fn exact_lazy_backing(region: &Region, state: &StateMap) -> bool {
         && state.flags.last_op_size.is_some()
         && state.flags.last_op1.is_some()
 }
-fn target(state: &StateMap, cpu: bool, lazy_flags: bool) -> Materialization {
+fn target(state: &StateMap, cpu: bool, lazy_flags: bool, dynamic_backing: bool) -> Materialization {
     use Step::{Value, I32};
     let mut writes: Vec<_> = state
         .gpr
@@ -154,6 +277,54 @@ fn target(state: &StateMap, cpu: bool, lazy_flags: bool) -> Materialization {
             writes.push(write(Address::Absolute(gp::flags_changed as u32), lazy));
         }
     }
+    // A CFG phi or normal helper reload can carry valid backing dynamically.
+    // Preserve the whole backing tuple when that certificate is true; retain
+    // concrete/raw-ZF reconstruction for paths that invalidated it.
+    if cpu && dynamic_backing {
+        if let (Some(valid), Some(raw), Some(mask), Some(result), Some(size)) = (
+            state.flags.backing_valid,
+            state.flags.raw_flags,
+            state.flags.lazy_mask,
+            state.flags.last_result,
+            state.flags.last_op_size,
+        ) {
+            for (address, value) in [
+                (Address::Flags, raw),
+                (Address::Absolute(gp::flags_changed as u32), mask),
+                (Address::Absolute(gp::last_result as u32), result),
+                (Address::Absolute(gp::last_op_size as u32), size),
+            ] {
+                if let Some(write) = writes.iter_mut().find(|write| write.address == address) {
+                    let fallback = std::mem::take(&mut write.expression);
+                    write.expression = vec![Value(value)];
+                    write.expression.extend(fallback);
+                    write
+                        .expression
+                        .extend([Value(valid), Step::Scalar(Scalar::Select)]);
+                } else {
+                    // Generic maps need not carry raw-ZF compatibility fields.
+                    // Restore valid backing, retaining the old unused slot on
+                    // the invalid path.
+                    let reading = Reading::Memory {
+                        address: address.clone(),
+                        load: Load::I32,
+                    };
+                    writes.push(write(
+                        address,
+                        vec![
+                            Value(value),
+                            Step::Read {
+                                cpu: reading.clone(),
+                                standalone: reading,
+                            },
+                            Value(valid),
+                            Step::Scalar(Scalar::Select),
+                        ],
+                    ));
+                }
+            }
+        }
+    }
     if cpu {
         writes.push(write(
             Address::Absolute(gp::previous_ip as u32),
@@ -189,9 +360,15 @@ fn target(state: &StateMap, cpu: bool, lazy_flags: bool) -> Materialization {
 }
 pub fn lower(region: &Region, state: &StateMap) -> StatePlan {
     let lazy_flags = exact_lazy_backing(region, state);
+    let dynamic_backing = !lazy_flags
+        && state.flags.last_op1.is_some()
+        && state
+            .flags
+            .backing_valid
+            .is_some_and(|value| !constant_bool(region, value, false));
     StatePlan {
-        cpu: target(state, true, lazy_flags),
-        standalone: target(state, false, false),
+        cpu: target(state, true, lazy_flags, dynamic_backing),
+        standalone: target(state, false, false, false),
         requires_cpu: !state.xmm.is_empty(),
         lazy_flags,
         decoded_next: write(

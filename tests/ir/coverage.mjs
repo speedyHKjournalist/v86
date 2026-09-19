@@ -7,6 +7,14 @@ for(const form of catalogue.forms) {
     assert(!covered || form.tests.length > 0, `missing suite attribution: ${form.key}`);
     for(const path of form.tests) assert(fs.existsSync(path), `missing coverage suite ${path}`);
 }
+const experimentalPending = catalogue.forms.filter(f => f.experimental_lowering === "Pending").length;
+const x87 = catalogue.forms.filter(f => f.experimental_lowering === "CpuX87Helper").length;
+const fpState = catalogue.forms.filter(f => f.experimental_lowering === "CpuFpStateHelper").length;
+const sseFp = catalogue.forms.filter(f => f.experimental_lowering === "CpuSseFpHelper").length;
+const mmx = catalogue.forms.filter(f => f.experimental_lowering === "CpuMmxHelper").length;
+const baseline = catalogue.forms.filter(f => f.experimental_lowering === "CpuBaselineHelper").length;
+const sti = catalogue.forms.filter(f => f.experimental_lowering === "CpuStiHIR").length;
+const farControl = catalogue.forms.filter(f => f.experimental_lowering === "CpuFarControlHelper").length;
 const branches = catalogue.forms.filter(f => f.experimental_lowering === "TerminalBranchHIR").length;
 const pending = catalogue.forms.filter(f => f.lowering === "Pending").length;
 const experimental = catalogue.forms.filter(f => f.experimental_lowering === "NativeHIR").length;
@@ -25,5 +33,6 @@ const descriptor = catalogue.forms.filter(f => f.experimental_lowering === "CpuD
 const taskRegs = catalogue.forms.filter(f => f.experimental_lowering === "CpuTaskRegHelper").length;
 const simd = catalogue.forms.filter(f => f.experimental_lowering === "CpuSimdHIR").length;
 const selectorQuery = catalogue.forms.filter(f => f.experimental_lowering === "CpuSelectorQueryHelper").length;
-console.log(`${catalogue.encodings} encodings; ${catalogue.forms.length} forms; ${pending} production Pending; ${experimental} experimental NativeHIR forms; ${memory} experimental CPU memory forms; ${stack} experimental CPU stack forms; ${control} experimental CPU control forms; ${arithmetic} experimental CPU arithmetic forms; ${branches} experimental terminal branch forms; ${state} experimental CPU state forms; ${strings} experimental non-REP CPU string forms; ${io} experimental CPU I/O forms; ${rep} experimental REP helper forms; ${cpuInfo} experimental CPU information helper forms; ${cpuSystem} experimental CPU system helper forms; ${controlRegs} experimental control/debug register helper forms; ${descriptor} experimental descriptor/system-word helper forms; ${taskRegs} experimental task/LDTR helper forms; ${selectorQuery} experimental selector-query helper forms; ${simd} experimental XMM forms`);
+console.log(`${catalogue.encodings} encodings; ${catalogue.forms.length} forms; ${pending} production Pending; ${experimentalPending} experimental Pending; ${x87} experimental x87 forms; ${farControl} experimental far-control forms; ${fpState} experimental FP-state forms; ${sseFp} experimental SSE FP forms; ${mmx} experimental MMX forms; ${baseline} explicit baseline forms; ${sti} experimental STI forms; ${experimental} experimental NativeHIR forms; ${memory} experimental CPU memory forms; ${stack} experimental CPU stack forms; ${control} experimental CPU control forms; ${arithmetic} experimental CPU arithmetic forms; ${branches} experimental terminal branch forms; ${state} experimental CPU state forms; ${strings} experimental non-REP CPU string forms; ${io} experimental CPU I/O forms; ${rep} experimental REP helper forms; ${cpuInfo} experimental CPU information helper forms; ${cpuSystem} experimental CPU system helper forms; ${controlRegs} experimental control/debug register helper forms; ${descriptor} experimental descriptor/system-word helper forms; ${taskRegs} experimental task/LDTR helper forms; ${selectorQuery} experimental selector-query helper forms; ${simd} experimental XMM forms`);
 if(process.argv.includes("--require-complete")) assert.equal(pending, 0, "IR cannot become the default backend while production forms remain Pending");
+if(process.argv.includes("--require-experimental-complete")) assert.equal(experimentalPending, 0, "experimental coarse forms must retain an attributed lowering path");

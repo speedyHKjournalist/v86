@@ -736,8 +736,10 @@ pub unsafe fn fpu_frstor16(_addr: i32) {
     dbg_log!("frstor16");
     fpu_unimpl();
 }
-pub unsafe fn fpu_frstor32(mut addr: i32) {
-    return_on_pagefault!(readable_or_pagefault(addr, 28 + 8 * 10));
+pub unsafe fn fpu_frstor32(addr: i32) { let _ = fpu_frstor32_checked(addr); }
+
+pub unsafe fn fpu_frstor32_checked(mut addr: i32) -> OrPageFault<()> {
+    readable_or_pagefault(addr, 28 + 8 * 10)?;
     fpu_fldenv32(addr);
     addr += 28;
     for i in 0..8 {
@@ -745,15 +747,19 @@ pub unsafe fn fpu_frstor32(mut addr: i32) {
         fpu_write_st(reg_index, fpu_load_m80(addr).unwrap());
         addr += 10;
     }
+
+    Ok(())
 }
 
 pub unsafe fn fpu_fsave16(_addr: i32) {
     dbg_log!("fsave16");
     fpu_unimpl();
 }
-pub unsafe fn fpu_fsave32(mut addr: i32) {
+pub unsafe fn fpu_fsave32(addr: i32) { let _ = fpu_fsave32_checked(addr); }
+
+pub unsafe fn fpu_fsave32_checked(mut addr: i32) -> OrPageFault<()> {
     fpu_sync_all();
-    return_on_pagefault!(writable_or_pagefault(addr, 108));
+    writable_or_pagefault(addr, 108)?;
     fpu_fstenv32(addr);
     addr += 28;
     for i in 0..8 {
@@ -762,6 +768,8 @@ pub unsafe fn fpu_fsave32(mut addr: i32) {
         addr += 10;
     }
     fpu_finit();
+
+    Ok(())
 }
 
 pub unsafe fn fpu_store_m80(addr: i32, f: F80) {

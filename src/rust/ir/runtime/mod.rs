@@ -1,7 +1,8 @@
 pub mod compile;
-pub mod region;
 pub mod entry;
+pub mod far_control;
 pub mod memory;
+pub mod region;
 pub mod system;
 
 pub mod io;
@@ -26,7 +27,15 @@ pub mod x87;
 
 #[cfg(feature = "ir-experimental")]
 pub mod cache;
+pub mod live;
 #[cfg(feature = "ir-experimental")]
 pub mod schedule;
-pub mod live;
 pub mod snapshot;
+
+pub mod fp_state;
+
+mod sse_fp;
+
+mod mmx;
+
+mod coverage;

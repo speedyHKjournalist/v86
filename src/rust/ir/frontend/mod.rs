@@ -2,10 +2,11 @@ pub(crate) use crate::decode;
 mod bits;
 mod control;
 mod exchange;
+mod far_control;
 pub mod integer;
 pub mod lift;
-pub mod region;
 mod multiply;
+pub mod region;
 mod shift;
 mod stack;
 
@@ -49,3 +50,13 @@ mod simd_transfer;
 mod simd_lane;
 
 pub mod simd_masked;
+
+pub mod fp_state;
+
+pub(crate) mod sse_fp;
+
+pub(crate) mod mmx;
+
+pub(crate) mod coverage;
+
+pub(crate) mod sti;

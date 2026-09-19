@@ -26,8 +26,8 @@ callees, optimized and unoptimized. These generic ABI fixtures do not test real 
 tests exercise real #PF/#GP, division tests exercise #DE, and the REP suites
 now verify partial-progress/final-commit exits.
 
-Remaining work includes a complete helper registry, remaining ABI/scratch layouts,
-normal-path state reloads, FP/state audits and the full guest exception matrix.
+Remaining work includes a complete low-level import registry, remaining ABI/scratch
+layouts, additional FP/state audits and the full guest exception matrix.
 F80 remains a distinct IR type. There is no f64 approximation or new x87 execution
 path in this change. The WasmBuilder v128 helper test uses a Wasm-to-Wasm callee;
 vector values are never passed to a JS function.
@@ -57,7 +57,9 @@ include these temporary slots and edge-copy staging slots.
 The adapter must explicitly guarantee `normal_preserves_state` for cached
 architectural state. This permits authoritative exceptional-state changes while
 preventing continuation with stale SSA after a normal state-writing call.
-Normal-path reloads are still pending. Extended XMM/x87 StateMaps remain rejected. REP progress maps now require exact
+State-changing returning adapters instead use the explicit `CpuReload` contract
+below. XMM StateMaps are supported; canonical x87 state remains CPU-owned rather
+than an F80 SSA reload result. REP progress maps now require exact
 aliases of their complete GPR mappings, which the current materializer restores. Real adapters must also audit
 implicit/lazy CPU state (including FLAGS provenance), fault metadata and CPU
 memory layout before being registered in the live runtime.
@@ -235,3 +237,40 @@ lanes. Cold success commits/exits (4); a read fault exits without a result/commi
 and `ir_xmm_store(address, register, bytes, lane)` captures the full source before
 callbacks; lane 1 is legal only for an eight-byte store. See
 [ir-simd-transfer.md](ir-simd-transfer.md).
+
+
+## Byte-frontend CPU call registry
+
+`helper/cpu_registry.rs` now owns the signatures and allowed outcome/exception
+contracts of the byte frontend's CPU `CallHelper` adapters. Frontend construction
+requires a registered name; HIR verification independently rejects forged arity,
+machine argument types, pure effects or changed exception ownership. Contracts
+remain conservative. Low-level memory imports retain their separate typed and
+validated contracts. See [control/FP increment](ir-control-fp-increment.md)
+for the additional instruction adapters.
+
+## Normal-return CPU state reload
+
+`HelperAbi::CpuReload` returns only an i32 outcome at the Wasm boundary. On Normal,
+the machine call plan reloads 22 SSA results from CPU storage: eight GPRs,
+concrete FLAGS, raw FLAGS, flags_changed, last_op1, last_result, last_op_size,
+and eight XMM values. V128 is loaded in Wasm, never returned through a JS import.
+The frontend rebinds its cached state to those results before the next instruction.
+
+The audited normal path must preserve execution context: decoded PC, mode,
+segments, translation identity and the instruction counter. Canonical x87 state
+may change because it is CPU-owned. Fault/transfer outcomes exit immediately,
+without reloading or restoring a stale snapshot. Generic `Outcome` descriptors
+that cannot preserve cached state remain rejected; they do not implicitly gain
+the reload contract.
+
+The SSE memory adapter checks that context and a saturating dirty/reset epoch
+after its read. Observer-driven changes commit the completed instruction and
+return Invalidated instead of continuing. The conservative epoch also detects
+page-walk writes and never wraps; register-only FP semantics have no such callbacks.
+
+SSE FP/conversion helpers use this ABI. CFG joins preserve the dynamically valid
+raw/lazy FLAGS tuple as well as the concrete EFLAGS value. Differential fixtures
+cover integer and SIMD continuation, repeated helpers, loops, MMIO callbacks
+modifying GPR/FLAGS/XMM, and faults before and after a successful helper, in
+straight-line/CFG and optimized/unoptimized variants.

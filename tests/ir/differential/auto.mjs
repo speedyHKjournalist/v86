@@ -60,10 +60,9 @@ try{
     assert(e.ir_cache_entry_stat(PC,0,1,9)>=2,"entry region contains multiple directly structured edges");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,8),0,"reachable reducible region avoids generic dispatcher edges");
     console.log(`PASS: ${wasm}: Tier-aware region formation follows a forward jump over dead bytes and publishes the hot reducible loop entry`);
-    // A still-Pending x87 memory form is suppressed until its actual source changes.
-    // FLD m32 [PC]; FSTP ST(0); JMP back keeps interpreter execution stable while
-    // the IR frontend deliberately stops at the unsupported guest-memory x87 form.
-    await prepare([0xD9,0x05,...u32(PC),0xDD,0xD8,0xEB,0xF6]);before=stats();configure();vm.run();
+    // The baseline tolerates LOCK NOP, while IR rejects this illegal prefix pair.
+    // This exercises failure suppression after coarse opcode coverage is complete.
+    await prepare([0xF0,0x90,0xEB,0xFC]);before=stats();configure();vm.run();
     await until(()=>e.ir_auto_stat(6)>before[6]&&e.ir_auto_stat(8)>before[8],"compile-stop suppression");await sleep(80);
     const attempts=e.ir_auto_stat(2)+e.ir_auto_stat(3);await sleep(100);assert.equal(e.ir_auto_stat(2)+e.ir_auto_stat(3),attempts);
     vm.write_memory(Uint8Array.of(0x40,0xEB,0xFD),PC);await until(()=>e.ir_auto_stat(4)>before[4],"recompile changed code");await vm.stop();

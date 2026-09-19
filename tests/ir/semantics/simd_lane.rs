@@ -114,11 +114,12 @@ fn simd_lane_contracts() {
         vec![0x0F, 0x2B, 0xC0],
         vec![0x66, 0x0F, 0xE7, 0xC0],
         vec![0xF2, 0x0F, 0xF0, 0xC0],
-        vec![0x0F, 0xC4, 0xC0, 0],
         vec![0xF0, 0x66, 0x0F, 0xC4, 0xC0, 0],
     ] {
         assert!(lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
     }
+    let mmx = lift_cpu(&[0x0F, 0xC4, 0xC0, 0], GuestEip(0), LinearAddress(0), true).unwrap();
+    assert!(mmx.helpers.iter().any(|h| h.name == "ir_mmx_reg"));
     for (bytes, kind) in [
         (&[0x66, 0x0F, 0xC4, 0x00, 0][..], 0),
         (&[0x66, 0x0F, 0xC4, 0xC0, 0][..], 1),

@@ -751,6 +751,33 @@ ir-x87-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-releas
 	cargo test ir::x87_tests
 	node tests/ir/differential/x87.mjs
 
+.PHONY: ir-far-control-tests ir-x87-memory-tests ir-fp-state-tests ir-control-reference-tests
+ir-far-control-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::far_control_tests
+	node tests/ir/differential/far_control.mjs
+	node tests/ir/differential/far_control.mjs build/v86-ir-test-release.wasm
+
+ir-x87-memory-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::x87_memory_tests
+	node tests/ir/differential/x87_memory.mjs
+
+ir-fp-state-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::fp_state_tests
+	node tests/ir/differential/fp_state.mjs
+
+build/v86-control-reference.wasm: $(RUST_FILES) Cargo.toml build/softfloat.o build/zstddeclib.o tests/ir/differential/build_control_reference.py
+	python3 tests/ir/differential/build_control_reference.py
+
+build/v86-control-reference-release.wasm: build/v86-control-reference.wasm
+	@test -f $@ || python3 tests/ir/differential/build_control_reference.py
+
+ir-control-reference-tests: ir-far-control-tests ir-x87-memory-tests ir-fp-state-tests ir-coverage-tests build/v86-control-reference.wasm build/v86-control-reference-release.wasm
+	node tests/ir/differential/far_control.mjs build/v86-control-reference.wasm
+	node tests/ir/differential/far_control.mjs build/v86-control-reference-release.wasm
+	node tests/ir/differential/x87_memory.mjs build/v86-control-reference
+	node tests/ir/differential/fp_state.mjs build/v86-control-reference
+	node tests/ir/differential/coverage.mjs build/v86-control-reference
+
 .PHONY: ir-simd-move-tests
 ir-simd-move-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
 	cargo test ir::simd_move_tests
@@ -873,3 +900,29 @@ build/v86-ir-cache-test-release.wasm: $(RUST_FILES) build/softfloat.o build/zstd
 .PHONY: ir-forwarding-tests
 ir-forwarding-tests:
 	tools/ir-forwarding-tests.sh
+
+.PHONY: ir-sse-fp-tests
+ir-sse-fp-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::sse_fp_tests
+	node tests/ir/differential/sse_fp.mjs
+
+.PHONY: ir-mmx-tests
+ir-mmx-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::mmx_tests
+	node tests/ir/differential/mmx.mjs
+
+.PHONY: ir-coverage-tests
+ir-coverage-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	node tests/ir/coverage.mjs --require-experimental-complete
+	cargo test ir::coverage_tests
+	node tests/ir/differential/coverage.mjs
+
+.PHONY: ir-sti-tests
+ir-sti-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::sti_tests
+	node tests/ir/differential/sti.mjs
+
+.PHONY: ir-helper-reload-tests
+ir-helper-reload-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test ir::helper_tests::cpu_reload_contract_and_continuation_fixtures
+	node tests/ir/differential/reload.mjs

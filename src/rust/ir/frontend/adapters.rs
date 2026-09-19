@@ -1,7 +1,7 @@
 //! Frontend construction of audited CPU helper calls.
 use super::integer::IntegerBuilder;
 use crate::ir::{
-    helper::{HelperAbi, HelperDescriptor},
+    helper::{cpu_registry, HelperAbi},
     hir::{Op, Terminator},
     ids::{HelperId, StateId, ValueId},
     types::Type,
@@ -36,23 +36,30 @@ pub(super) fn call_abi(
     abi: HelperAbi,
 ) {
     let terminal = matches!(abi, HelperAbi::CpuExit | HelperAbi::CpuRep);
-    let mut descriptor = HelperDescriptor::conservative(
-        name.into(),
-        args.iter().map(|&a| b.ty(a)).collect(),
-        vec![],
-    );
+    let reload = matches!(abi, HelperAbi::CpuReload);
+    let mut descriptor = cpu_registry::descriptor(name, args.iter().map(|&a| b.ty(a)).collect())
+        .expect("byte frontend CPU helper must have a registered ABI");
     descriptor.abi = abi;
+    descriptor
+        .validate()
+        .expect("byte frontend CPU helper ABI must match registry");
     let id = HelperId(b.region.helpers.len() as u32);
+    let mut result_types = descriptor.results.clone();
+    result_types.push(Type::Effect);
     b.region.helpers.push(descriptor);
     let mut args = args;
     args.push(b.effect);
-    b.effect = b.region.append(
+    let values = b.region.append(
         b.block,
         Op::CallHelper(id),
         args,
-        &[Type::Effect],
+        &result_types,
         Some(state),
-    )[0];
+    );
+    b.effect = *values.last().unwrap();
+    if reload {
+        b.reload_cpu_state(&values[..values.len() - 1]);
+    }
     if terminal {
         b.region.terminate(b.block, Terminator::Exit(state));
     }

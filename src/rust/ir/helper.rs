@@ -1,3 +1,4 @@
+pub mod cpu_registry;
 use super::{effects::Effects, types::Type};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExceptionOwner {
@@ -18,6 +19,10 @@ pub enum Outcome {
 pub enum HelperAbi {
     /// Metadata alone does not authorize calling a legacy helper.
     Unadapted,
+    /// Outcome-only CPU ABI. On Normal, new SSA results reload GPRs, concrete
+    /// and lazy FLAGS backing, then XMMs. The adapter preserves EIP, segments,
+    /// privilege/mode, translation and counters on Normal. Faults are CPU-owned.
+    CpuReload,
     /// CPU state is authoritative after this terminal call. The adapter owns
     /// one instruction commit on success and returns Invalidated; delivered
     /// faults return ControlTransferred without committing. No Normal outcome.
@@ -44,6 +49,9 @@ pub struct HelperDescriptor {
     pub exception_owner: ExceptionOwner,
     pub abi: HelperAbi,
 }
+pub fn cpu_reload_types() -> Vec<Type> {
+    [vec![Type::I32; 14], vec![Type::V128; 8]].concat()
+}
 impl HelperDescriptor {
     /// Unreviewed helpers observe everything. They are not eligible for DCE/CSE.
     pub fn conservative(name: String, params: Vec<Type>, results: Vec<Type>) -> Self {
@@ -57,6 +65,13 @@ impl HelperDescriptor {
         }
     }
     pub fn validate(&self) -> Result<(), &'static str> {
+        cpu_registry::validate(self)?;
+        if matches!(self.abi, HelperAbi::CpuReload)
+            && (self.results != cpu_reload_types()
+                || self.exception_owner != ExceptionOwner::Helper)
+        {
+            return Err("invalid CPU normal-reload contract");
+        }
         if matches!(self.abi, HelperAbi::CpuExit | HelperAbi::CpuRep)
             && (self.exception_owner != ExceptionOwner::Helper
                 || !self.results.is_empty()

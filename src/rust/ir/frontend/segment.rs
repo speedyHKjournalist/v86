@@ -23,16 +23,17 @@ pub fn lift(
     let op = i.encoding.opcode;
     let reg = i.modrm.unwrap() >> 3 & 7;
     let rm = i.modrm.unwrap() & 7;
-    if (op == 0x8C && reg >= 6)
-        || (op == 0x8E && (reg == 1 || reg >= 6))
-        || (!matches!(op, 0x8C | 0x8E) && i.ea.is_none())
-    {
+    if (op == 0x8C && reg >= 6) || (op == 0x8E && (reg == 1 || reg >= 6)) {
         return Err(CompileError::Unsupported(
             "invalid segment instruction form",
         ));
     }
     let map = snapshot(b, i.instruction_pc, i.next_pc, count - 1);
     b.region.states[map.index()].resume = ResumeKind::BeforeInstruction;
+    if !matches!(op, 0x8C | 0x8E) && i.ea.is_none() {
+        call(b, "ir_far_control_ud", vec![], map, true);
+        return Ok(());
+    }
     if op == 0x8C {
         let selector = b.node(Op::ReadSegment(reg), vec![], Type::I16);
         if let Some(ea) = i.ea {

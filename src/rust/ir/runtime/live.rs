@@ -23,6 +23,7 @@ pub(super) struct Job {
 struct LiveState {
     serial: u64,
     generation: u64,
+    continuation_epoch: u64,
     exhausted: bool,
     job: Option<Job>,
     error: u32,
@@ -30,6 +31,7 @@ struct LiveState {
 static LIVE: Mutex<LiveState> = Mutex::new(LiveState {
     serial: 0,
     generation: 0,
+    continuation_epoch: 0,
     exhausted: false,
     job: None,
     error: 0,
@@ -37,6 +39,7 @@ static LIVE: Mutex<LiveState> = Mutex::new(LiveState {
 /// Reset/cache-clear invalidation is independent of the CPU snapshot format.
 pub fn invalidate() {
     let mut state = LIVE.try_lock().unwrap();
+    state.continuation_epoch = state.continuation_epoch.saturating_add(1);
     state.job = None;
     state.error = 0;
     match state.generation.checked_add(1) {
@@ -46,6 +49,7 @@ pub fn invalidate() {
 }
 pub fn dirty_page(page: u32) {
     let mut state = LIVE.try_lock().unwrap();
+    state.continuation_epoch = state.continuation_epoch.saturating_add(1);
     if let Some(job) = &mut state.job {
         for dependency in &mut job.observed {
             if dependency.page.0 == page {
@@ -56,6 +60,11 @@ pub fn dirty_page(page: u32) {
             }
         }
     }
+}
+/// Returning observers may continue only if no code write/reset occurred during
+/// the call. Exhaustion permanently forces a cold exit, without wrapping.
+pub(super) fn continuation_epoch() -> u64 {
+    LIVE.try_lock().unwrap().continuation_epoch
 }
 pub(super) unsafe fn entry() -> CpuEntryKey {
     let linear = *gp::instruction_pointer as u32;
@@ -159,11 +168,7 @@ pub unsafe fn ir_compile_live(
     };
     let config = IrConfig {
         optimize: optimize != 0,
-        passes: if tier == 1 {
-            crate::ir::passes::PassConfig::tier1()
-        } else {
-            Default::default()
-        },
+        passes: if tier == 1 { crate::ir::passes::PassConfig::tier1() } else { Default::default() },
         execution_budget: budget,
         rep_iteration_budget: rep_budget,
         max_code_bytes: 1920,

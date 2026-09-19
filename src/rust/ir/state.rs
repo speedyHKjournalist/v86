@@ -25,9 +25,10 @@ pub struct FlagState {
     pub lazy_mask: Option<ValueId>,
     pub last_result: Option<ValueId>,
     pub last_op_size: Option<ValueId>,
-    /// I1 proof bit: when statically true, the backing fields above exactly
+    /// I1 proof bit: when true, the backing fields above exactly
     /// describe the current CPU lazy-FLAGS representation. Unsupported flag
-    /// mutations set this false; flag-neutral code preserves it.
+    /// mutations set this false; flag-neutral code preserves it. CFG joins may
+    /// retain a dynamic bit, selecting exact backing during CPU materialization.
     pub backing_valid: Option<ValueId>,
 }
 #[derive(Clone, Debug)]

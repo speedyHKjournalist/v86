@@ -105,10 +105,11 @@ fn simd_immediate_contracts() {
     for bytes in [
         vec![0x66, 0x0F, 0x71, 0x10, 1],
         vec![0xF0, 0x66, 0x0F, 0x71, 0xD0, 1],
-        vec![0x0F, 0x71, 0xD0, 1],
     ] {
         assert!(lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
     }
+    let mmx = lift_cpu(&[0x0F, 0x71, 0xD0, 1], GuestEip(0), LinearAddress(0), true).unwrap();
+    assert!(mmx.helpers.iter().any(|h| h.name == "ir_mmx_reg"));
     let mut r = lift_cpu(
         &[0x66, 0x0F, 0xFC, 0x06],
         GuestEip(0),

@@ -218,6 +218,8 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
                 })
                 .collect(),
             allocation,
+            allocation_graph: super::mir::allocation::capture(region),
+            stack_elided: vec![false; region.instructions.len()],
             helpers,
             memory,
             effects,

@@ -110,10 +110,9 @@ fn simd_shuffle_contracts() {
         .0
         .contains("destination/state mismatch"));
     assert!(ShuffleOp::from_id(5).is_none());
-    for bytes in [
-        vec![0x0F, 0x70, 0xC0, 0],
-        vec![0xF0, 0x66, 0x0F, 0x70, 0xC0, 0],
-    ] {
+    for bytes in [vec![0xF0, 0x66, 0x0F, 0x70, 0xC0, 0]] {
         assert!(lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
     }
+    let mmx = lift_cpu(&[0x0F, 0x70, 0xC0, 0], GuestEip(0), LinearAddress(0), true).unwrap();
+    assert!(mmx.helpers.iter().any(|h| h.name == "ir_mmx_reg"));
 }

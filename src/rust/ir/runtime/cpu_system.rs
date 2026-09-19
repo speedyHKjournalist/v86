@@ -69,3 +69,25 @@ pub unsafe fn ir_hlt() -> u32 {
     instructions::instr_F4();
     commit()
 }
+
+/// Only check privilege here. HIR changes IF after Normal, retaining its SSA flags.
+#[no_mangle]
+pub unsafe fn ir_sti_check() -> u32 {
+    assert!(!cpu::in_jit);
+    if !*gp::protected_mode
+        || if cpu::vm86_mode() { cpu::getiopl() == 3 } else { cpu::getiopl() >= *gp::cpl as i32 }
+    {
+        Outcome::Normal as u32
+    } else {
+        gp_fault()
+    }
+}
+/// Every completed STI scope observes IRQs after its shadow instruction, even
+/// when that instruction delivers a guest fault. Nested STIs unwind in order.
+#[no_mangle]
+pub unsafe fn ir_sti_finish(depth: u32) {
+    assert!(!cpu::in_jit && depth <= 128);
+    for _ in 0..depth {
+        cpu::handle_irqs();
+    }
+}

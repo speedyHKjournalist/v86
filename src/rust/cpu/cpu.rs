@@ -504,25 +504,31 @@ pub unsafe fn iret16() { iret(true); }
 pub unsafe fn iret32() { iret(false); }
 
 pub unsafe fn iret(is_16: bool) {
+    iret_checked(is_16);
+}
+
+/// Reports whether the semantic body completed; delivered faults remain CPU-owned.
+pub unsafe fn iret_checked(is_16: bool) -> bool {
+    let mut completed = true;
     if vm86_mode() && getiopl() < 3 {
         // vm86 mode, iopl != 3
         dbg_log!("#gp iret vm86 mode, iopl != 3");
         trigger_gp(0);
-        return;
+        return false;
     }
 
     let (new_eip, new_cs, mut new_flags) = if is_16 {
         (
-            return_on_pagefault!(safe_read16(get_stack_pointer(0))),
-            return_on_pagefault!(safe_read16(get_stack_pointer(2))),
-            return_on_pagefault!(safe_read16(get_stack_pointer(4))),
+            return_on_pagefault!(safe_read16(get_stack_pointer(0)), false),
+            return_on_pagefault!(safe_read16(get_stack_pointer(2)), false),
+            return_on_pagefault!(safe_read16(get_stack_pointer(4)), false),
         )
     }
     else {
         (
-            return_on_pagefault!(safe_read32s(get_stack_pointer(0))),
-            return_on_pagefault!(safe_read16(get_stack_pointer(4))),
-            return_on_pagefault!(safe_read32s(get_stack_pointer(8))),
+            return_on_pagefault!(safe_read32s(get_stack_pointer(0)), false),
+            return_on_pagefault!(safe_read16(get_stack_pointer(4)), false),
+            return_on_pagefault!(safe_read32s(get_stack_pointer(8)), false),
         )
     };
 
@@ -550,7 +556,7 @@ pub unsafe fn iret(is_16: bool) {
 
         update_state_flags();
         handle_irqs();
-        return;
+        return completed;
     }
 
     dbg_assert!(!vm86_mode());
@@ -558,9 +564,8 @@ pub unsafe fn iret(is_16: bool) {
     if *flags & FLAG_NT != 0 {
         // nested task: return to the task linked through the back-link field of the current tss
         let tss_offset = *segment_offsets.offset(TR as isize);
-        let backlink = return_on_pagefault!(safe_read16(tss_offset + TSR_BACKLINK));
-        do_task_switch(backlink, None, TaskSwitchSource::Iret);
-        return;
+        let backlink = return_on_pagefault!(safe_read16(tss_offset + TSR_BACKLINK), false);
+        return do_task_switch_checked(backlink, None, TaskSwitchSource::Iret);
     }
 
     if new_flags & FLAG_VM != 0 {
@@ -570,13 +575,13 @@ pub unsafe fn iret(is_16: bool) {
             // vm86 cannot be set in 16 bit flag
             dbg_assert!(!is_16);
 
-            let temp_esp = return_on_pagefault!(safe_read32s(get_stack_pointer(12)));
-            let temp_ss = return_on_pagefault!(safe_read16(get_stack_pointer(16)));
+            let temp_esp = return_on_pagefault!(safe_read32s(get_stack_pointer(12)), false);
+            let temp_ss = return_on_pagefault!(safe_read16(get_stack_pointer(16)), false);
 
-            let new_es = return_on_pagefault!(safe_read16(get_stack_pointer(20)));
-            let new_ds = return_on_pagefault!(safe_read16(get_stack_pointer(24)));
-            let new_fs = return_on_pagefault!(safe_read16(get_stack_pointer(28)));
-            let new_gs = return_on_pagefault!(safe_read16(get_stack_pointer(32)));
+            let new_es = return_on_pagefault!(safe_read16(get_stack_pointer(20)), false);
+            let new_ds = return_on_pagefault!(safe_read16(get_stack_pointer(24)), false);
+            let new_fs = return_on_pagefault!(safe_read16(get_stack_pointer(28)), false);
+            let new_gs = return_on_pagefault!(safe_read16(get_stack_pointer(32)), false);
 
             // no exceptions below
 
@@ -593,6 +598,7 @@ pub unsafe fn iret(is_16: bool) {
             {
                 // XXX: Should be checked before side effects
                 dbg_assert!(false);
+                completed = false;
             }
 
             adjust_stack_reg(9 * 4); // 9 dwords: eip, cs, flags, esp, ss, es, ds, fs, gs
@@ -601,6 +607,7 @@ pub unsafe fn iret(is_16: bool) {
             if !switch_seg(SS, temp_ss) {
                 // XXX
                 dbg_assert!(false);
+                completed = false;
             }
 
             *cpl = 3;
@@ -610,7 +617,7 @@ pub unsafe fn iret(is_16: bool) {
             update_state_flags();
 
             // iret end
-            return;
+            return completed;
         }
         else {
             dbg_log!("vm86 flag ignored because cpl != 0");
@@ -621,7 +628,7 @@ pub unsafe fn iret(is_16: bool) {
     // protected mode return
 
     let cs_selector = SegmentSelector::of_u16(new_cs as u16);
-    let cs_descriptor = match return_on_pagefault!(lookup_segment_selector(cs_selector)) {
+    let cs_descriptor = match return_on_pagefault!(lookup_segment_selector(cs_selector), false) {
         Ok((desc, _)) => desc,
         Err(SelectorNullOrInvalid::IsNull) => panic!("Unimplemented: CS selector is null"),
         Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
@@ -636,7 +643,7 @@ pub unsafe fn iret(is_16: bool) {
             cs_descriptor.effective_limit()
         );
         trigger_gp(new_cs & !3);
-        return;
+        return false;
     }
 
     if !cs_descriptor.is_present() {
@@ -659,37 +666,37 @@ pub unsafe fn iret(is_16: bool) {
             cs_selector.rpl()
         );
         trigger_gp(new_cs & !3);
-        return;
+        return false;
     }
 
     if cs_selector.rpl() > *cpl {
         // outer privilege return
         let (temp_esp, temp_ss) = if is_16 {
             (
-                return_on_pagefault!(safe_read16(get_stack_pointer(6))),
-                return_on_pagefault!(safe_read16(get_stack_pointer(8))),
+                return_on_pagefault!(safe_read16(get_stack_pointer(6)), false),
+                return_on_pagefault!(safe_read16(get_stack_pointer(8)), false),
             )
         }
         else {
             (
-                return_on_pagefault!(safe_read32s(get_stack_pointer(12))),
-                return_on_pagefault!(safe_read16(get_stack_pointer(16))),
+                return_on_pagefault!(safe_read32s(get_stack_pointer(12)), false),
+                return_on_pagefault!(safe_read16(get_stack_pointer(16)), false),
             )
         };
 
         let ss_selector = SegmentSelector::of_u16(temp_ss as u16);
-        let ss_descriptor = match return_on_pagefault!(lookup_segment_selector(ss_selector)) {
+        let ss_descriptor = match return_on_pagefault!(lookup_segment_selector(ss_selector), false) {
             Ok((desc, _)) => desc,
             Err(SelectorNullOrInvalid::IsNull) => {
                 dbg_log!("#GP for loading 0 in SS sel={:x}", temp_ss);
                 dbg_trace();
                 trigger_gp(0);
-                return;
+                return false;
             },
             Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
                 dbg_log!("#GP for loading invalid in SS sel={:x}", temp_ss);
                 trigger_gp(temp_ss & !3);
-                return;
+                return false;
             },
         };
         let new_cpl = cs_selector.rpl();
@@ -702,14 +709,14 @@ pub unsafe fn iret(is_16: bool) {
             dbg_log!("#GP for loading invalid in SS sel={:x}", temp_ss);
             dbg_trace();
             trigger_gp(temp_ss & !3);
-            return;
+            return false;
         }
 
         if !ss_descriptor.is_present() {
             dbg_log!("#SS for loading non-present in SS sel={:x}", temp_ss);
             dbg_trace();
             trigger_ss(temp_ss & !3);
-            return;
+            return false;
         }
 
         // no exceptions below
@@ -727,6 +734,7 @@ pub unsafe fn iret(is_16: bool) {
         if !switch_seg(SS, temp_ss) {
             // XXX
             dbg_assert!(false);
+            completed = false;
         }
 
         set_stack_reg(temp_esp);
@@ -790,6 +798,7 @@ pub unsafe fn iret(is_16: bool) {
     // iret end
 
     handle_irqs();
+    completed
 }
 
 pub unsafe fn call_interrupt_vector(
@@ -797,6 +806,16 @@ pub unsafe fn call_interrupt_vector(
     is_software_int: bool,
     error_code: Option<i32>,
 ) {
+    call_interrupt_vector_checked(interrupt_nr, is_software_int, error_code);
+}
+
+/// Reports whether the semantic body completed; delivered faults remain CPU-owned.
+pub unsafe fn call_interrupt_vector_checked(
+    interrupt_nr: i32,
+    is_software_int: bool,
+    error_code: Option<i32>,
+) -> bool {
+    let mut completed = true;
     if *protected_mode {
         if vm86_mode() && *cr.offset(4) & CR4_VME != 0 {
             panic!("Unimplemented: VME");
@@ -806,7 +825,7 @@ pub unsafe fn call_interrupt_vector(
             dbg_log!("call_interrupt_vector #GP. vm86 && software int && iopl < 3");
             dbg_trace();
             trigger_gp(0);
-            return;
+            return false;
         }
 
         if interrupt_nr << 3 | 7 > *idtr_size {
@@ -817,7 +836,7 @@ pub unsafe fn call_interrupt_vector(
 
         let descriptor_address = return_on_pagefault!(translate_address_system_read(
             *idtr_offset + (interrupt_nr << 3)
-        ));
+        ), false);
 
         let descriptor = InterruptDescriptor::of_u64(memory::read64s(descriptor_address) as u64);
 
@@ -830,7 +849,7 @@ pub unsafe fn call_interrupt_vector(
             dbg_log!("#gp software interrupt ({:x}) and dpl < cpl", interrupt_nr);
             dbg_trace();
             trigger_gp(interrupt_nr << 3 | 2);
-            return;
+            return false;
         }
 
         if gate_type != InterruptDescriptor::TRAP_GATE
@@ -861,7 +880,7 @@ pub unsafe fn call_interrupt_vector(
             // present bit not set
             dbg_log!("#np int descriptor not present, int={}", interrupt_nr);
             trigger_np(interrupt_nr << 3 | 2);
-            return;
+            return false;
         }
 
         if gate_type == InterruptDescriptor::TASK_GATE {
@@ -874,13 +893,12 @@ pub unsafe fn call_interrupt_vector(
             );
             dbg_trace();
             dbg_assert!(offset == 0, "TODO: Check this (likely #GP)");
-            do_task_switch(selector, error_code, TaskSwitchSource::CallOrInt);
-            return;
+            return do_task_switch_checked(selector, error_code, TaskSwitchSource::CallOrInt);
         }
 
         let cs_segment_descriptor = match return_on_pagefault!(lookup_segment_selector(
             SegmentSelector::of_u16(selector as u16)
-        )) {
+        ), false) {
             Ok((desc, _)) => desc,
             Err(SelectorNullOrInvalid::IsNull) => {
                 dbg_log!("is null");
@@ -902,7 +920,7 @@ pub unsafe fn call_interrupt_vector(
             // kvm-unit-test
             dbg_log!("not present");
             trigger_np(interrupt_nr << 3 | 2);
-            return;
+            return false;
         }
 
         let old_flags = get_eflags();
@@ -916,11 +934,11 @@ pub unsafe fn call_interrupt_vector(
             }
 
             let (new_ss, new_esp) =
-                return_on_pagefault!(get_tss_ss_esp(cs_segment_descriptor.dpl()));
+                return_on_pagefault!(get_tss_ss_esp(cs_segment_descriptor.dpl()), false);
 
             let ss_segment_selector = SegmentSelector::of_u16(new_ss as u16);
             let ss_segment_descriptor =
-                match return_on_pagefault!(lookup_segment_selector(ss_segment_selector)) {
+                match return_on_pagefault!(lookup_segment_selector(ss_segment_selector), false) {
                     Ok((desc, _)) => desc,
                     Err(
                         SelectorNullOrInvalid::IsNull | SelectorNullOrInvalid::OutsideOfTableLimit,
@@ -965,10 +983,10 @@ pub unsafe fn call_interrupt_vector(
                     new_esp - stack_space & 0xFFFF
                 };
 
-            return_on_pagefault!(translate_address_system_write(new_stack_pointer));
+            return_on_pagefault!(translate_address_system_write(new_stack_pointer), false);
             return_on_pagefault!(translate_address_system_write(
                 ss_segment_descriptor.base() + new_esp - 1
-            ));
+            ), false);
 
             // no exceptions below
             *cpl = cs_segment_descriptor.dpl();
@@ -981,6 +999,7 @@ pub unsafe fn call_interrupt_vector(
             if !switch_seg(SS, new_ss) {
                 // XXX
                 dbg_assert!(false);
+                completed = false;
             }
             set_stack_reg(new_esp);
 
@@ -1018,7 +1037,7 @@ pub unsafe fn call_interrupt_vector(
             if *flags & FLAG_VM != 0 {
                 dbg_assert!(false, "check error code");
                 trigger_gp(selector & !3);
-                return;
+                return false;
             }
 
             let bytes_per_arg = if descriptor.is_32() { 4 } else { 2 };
@@ -1030,7 +1049,7 @@ pub unsafe fn call_interrupt_vector(
             return_on_pagefault!(writable_or_pagefault(
                 get_stack_pointer(-stack_space),
                 stack_space
-            ));
+            ), false);
 
         // no exceptions below
         }
@@ -1066,6 +1085,7 @@ pub unsafe fn call_interrupt_vector(
             {
                 // can't fail
                 dbg_assert!(false);
+                completed = false;
             }
         }
 
@@ -1119,21 +1139,28 @@ pub unsafe fn call_interrupt_vector(
         *instruction_pointer = get_seg_cs() + new_ip;
         update_state_flags();
     }
+    completed
 }
 
 pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool) {
+    far_jump_checked(eip, selector, is_call, is_osize_32);
+}
+
+/// Reports whether the semantic body completed; delivered faults remain CPU-owned.
+pub unsafe fn far_jump_checked(eip: i32, selector: i32, is_call: bool, is_osize_32: bool) -> bool {
+    let mut completed = true;
     dbg_assert!(selector < 0x10000 && selector >= 0);
 
     if !*protected_mode || vm86_mode() {
         if is_call {
             if is_osize_32 {
-                return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-8), 8));
+                return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-8), 8), false);
 
                 push32(*sreg.offset(CS as isize) as i32).unwrap();
                 push32(get_real_eip()).unwrap();
             }
             else {
-                return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-4), 4));
+                return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-4), 4), false);
 
                 push16(*sreg.offset(CS as isize) as i32).unwrap();
                 push16(get_real_eip()).unwrap();
@@ -1142,21 +1169,21 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
         switch_cs_real_mode(selector);
         *instruction_pointer = get_seg_cs() + eip;
         update_state_flags();
-        return;
+        return completed;
     }
 
     let cs_selector = SegmentSelector::of_u16(selector as u16);
-    let info = match return_on_pagefault!(lookup_segment_selector(cs_selector)) {
+    let info = match return_on_pagefault!(lookup_segment_selector(cs_selector), false) {
         Ok((desc, _)) => desc,
         Err(SelectorNullOrInvalid::IsNull) => {
             dbg_log!("#gp null cs");
             trigger_gp(0);
-            return;
+            return false;
         },
         Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
             dbg_log!("#gp invalid cs: {:x}", selector);
             trigger_gp(selector & !3);
-            return;
+            return false;
         },
     };
 
@@ -1172,55 +1199,55 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
             if info.dpl() < *cpl || info.dpl() < cs_selector.rpl() {
                 dbg_log!("#gp cs gate dpl < cpl or dpl < rpl: {:x}", selector);
                 trigger_gp(selector & !3);
-                return;
+                return false;
             }
 
             if !info.is_present() {
                 dbg_log!("#NP for loading not-present in gate cs sel={:x}", selector);
                 trigger_np(selector & !3);
-                return;
+                return false;
             }
 
             let cs_selector = (info.raw >> 16) as i32;
 
             let cs_info = match return_on_pagefault!(lookup_segment_selector(
                 SegmentSelector::of_u16(cs_selector as u16)
-            )) {
+            ), false) {
                 Ok((desc, _)) => desc,
                 Err(SelectorNullOrInvalid::IsNull) => {
                     dbg_log!("#gp null cs");
                     trigger_gp(0);
-                    return;
+                    return false;
                 },
                 Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
                     dbg_log!("#gp invalid cs: {:x}", cs_selector);
                     trigger_gp(cs_selector & !3);
-                    return;
+                    return false;
                 },
             };
 
             if cs_info.is_system() {
                 dbg_log!("#gp non-code cs: {:x}", cs_selector);
                 trigger_gp(cs_selector & !3);
-                return;
+                return false;
             }
 
             if !cs_info.is_executable() {
                 dbg_log!("#gp non-executable cs: {:x}", cs_selector);
                 trigger_gp(cs_selector & !3);
-                return;
+                return false;
             }
 
             if cs_info.dpl() > *cpl {
                 dbg_log!("#gp dpl > cpl: {:x}", cs_selector);
                 trigger_gp(cs_selector & !3);
-                return;
+                return false;
             }
 
             if !cs_info.is_present() {
                 dbg_log!("#NP for loading not-present in cs sel={:x}", cs_selector);
                 trigger_np(cs_selector & !3);
-                return;
+                return false;
             }
 
             if !cs_info.is_dc() && cs_info.dpl() < *cpl {
@@ -1230,10 +1257,10 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
                     *cpl,
                     cs_info.dpl()
                 );
-                let (new_ss, new_esp) = return_on_pagefault!(get_tss_ss_esp(cs_info.dpl()));
+                let (new_ss, new_esp) = return_on_pagefault!(get_tss_ss_esp(cs_info.dpl()), false);
 
                 let ss_selector = SegmentSelector::of_u16(new_ss as u16);
-                let ss_info = match return_on_pagefault!(lookup_segment_selector(ss_selector)) {
+                let ss_info = match return_on_pagefault!(lookup_segment_selector(ss_selector), false) {
                     Ok((desc, _)) => desc,
                     Err(SelectorNullOrInvalid::IsNull) => {
                         panic!("null ss: {}", new_ss);
@@ -1274,14 +1301,14 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
                         cs_info.dpl(),
                         ss_info.base() + new_esp - stack_space,
                         stack_space
-                    ));
+                    ), false);
                 }
                 else {
                     return_on_pagefault!(writable_or_pagefault_cpl(
                         cs_info.dpl(),
                         ss_info.base() + (new_esp - stack_space & 0xFFFF),
                         stack_space
-                    ));
+                    ), false);
                 }
 
                 let old_esp = read_reg32(ESP);
@@ -1299,6 +1326,7 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
                 // XXX: Should be checked before side effects
                 if !switch_seg(SS, new_ss) {
                     dbg_assert!(false);
+                    completed = false;
                 };
                 set_stack_reg(new_esp);
 
@@ -1348,13 +1376,13 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
 
                 if is_call {
                     if is_16 {
-                        return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-4), 4));
+                        return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-4), 4), false);
 
                         push16(*sreg.offset(CS as isize) as i32).unwrap();
                         push16(get_real_eip()).unwrap();
                     }
                     else {
-                        return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-8), 8));
+                        return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-8), 8), false);
 
                         push32(*sreg.offset(CS as isize) as i32).unwrap();
                         push32(get_real_eip()).unwrap();
@@ -1396,16 +1424,16 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
             if info.dpl() < *cpl || info.dpl() < cs_selector.rpl() {
                 dbg_log!("#gp tss dpl < cpl or dpl < rpl: {:x}", selector);
                 trigger_gp(selector & !3);
-                return;
+                return false;
             }
 
             if !info.is_present() {
                 dbg_log!("#NP for loading not-present tss sel={:x}", selector);
                 trigger_np(selector & !3);
-                return;
+                return false;
             }
 
-            do_task_switch(
+            completed &= do_task_switch_checked(
                 selector,
                 None,
                 if is_call { TaskSwitchSource::CallOrInt } else { TaskSwitchSource::Jump },
@@ -1416,17 +1444,17 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
             if info.dpl() < *cpl || info.dpl() < cs_selector.rpl() {
                 dbg_log!("#gp task gate dpl < cpl or dpl < rpl: {:x}", selector);
                 trigger_gp(selector & !3);
-                return;
+                return false;
             }
 
             if !info.is_present() {
                 dbg_log!("#NP for loading not-present task gate sel={:x}", selector);
                 trigger_np(selector & !3);
-                return;
+                return false;
             }
 
             let tss_selector = (info.raw >> 16) as i32 & 0xFFFF;
-            do_task_switch(
+            completed &= do_task_switch_checked(
                 tss_selector,
                 None,
                 if is_call { TaskSwitchSource::CallOrInt } else { TaskSwitchSource::Jump },
@@ -1440,7 +1468,7 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
         if !info.is_executable() {
             dbg_log!("#gp non-executable cs: {:x}", selector);
             trigger_gp(selector & !3);
-            return;
+            return false;
         }
 
         if info.is_dc() {
@@ -1448,7 +1476,7 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
             if info.dpl() > *cpl {
                 dbg_log!("#gp cs dpl > cpl: {:x}", selector);
                 trigger_gp(selector & !3);
-                return;
+                return false;
             }
         }
         else {
@@ -1457,7 +1485,7 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
             if cs_selector.rpl() > *cpl || info.dpl() != *cpl {
                 dbg_log!("#gp cs rpl > cpl or dpl != cpl: {:x}", selector);
                 trigger_gp(selector & !3);
-                return;
+                return false;
             }
         }
 
@@ -1465,18 +1493,18 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
             dbg_log!("#NP for loading not-present in cs sel={:x}", selector);
             dbg_trace();
             trigger_np(selector & !3);
-            return;
+            return false;
         }
 
         if is_call {
             if is_osize_32 {
-                return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-8), 8));
+                return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-8), 8), false);
 
                 push32(*sreg.offset(CS as isize) as i32).unwrap();
                 push32(get_real_eip()).unwrap();
             }
             else {
-                return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-4), 4));
+                return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-4), 4), false);
 
                 push16(*sreg.offset(CS as isize) as i32).unwrap();
                 push16(get_real_eip()).unwrap();
@@ -1498,9 +1526,16 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
 
         update_state_flags();
     }
+    completed
 }
 
 pub unsafe fn far_return(eip: i32, selector: i32, stack_adjust: i32, is_osize_32: bool) {
+    far_return_checked(eip, selector, stack_adjust, is_osize_32);
+}
+
+/// Reports whether the semantic body completed; delivered faults remain CPU-owned.
+pub unsafe fn far_return_checked(eip: i32, selector: i32, stack_adjust: i32, is_osize_32: bool) -> bool {
+    let mut completed = true;
     dbg_assert!(selector < 0x10000 && selector >= 0);
 
     if !*protected_mode {
@@ -1512,59 +1547,59 @@ pub unsafe fn far_return(eip: i32, selector: i32, stack_adjust: i32, is_osize_32
         *instruction_pointer = get_seg_cs() + eip;
         adjust_stack_reg(2 * (if is_osize_32 { 4 } else { 2 }) + stack_adjust);
         update_state_flags();
-        return;
+        return completed;
     }
 
     let cs_selector = SegmentSelector::of_u16(selector as u16);
-    let info = match return_on_pagefault!(lookup_segment_selector(cs_selector)) {
+    let info = match return_on_pagefault!(lookup_segment_selector(cs_selector), false) {
         Ok((desc, _)) => desc,
         Err(SelectorNullOrInvalid::IsNull) => {
             dbg_log!("far return: #gp null cs");
             trigger_gp(0);
-            return;
+            return false;
         },
         Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
             dbg_log!("far return: #gp invalid cs: {:x}", selector);
             trigger_gp(selector & !3);
-            return;
+            return false;
         },
     };
 
     if info.is_system() {
         dbg_assert!(false, "is system in far return");
         trigger_gp(selector & !3);
-        return;
+        return false;
     }
 
     if !info.is_executable() {
         dbg_log!("non-executable cs: {:x}", selector);
         trigger_gp(selector & !3);
-        return;
+        return false;
     }
 
     if cs_selector.rpl() < *cpl {
         dbg_log!("cs rpl < cpl: {:x}", selector);
         trigger_gp(selector & !3);
-        return;
+        return false;
     }
 
     if info.is_dc() && info.dpl() > cs_selector.rpl() {
         dbg_log!("cs conforming and dpl > rpl: {:x}", selector);
         trigger_gp(selector & !3);
-        return;
+        return false;
     }
 
     if !info.is_dc() && info.dpl() != cs_selector.rpl() {
         dbg_log!("cs non-conforming and dpl != rpl: {:x}", selector);
         trigger_gp(selector & !3);
-        return;
+        return false;
     }
 
     if !info.is_present() {
         dbg_log!("#NP for loading not-present in cs sel={:x}", selector);
         dbg_trace();
         trigger_np(selector & !3);
-        return;
+        return false;
     }
 
     if cs_selector.rpl() > *cpl {
@@ -1597,6 +1632,7 @@ pub unsafe fn far_return(eip: i32, selector: i32, stack_adjust: i32, is_osize_32
         // XXX: This failure should be checked before side effects
         if !switch_seg(SS, temp_ss) {
             dbg_assert!(false);
+            completed = false;
         }
         set_stack_reg(temp_esp + stack_adjust);
 
@@ -1648,6 +1684,7 @@ pub unsafe fn far_return(eip: i32, selector: i32, stack_adjust: i32, is_osize_32
     *instruction_pointer = get_seg_cs() + eip;
 
     update_state_flags();
+    completed
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -1658,6 +1695,12 @@ pub enum TaskSwitchSource {
 }
 
 pub unsafe fn do_task_switch(selector: i32, error_code: Option<i32>, source: TaskSwitchSource) {
+    do_task_switch_checked(selector, error_code, source);
+}
+
+/// Reports whether the semantic body completed; delivered faults remain CPU-owned.
+pub unsafe fn do_task_switch_checked(selector: i32, error_code: Option<i32>, source: TaskSwitchSource) -> bool {
+    let mut completed = true;
     dbg_log!("do_task_switch sel={:x}", selector);
 
     dbg_assert!(*tss_size_32, "TODO: 16-bit TSS in task switch");
@@ -1869,6 +1912,7 @@ pub unsafe fn do_task_switch(selector: i32, error_code: Option<i32>, source: Tas
     {
         // XXX: Should be checked before side effects
         dbg_assert!(false);
+        completed = false;
     }
 
     *instruction_pointer =
@@ -1892,6 +1936,7 @@ pub unsafe fn do_task_switch(selector: i32, error_code: Option<i32>, source: Tas
     }
 
     update_state_flags();
+    completed
 }
 
 pub unsafe fn after_block_boundary() { jit_block_boundary = true; }
@@ -4077,10 +4122,14 @@ pub unsafe fn safe_read_write8(addr: i32, instruction: &dyn Fn(i32) -> i32) {
 
 #[inline(always)]
 pub unsafe fn safe_read_write16(addr: i32, instruction: &dyn Fn(i32) -> i32) {
+    let _ = safe_read_write16_checked(addr, instruction);
+}
+
+pub unsafe fn safe_read_write16_checked(addr: i32, instruction: &dyn Fn(i32) -> i32) -> OrPageFault<()> {
     let (phys_addr, can_skip_dirty_page) =
-        return_on_pagefault!(translate_address_write_and_can_skip_dirty(addr));
+        translate_address_write_and_can_skip_dirty(addr)?;
     if phys_addr & 0xFFF == 0xFFF {
-        let phys_addr_high = return_on_pagefault!(translate_address_write(addr + 1));
+        let phys_addr_high = translate_address_write(addr + 1)?;
         let x = virt_boundary_read16(phys_addr, phys_addr_high);
         virt_boundary_write16(phys_addr, phys_addr_high, instruction(x));
     }
@@ -4101,6 +4150,7 @@ pub unsafe fn safe_read_write16(addr: i32, instruction: &dyn Fn(i32) -> i32) {
             memory::write16_no_mmap_or_dirty_check(phys_addr, value);
         };
     }
+    Ok(())
 }
 
 #[inline(always)]

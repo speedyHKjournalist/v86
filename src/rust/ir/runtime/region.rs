@@ -68,8 +68,7 @@ pub fn reachable_length(
             GuestEip(pc.0.wrapping_add(at as u32)),
             LinearAddress(linear.0.wrapping_add(at as u32)),
             default_32,
-        )
-        else {
+        ) else {
             continue;
         };
         let end = at + instruction.length as usize;
@@ -82,8 +81,7 @@ pub fn reachable_length(
             // ends (notably memory forms). The IR frontend owns the semantic
             // stop decision, so keep the fallthrough available unless the
             // shared decoder already identifies a baseline #UD form.
-            Flow::Next
-            | Flow::Boundary
+            Flow::Next | Flow::Boundary
                 if !instruction.baseline_ud && !instruction.encoding.block_boundary =>
             {
                 if end < bytes.len() {
@@ -106,7 +104,17 @@ pub fn reachable_length(
                     pending.insert(end);
                 }
             },
-            Flow::Next | Flow::Boundary | Flow::Stop | Flow::Sti => {},
+            Flow::Sti => {
+                if let Ok(span) = crate::ir::frontend::sti::extent(
+                    &bytes[at..],
+                    instruction.instruction_pc,
+                    instruction.linear_pc,
+                    default_32,
+                ) {
+                    max_end = max_end.max(at + span);
+                }
+            },
+            Flow::Next | Flow::Boundary | Flow::Stop => {},
         }
     }
     max_end
