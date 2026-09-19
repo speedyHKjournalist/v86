@@ -22,6 +22,8 @@ pub mod selector_query;
 
 pub mod simd;
 
+pub mod x87;
+
 #[cfg(feature = "ir-experimental")]
 pub mod cache;
 #[cfg(feature = "ir-experimental")]
