@@ -82,7 +82,10 @@ pub fn reachable_length(
             // ends (notably memory forms). The IR frontend owns the semantic
             // stop decision, so keep the fallthrough available unless the
             // shared decoder already identifies a baseline #UD form.
-            Flow::Next | Flow::Boundary if !instruction.baseline_ud => {
+            Flow::Next
+            | Flow::Boundary
+                if !instruction.baseline_ud && !instruction.encoding.block_boundary =>
+            {
                 if end < bytes.len() {
                     pending.insert(end);
                 }
@@ -201,6 +204,27 @@ mod tests {
                 },
             ),
             bytes.len()
+        );
+    }
+
+    #[test]
+    fn explicit_semantic_boundary_stops_region_growth() {
+        // CPUID is deliberately a frontend/runtime observation boundary. Bytes
+        // after it may be present in the immutable candidate but are not part of
+        // this automatic region.
+        let bytes = [0x0F, 0xA2, 0x40];
+        assert_eq!(
+            reachable_length(
+                &bytes,
+                GuestEip(0x1000),
+                LinearAddress(0x2000),
+                true,
+                Policy {
+                    max_bytes: bytes.len(),
+                    max_instructions: 32,
+                },
+            ),
+            2
         );
     }
 
