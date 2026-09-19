@@ -397,6 +397,9 @@ pub fn ir_cache_entry_stat(
                 2
             }
         },
+        6 => u32::from(record.job.artifact.code.structured_cfg),
+        7 => record.job.artifact.code.structured_backedges,
+        8 => record.job.artifact.code.generic_dispatch_edges,
         _ => 0,
     }
 }
