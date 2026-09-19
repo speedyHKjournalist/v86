@@ -3,6 +3,10 @@
 <script type="module">
 import { V86 } from "../../build/libv86.mjs";
 import { WorkerPerformanceRecorder } from "../../src/browser/cpu_worker.js";
+const params = new URLSearchParams(location.search);
+const irBackend = params.get("jit_backend") === "ir";
+const corePath = irBackend ? "../../build/v86-ir-runtime.wasm" : "../../build/v86.wasm";
+const jitOptions = irBackend ? { jit_backend: "ir" } : {};
 const checks = [];
 const check = (value, message) => { if(!value) throw new Error(message); checks.push(message); };
 const sleep = ms => new Promise(r => setTimeout(r,ms));
@@ -24,11 +28,20 @@ try {
         };
     };
     vm = new V86({ cpu_worker: true, cpu_worker_url: "../../build/cpu-worker.js",
-        wasm_path: "../../build/v86.wasm", bios: { url: "../../build/cpu-worker-test.bin" },
+        wasm_path: corePath, ...jitOptions, bios: { url: "../../build/cpu-worker-test.bin" },
         memory_size: 32 << 20, screen: { container: document.getElementById("screen") },
         disable_keyboard: true, disable_mouse: true, disable_speaker: true,
         filesystem: {}, net_device: { type: "none" }, autostart: true, graphics_adapter: fakeGraphics });
     await Promise.race([new Promise((resolve,reject) => { vm.add_listener("emulator-loaded",resolve); vm.add_listener("emulator-error",reject); }), sleep(15000).then(()=>{throw new Error("startup timeout");})]);
+    const assertIRBackend = async label => {
+        if(!irBackend) return;
+        const info = await vm.get_jit_info();
+        check(info.backend === "ir" && info.ir_available && info.ir.enabled === 1,
+            label + " selects the IR backend");
+        check(!info.legacy_generation_enabled && info.legacy_compile_requests === 0,
+            label + " performs no legacy JIT generation");
+    };
+    await assertIRBackend("initial Worker");
     const word = async a => new DataView((await vm.read_memory(a,4)).buffer).getUint32(0,true);
     const wait = async test => { const end=performance.now()+10000; while(!await test()) { if(performance.now()>end) throw new Error("guest timeout"); await sleep(5); } };
     await wait(async()=>await word(0x500)===0xCAFE);
@@ -119,30 +132,34 @@ try {
     await vm.restore_state(saved);
     check((await vm.read_memory(0x101000,1))[0]===13,"good checkpoint recovers after a rejected restore");
     await vm.stop();
+    await assertIRBackend("post-device workload Worker");
     const state2=await vm.save_state();
     await vm.destroy();vm=null;
     // Boot directly from a saved state, including the graphics checkpoint.
-    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path:"../../build/v86.wasm",
+    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path: corePath, ...jitOptions,
         bios:{url:"../../build/cpu-worker-test.bin"},initial_state:{buffer:state2},memory_size:32<<20,
         screen:{container:document.getElementById("screen")},disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
     await new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);});
+    await assertIRBackend("restored Worker");
     check(!vm.is_running(),"initial-state load preserves requested stopped mode");
     check((await vm.read_memory(0x101000,1))[0]===13,"initial state restores worker RAM");
     await vm.destroy();await vm.destroy();vm=null;
-    vm=new V86({wasm_path:"../../build/v86.wasm",bios:{url:"../../build/cpu-worker-test.bin"},
+    vm=new V86({wasm_path: corePath, ...jitOptions,bios:{url:"../../build/cpu-worker-test.bin"},
         memory_size:32<<20,screen:{container:document.getElementById("screen")},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
     await new Promise(r=>vm.add_listener("emulator-loaded",r));
+    await assertIRBackend("main-thread restore");
     await vm.restore_state(state2);
     check(vm.read_memory(0x101000,1)[0]===13,"main-thread mode loads a worker snapshot");
     const legacy=await vm.save_state();await vm.destroy();vm=null;
-    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path:"../../build/v86.wasm",
+    vm=new V86({cpu_worker:true,cpu_worker_url:"../../build/cpu-worker.js",wasm_path: corePath, ...jitOptions,
         bios:{url:"../../build/cpu-worker-test.bin"},initial_state:{buffer:legacy},memory_size:32<<20,
         screen:{container:document.getElementById("screen")},disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         filesystem:{},net_device:{type:"none"},graphics_adapter:fakeGraphics,autostart:false});
     await new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);});
+    await assertIRBackend("cross-mode Worker restore");
     check((await vm.read_memory(0x101000,1))[0]===13,"worker mode loads a main-thread snapshot");
     await vm.destroy();vm=null;
     document.getElementById("result").textContent="PASS\n"+checks.join("\n");
