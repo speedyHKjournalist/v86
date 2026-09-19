@@ -88,6 +88,21 @@ fn reachable_cfg_fixtures() {
                         }
                         assert!(mir.control.dynamic_counts);
                         let artifact = emit_cpu(&mir, budget).unwrap();
+                        if matches!(n, 3 | 4 | 5) {
+                            assert!(
+                                artifact.structured_cfg,
+                                "simple self-loop fixture {n} should use structured control flow"
+                            );
+                            assert_eq!(artifact.structured_backedges, 1);
+                            assert_eq!(artifact.generic_dispatch_edges, 0);
+                        }
+                        if n == 6 {
+                            assert!(
+                                !artifact.structured_cfg,
+                                "multi-arm merge remains on the generic dispatcher fallback"
+                            );
+                            assert!(artifact.generic_dispatch_edges > 0);
+                        }
                         std::fs::write(
                             format!("build/ir-cfg/{}.wasm", cases.len()),
                             artifact.bytes,
