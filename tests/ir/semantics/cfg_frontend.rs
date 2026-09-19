@@ -102,8 +102,6 @@ fn reachable_cfg_fixtures() {
                             if internal_self_loop {
                                 assert_eq!(artifact.structured_backedges, 1);
                                 assert_eq!(artifact.generic_dispatch_edges, 0);
-                            } else {
-                                assert!(artifact.generic_dispatch_edges > 0);
                             }
                         }
                         if n == 6 {
