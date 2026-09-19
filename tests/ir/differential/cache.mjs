@@ -99,6 +99,15 @@ try {
     prepare([0x40,0xF4]);r=reserve();const snapshot=await vm.save_state();await vm.restore_state(snapshot);
     assert.equal(e.ir_cache_validate(r.id,r.slot),0);e.ir_cache_collect();assert.equal(e.ir_cache_stat(1),0);
     console.log(`PASS: ${wasm}: pending/duplicate/forged/ABA publication, moved IP, raw and same-byte guest/host writes, physical remapping, secondary dependencies, active SMC and restore`);
+    // IR-12 link lookup is a validated graph hint, never an unchecked call.
+    prepare([0x40,0xF4]);assert(await request(1));cpu.instruction_pointer[0]=PC;
+    const linkBefore=e.ir_cache_stat(6),missBefore=e.ir_cache_stat(7);
+    let packed=e.ir_cache_link_target();assert.notEqual(packed,0n);assert.equal(e.ir_cache_stat(6)-linkBefore,1);
+    assert.notEqual(Number(packed&0xFFFFFFFFn),0);
+    cpu.instruction_pointer[0]=PC+0x1000;assert.equal(e.ir_cache_link_target(),0n);assert.equal(e.ir_cache_stat(7)-missBefore,1);
+    cpu.instruction_pointer[0]=PC;vm.write_memory(Uint8Array.of(0x40),PC);assert.equal(e.ir_cache_link_target(),0n);
+    e.ir_cache_collect();assert.equal(e.ir_cache_stat(0),0);
+    console.log(`PASS: ${wasm}: validated IR link lookup rejects absent/stale targets without unchecked table dispatch`);
     // Keep the actual running function/reservation alive through a synchronous I/O callback.
     for(const reset of [false,true]){
         prepare([0xEE,0xF4]);cpu.reg32[2]=0x502;r=reserve();await install(r);let callbacks=0;
