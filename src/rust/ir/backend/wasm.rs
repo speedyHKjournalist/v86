@@ -13,7 +13,7 @@ use crate::ir::mir::memory::{
 use crate::ir::mir::value::{Address, Load, Reading, Step, ValuePlan};
 use crate::ir::runtime::entry::CpuEntryKey;
 use crate::ir::{ids::*, lowering::CompileError, mir::MirRegion, types::Type};
-use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128};
+use crate::wasmgen::wasm_builder::{Label, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128};
 #[derive(Clone, Copy)]
 pub struct StateLayout {
     pub gpr: u32,
@@ -163,7 +163,7 @@ fn control_edge_count(mir: &MirRegion) -> u32 {
     mir.control
         .blocks
         .iter()
-        .map(|block| match block.terminator {
+        .map(|block| match &block.terminator {
             MirTerminator::Exit(_) => 0,
             MirTerminator::Jump(_) => 1,
             MirTerminator::Branch { .. } => 2,
@@ -393,7 +393,7 @@ impl Emitter<'_> {
         arm: Option<BlockId>,
         header: BlockId,
         remaining: &WasmLocal,
-        loop_label: crate::wasmgen::wasm_builder::Label,
+        loop_label: Label,
     ) {
         self.copy_edge_values(edge);
         if let Some(id) = arm {
