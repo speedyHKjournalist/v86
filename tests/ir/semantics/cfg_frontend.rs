@@ -49,6 +49,10 @@ fn reachable_cfg_fixtures() {
         vec![0x10, 0xD8, 0x18, 0xD1, 0xFE, 0xC0, 0xFE, 0xC9, 0x75, 0, 0x90],
         // Carry/direction control must update raw backing without canonicalizing.
         vec![0xF8, 0xF9, 0xF5, 0xFC, 0xFD, 0x90],
+        // Conditional loop with an in-region epilogue after the loop exit.
+        vec![0x40, 0x49, 0x75, 0xFC, 0x90],
+        // Nested branch remains outside the first diamond structuring subset.
+        vec![0x74, 0x02, 0x75, 0x02, 0x40, 0x90, 0x48, 0x90],
     ];
     let mut cases = vec![];
     for (n, bytes) in programs.iter().enumerate() {
@@ -88,26 +92,64 @@ fn reachable_cfg_fixtures() {
                         }
                         assert!(mir.control.dynamic_counts);
                         let artifact = emit_cpu(&mir, budget).unwrap();
+                        // Relative branch targets use architectural operand
+                        // width. In 16-bit mode at a high EIP, the taken target can
+                        // wrap outside this immutable snapshot and must not be
+                        // mistaken for an internal structured edge.
+                        let internal_relative_target = mode || pc <= u16::MAX as u32;
                         if matches!(n, 3 | 4 | 5) {
-                            // These branches are operand-size sensitive. At a high
-                            // 32-bit EIP in 16-bit mode, the taken target truncates
-                            // to 16 bits and is therefore outside this snapshot.
-                            let internal_self_loop = mode || pc <= u16::MAX as u32;
                             assert_eq!(
                                 artifact.structured_cfg,
-                                internal_self_loop,
+                                internal_relative_target,
                                 "self-loop structuring must follow architectural target width: case {n}, mode {mode}, pc {pc:x}: {:?}",
                                 mir.control
                             );
-                            if internal_self_loop {
+                            if internal_relative_target {
                                 assert_eq!(artifact.structured_backedges, 1);
+                                assert!(artifact.structured_edges > 0);
                                 assert_eq!(artifact.generic_dispatch_edges, 0);
                             }
                         }
-                        if n == 6 {
+                        if matches!(n, 0 | 1 | 2 | 12 | 13 | 17 | 18 | 23) {
+                            let expected = if matches!(n, 0 | 23) {
+                                internal_relative_target
+                            } else {
+                                true
+                            };
+                            assert_eq!(
+                                artifact.structured_cfg,
+                                expected,
+                                "multi-block/epilogue loop structuring: case {n}, mode {mode}, pc {pc:x}: {:?}",
+                                mir.control
+                            );
+                            if expected {
+                                assert_eq!(artifact.structured_backedges, 1);
+                                assert!(artifact.structured_edges >= 2);
+                                assert_eq!(artifact.generic_dispatch_edges, 0);
+                            }
+                        }
+                        if matches!(n, 6 | 14 | 15) {
+                            let expected = if n == 6 {
+                                internal_relative_target
+                            } else {
+                                true
+                            };
+                            assert_eq!(
+                                artifact.structured_cfg,
+                                expected,
+                                "diamond structuring: case {n}, mode {mode}, pc {pc:x}: {:?}",
+                                mir.control
+                            );
+                            if expected {
+                                assert_eq!(artifact.structured_backedges, 0);
+                                assert!(artifact.structured_edges >= 4);
+                                assert_eq!(artifact.generic_dispatch_edges, 0);
+                            }
+                        }
+                        if n == 24 {
                             assert!(
                                 !artifact.structured_cfg,
-                                "multi-arm merge remains on the generic dispatcher fallback"
+                                "nested branch remains on the generic dispatcher fallback"
                             );
                             assert!(artifact.generic_dispatch_edges > 0);
                         }
