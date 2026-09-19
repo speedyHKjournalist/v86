@@ -4,7 +4,7 @@
 use super::{
     entry::{ir_entry_matches, EntryContract},
     live::{self, Job},
-    snapshot::capture,
+    snapshot::{capture, cached_match, CachedMatch},
 };
 use crate::{
     cpu::{cpu, global_pointers as gp},
@@ -38,6 +38,8 @@ struct Cache {
     clock: u64,
     links: u32,
     link_misses: u32,
+    cached_checks: u32,
+    capture_fallbacks: u32,
 }
 static CACHE: Mutex<Cache> = Mutex::new(Cache {
     records: Vec::new(),
@@ -49,6 +51,8 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     clock: 0,
     links: 0,
     link_misses: 0,
+    cached_checks: 0,
+    capture_fallbacks: 0,
 });
 const CAPACITY: usize = 32;
 extern "C" {
@@ -78,7 +82,16 @@ pub fn dirty_page(page: u32) {
 unsafe fn cold() -> bool {
     !cpu::in_jit && !busy() && jit::ir_cache_quiescent()
 }
-unsafe fn unchanged(job: &Job) -> bool {
+unsafe fn cached_current(job: &Job) -> CachedMatch {
+    if !live::generation_current(job.artifact.key) {
+        return CachedMatch::Stale;
+    }
+    let EntryContract::Cpu(entry) = job.artifact.entry else {
+        return CachedMatch::Stale;
+    };
+    cached_match(entry.linear.0, &job.source)
+}
+unsafe fn unchanged_full(job: &Job) -> bool {
     if !live::generation_current(job.artifact.key) {
         return false;
     }
@@ -131,7 +144,7 @@ pub unsafe fn ir_cache_reserve(id: u64) -> u32 {
     reserve_job(job, false)
 }
 pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
-    if !cold() || !unchanged(&job) {
+    if !cold() || !unchanged_full(&job) {
         return 0;
     }
     ir_cache_collect();
@@ -251,7 +264,7 @@ pub unsafe fn ir_cache_validate(id: u64, slot: u32) -> bool {
         .iter_mut()
         .find(|r| r.job.artifact.key.job == id && r.slot == slot)
     {
-        if r.phase == Phase::Pending && unchanged(&r.job) {
+        if r.phase == Phase::Pending && unchanged_full(&r.job) {
             r.phase = Phase::Validated;
             true
         } else {
@@ -284,7 +297,7 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
     if cache.records[index].phase != Phase::Validated {
         return false;
     }
-    if !unchanged(&cache.records[index].job) {
+    if !unchanged_full(&cache.records[index].job) {
         cache.records[index].phase = Phase::Retired;
         return false;
     }
@@ -327,6 +340,8 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         5 => cache.reclaimed,
         6 => cache.links,
         7 => cache.link_misses,
+        8 => cache.cached_checks,
+        9 => cache.capture_fallbacks,
         _ => 0,
     }
 }
@@ -405,21 +420,36 @@ pub unsafe fn execute() -> bool {
     let selected = {
         let mut cache = CACHE.try_lock().unwrap();
         let mut selected = None;
-        for r in &mut cache.records {
-            if r.phase != Phase::Published {
+        for index in 0..cache.records.len() {
+            if cache.records[index].phase != Phase::Published {
                 continue;
             }
-            let EntryContract::Cpu(entry) = r.job.artifact.entry else {
+            let EntryContract::Cpu(entry) = cache.records[index].job.artifact.entry else {
                 continue;
             };
             if !ir_entry_matches(entry.linear.0, entry.cs_base(), entry.default_32 as u32) {
                 continue;
             }
-            if !unchanged(&r.job) {
-                r.phase = Phase::Retired;
+            let cached = cached_current(&cache.records[index].job);
+            let valid = match cached {
+                CachedMatch::Match => {
+                    cache.cached_checks = cache.cached_checks.wrapping_add(1);
+                    true
+                },
+                CachedMatch::Unavailable => {
+                    cache.capture_fallbacks = cache.capture_fallbacks.wrapping_add(1);
+                    unchanged_full(&cache.records[index].job)
+                },
+                CachedMatch::Stale => false,
+            };
+            if !valid {
+                cache.records[index].phase = Phase::Retired;
                 continue;
             }
-            selected = Some((r.slot, r.job.artifact.key.job));
+            selected = Some((
+                cache.records[index].slot,
+                cache.records[index].job.artifact.key.job,
+            ));
             break;
         }
         selected
@@ -429,25 +459,34 @@ pub unsafe fn execute() -> bool {
         return false;
     };
     // Preserve the dispatcher's actual initial fetch translation and A-bit
-    // updates. The read-only capture above is only a compilation/admission check.
+    // updates. A cached fast check above is sufficient only when every source
+    // mapping is already CPU-visible; otherwise the read-only capture fallback
+    // validates without creating A-bit side effects.
     *gp::previous_ip = *gp::instruction_pointer;
     if cpu::get_phys_eip().is_err() {
         return true;
     }
     let admitted = {
         let mut cache = CACHE.try_lock().unwrap();
-        let record = cache
+        let index = cache
             .records
-            .iter_mut()
-            .find(|r| r.job.artifact.key.job == id && r.phase == Phase::Published);
-        let valid = if let Some(r) = record {
+            .iter()
+            .position(|r| r.job.artifact.key.job == id && r.phase == Phase::Published);
+        let valid = if let Some(index) = index {
             // Page tables can themselves alias code: the A-bit update must not
-            // leave a module compiled from the pre-fetch bytes admissible.
-            if !unchanged(&r.job) {
-                r.phase = Phase::Retired;
-                false
-            } else {
-                super::snapshot::mappings_cached(&r.job.source)
+            // leave a module compiled from the pre-fetch bytes admissible. After
+            // the architectural fetch, admission requires cached mapping identity;
+            // an unavailable secondary mapping remains published for a later hit.
+            match cached_current(&cache.records[index].job) {
+                CachedMatch::Match => {
+                    cache.cached_checks = cache.cached_checks.wrapping_add(1);
+                    true
+                },
+                CachedMatch::Unavailable => false,
+                CachedMatch::Stale => {
+                    cache.records[index].phase = Phase::Retired;
+                    false
+                },
             }
         } else {
             false
