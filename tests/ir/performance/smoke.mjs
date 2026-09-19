@@ -195,6 +195,7 @@ async function sample_legacy(round)
 
 function summarize_ir(samples, execution_budget)
 {
+    assert.equal(samples.length, repetitions, "IR budget matrix requires every repetition");
     return {
         samples: samples.length,
         execution_budget,
@@ -216,6 +217,7 @@ function summarize_ir(samples, execution_budget)
 
 function summarize_legacy(samples)
 {
+    assert.equal(samples.length, repetitions, "legacy matrix requires every repetition");
     return {
         samples: samples.length,
         median_load_ms: median(samples.map(sample => sample.load_ms)),
@@ -233,12 +235,16 @@ for(let round = 0; round < repetitions; round++)
     legacy_runs.push(await sample_legacy(round));
     const order = round & 1 ? [...execution_budgets].reverse() : execution_budgets;
     for(const execution_budget of order)
+    {
         ir_runs[String(execution_budget)].push(await sample_ir(execution_budget, round));
+    }
 }
 
 const ir_summary = {};
 for(const execution_budget of execution_budgets)
+{
     ir_summary[String(execution_budget)] = summarize_ir(ir_runs[String(execution_budget)], execution_budget);
+}
 const legacy_summary = summarize_legacy(legacy_runs);
 const baseline_128 = ir_summary["128"].median_instruction_steps_per_ms;
 for(const execution_budget of execution_budgets)
