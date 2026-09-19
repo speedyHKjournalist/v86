@@ -2,8 +2,8 @@
 
 ## Goal
 
-The IR backend already lowers reachable guest control flow to MIR, but the Wasm
-emitter historically executed every MIR CFG through a generic pc-local dispatcher:
+The IR backend lowers reachable guest control flow to MIR, but the original Wasm
+backend executed every MIR CFG through a generic pc-local dispatcher:
 
 ```text
 loop
@@ -12,48 +12,70 @@ loop
   ...
 ```
 
-That representation is general, but it adds a local write, a block-id comparison
-chain and dispatcher branches on every internal guest edge. IR-13 budget
-measurements showed that removing outer activation frequency alone asymptotes well
-below the paired legacy backend, so IR-09 now begins replacing the internal
-dispatcher where the MIR graph has a directly provable structured shape.
+That representation is the correctness fallback, but it adds pc-local writes,
+block-id comparisons and dispatcher branches on every internal edge. IR-13
+measurements showed that this overhead is material for hot reducible loops, so
+IR-09 now emits directly structured Wasm for graph shapes that can be proven
+without a general relooper.
 
-## First structured shape
+## Structured subset
 
-The first fast path accepts only a single external entry with a preheader jump and
-one natural loop:
+The first subset accepts one single-entry natural loop with a synthetic preheader,
+a linear loop body and one backedge. The loop tail may be unconditional or
+conditional.
+
+The second subset extends that proof in two directions.
+
+### Linear exit/backedge arms
+
+A conditional loop may now have an arbitrary finite Jump-only chain on either
+side before the arm reaches the loop header or an Exit:
 
 ```text
 entry -> header -> ... -> tail
-                    ^       |
+                    ^       | \
+                    |       |  -> epilogue -> ... -> Exit
                     +-------+
 ```
 
-The linear loop chain may end in either:
+This covers loops whose not-taken path remains inside the immutable region and
+executes an epilogue before returning to the outer CPU dispatcher.
 
-- an unconditional jump back to the header; or
-- one conditional split where exactly one arm returns to the header and the other
-  reaches an exit block.
+### Acyclic diamond with a join
 
-The conditional backedge arm may contain one trampoline block. This covers the
-existing x86 frontend shapes for `Jcc self` and `LOOP self`, where the
-single-instruction lifter creates taken/not-taken exit blocks before CFG grafting.
+One conditional branch may split into two Jump-only arms, reconverge at one join,
+then continue through a shared linear tail:
 
-Every MIR block must be accounted for by the structured plan. Multi-arm merges,
-extra side regions, irreducible graphs and any shape outside this proof fall back
-to the existing generic dispatcher.
+```text
+             -> left  ->
+entry -> test             join -> ... -> Exit
+             -> right ->
+```
+
+Either arm may be empty when the branch edge targets the join directly. Edge
+parallel-copy schedules execute on the same logical edge as in the generic
+dispatcher, so join parameters retain normal SSA/phi semantics.
+
+The detector requires every MIR block in the region to be owned exactly once by
+the selected plan. It rejects nested branches, extra side regions, cycles in a
+diamond, multiple loop backedges and any graph outside these proofs. Those cases
+continue through the generic pc-local dispatcher.
+
+Relative targets remain architectural-width sensitive. In 16-bit mode a branch
+near a high 32-bit EIP may wrap outside the immutable snapshot; such a target is
+not treated as an internal structured edge.
 
 ## Semantic boundaries retained
 
 Structured emission changes only the Wasm control representation. It preserves:
 
-- per-block budget polls and exact recovery StateMaps;
+- every per-block execution-budget poll and recovery StateMap;
 - dynamic retirement-count accounting;
 - edge parallel-copy schedules, including scratch locals for cycles;
 - RAM loop-cache reset points;
-- memory/helper/fault exits;
+- memory/helper/fault exits and partial-completion rules;
 - entry ABI and invalid initial-state rejection;
-- publication, cache admission, SMC and snapshot rules.
+- publication, cache admission, SMC, reset/restore and snapshot rules.
 
 The generic dispatcher remains the correctness fallback.
 
@@ -63,25 +85,38 @@ Every emitted Artifact records:
 
 - whether structured CFG was selected;
 - the number of direct structured backedges;
-- the number of generic dispatcher edges.
+- the number of MIR control edges emitted directly;
+- the number of edges left to the generic dispatcher.
 
 Published cache records expose the same metadata through the experimental
-entry-scoped diagnostic API. Global publication counters are also included in
-`get_jit_info()` so later XP/application acceptance can measure real structured
-coverage rather than extrapolating from a synthetic loop.
+entry-scoped diagnostic API. Global publication counters also include cumulative
+structured-edge coverage so later XP/application acceptance can measure real
+structured use instead of extrapolating from synthetic loops.
 
-The CFG corpus requires unconditional self-jump, conditional self-jump and LOOP
-self-loop fixtures to select structured emission. A multi-arm merge fixture is
-kept on the generic fallback. The cache lifecycle test separately verifies that a
-published self-loop advertises one structured backedge and zero generic dispatch
-edges.
+The CFG corpus requires:
 
-## IR-13 measurement
+- unconditional, conditional and LOOP self-loops to select structured emission
+  when their architectural target remains inside the snapshot;
+- multi-block natural loops to stay structured;
+- a conditional loop with an in-region epilogue to stay structured;
+- simple diamonds, including memory-bearing arms, to stay structured;
+- a nested-branch graph to remain on the generic fallback;
+- high-EIP 16-bit wrapped targets not to be misclassified as internal edges.
 
-The execution-budget matrix hard-requires its target Tier-2 loop to be structured.
-The same 128/256/512/1024/2048/4096 fresh-VM matrix is then rerun without changing
-the runtime default budget. This isolates the benefit of internal direct Wasm
-control flow from the already-measured outer activation cost.
+The cache lifecycle test separately verifies that a published self-loop advertises
+one backedge, nonzero structured-edge coverage and zero generic dispatch edges.
 
-This is an IR-09 backend backfill discovered through IR-13 acceptance. It does not
-mark IR-09 or IR-13 complete and does not enable IR-14.
+## IR-13 evidence
+
+PR #46 removed the internal pc-local dispatcher from the synthetic target loop.
+IR-core run 362 kept the same 128/256/512/1024/2048/4096 fresh-VM matrix and
+reported all samples as structured with one backedge and zero generic edges.
+Within that hosted run, 1024 and larger budgets exceeded the paired legacy
+synthetic-loop throughput. These values are diagnostic only; they do not establish
+XP or application performance.
+
+PR #47 expands coverage while preserving the same matrix and fallback policy. It
+does not change the runtime default execution budget.
+
+This remains an IR-09 backend backfill discovered through IR-13 acceptance. It
+does not mark IR-09 or IR-13 complete and does not enable IR-14.
