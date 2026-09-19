@@ -341,8 +341,8 @@ and memory faults compare complete FLAGS with no undefined-bit masking.
 
 `cargo check --target wasm32-unknown-unknown --features ir-experimental` passed
 (`build/ir-misc-check.log`). Normal CPU Wasm has no experimental IR exports;
-generated files and `git diff --check` pass. Experimental coverage is now
-838 NativeHIR, 614 CpuMemoryHIR, 104 CpuStackHIR, 28 CpuControlHIR,
+generated files and `git diff --check` pass. At this milestone, experimental
+coverage was 838 NativeHIR, 614 CpuMemoryHIR, 104 CpuStackHIR, 28 CpuControlHIR,
 14 CpuArithmeticHIR and 136 TerminalBranchHIR forms. Production Pending remains
 3,728. Full ISA, online tiers/publication/invalidation, OS/performance acceptance
 and old-emitter retirement remain incomplete.
@@ -791,8 +791,8 @@ are permanent in `tests/ir/differential/raw_zero.mjs`.
 
 `cargo check --target wasm32-unknown-unknown --features ir-experimental` passed
 (`build/ir-cmpxchg8b-check.log`). Generated catalogue/attribution, normal CPU export
-isolation and `git diff --check` passed. CMPXCHG8B adds four CpuMemoryHIR forms,
-now 622 total; production Pending remains 3,728. [The contract](ir-cmpxchg8b.md)
+isolation and `git diff --check` passed. At this milestone CMPXCHG8B added four
+CpuMemoryHIR forms, bringing that category to 622; production Pending remained 3,728. [The contract](ir-cmpxchg8b.md)
 distinguishes native execution, CPU slow-path semantics, guard tests and the
 remaining full MIR/ISA/online tier/XP/performance/retirement work.
 
