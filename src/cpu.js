@@ -1055,6 +1055,10 @@ CPU.prototype.get_jit_info = function()
         ir["cache_guest_steps"] = exports["ir_cache_stat"](10) >>> 0;
         ir["cache_max_guest_steps"] = exports["ir_cache_stat"](11) >>> 0;
         ir["cache_zero_step_exits"] = exports["ir_cache_stat"](12) >>> 0;
+        ir["structured_publications"] = exports["ir_cache_stat"](13) >>> 0;
+        ir["generic_publications"] = exports["ir_cache_stat"](14) >>> 0;
+        ir["structured_backedges"] = exports["ir_cache_stat"](15) >>> 0;
+        ir["generic_dispatch_edges"] = exports["ir_cache_stat"](16) >>> 0;
     }
     return {
         "backend": this.jit_backend,

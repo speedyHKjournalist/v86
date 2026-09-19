@@ -13,7 +13,7 @@ use crate::ir::mir::memory::{
 use crate::ir::mir::value::{Address, Load, Reading, Step, ValuePlan};
 use crate::ir::runtime::entry::CpuEntryKey;
 use crate::ir::{ids::*, lowering::CompileError, mir::MirRegion, types::Type};
-use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128};
+use crate::wasmgen::wasm_builder::{Label, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128};
 #[derive(Clone, Copy)]
 pub struct StateLayout {
     pub gpr: u32,
@@ -25,6 +25,150 @@ pub struct StateLayout {
 pub struct Artifact {
     pub bytes: Vec<u8>,
     pub locals: usize,
+    /// True when this CPU CFG bypasses the generic pc-local block dispatcher.
+    pub structured_cfg: bool,
+    pub structured_backedges: u32,
+    pub generic_dispatch_edges: u32,
+}
+
+#[derive(Clone, Debug)]
+struct StructuredLoop {
+    entry: BlockId,
+    header: BlockId,
+    chain: Vec<BlockId>,
+    tail: StructuredTail,
+}
+
+#[derive(Clone, Debug)]
+enum StructuredTail {
+    Backedge,
+    Conditional {
+        backedge_taken: bool,
+        backedge_block: Option<BlockId>,
+        exit_block: BlockId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Arm {
+    Backedge(Option<BlockId>),
+    Exit(BlockId),
+}
+
+fn structured_loop_plan(mir: &MirRegion) -> Option<StructuredLoop> {
+    let control = &mir.control;
+    if control.entries.len() != 1 || control.blocks.len() < 2 {
+        return None;
+    }
+    let entry = control.entries[0];
+    let MirTerminator::Jump(entry_edge) = &control.blocks.get(entry.index())?.terminator else {
+        return None;
+    };
+    let header = entry_edge.target;
+    if header == entry {
+        return None;
+    }
+
+    let classify = |target: BlockId| -> Option<Arm> {
+        if target == header {
+            return Some(Arm::Backedge(None));
+        }
+        let block = control.blocks.get(target.index())?;
+        match &block.terminator {
+            MirTerminator::Jump(edge) if edge.target == header => {
+                Some(Arm::Backedge(Some(target)))
+            },
+            MirTerminator::Exit(_) => Some(Arm::Exit(target)),
+            _ => None,
+        }
+    };
+
+    let mut chain = Vec::new();
+    let mut current = header;
+    loop {
+        if current == entry || chain.contains(&current) {
+            return None;
+        }
+        chain.push(current);
+        let block = control.blocks.get(current.index())?;
+        match &block.terminator {
+            MirTerminator::Jump(edge) if edge.target == header => {
+                let mut used = vec![false; control.blocks.len()];
+                used[entry.index()] = true;
+                for id in &chain {
+                    if used[id.index()] {
+                        return None;
+                    }
+                    used[id.index()] = true;
+                }
+                if used.iter().all(|used| *used) {
+                    return Some(StructuredLoop {
+                        entry,
+                        header,
+                        chain,
+                        tail: StructuredTail::Backedge,
+                    });
+                }
+                return None;
+            },
+            MirTerminator::Jump(edge) => current = edge.target,
+            MirTerminator::Branch {
+                taken, not_taken, ..
+            } => {
+                let taken = classify(taken.target)?;
+                let not_taken = classify(not_taken.target)?;
+                let (backedge_taken, backedge_block, exit_block) = match (taken, not_taken) {
+                    (Arm::Backedge(backedge), Arm::Exit(exit)) => (true, backedge, exit),
+                    (Arm::Exit(exit), Arm::Backedge(backedge)) => (false, backedge, exit),
+                    _ => return None,
+                };
+                let mut used = vec![false; control.blocks.len()];
+                used[entry.index()] = true;
+                for id in &chain {
+                    if used[id.index()] {
+                        return None;
+                    }
+                    used[id.index()] = true;
+                }
+                if let Some(id) = backedge_block {
+                    if used[id.index()] {
+                        return None;
+                    }
+                    used[id.index()] = true;
+                }
+                if used[exit_block.index()] {
+                    return None;
+                }
+                used[exit_block.index()] = true;
+                if !used.iter().all(|used| *used) {
+                    return None;
+                }
+                return Some(StructuredLoop {
+                    entry,
+                    header,
+                    chain,
+                    tail: StructuredTail::Conditional {
+                        backedge_taken,
+                        backedge_block,
+                        exit_block,
+                    },
+                });
+            },
+            MirTerminator::Exit(_) => return None,
+        }
+    }
+}
+
+fn control_edge_count(mir: &MirRegion) -> u32 {
+    mir.control
+        .blocks
+        .iter()
+        .map(|block| match &block.terminator {
+            MirTerminator::Exit(_) => 0,
+            MirTerminator::Jump(_) => 1,
+            MirTerminator::Branch { .. } => 2,
+        })
+        .sum()
 }
 enum Local {
     I32(WasmLocal),
@@ -191,7 +335,7 @@ impl Emitter<'_> {
     fn state(&mut self, state: StateId) {
         self.observe_state(state, state, false);
     }
-    fn copy_edge(&mut self, edge: &MirEdge, pc: &WasmLocal) {
+    fn copy_edge_values(&mut self, edge: &MirEdge) {
         let mut scratch = Vec::new();
         for copy in &edge.copies {
             match *copy {
@@ -217,8 +361,127 @@ impl Emitter<'_> {
         for temp in scratch {
             self.free_temporary(temp);
         }
+    }
+    fn copy_edge(&mut self, edge: &MirEdge, pc: &WasmLocal) {
+        self.copy_edge_values(edge);
         self.w.const_i32(edge.target.0 as i32);
         self.w.set_local(pc);
+    }
+    fn emit_block_body(&mut self, id: BlockId, remaining: &WasmLocal) {
+        let resets = self.mir.ram_loop_resets(id).to_vec();
+        for slot in resets {
+            self.cache_clear(MemoryCache::Loop(slot));
+        }
+        let block = self.mir.control.blocks[id.index()].clone();
+        self.poll(block.recovery, block.budget_cost, remaining);
+        for id in block.instructions {
+            self.instruction(id, remaining);
+        }
+    }
+    fn emit_exit_block(&mut self, id: BlockId, remaining: &WasmLocal) {
+        self.emit_block_body(id, remaining);
+        let terminator = self.mir.control.blocks[id.index()].terminator.clone();
+        let MirTerminator::Exit(state) = terminator else {
+            unreachable!("verified structured exit block");
+        };
+        self.state(state);
+        self.w.return_();
+    }
+    fn emit_backedge_arm(
+        &mut self,
+        edge: &MirEdge,
+        arm: Option<BlockId>,
+        header: BlockId,
+        remaining: &WasmLocal,
+        loop_label: Label,
+    ) {
+        self.copy_edge_values(edge);
+        if let Some(id) = arm {
+            self.emit_block_body(id, remaining);
+            let terminator = self.mir.control.blocks[id.index()].terminator.clone();
+            let MirTerminator::Jump(backedge) = terminator else {
+                unreachable!("verified structured backedge block");
+            };
+            debug_assert_eq!(backedge.target, header);
+            self.copy_edge_values(&backedge);
+        }
+        self.w.br(loop_label);
+    }
+    fn emit_structured_loop(&mut self, plan: &StructuredLoop, remaining: &WasmLocal) {
+        self.emit_block_body(plan.entry, remaining);
+        let entry_terminator = self.mir.control.blocks[plan.entry.index()].terminator.clone();
+        let MirTerminator::Jump(entry_edge) = entry_terminator else {
+            unreachable!("verified structured entry");
+        };
+        debug_assert_eq!(entry_edge.target, plan.header);
+        self.copy_edge_values(&entry_edge);
+
+        let loop_label = self.w.loop_void();
+        for (index, id) in plan.chain.iter().copied().enumerate() {
+            self.emit_block_body(id, remaining);
+            let terminator = self.mir.control.blocks[id.index()].terminator.clone();
+            let tail = index + 1 == plan.chain.len();
+            if !tail {
+                let MirTerminator::Jump(edge) = terminator else {
+                    unreachable!("verified structured loop chain");
+                };
+                debug_assert_eq!(edge.target, plan.chain[index + 1]);
+                self.copy_edge_values(&edge);
+                continue;
+            }
+            match (&plan.tail, terminator) {
+                (StructuredTail::Backedge, MirTerminator::Jump(edge)) => {
+                    debug_assert_eq!(edge.target, plan.header);
+                    self.copy_edge_values(&edge);
+                    self.w.br(loop_label);
+                },
+                (
+                    StructuredTail::Conditional {
+                        backedge_taken,
+                        backedge_block,
+                        exit_block,
+                    },
+                    MirTerminator::Branch {
+                        condition,
+                        taken,
+                        not_taken,
+                    },
+                ) => {
+                    self.get_local(condition);
+                    self.w.if_void();
+                    if *backedge_taken {
+                        self.emit_backedge_arm(
+                            &taken,
+                            *backedge_block,
+                            plan.header,
+                            remaining,
+                            loop_label,
+                        );
+                    } else {
+                        self.copy_edge_values(&taken);
+                        self.emit_exit_block(*exit_block, remaining);
+                    }
+                    self.w.else_();
+                    if *backedge_taken {
+                        self.copy_edge_values(&not_taken);
+                        self.emit_exit_block(*exit_block, remaining);
+                    } else {
+                        self.emit_backedge_arm(
+                            &not_taken,
+                            *backedge_block,
+                            plan.header,
+                            remaining,
+                            loop_label,
+                        );
+                    }
+                    self.w.block_end();
+                    self.w.unreachable();
+                },
+                _ => unreachable!("verified structured loop tail"),
+            }
+        }
+        self.w.unreachable();
+        self.w.block_end();
     }
     /// Decode the packed CPU adapter result without touching any SSA result slot.
     fn packed_cpu_result(&mut self, result: ValueId, trap_after_fault: bool) {
@@ -1198,65 +1461,84 @@ fn emit_inner(
             e.locals.push(Local::I32(e.w.set_new_local()));
         }
     }
-    e.w.const_i32(-1);
-    let pc = e.w.set_new_local();
-    for (i, entry) in mir.control.entries.iter().enumerate() {
-        e.w.get_local(&e.w.arg_local_initial_state.unsafe_clone());
-        e.w.const_i32(i as i32);
-        e.w.eq_i32();
-        e.w.if_void();
-        e.w.const_i32(entry.0 as i32);
-        e.w.set_local(&pc);
-        e.w.block_end();
-    }
-    e.w.get_local(&pc);
-    e.w.const_i32(-1);
-    e.w.eq_i32();
-    e.w.if_void();
-    e.w.return_();
-    e.w.block_end();
+    let structured = if cpu { structured_loop_plan(mir) } else { None };
+    let structured_cfg = structured.is_some();
+    let structured_backedges = if structured_cfg { 1 } else { 0 };
+    let generic_dispatch_edges = if structured_cfg { 0 } else { control_edge_count(mir) };
+
     e.w.const_i32(budget as i32);
     let remaining = e.w.set_new_local();
-    let dispatch = e.w.loop_void();
-    for (b, block) in mir.control.blocks.iter().enumerate() {
-        e.w.get_local(&pc);
-        e.w.const_i32(b as i32);
+    let mut pc = None;
+    if let Some(plan) = &structured {
+        if entry.is_none() {
+            // The generic single-entry dispatcher accepts only initial_state=0.
+            // Keep that external ABI while removing the internal pc local.
+            e.w.get_local(&e.w.arg_local_initial_state.unsafe_clone());
+            e.w.if_void();
+            e.w.return_();
+            e.w.block_end();
+        }
+        e.emit_structured_loop(plan, &remaining);
+    } else {
+        e.w.const_i32(-1);
+        let pc_local = e.w.set_new_local();
+        for (i, entry) in mir.control.entries.iter().enumerate() {
+            e.w.get_local(&e.w.arg_local_initial_state.unsafe_clone());
+            e.w.const_i32(i as i32);
+            e.w.eq_i32();
+            e.w.if_void();
+            e.w.const_i32(entry.0 as i32);
+            e.w.set_local(&pc_local);
+            e.w.block_end();
+        }
+        e.w.get_local(&pc_local);
+        e.w.const_i32(-1);
         e.w.eq_i32();
         e.w.if_void();
-        for &slot in mir.ram_loop_resets(BlockId(b as u32)) {
-            e.cache_clear(MemoryCache::Loop(slot));
-        }
-        e.poll(block.recovery, block.budget_cost, &remaining);
-        for id in &block.instructions {
-            e.instruction(*id, &remaining);
-        }
-        match &block.terminator {
-            MirTerminator::Exit(state) => {
-                e.state(*state);
-                e.w.return_();
-            },
-            MirTerminator::Jump(edge) => {
-                e.copy_edge(edge, &pc);
-                e.w.br(dispatch);
-            },
-            MirTerminator::Branch {
-                condition,
-                taken,
-                not_taken,
-            } => {
-                e.get_local(*condition);
-                e.w.if_void();
-                e.copy_edge(taken, &pc);
-                e.w.else_();
-                e.copy_edge(not_taken, &pc);
-                e.w.block_end();
-                e.w.br(dispatch);
-            },
-        }
+        e.w.return_();
         e.w.block_end();
+        let dispatch = e.w.loop_void();
+        for (b, block) in mir.control.blocks.iter().enumerate() {
+            e.w.get_local(&pc_local);
+            e.w.const_i32(b as i32);
+            e.w.eq_i32();
+            e.w.if_void();
+            for &slot in mir.ram_loop_resets(BlockId(b as u32)) {
+                e.cache_clear(MemoryCache::Loop(slot));
+            }
+            e.poll(block.recovery, block.budget_cost, &remaining);
+            for id in &block.instructions {
+                e.instruction(*id, &remaining);
+            }
+            match &block.terminator {
+                MirTerminator::Exit(state) => {
+                    e.state(*state);
+                    e.w.return_();
+                },
+                MirTerminator::Jump(edge) => {
+                    e.copy_edge(edge, &pc_local);
+                    e.w.br(dispatch);
+                },
+                MirTerminator::Branch {
+                    condition,
+                    taken,
+                    not_taken,
+                } => {
+                    e.get_local(*condition);
+                    e.w.if_void();
+                    e.copy_edge(taken, &pc_local);
+                    e.w.else_();
+                    e.copy_edge(not_taken, &pc_local);
+                    e.w.block_end();
+                    e.w.br(dispatch);
+                },
+            }
+            e.w.block_end();
+        }
+        e.w.unreachable();
+        e.w.block_end();
+        pc = Some(pc_local);
     }
-    e.w.unreachable();
-    e.w.block_end();
     let locals = e.w.declared_local_count();
     for local in e.locals {
         match local {
@@ -1265,7 +1547,9 @@ fn emit_inner(
             Local::V128(local) => e.w.free_local_v128(local),
         }
     }
-    e.w.free_local(pc);
+    if let Some(pc) = pc {
+        e.w.free_local(pc);
+    }
     e.w.free_local(remaining);
     if let Some(local) = e.accounted {
         e.w.free_local(local);
@@ -1289,5 +1573,11 @@ fn emit_inner(
     if bytes.len() > 256 * 1024 {
         return Err(CompileError::Budget("Wasm bytes"));
     }
-    Ok(Artifact { bytes, locals })
+    Ok(Artifact {
+        bytes,
+        locals,
+        structured_cfg,
+        structured_backedges,
+        generic_dispatch_edges,
+    })
 }

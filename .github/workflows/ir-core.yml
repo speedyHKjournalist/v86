@@ -41,6 +41,10 @@ jobs:
         run: |
           RUSTFLAGS="-D warnings" cargo check --release --target wasm32-unknown-unknown
           RUSTFLAGS="-D warnings" cargo check --release --target wasm32-unknown-unknown --features ir-experimental
+      - name: Focused IR-09 structured CFG regressions
+        run: |
+          set -o pipefail
+          env RUSTFLAGS="-D warnings" cargo test ir::cfg_frontend_tests::reachable_cfg_fixtures -- --nocapture 2>&1 | tee build/ir09-structured-cfg.log
       - name: Focused IR-11 RAM proof regressions
         run: |
           set -o pipefail

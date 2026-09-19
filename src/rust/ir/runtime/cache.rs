@@ -47,6 +47,10 @@ struct Cache {
     guest_steps: u32,
     max_guest_steps: u32,
     zero_step_exits: u32,
+    structured_publications: u32,
+    generic_publications: u32,
+    structured_backedges: u32,
+    generic_dispatch_edges: u32,
 }
 static CACHE: Mutex<Cache> = Mutex::new(Cache {
     records: Vec::new(),
@@ -63,6 +67,10 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     guest_steps: 0,
     max_guest_steps: 0,
     zero_step_exits: 0,
+    structured_publications: 0,
+    generic_publications: 0,
+    structured_backedges: 0,
+    generic_dispatch_edges: 0,
 });
 const CAPACITY: usize = 32;
 extern "C" {
@@ -322,6 +330,16 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
         }
     }
     cache.records[index].phase = Phase::Published;
+    let structured = cache.records[index].job.artifact.code.structured_cfg;
+    let backedges = cache.records[index].job.artifact.code.structured_backedges;
+    let dispatch_edges = cache.records[index].job.artifact.code.generic_dispatch_edges;
+    if structured {
+        cache.structured_publications = cache.structured_publications.wrapping_add(1);
+        cache.structured_backedges = cache.structured_backedges.wrapping_add(backedges);
+    } else {
+        cache.generic_publications = cache.generic_publications.wrapping_add(1);
+        cache.generic_dispatch_edges = cache.generic_dispatch_edges.wrapping_add(dispatch_edges);
+    }
     true
 }
 #[no_mangle]
@@ -359,6 +377,10 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         10 => cache.guest_steps,
         11 => cache.max_guest_steps,
         12 => cache.zero_step_exits,
+        13 => cache.structured_publications,
+        14 => cache.generic_publications,
+        15 => cache.structured_backedges,
+        16 => cache.generic_dispatch_edges,
         _ => 0,
     }
 }
@@ -397,6 +419,9 @@ pub fn ir_cache_entry_stat(
                 2
             }
         },
+        6 => u32::from(record.job.artifact.code.structured_cfg),
+        7 => record.job.artifact.code.structured_backedges,
+        8 => record.job.artifact.code.generic_dispatch_edges,
         _ => 0,
     }
 }

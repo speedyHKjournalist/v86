@@ -88,6 +88,29 @@ fn reachable_cfg_fixtures() {
                         }
                         assert!(mir.control.dynamic_counts);
                         let artifact = emit_cpu(&mir, budget).unwrap();
+                        if matches!(n, 3 | 4 | 5) {
+                            // These branches are operand-size sensitive. At a high
+                            // 32-bit EIP in 16-bit mode, the taken target truncates
+                            // to 16 bits and is therefore outside this snapshot.
+                            let internal_self_loop = mode || pc <= u16::MAX as u32;
+                            assert_eq!(
+                                artifact.structured_cfg,
+                                internal_self_loop,
+                                "self-loop structuring must follow architectural target width: case {n}, mode {mode}, pc {pc:x}: {:?}",
+                                mir.control
+                            );
+                            if internal_self_loop {
+                                assert_eq!(artifact.structured_backedges, 1);
+                                assert_eq!(artifact.generic_dispatch_edges, 0);
+                            }
+                        }
+                        if n == 6 {
+                            assert!(
+                                !artifact.structured_cfg,
+                                "multi-arm merge remains on the generic dispatcher fallback"
+                            );
+                            assert!(artifact.generic_dispatch_edges > 0);
+                        }
                         std::fs::write(
                             format!("build/ir-cfg/{}.wasm", cases.len()),
                             artifact.bytes,
