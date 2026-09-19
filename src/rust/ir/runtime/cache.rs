@@ -340,17 +340,34 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
         return None;
     }
     let entry = live::entry();
-    let mut cache = CACHE.try_lock().unwrap();
-    let found = cache.records.iter().position(|r| {
-        r.phase == Phase::Published && r.job.artifact.entry == EntryContract::Cpu(entry)
-    });
-    let Some(index) = found else {
+    let candidate = {
+        let cache = CACHE.try_lock().unwrap();
+        cache
+            .records
+            .iter()
+            .find(|r| {
+                r.phase == Phase::Published && r.job.artifact.entry == EntryContract::Cpu(entry)
+            })
+            .map(|r| (r.job.artifact.key.job, r.job.source.clone()))
+    };
+    let Some((id, source)) = candidate else {
+        let mut cache = CACHE.try_lock().unwrap();
         cache.link_misses = cache.link_misses.wrapping_add(1);
         return None;
     };
-    if !unchanged(&cache.records[index].job)
-        || !super::snapshot::mappings_cached(&cache.records[index].job.source)
-    {
+    let valid = capture(entry.linear.0, source.bytes.len())
+        .is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings)
+        && super::snapshot::mappings_cached(&source);
+    let mut cache = CACHE.try_lock().unwrap();
+    let Some(index) = cache
+        .records
+        .iter()
+        .position(|r| r.job.artifact.key.job == id && r.phase == Phase::Published)
+    else {
+        cache.link_misses = cache.link_misses.wrapping_add(1);
+        return None;
+    };
+    if !valid || !live::generation_current(cache.records[index].job.artifact.key) {
         cache.records[index].phase = Phase::Retired;
         cache.link_misses = cache.link_misses.wrapping_add(1);
         return None;
@@ -359,7 +376,7 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
     let stamp = cache.clock;
     cache.records[index].last_used = stamp;
     cache.links = cache.links.wrapping_add(1);
-    Some((cache.records[index].slot, cache.records[index].job.artifact.key.job))
+    Some((cache.records[index].slot, id))
 }
 
 /// Called by the ordinary CPU dispatcher, before legacy cache lookup.
