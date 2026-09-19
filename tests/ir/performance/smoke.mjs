@@ -94,6 +94,7 @@ function target_entry_stats(exports)
         structured_cfg: read(6),
         structured_backedges: read(7),
         generic_dispatch_edges: read(8),
+        structured_edges: read(9),
     };
 }
 
@@ -138,6 +139,8 @@ async function sample_ir(execution_budget, round)
             "budget matrix target uses structured CFG emission");
         assert.equal(target_before.structured_backedges, 1);
         assert.equal(target_before.generic_dispatch_edges, 0);
+        assert(target_before.structured_edges > 0,
+            "budget matrix target records directly structured CFG edges");
 
         const warm = await warm_rate(vm);
         await vm.stop();
@@ -177,6 +180,7 @@ async function sample_ir(execution_budget, round)
                 structured_cfg: target_after.structured_cfg,
                 structured_backedges: target_after.structured_backedges,
                 generic_dispatch_edges: target_after.generic_dispatch_edges,
+                structured_edges: target_after.structured_edges,
             },
             global_ir: {
                 tier1_attempts: after.ir.tier1_attempts - before.ir.tier1_attempts,
@@ -192,6 +196,8 @@ async function sample_ir(execution_budget, round)
                     (after.ir.cache_zero_step_exits - before.ir.cache_zero_step_exits) >>> 0,
                 structured_publications:
                     (after.ir.structured_publications - before.ir.structured_publications) >>> 0,
+                structured_edges:
+                    (after.ir.structured_edges - before.ir.structured_edges) >>> 0,
                 generic_publications:
                     (after.ir.generic_publications - before.ir.generic_publications) >>> 0,
                 structured_backedges:
@@ -268,6 +274,8 @@ function summarize_ir(samples, execution_budget)
             samples.filter(sample => sample.target_entry.structured_cfg === 1).length,
         median_structured_backedges:
             median(samples.map(sample => sample.target_entry.structured_backedges)),
+        median_structured_edges:
+            median(samples.map(sample => sample.target_entry.structured_edges)),
         median_generic_dispatch_edges:
             median(samples.map(sample => sample.target_entry.generic_dispatch_edges)),
         median_global_cache_capture_fallbacks:
