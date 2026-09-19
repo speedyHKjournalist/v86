@@ -322,10 +322,7 @@ impl Emitter<'_> {
                     }
                 },
                 Work::Node(Structure::Loop(children)) => {
-                    let entries = children
-                        .first()
-                        .expect("verified non-empty loop")
-                        .head();
+                    let entries = children.first().expect("verified non-empty loop").head();
                     let label = self.w.loop_void();
                     let mut old = Vec::new();
                     for target in &entries {
