@@ -357,7 +357,15 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
     };
     let valid = capture(entry.linear.0, source.bytes.len())
         .is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings)
-        && super::snapshot::mappings_cached(&source);
+        && super::snapshot::mappings_cached(&source)
+        && {
+            let cache = CACHE.try_lock().unwrap();
+            cache
+                .records
+                .iter()
+                .find(|r| r.job.artifact.key.job == id)
+                .is_some_and(|r| live::generation_current(r.job.artifact.key))
+        };
     let mut cache = CACHE.try_lock().unwrap();
     let Some(index) = cache
         .records
@@ -367,7 +375,7 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
         cache.link_misses = cache.link_misses.wrapping_add(1);
         return None;
     };
-    if !valid || !live::generation_current(cache.records[index].job.artifact.key) {
+    if !valid {
         cache.records[index].phase = Phase::Retired;
         cache.link_misses = cache.link_misses.wrapping_add(1);
         return None;
