@@ -37,6 +37,10 @@ jobs:
           mkdir -p build
           make src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs src/rust/gen/jit.rs src/rust/gen/jit0f.rs src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
           make ir-generated-check
+      - name: Warning-free production and experimental Rust
+        run: |
+          RUSTFLAGS="-D warnings" cargo check --release --target wasm32-unknown-unknown
+          RUSTFLAGS="-D warnings" cargo check --release --target wasm32-unknown-unknown --features ir-experimental
       - name: Focused IR-11 RAM proof regressions
         run: |
           set -o pipefail
