@@ -159,7 +159,11 @@ pub unsafe fn ir_compile_live(
     };
     let config = IrConfig {
         optimize: optimize != 0,
-        passes: Default::default(),
+        passes: if tier == 1 {
+            crate::ir::passes::PassConfig::tier1()
+        } else {
+            Default::default()
+        },
         execution_budget: budget,
         rep_iteration_budget: rep_budget,
         max_code_bytes: 1920,

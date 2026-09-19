@@ -652,6 +652,17 @@ ir-cfg-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs build/j
 	cargo test ir::cfg_frontend_tests
 	node tests/ir/differential/cfg.mjs
 
+.PHONY: ir09-completion-tests
+ir09-completion-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs build/jit-capacity.bin
+	env RUSTFLAGS="-D warnings" cargo test ir::backend::structure::tests -- --nocapture
+	env RUSTFLAGS="-D warnings" cargo test ir::runtime::region::tests -- --nocapture
+	env RUSTFLAGS="-D warnings" cargo test ir::cfg_frontend_tests -- --nocapture
+	node tests/ir/differential/cfg.mjs
+	@if grep -R -n -E 'jit_instructions|crate::codegen|crate::control_flow|jit_instruction\(' src/rust/ir; then \
+		echo "IR-09 backend must not embed the legacy emitter/control-flow implementation"; \
+		exit 1; \
+	fi
+
 .PHONY: ir-system-stack-tests
 ir-system-stack-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs build/jit-capacity.bin
 	cargo test ir::system_stack_tests

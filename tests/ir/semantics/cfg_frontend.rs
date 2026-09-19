@@ -51,14 +51,18 @@ fn reachable_cfg_fixtures() {
         vec![0xF8, 0xF9, 0xF5, 0xFC, 0xFD, 0x90],
         // Conditional loop with an in-region epilogue after the loop exit.
         vec![0x40, 0x49, 0x75, 0xFC, 0x90],
-        // Nested branch remains outside the first diamond structuring subset.
+        // Nested reducible branch: the general IR-09 structurer must own it.
         vec![0x74, 0x02, 0x75, 0x02, 0x40, 0x90, 0x48, 0x90],
+        // Irreducible SCC: block 0 enters the 1/2/3 cycle through two headers.
+        vec![0x74, 0x02, 0xEB, 0x02, 0xEB, 0xFC, 0xEB, 0xFC],
+        // Nested reducible loops: reset EDX for each outer ECX iteration.
+        vec![0xBA, 2, 0, 0, 0, 0x4A, 0x75, 0xFD, 0x49, 0x75, 0xF5, 0x90],
     ];
     let mut cases = vec![];
     for (n, bytes) in programs.iter().enumerate() {
         for mode in [false, true] {
             // Memory fixture uses [ESI] and the vector prefix requires 32-bit default.
-            if !mode && matches!(n, 1 | 2 | 10 | 12..=18) {
+            if !mode && matches!(n, 1 | 2 | 10 | 12..=18 | 26) {
                 continue;
             }
             for pc in [0x1000u32, 0xFFFFFFFC] {
@@ -92,6 +96,27 @@ fn reachable_cfg_fixtures() {
                         }
                         assert!(mir.control.dynamic_counts);
                         let artifact = emit_cpu(&mir, budget).unwrap();
+                        let control_edges: u32 = mir
+                            .control
+                            .blocks
+                            .iter()
+                            .map(|block| block.terminator.edges().len() as u32)
+                            .sum();
+                        if artifact.structured_cfg {
+                            assert_eq!(
+                                artifact.structured_edges,
+                                control_edges,
+                                "structured metadata must account for every MIR edge"
+                            );
+                            assert_eq!(artifact.generic_dispatch_edges, 0);
+                        } else {
+                            assert_eq!(artifact.structured_edges, 0);
+                            assert_eq!(
+                                artifact.generic_dispatch_edges,
+                                control_edges,
+                                "fallback metadata must account for every MIR edge"
+                            );
+                        }
                         // Relative targets use architectural width and the CFG
                         // snapshot itself may cross the 32-bit EIP wrap. Self/back
                         // edges to the high start address leave the snapshot after
@@ -99,40 +124,32 @@ fn reachable_cfg_fixtures() {
                         // to offset 5 and remains inside the same byte snapshot.
                         let internal_backedge_target = mode || pc <= u16::MAX as u32;
                         if matches!(n, 3 | 4 | 5) {
-                            let linear_external_jump = n == 3 && !internal_backedge_target;
-                            let expected_structured =
-                                internal_backedge_target || linear_external_jump;
-                            assert_eq!(
+                            assert!(
                                 artifact.structured_cfg,
-                                expected_structured,
-                                "self-loop/external-target structuring must follow the actual CFG: case {n}, mode {mode}, pc {pc:x}: {:?}",
+                                "self-loop or width-truncated acyclic CFG must use the general structurer: case {n}, mode {mode}, pc {pc:x}: {:?}",
                                 mir.control
                             );
+                            assert_eq!(
+                                artifact.structured_backedges,
+                                u32::from(internal_backedge_target)
+                            );
                             if internal_backedge_target {
-                                assert_eq!(artifact.structured_backedges, 1);
                                 assert!(artifact.structured_edges > 0);
-                                assert_eq!(artifact.generic_dispatch_edges, 0);
-                            } else if linear_external_jump {
-                                assert_eq!(artifact.structured_backedges, 0);
-                                assert_eq!(artifact.generic_dispatch_edges, 0);
                             }
                         }
                         if matches!(n, 0 | 1 | 2 | 12 | 13 | 17 | 18 | 23) {
-                            let expected = if matches!(n, 0 | 23) {
-                                internal_backedge_target
-                            } else {
-                                true
-                            };
-                            assert_eq!(
+                            assert!(
                                 artifact.structured_cfg,
-                                expected,
-                                "multi-block/epilogue loop structuring: case {n}, mode {mode}, pc {pc:x}: {:?}",
+                                "multi-block loop or width-truncated acyclic form must structure: case {n}, mode {mode}, pc {pc:x}: {:?}",
                                 mir.control
                             );
-                            if expected {
-                                assert_eq!(artifact.structured_backedges, 1);
-                                assert!(artifact.structured_edges >= 2);
-                                assert_eq!(artifact.generic_dispatch_edges, 0);
+                            if matches!(n, 0 | 23) && !internal_backedge_target {
+                                assert_eq!(artifact.structured_backedges, 0);
+                            } else {
+                                assert!(artifact.structured_backedges >= 1);
+                            }
+                            if artifact.structured_backedges > 0 {
+                                assert!(artifact.structured_edges >= artifact.structured_backedges);
                             }
                         }
                         if matches!(n, 6 | 14 | 15) {
@@ -146,17 +163,34 @@ fn reachable_cfg_fixtures() {
                             if expected {
                                 assert_eq!(artifact.structured_backedges, 0);
                                 if n == 6 || !opt {
-                                    assert!(artifact.structured_edges >= 4);
+                                    assert!(artifact.structured_edges > 0);
                                 }
-                                assert_eq!(artifact.generic_dispatch_edges, 0);
                             }
                         }
-                        if n == 24 {
+                        if n == 24 && mode && pc == 0x1000 {
+                            assert!(
+                                artifact.structured_cfg,
+                                "nested reducible branch must use the general structurer: {:?}",
+                                mir.control
+                            );
+                            assert!(artifact.structured_edges > 0);
+                        }
+                        if n == 25 && mode && pc == 0x1000 {
                             assert!(
                                 !artifact.structured_cfg,
-                                "nested branch remains on the generic dispatcher fallback"
+                                "multi-entry irreducible SCC must retain dispatcher fallback"
                             );
                             assert!(artifact.generic_dispatch_edges > 0);
+                        }
+                        if n == 26 && mode {
+                            assert!(
+                                artifact.structured_cfg,
+                                "nested reducible loops must use the general structurer: {:?}",
+                                mir.control
+                            );
+                            assert!(artifact.structured_backedges >= 2);
+                            assert!(artifact.structured_edges > 0);
+                            assert_eq!(artifact.generic_dispatch_edges, 0);
                         }
                         std::fs::write(
                             format!("build/ir-cfg/{}.wasm", cases.len()),
@@ -210,7 +244,7 @@ fn cfg_boundaries_and_immutable_compile() {
             version: 4,
         }],
     };
-    let config = IrConfig {
+    let mut config = IrConfig {
         optimize: true,
         passes: PassConfig::default(),
         execution_budget: 16,
@@ -243,7 +277,12 @@ fn cfg_boundaries_and_immutable_compile() {
         default_32: request.default_32,
         tier: Tier::One,
     };
+    config.passes = PassConfig::tier1();
     let tier_one = compile_cpu_cfg_region(&tier_one, &snapshot, &config).unwrap();
+    assert!(
+        tier_one.code.structured_cfg,
+        "Tier 1 and Tier 2 must share the structured IR backend"
+    );
     assert_eq!(
         tier_one.passes.state_writes_elided,
         0,
@@ -253,6 +292,17 @@ fn cfg_boundaries_and_immutable_compile() {
         tier_one.passes.cpu_values_elided,
         0,
         "Tier 1 must not enable CPU-only value liveness"
+    );
+    assert_eq!(tier_one.passes.loop_hoisted, 0, "Tier 1 must not run LICM");
+    assert_eq!(
+        tier_one.passes.ram_forwarded,
+        0,
+        "Tier 1 must not run RAM forwarding"
+    );
+    assert_eq!(
+        tier_one.passes.helper_states_elided,
+        0,
+        "Tier 1 must not run helper-state elision"
     );
     assert!(artifact.current(
         request.key,

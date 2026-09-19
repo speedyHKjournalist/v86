@@ -5,14 +5,11 @@ use super::{
     compile::*,
     entry::CpuEntryKey,
     live::{self, Job},
-    snapshot::capture,
+    region,
 };
 use crate::{
     cpu::{cpu, global_pointers as gp},
-    ir::{
-        backend::wasm::StateLayout,
-        frontend::decode::{decode, DecodeStop, Flow, GuestEip, LinearAddress},
-    },
+    ir::backend::wasm::StateLayout,
     jit,
 };
 use std::{collections::VecDeque, sync::Mutex};
@@ -157,51 +154,10 @@ unsafe fn record(link: bool) {
 pub unsafe fn note() {
     record(true);
 }
-/// A conservative sequential boundary finder. Direct targets outside the selected
-/// byte window remain explicit region exits in the shared CFG frontend.
+/// Tier-aware reachable-CFG source selection. Direct targets outside the
+/// bounded immutable window remain explicit exits in the shared frontend.
 unsafe fn source(entry: CpuEntryKey, window: u32, tier: u32) -> Option<ImmutableCodeSnapshot> {
-    let window = if tier == 2 { (window * 2).min(960) } else { window };
-    let mut length = window.min(4096 - (entry.linear.0 & 4095)) as usize;
-    let mut bytes = capture(entry.linear.0, length).ok()?;
-    if matches!(
-        decode(&bytes.bytes, entry.pc, entry.linear, entry.default_32),
-        Err(DecodeStop::Incomplete { .. })
-    ) && length < 15
-    {
-        length = 15;
-        bytes = capture(entry.linear.0, length).ok()?;
-    }
-    let mut offset = 0;
-    for _ in 0..if tier == 2 { 48 } else { 32 } {
-        let Ok(i) = decode(
-            &bytes.bytes[offset..],
-            GuestEip(entry.pc.0.wrapping_add(offset as u32)),
-            LinearAddress(entry.linear.0.wrapping_add(offset as u32)),
-            entry.default_32,
-        ) else {
-            break;
-        };
-        offset += i.length as usize;
-        if offset == bytes.bytes.len()
-            || match i.flow {
-                Flow::Next => false,
-                Flow::Relative {
-                    displacement,
-                    conditional,
-                    call,
-                } => !conditional || call || displacement < 0,
-                _ => true,
-            }
-        {
-            break;
-        }
-    }
-    // Retain an undecodable first instruction as a failed input fingerprint.
-    if offset > 0 {
-        capture(entry.linear.0, offset).ok()
-    } else {
-        Some(bytes)
-    }
+    region::capture_region(entry, if tier == 1 { Tier::One } else { Tier::Two }, window)
 }
 fn same(a: &ImmutableCodeSnapshot, b: &ImmutableCodeSnapshot) -> bool {
     a.bytes == b.bytes && a.mappings == b.mappings
@@ -280,19 +236,25 @@ pub unsafe fn visit() {
         let mut s = SCHEDULER.try_lock().unwrap();
         s.stats[tier as usize + 1] = s.stats[tier as usize + 1].wrapping_add(1);
     }
+    let compile_tier = if tier == 1 { Tier::One } else { Tier::Two };
+    let region_policy = region::Policy::for_tier(compile_tier, config.window);
     let request = CompileRequest {
         key,
         pc: entry.pc,
         linear: entry.linear,
         default_32: entry.default_32,
-        tier: if tier == 1 { Tier::One } else { Tier::Two },
+        tier: compile_tier,
     };
     let config = IrConfig {
-        optimize: tier == 2,
-        passes: Default::default(),
+        optimize: true,
+        passes: if tier == 1 {
+            crate::ir::passes::PassConfig::tier1()
+        } else {
+            Default::default()
+        },
         execution_budget: config.budget,
         rep_iteration_budget: config.rep,
-        max_code_bytes: 960,
+        max_code_bytes: region_policy.max_bytes,
         layout: StateLayout {
             gpr: 0,
             flags: 32,

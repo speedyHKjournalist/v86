@@ -1,4 +1,5 @@
 pub mod locals;
+pub mod structure;
 pub mod wasm;
 
 mod simd;

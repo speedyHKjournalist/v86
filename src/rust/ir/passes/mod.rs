@@ -40,6 +40,24 @@ impl Default for PassConfig {
         }
     }
 }
+impl PassConfig {
+    /// Low-latency Tier-1 canonicalization. This may rewrite only local CFG/SSA
+    /// shape; Tier-2 dataflow/state optimizations remain disabled.
+    pub fn tier1() -> Self {
+        Self {
+            prune: true,
+            merge: true,
+            phis: true,
+            copy: true,
+            fold: false,
+            flags: false,
+            helper_state: false,
+            gvn: false,
+            dce: false,
+            rounds: 1,
+        }
+    }
+}
 #[derive(Default, Debug)]
 pub struct PassStats {
     pub branches: usize,
