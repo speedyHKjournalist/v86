@@ -24,7 +24,22 @@ The first subset accepts one single-entry natural loop with a synthetic preheade
 a linear loop body and one backedge. The loop tail may be unconditional or
 conditional.
 
-The second subset extends that proof in two directions.
+The second subset extends that proof in three directions.
+
+### Real preheaders and natural-loop header discovery
+
+The detector no longer assumes that the first internal block is the loop header.
+It follows the single-entry Jump spine and derives the header from the actual
+backedge target:
+
+```text
+entry -> preheader0 -> preheader1 -> header -> ... -> tail
+                                      ^              |
+                                      +--------------+
+```
+
+This covers the same preheader shape used by LICM and keeps all preheader budget
+polls and edge copies in their original order.
 
 ### Linear exit/backedge arms
 
@@ -55,6 +70,13 @@ entry -> test             join -> ... -> Exit
 Either arm may be empty when the branch edge targets the join directly. Edge
 parallel-copy schedules execute on the same logical edge as in the generic
 dispatcher, so join parameters retain normal SSA/phi semantics.
+
+### Linear CFGs after optimization
+
+When Tier-2 CFG cleanup folds a constant branch, the resulting region may be only
+a Jump chain ending in Exit, including a single Exit block. That graph is also
+emitted directly and does not allocate a pc dispatcher merely because its original
+unoptimized form was a diamond.
 
 The detector requires every MIR block in the region to be owned exactly once by
 the selected plan. It rejects nested branches, extra side regions, cycles in a
@@ -97,7 +119,8 @@ The CFG corpus requires:
 
 - unconditional, conditional and LOOP self-loops to select structured emission
   when their architectural target remains inside the snapshot;
-- multi-block natural loops to stay structured;
+- multi-block natural loops, including loops with multiple real preheader blocks,
+  to stay structured;
 - a conditional loop with an in-region epilogue to stay structured;
 - simple diamonds, including memory-bearing arms, to stay structured;
 - a nested-branch graph to remain on the generic fallback;
