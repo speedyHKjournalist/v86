@@ -186,6 +186,35 @@ Interpretation for the next step:
 - entry-scoped average/max guest-step data distinguishes the target hot loop from
   unrelated compiled work, but it is not a direct count of dispatcher budget units.
 
+## Structured CFG follow-up
+
+The corrected six-point matrix from IR-core run 354 confirmed that the synthetic
+target itself consumes the full configured activation budget:
+
+```text
+128 -> 127 retired guest instructions
+256 -> 255
+512 -> 511
+1024 -> 1023
+2048 -> 2047
+4096 -> 4095
+```
+
+Median throughput rose from about 355k steps/ms at 128 to about 766k at 4096, but
+the final doubling improved throughput by only about 3.7% and the 4096 result was
+still only about 60% of the paired legacy median. The remaining gap is therefore
+not plausibly explained by outer activation frequency alone.
+
+IR-09 now adds a conservative structured-CFG fast path for single-entry natural
+loops. Matching loops emit direct Wasm `loop`/branch control instead of writing a
+pc local and re-running a block-id comparison dispatcher on every internal edge.
+Simple conditional loops are accepted only when one arm returns to the loop header
+and the other exits. All other CFGs stay on the existing generic dispatcher.
+
+The six-point matrix now hard-requires its target Tier-2 entry to report structured
+emission and is rerun unchanged. This makes the before/after comparison isolate the
+internal CFG-dispatch representation rather than a different activation policy.
+
 Further tuning remains separate: safe IR-to-IR continuation/link consumption,
 Tier-1/Tier-2 region/budget policy, compiler-stage timing, and controlled XP/
 application benchmarks.
