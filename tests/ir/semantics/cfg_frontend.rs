@@ -91,7 +91,8 @@ fn reachable_cfg_fixtures() {
                         if matches!(n, 3 | 4 | 5) {
                             assert!(
                                 artifact.structured_cfg,
-                                "simple self-loop fixture {n} should use structured control flow"
+                                "simple self-loop fixture {n} should use structured control flow: {:?}",
+                                mir.control
                             );
                             assert_eq!(artifact.structured_backedges, 1);
                             assert_eq!(artifact.generic_dispatch_edges, 0);
