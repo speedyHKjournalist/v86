@@ -1059,6 +1059,7 @@ CPU.prototype.get_jit_info = function()
         ir["generic_publications"] = exports["ir_cache_stat"](14) >>> 0;
         ir["structured_backedges"] = exports["ir_cache_stat"](15) >>> 0;
         ir["generic_dispatch_edges"] = exports["ir_cache_stat"](16) >>> 0;
+        ir["structured_edges"] = exports["ir_cache_stat"](17) >>> 0;
     }
     return {
         "backend": this.jit_backend,
