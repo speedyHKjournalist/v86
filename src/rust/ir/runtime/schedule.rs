@@ -9,9 +9,7 @@ use super::{
 };
 use crate::{
     cpu::{cpu, global_pointers as gp},
-    ir::{
-        backend::wasm::StateLayout,
-    },
+    ir::backend::wasm::StateLayout,
     jit,
 };
 use std::{collections::VecDeque, sync::Mutex};
@@ -159,11 +157,7 @@ pub unsafe fn note() {
 /// Tier-aware reachable-CFG source selection. Direct targets outside the
 /// bounded immutable window remain explicit exits in the shared frontend.
 unsafe fn source(entry: CpuEntryKey, window: u32, tier: u32) -> Option<ImmutableCodeSnapshot> {
-    region::capture_region(
-        entry,
-        if tier == 1 { Tier::One } else { Tier::Two },
-        window,
-    )
+    region::capture_region(entry, if tier == 1 { Tier::One } else { Tier::Two }, window)
 }
 fn same(a: &ImmutableCodeSnapshot, b: &ImmutableCodeSnapshot) -> bool {
     a.bytes == b.bytes && a.mappings == b.mappings
