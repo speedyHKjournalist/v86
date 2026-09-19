@@ -49,8 +49,7 @@ heat so inactive entries do not immediately recompile.
 
 IR-12 adds a cache-owned link-target lookup for compiled exits. A link lookup is
 only a hint: it identifies a currently published target for the exact
-`CpuEntryKey`, then rechecks VM generation, immutable source bytes, physical
-mapping identity and cached mappings.
+`CpuEntryKey`, then rechecks VM generation, immutable source bytes and physical mapping identity. Cached-TLB visibility remains part of the normal execution admission, so a graph lookup cannot create architectural A-bit effects merely to discover a target.
 
 The lookup never performs an unchecked `call_indirect`, never compiles or
 publishes while guest locals are live, and never retains a cache lock across guest
