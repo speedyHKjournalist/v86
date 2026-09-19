@@ -252,7 +252,7 @@ pub unsafe fn visit() {
         },
         execution_budget: config.budget,
         rep_iteration_budget: config.rep,
-        max_code_bytes: 960,
+        max_code_bytes: if tier == 1 { 960 } else { 1920 },
         layout: StateLayout {
             gpr: 0,
             flags: 32,
