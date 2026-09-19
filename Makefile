@@ -219,7 +219,7 @@ build/v86.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	-BLOCK_SIZE=K ls -l build/v86.wasm
 	cargo rustc --release $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86.wasm
-	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86.wasm -o build/v86.wasm
+	@if [ "$(WASM_OPT)" != "false" ]; then $(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86.wasm -o build/v86.wasm; fi
 	BLOCK_SIZE=K ls -l build/v86.wasm
 
 build/v86-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
