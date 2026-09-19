@@ -116,6 +116,8 @@ async function sample_ir()
                 tier2_attempts: after.ir.tier2_attempts - before.ir.tier2_attempts,
                 tier2_published: after.ir.tier2_published - before.ir.tier2_published,
                 cache_hits: after.ir.cache_hits - before.ir.cache_hits,
+                cache_cached_checks: after.ir.cache_cached_checks - before.ir.cache_cached_checks,
+                cache_capture_fallbacks: after.ir.cache_capture_fallbacks - before.ir.cache_capture_fallbacks,
             },
             recorder: {
                 duration_ms: report.duration_ms,
