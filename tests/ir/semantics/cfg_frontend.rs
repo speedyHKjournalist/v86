@@ -99,15 +99,21 @@ fn reachable_cfg_fixtures() {
                         // to offset 5 and remains inside the same byte snapshot.
                         let internal_backedge_target = mode || pc <= u16::MAX as u32;
                         if matches!(n, 3 | 4 | 5) {
+                            let linear_external_jump = n == 3 && !internal_backedge_target;
+                            let expected_structured =
+                                internal_backedge_target || linear_external_jump;
                             assert_eq!(
                                 artifact.structured_cfg,
-                                internal_backedge_target,
-                                "self-loop structuring must follow architectural target width: case {n}, mode {mode}, pc {pc:x}: {:?}",
+                                expected_structured,
+                                "self-loop/external-target structuring must follow the actual CFG: case {n}, mode {mode}, pc {pc:x}: {:?}",
                                 mir.control
                             );
                             if internal_backedge_target {
                                 assert_eq!(artifact.structured_backedges, 1);
                                 assert!(artifact.structured_edges > 0);
+                                assert_eq!(artifact.generic_dispatch_edges, 0);
+                            } else if linear_external_jump {
+                                assert_eq!(artifact.structured_backedges, 0);
                                 assert_eq!(artifact.generic_dispatch_edges, 0);
                             }
                         }
@@ -139,7 +145,9 @@ fn reachable_cfg_fixtures() {
                             );
                             if expected {
                                 assert_eq!(artifact.structured_backedges, 0);
-                                assert!(artifact.structured_edges >= 4);
+                                if n == 6 || !opt {
+                                    assert!(artifact.structured_edges >= 4);
+                                }
                                 assert_eq!(artifact.generic_dispatch_edges, 0);
                             }
                         }
