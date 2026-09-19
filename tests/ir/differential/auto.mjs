@@ -50,7 +50,7 @@ try{
     const offset=cpu.instruction_pointer[0]-PC;assert(offset>=0&&offset<=41);
     assert.equal(new Uint32Array(e.memory.buffer)[664>>2],((cpu.reg32[0]-(offset?1:0))*42+offset)>>>0);
     console.log(`PASS: ${wasm}: a 42-instruction loop spans lightweight regions and preserves exact retirement through the larger optimized region`);
-    await prepare([0xEB,0x02,0xCC,0xCC,0x40,0xEB,0xFD]);before=stats();let reachableHits=e.ir_cache_stat(2);configure();vm.run();
+    await prepare([0xEB,0x02,0xCC,0xCC,0x40,0xEB,0xFD]);let before=stats();let reachableHits=e.ir_cache_stat(2);configure();vm.run();
     await until(()=>e.ir_auto_stat(5)>before[5]&&e.ir_cache_stat(2)>reachableHits,"reachable forward-edge Tier 1/2 region");await vm.stop();
     assert([PC+4,PC+5].includes(cpu.instruction_pointer[0]),"forward target remains inside the compiled region");
     assert(cpu.reg32[0]>>>0>0,"reachable loop executes after the forward jump");
@@ -59,7 +59,7 @@ try{
     assert.equal(e.ir_cache_entry_stat(PC,0,1,8),0,"reachable reducible region avoids generic dispatcher edges");
     console.log(`PASS: ${wasm}: Tier-aware region formation follows a forward jump over dead bytes into an internal hot loop`);
     // Unsupported x87 semantics are suppressed until their actual source changes.
-    await prepare([0xD9,0xEE,0xDD,0xD8,0xEB,0xFA]);let before=stats();configure();vm.run();
+    await prepare([0xD9,0xEE,0xDD,0xD8,0xEB,0xFA]);before=stats();configure();vm.run();
     await until(()=>e.ir_auto_stat(6)>before[6]&&e.ir_auto_stat(8)>before[8],"compile-stop suppression");await sleep(80);
     const attempts=e.ir_auto_stat(2)+e.ir_auto_stat(3);await sleep(100);assert.equal(e.ir_auto_stat(2)+e.ir_auto_stat(3),attempts);
     vm.write_memory(Uint8Array.of(0x40,0xEB,0xFD),PC);await until(()=>e.ir_auto_stat(4)>before[4],"recompile changed code");await vm.stop();
