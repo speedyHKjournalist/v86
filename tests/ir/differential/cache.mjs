@@ -65,7 +65,10 @@ try {
     assert.equal(e.ir_cache_entry_stat(PC,0,1,4),entryZero,"normal entry activation is not a zero-step exit");
     assert.equal(e.ir_cache_entry_stat(PC+1,0,1,0),0,"entry diagnostics require an exact entry key");
     console.log(`PASS: ${wasm}: warm one-page IR admission validates cached mapping/source bytes without recapture and records entry-scoped activation work`);
+    const structuredPublications=e.ir_cache_stat(13),genericPublications=e.ir_cache_stat(14);
     prepare([0xEB,0xFE]);assert(await request(2));
+    assert.equal(e.ir_cache_stat(13)-structuredPublications,1,"structured publication counter advances");
+    assert.equal(e.ir_cache_stat(14),genericPublications,"structured loop does not count as generic publication");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,6),1,"self-loop publication uses structured CFG");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,7),1,"structured self-loop records one backedge");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,8),0,"structured self-loop bypasses generic dispatch edges");
