@@ -46,6 +46,12 @@ try {
     }
     e.performance_recording_enable(0);
     console.log(`PASS: ${wasm}: ${programs} published CFG/store modules executed by normal CPU dispatch, both tier requests, optimization and recording modes`);
+    prepare([0x40,0xF4]);assert(await request(1));await run();
+    let cachedChecks=e.ir_cache_stat(8),captureFallbacks=e.ir_cache_stat(9),warmHits=e.ir_cache_stat(2);
+    await run();assert.equal(e.ir_cache_stat(2)-warmHits,1);
+    assert(e.ir_cache_stat(8)-cachedChecks>=2,"warm admission uses cached pre/post source validation");
+    assert.equal(e.ir_cache_stat(9),captureFallbacks,"warm admission avoids read-only snapshot fallback");
+    console.log(`PASS: ${wasm}: warm one-page IR admission validates cached mapping/source bytes without recapture`);
     // Entry fetch has architectural A-bit effects. A cold secondary page is not
     // eagerly fetched just because it belongs to the immutable request window.
     prepare([0xB8,...u32(0x12345678),0xF4],PC+4094);assert(await request(5));
