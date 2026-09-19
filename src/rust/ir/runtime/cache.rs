@@ -420,21 +420,36 @@ pub unsafe fn execute() -> bool {
     let selected = {
         let mut cache = CACHE.try_lock().unwrap();
         let mut selected = None;
-        for r in &mut cache.records {
-            if r.phase != Phase::Published {
+        for index in 0..cache.records.len() {
+            if cache.records[index].phase != Phase::Published {
                 continue;
             }
-            let EntryContract::Cpu(entry) = r.job.artifact.entry else {
+            let EntryContract::Cpu(entry) = cache.records[index].job.artifact.entry else {
                 continue;
             };
             if !ir_entry_matches(entry.linear.0, entry.cs_base(), entry.default_32 as u32) {
                 continue;
             }
-            if !unchanged_full(&r.job) {
-                r.phase = Phase::Retired;
+            let cached = cached_current(&cache.records[index].job);
+            let valid = match cached {
+                CachedMatch::Match => {
+                    cache.cached_checks = cache.cached_checks.wrapping_add(1);
+                    true
+                },
+                CachedMatch::Unavailable => {
+                    cache.capture_fallbacks = cache.capture_fallbacks.wrapping_add(1);
+                    unchanged_full(&cache.records[index].job)
+                },
+                CachedMatch::Stale => false,
+            };
+            if !valid {
+                cache.records[index].phase = Phase::Retired;
                 continue;
             }
-            selected = Some((r.slot, r.job.artifact.key.job));
+            selected = Some((
+                cache.records[index].slot,
+                cache.records[index].job.artifact.key.job,
+            ));
             break;
         }
         selected
@@ -444,25 +459,34 @@ pub unsafe fn execute() -> bool {
         return false;
     };
     // Preserve the dispatcher's actual initial fetch translation and A-bit
-    // updates. The read-only capture above is only a compilation/admission check.
+    // updates. A cached fast check above is sufficient only when every source
+    // mapping is already CPU-visible; otherwise the read-only capture fallback
+    // validates without creating A-bit side effects.
     *gp::previous_ip = *gp::instruction_pointer;
     if cpu::get_phys_eip().is_err() {
         return true;
     }
     let admitted = {
         let mut cache = CACHE.try_lock().unwrap();
-        let record = cache
+        let index = cache
             .records
-            .iter_mut()
-            .find(|r| r.job.artifact.key.job == id && r.phase == Phase::Published);
-        let valid = if let Some(r) = record {
+            .iter()
+            .position(|r| r.job.artifact.key.job == id && r.phase == Phase::Published);
+        let valid = if let Some(index) = index {
             // Page tables can themselves alias code: the A-bit update must not
-            // leave a module compiled from the pre-fetch bytes admissible.
-            if !unchanged_full(&r.job) {
-                r.phase = Phase::Retired;
-                false
-            } else {
-                super::snapshot::mappings_cached(&r.job.source)
+            // leave a module compiled from the pre-fetch bytes admissible. After
+            // the architectural fetch, admission requires cached mapping identity;
+            // an unavailable secondary mapping remains published for a later hit.
+            match cached_current(&cache.records[index].job) {
+                CachedMatch::Match => {
+                    cache.cached_checks = cache.cached_checks.wrapping_add(1);
+                    true
+                },
+                CachedMatch::Unavailable => false,
+                CachedMatch::Stale => {
+                    cache.records[index].phase = Phase::Retired;
+                    false
+                },
             }
         } else {
             false
