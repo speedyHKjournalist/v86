@@ -161,7 +161,8 @@ fn loopify(graph: &Graph, external_entries: &Set, backedges: &mut u32) -> Option
             if graph.get(&id).is_some_and(|edges| edges.contains(&id)) {
                 *backedges = backedges.wrapping_add(1);
                 result.push(Structure::Loop(vec![node]));
-            } else {
+            }
+            else {
                 result.push(node);
             }
             continue;
@@ -173,9 +174,9 @@ fn loopify(graph: &Graph, external_entries: &Set, backedges: &mut u32) -> Option
             .copied()
             .filter(|id| {
                 external_entries.contains(id)
-                    || reverse.get(id).is_some_and(|preds| {
-                        preds.iter().any(|pred| !members.contains(pred))
-                    })
+                    || reverse
+                        .get(id)
+                        .is_some_and(|preds| preds.iter().any(|pred| !members.contains(pred)))
             })
             .collect();
         // A cyclic SCC with more than one externally reachable header is
@@ -236,7 +237,8 @@ fn blockify(nodes: &mut Vec<Structure>, graph: &Graph) {
         }
 
         let heads: Set = nodes[index].head().into_iter().collect();
-        let Some(source) = (0..index).find(|source| !cached[*source].is_disjoint(&heads)) else {
+        let Some(source) = (0..index).find(|source| !cached[*source].is_disjoint(&heads))
+        else {
             index += 1;
             continue;
         };
