@@ -380,6 +380,17 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
     Some((cache.records[index].slot, id))
 }
 
+#[no_mangle]
+pub unsafe fn ir_cache_link_target() -> u64 {
+    let Some((slot, id)) = link_target() else {
+        return 0;
+    };
+    // Slot zero is never allocated. Pack slot and a truncated owner witness for
+    // diagnostics; execution must still use normal cache admission, never this
+    // value as an unchecked call target.
+    ((id as u32 as u64) << 32) | slot as u64
+}
+
 /// Called by the ordinary CPU dispatcher, before legacy cache lookup.
 /// No request means no IR entry; compilation policy/tier promotion remain separate.
 pub unsafe fn execute() -> bool {
