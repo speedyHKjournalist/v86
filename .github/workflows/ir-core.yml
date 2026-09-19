@@ -99,4 +99,7 @@ jobs:
           name: ir-diagnostics-${{ github.sha }}
           retention-days: 7
           if-no-files-found: ignore
-          path: build/ir-*.log
+          path: |
+            build/ir-*.log
+            build/ir13-smoke.log
+            build/ir13-performance-smoke.json
