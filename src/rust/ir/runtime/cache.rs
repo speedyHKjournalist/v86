@@ -348,24 +348,17 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
             .find(|r| {
                 r.phase == Phase::Published && r.job.artifact.entry == EntryContract::Cpu(entry)
             })
-            .map(|r| (r.job.artifact.key.job, r.job.source.clone()))
+            .map(|r| (r.job.artifact.key.job, r.job.artifact.key, r.job.source.clone()))
     };
-    let Some((id, source)) = candidate else {
+    let Some((id, key, source)) = candidate else {
         let mut cache = CACHE.try_lock().unwrap();
         cache.link_misses = cache.link_misses.wrapping_add(1);
         return None;
     };
-    let valid = capture(entry.linear.0, source.bytes.len())
-        .is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings)
-        && super::snapshot::mappings_cached(&source)
-        && {
-            let cache = CACHE.try_lock().unwrap();
-            cache
-                .records
-                .iter()
-                .find(|r| r.job.artifact.key.job == id)
-                .is_some_and(|r| live::generation_current(r.job.artifact.key))
-        };
+    let valid = live::generation_current(key)
+        && capture(entry.linear.0, source.bytes.len())
+            .is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings)
+        && super::snapshot::mappings_cached(&source);
     let mut cache = CACHE.try_lock().unwrap();
     let Some(index) = cache
         .records
