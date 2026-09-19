@@ -81,7 +81,11 @@ pub fn reachable_length(
         }
         max_end = max_end.max(end);
         match instruction.flow {
-            Flow::Next => {
+            // Legacy analysis uses Boundary for several ordinary basic-block
+            // ends (notably memory forms). The IR frontend owns the semantic
+            // stop decision, so keep the fallthrough available unless the
+            // shared decoder already identifies a baseline #UD form.
+            Flow::Next | Flow::Boundary if !instruction.baseline_ud => {
                 if end < bytes.len() {
                     pending.insert(end);
                 }
@@ -183,6 +187,27 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn boundary_memory_form_keeps_candidate_fallthrough() {
+        // MOV EAX,[ESI]; INC EAX. The shared decoder marks the memory form as a
+        // legacy block boundary, but the IR CFG frontend can decide whether its
+        // precise memory contract permits continuation.
+        let bytes = [0x8B, 0x06, 0x40];
+        assert_eq!(
+            reachable_length(
+                &bytes,
+                GuestEip(0x1000),
+                LinearAddress(0x2000),
+                true,
+                Policy {
+                    max_bytes: bytes.len(),
+                    max_instructions: 32,
+                },
+            ),
+            bytes.len()
+        );
+    }
+
     fn keeps_external_targets_as_region_exits() {
         let bytes = [0xEB, 0x7F, 0x40, 0x40];
         assert_eq!(
