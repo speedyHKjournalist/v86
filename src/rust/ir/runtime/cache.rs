@@ -27,6 +27,10 @@ struct Record {
     automatic: bool,
     /// Monotonic use stamp for deterministic cold-point eviction.
     last_used: u64,
+    hits: u32,
+    guest_steps: u32,
+    max_guest_steps: u32,
+    zero_step_exits: u32,
 }
 struct Cache {
     records: Vec<Record>,
@@ -180,6 +184,10 @@ pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
         phase: Phase::Pending,
         automatic,
         last_used,
+        hits: 0,
+        guest_steps: 0,
+        max_guest_steps: 0,
+        zero_step_exits: 0,
     });
     slot
 }
@@ -351,6 +359,44 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         10 => cache.guest_steps,
         11 => cache.max_guest_steps,
         12 => cache.zero_step_exits,
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub fn ir_cache_entry_stat(
+    linear: u32,
+    cs_base: u32,
+    default_32: u32,
+    field: u32,
+) -> u32 {
+    let cache = CACHE.try_lock().unwrap();
+    let Some(record) = cache.records.iter().find(|record| {
+        if record.phase != Phase::Published {
+            return false;
+        }
+        let EntryContract::Cpu(entry) = record.job.artifact.entry else {
+            return false;
+        };
+        entry.linear.0 == linear
+            && entry.cs_base() == cs_base
+            && u32::from(entry.default_32) == default_32
+    }) else {
+        return 0;
+    };
+    match field {
+        0 => 1,
+        1 => record.hits,
+        2 => record.guest_steps,
+        3 => record.max_guest_steps,
+        4 => record.zero_step_exits,
+        5 => {
+            if record.job.artifact.tier == super::compile::Tier::One {
+                1
+            } else {
+                2
+            }
+        },
         _ => 0,
     }
 }
@@ -543,6 +589,18 @@ pub unsafe fn execute() -> bool {
         cache.max_guest_steps = cache.max_guest_steps.max(steps);
         if steps == 0 {
             cache.zero_step_exits = cache.zero_step_exits.wrapping_add(1);
+        }
+        if let Some(record) = cache
+            .records
+            .iter_mut()
+            .find(|record| record.job.artifact.key.job == id)
+        {
+            record.hits = record.hits.wrapping_add(1);
+            record.guest_steps = record.guest_steps.wrapping_add(steps);
+            record.max_guest_steps = record.max_guest_steps.max(steps);
+            if steps == 0 {
+                record.zero_step_exits = record.zero_step_exits.wrapping_add(1);
+            }
         }
         // Zero-budget REP and other no-retirement exits must not trap scheduling
         // in a repeatedly admitted entry. The next cycle may interpret instead.
