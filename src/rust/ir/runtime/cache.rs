@@ -4,7 +4,7 @@
 use super::{
     entry::{ir_entry_matches, EntryContract},
     live::{self, Job},
-    snapshot::capture,
+    snapshot::{capture, cached_match, CachedMatch},
 };
 use crate::{
     cpu::{cpu, global_pointers as gp},
@@ -38,6 +38,8 @@ struct Cache {
     clock: u64,
     links: u32,
     link_misses: u32,
+    cached_checks: u32,
+    capture_fallbacks: u32,
 }
 static CACHE: Mutex<Cache> = Mutex::new(Cache {
     records: Vec::new(),
@@ -49,6 +51,8 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     clock: 0,
     links: 0,
     link_misses: 0,
+    cached_checks: 0,
+    capture_fallbacks: 0,
 });
 const CAPACITY: usize = 32;
 extern "C" {
@@ -78,7 +82,16 @@ pub fn dirty_page(page: u32) {
 unsafe fn cold() -> bool {
     !cpu::in_jit && !busy() && jit::ir_cache_quiescent()
 }
-unsafe fn unchanged(job: &Job) -> bool {
+unsafe fn cached_current(job: &Job) -> CachedMatch {
+    if !live::generation_current(job.artifact.key) {
+        return CachedMatch::Stale;
+    }
+    let EntryContract::Cpu(entry) = job.artifact.entry else {
+        return CachedMatch::Stale;
+    };
+    cached_match(entry.linear.0, &job.source)
+}
+unsafe fn unchanged_full(job: &Job) -> bool {
     if !live::generation_current(job.artifact.key) {
         return false;
     }
@@ -131,7 +144,7 @@ pub unsafe fn ir_cache_reserve(id: u64) -> u32 {
     reserve_job(job, false)
 }
 pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
-    if !cold() || !unchanged(&job) {
+    if !cold() || !unchanged_full(&job) {
         return 0;
     }
     ir_cache_collect();
@@ -251,7 +264,7 @@ pub unsafe fn ir_cache_validate(id: u64, slot: u32) -> bool {
         .iter_mut()
         .find(|r| r.job.artifact.key.job == id && r.slot == slot)
     {
-        if r.phase == Phase::Pending && unchanged(&r.job) {
+        if r.phase == Phase::Pending && unchanged_full(&r.job) {
             r.phase = Phase::Validated;
             true
         } else {
@@ -284,7 +297,7 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
     if cache.records[index].phase != Phase::Validated {
         return false;
     }
-    if !unchanged(&cache.records[index].job) {
+    if !unchanged_full(&cache.records[index].job) {
         cache.records[index].phase = Phase::Retired;
         return false;
     }
@@ -327,6 +340,8 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         5 => cache.reclaimed,
         6 => cache.links,
         7 => cache.link_misses,
+        8 => cache.cached_checks,
+        9 => cache.capture_fallbacks,
         _ => 0,
     }
 }
@@ -415,7 +430,7 @@ pub unsafe fn execute() -> bool {
             if !ir_entry_matches(entry.linear.0, entry.cs_base(), entry.default_32 as u32) {
                 continue;
             }
-            if !unchanged(&r.job) {
+            if !unchanged_full(&r.job) {
                 r.phase = Phase::Retired;
                 continue;
             }
@@ -443,7 +458,7 @@ pub unsafe fn execute() -> bool {
         let valid = if let Some(r) = record {
             // Page tables can themselves alias code: the A-bit update must not
             // leave a module compiled from the pre-fetch bytes admissible.
-            if !unchanged(&r.job) {
+            if !unchanged_full(&r.job) {
                 r.phase = Phase::Retired;
                 false
             } else {
