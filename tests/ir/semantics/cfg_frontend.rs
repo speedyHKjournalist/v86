@@ -233,7 +233,7 @@ fn cfg_boundaries_and_immutable_compile() {
             version: 4,
         }],
     };
-    let config = IrConfig {
+    let mut config = IrConfig {
         optimize: true,
         passes: PassConfig::default(),
         execution_budget: 16,
@@ -266,7 +266,12 @@ fn cfg_boundaries_and_immutable_compile() {
         default_32: request.default_32,
         tier: Tier::One,
     };
+    config.passes = PassConfig::tier1();
     let tier_one = compile_cpu_cfg_region(&tier_one, &snapshot, &config).unwrap();
+    assert!(
+        tier_one.code.structured_cfg,
+        "Tier 1 and Tier 2 must share the structured IR backend"
+    );
     assert_eq!(
         tier_one.passes.state_writes_elided,
         0,
@@ -276,6 +281,17 @@ fn cfg_boundaries_and_immutable_compile() {
         tier_one.passes.cpu_values_elided,
         0,
         "Tier 1 must not enable CPU-only value liveness"
+    );
+    assert_eq!(tier_one.passes.loop_hoisted, 0, "Tier 1 must not run LICM");
+    assert_eq!(
+        tier_one.passes.ram_forwarded,
+        0,
+        "Tier 1 must not run RAM forwarding"
+    );
+    assert_eq!(
+        tier_one.passes.helper_states_elided,
+        0,
+        "Tier 1 must not run helper-state elision"
     );
     assert!(artifact.current(
         request.key,
