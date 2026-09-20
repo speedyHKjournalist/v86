@@ -9,7 +9,7 @@ legacy emitter.
 
 ## Completed optimization boundary
 
-IR-11 now consists of four conservative layers:
+IR-11 now consists of five conservative layers:
 
 1. **Pure SSA LICM.** Natural loops, multiple latches and nested loops use the
    existing transactional LICM pass. Only total SSA calculations move. CPU
@@ -27,6 +27,12 @@ IR-11 now consists of four conservative layers:
    original load/guard/fault point remains in the loop; only a successful native
    RAM access sets the cache-valid bit. A unique unconditional preheader clears
    the cache on every loop entry.
+5. **RAM guard reuse.** Within a block, an exact canonical address may reuse a
+   preceding successful translation/range/permission proof when its width is no
+   larger and required permissions are covered. Data loads/stores still execute.
+   This separate certificate excludes value-forwarded/loop-cached accesses,
+   RMW tickets, vector memory and intervening unknown effects. Slow paths clear
+   validity before callbacks; no proof survives a new entry invocation.
 
 The fourth rule deliberately differs from textbook physical load hoisting.
 Moving a possibly faulting x86 load into a preheader could introduce a #PF/#GP
@@ -50,7 +56,7 @@ The RAM optimizer derives deterministic certificates from:
 - helper/effect/memory classifications already fixed by lowering.
 
 Certificates are bounded and transactional. The verifier independently re-derives
-both the intra-block forwarding plan and the loop-cache plan. Missing resets,
+the intra-block forwarding, RAM guard reuse and loop-cache plans. Missing resets,
 invalid slots, forged reuse sites or plans inconsistent with current MIR are
 rejected before emission.
 

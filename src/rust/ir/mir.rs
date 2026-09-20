@@ -45,6 +45,7 @@ pub struct MirData {
     pub values: Vec<Option<value::ValuePlan>>,
     pub states: Vec<materialize::StatePlan>,
     pub(super) ram_forwarding: Vec<Option<forwarding::Forwarding>>,
+    pub(super) ram_guard_reuse: Vec<Option<forwarding::Forwarding>>,
     pub(super) ram_loop_cache: forwarding::LoopPlan,
     pub(super) state_elision: state_elision::Plan,
     pub(super) helper_state: helper_state::Plan,
@@ -63,6 +64,27 @@ impl Deref for MirRegion {
     }
 }
 impl MirRegion {
+    /// Independent post-lowering graph, type, allocation and proof validation.
+    pub fn verify(&self) -> Result<(), CompileError> {
+        allocation::verify(&self.data, 4_000_000)?;
+        super::helper::imports::verify(&self.data)?;
+        forwarding::verify(&self.data)?;
+        state_elision::verify_owned(&self.data)?;
+        cpu_liveness::verify_owned(&self.data)
+    }
+
+    pub fn reuse_ram_guards(&mut self, work_limit: usize) -> Result<usize, CompileError> {
+        forwarding::optimize_guards(&mut self.data, work_limit)
+    }
+    pub(crate) fn ram_guard_reuse(&self, id: super::ids::InstId) -> Option<forwarding::Forwarding> {
+        self.data.ram_guard_reuse[id.index()]
+    }
+    pub(crate) fn has_ram_guard_reuse(&self) -> bool {
+        self.data.ram_guard_reuse.iter().any(Option::is_some)
+    }
+    pub(crate) fn verify_ram_guard_reuse(&self) -> Result<(), CompileError> {
+        forwarding::verify_guards(&self.data)
+    }
     /// Enable guarded repeated scalar reads from ordinary RAM. This transformation
     /// uses owned MIR only, with transactional work-budget failure.
     pub fn forward_ram_reads(&mut self, work_limit: usize) -> Result<usize, CompileError> {
@@ -153,7 +175,11 @@ impl MirRegion {
 /// Transient lowering transaction. It cannot be emitted and never clones HIR.
 pub struct Draft<'a> {
     pub(super) hir: &'a Region,
+    hir_witness: &'a Region,
     pub(super) data: MirData,
+    // The allocator runs once on the immutably borrowed, verified HIR. Keep its
+    // result private so Draft mutations can be checked without reallocating.
+    allocation_witness: Allocation,
 }
 impl Deref for Draft<'_> {
     type Target = MirData;
@@ -166,8 +192,15 @@ impl DerefMut for Draft<'_> {
         &mut self.data
     }
 }
-impl Draft<'_> {
+impl<'a> Draft<'a> {
+    pub(super) fn new(hir: &'a Region, data: MirData) -> Self {
+        let allocation_witness = data.allocation.clone();
+        Self { hir, hir_witness: hir, data, allocation_witness }
+    }
     pub fn finish(self) -> Result<MirRegion, CompileError> {
+        if !std::ptr::eq(self.hir, self.hir_witness) {
+            return Err(CompileError::InvalidIr("lowering source changed after allocation".into()));
+        }
         super::verify::verify(self.hir).map_err(|e| CompileError::InvalidIr(e.0))?;
         let data = &self.data;
         let value_blocks = self
@@ -193,8 +226,7 @@ impl Draft<'_> {
         if data.value_types != self.hir.values.iter().map(|v| v.ty).collect::<Vec<_>>()
             || data.value_blocks != value_blocks
             || data.value_definitions != value_definitions
-            || data.allocation
-                != super::backend::locals::allocate(self.hir).map_err(CompileError::Budget)?
+            || data.allocation != self.allocation_witness
         {
             return Err(CompileError::InvalidIr(
                 "invalid machine types or local allocation".into(),
@@ -207,6 +239,7 @@ impl Draft<'_> {
                 "invalid initial machine use/definition facts".into(),
             ));
         }
+        super::helper::imports::verify(data)?;
         memory::verify(self.hir, &data.memory)?;
         effect::verify(self.hir, &data.effects)?;
         call::verify(self.hir, &data.helpers, &data.calls)?;
@@ -222,30 +255,4 @@ impl Draft<'_> {
 }
 
 /// Built-in emitter/plan adapters cannot be redeclared as generic helpers.
-pub const CPU_IMPORTS: &[&str] = &[
-    "ir_pop_address",
-    "ir_enter",
-    "ir_sti_finish",
-    "ir_entry_matches",
-    "ir_divide_fault",
-    "ir_tlb_base",
-    "ir_memory_base",
-    "get_eflags",
-    "ir_segment_address",
-    "ir_memory_read",
-    "ir_memory_check",
-    "ir_memory_write",
-    "ir_memory_write_unmasked_word",
-    "ir_rmw_read",
-    "ir_rmw_write",
-    "ir_rmw_value",
-    "ir_cmpxchg8b",
-    "ir_sse_guard",
-    "ir_xmm_load",
-    "ir_xmm_store",
-    "ir_xmm_binary",
-    "ir_xmm_shuffle",
-    "ir_xmm_transfer_load",
-    "ir_xmm_insert_word",
-    "ir_xmm_masked_store",
-];
+pub use super::helper::imports::NAMES as CPU_IMPORTS;

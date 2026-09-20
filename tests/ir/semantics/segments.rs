@@ -133,3 +133,18 @@ fn segment_access_and_invalid_forms() {
             .any(|i| matches!(i.op, Op::GuestStore { bytes: 2 })));
     }
 }
+
+#[test]
+fn real_segment_continuation_fixtures() {
+    std::fs::create_dir_all("build/ir-segments").unwrap();
+    for segment in [0u8, 2, 3, 4, 5] {
+        // Dirty ECX; MOV segment,AX; MOV EBX,segment:[400h]; INC EBX.
+        let prefix = [0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65][segment as usize];
+        let bytes = [0x41, 0x8E, 0xC0 | segment << 3, prefix, 0x8B, 0x1D, 0, 4, 0, 0, 0x43];
+        let mut r = lift_cpu(&bytes, GuestEip(0x8000), LinearAddress(0x8000), true).unwrap();
+        for opt in 0..2 {
+            if opt == 1 { run(&mut r, PassConfig::default()).unwrap(); }
+            std::fs::write(format!("build/ir-segments/continue-{segment}-{opt}.wasm"), emit_cpu(&lower(&r).unwrap(), 100).unwrap().bytes).unwrap();
+        }
+    }
+}

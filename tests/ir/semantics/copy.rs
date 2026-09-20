@@ -48,6 +48,8 @@ fn copy_propagates_identity_chains_into_state_maps() {
     let stats = run(
         &mut region,
         PassConfig {
+        debug: Default::default(),
+        disabled: 0,
             copy: false,
             fold: false,
             gvn: false,

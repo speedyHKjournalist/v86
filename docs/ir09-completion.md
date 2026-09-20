@@ -121,8 +121,9 @@ It deliberately does not run the Tier-2-only families:
 - LICM;
 - RAM forwarding/loop caches.
 
-MIR constant folding remains a small legalization/canonicalization stage shared by
-optimized compilation. Tier-2 retains the full configured pass pipeline.
+Tier 1 uses the verified local allocation from lowering directly. MIR constant
+folding, operand-stack fusion and the subsequent local reallocation run only for
+optimized Tier 2 compilation, which retains the full configured pass pipeline.
 
 ## Fallback boundary
 

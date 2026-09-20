@@ -108,6 +108,8 @@ fn dynamic_eip_is_verified_and_kept_alive_by_state_maps() {
     run(
         &mut r,
         PassConfig {
+        debug: Default::default(),
+        disabled: 0,
             prune: false,
             merge: false,
             phis: false,

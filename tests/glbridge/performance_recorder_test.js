@@ -41,6 +41,8 @@ const assert = require("node:assert/strict");
     recorder.mark("scene_ready");
     const report = recorder.stop();
     assert.equal(report.metadata.jit_backend, "ir", "report records the actual selected backend");
+    assert.equal(report.jit.start.backend, "ir");
+    assert.equal(report.jit.end.backend, "ir");
     assert.equal(report.disks[0].callback_latency_ms, 30, "overlapping read latencies are summed separately");
     assert.equal(report.samples.at(-1).disk_any_request_pending_ms, 20, "union of outstanding reads does not double count overlap");
     assert.equal(report.disks[0].synchronous_completions, 1);

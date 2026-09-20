@@ -6,7 +6,7 @@ The stable encoding ID is `(opcode << 4) | (fixed_g + 1)`, using zero for an opc
 without a ModRM group. It does not depend on table ordering.
 
 `lowering` is the **production** status. `experimental_lowering` separately records
-experimental capability. Of 3,830 coarse forms, 102 explicit invalid reg/mem forms
+experimental capability. Of 3,972 coarse forms, 244 explicit invalid reg/mem and missing-group forms
 are BaselineUD and **3,728 production forms remain Pending**. Of those production-
 Pending forms, zero remain `experimental_lowering: Pending`. Each has an
 experimental native/helper path or explicit baseline behavior, including baseline
@@ -67,3 +67,5 @@ legacy-analyzer differential, independently of experimental lowering capability.
 
 [CMPXCHG8B](ir-cmpxchg8b.md) adds four experimental memory forms with native
 RAM execution and ordered CPU slow paths; production coverage is unchanged.
+
+The shared interpreter rules, explicit missing groups and expanded acceptance matrix are documented in [the contract increment](ir-contract-matrix.md).

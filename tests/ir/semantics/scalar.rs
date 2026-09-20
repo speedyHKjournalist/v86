@@ -56,6 +56,8 @@ const CASES: [&str; 38] = [
 ];
 fn config() -> PassConfig {
     PassConfig {
+        debug: Default::default(),
+        disabled: 0,
         prune: false,
         merge: false,
         phis: false,

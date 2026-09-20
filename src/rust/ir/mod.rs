@@ -197,6 +197,10 @@ mod dataflow_tests;
 mod entry_tests;
 
 #[cfg(test)]
+#[path = "../../../tests/ir/semantics/fusion.rs"]
+mod fusion_tests;
+
+#[cfg(test)]
 #[path = "../../../tests/ir/semantics/x87_memory.rs"]
 mod x87_memory_tests;
 
@@ -219,3 +223,9 @@ mod coverage_tests;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/sti.rs"]
 mod sti_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/invalid.rs"]
+mod invalid_tests;
+
+pub mod debug;

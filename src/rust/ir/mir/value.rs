@@ -484,6 +484,9 @@ pub fn verify_program_types(types: &[Type], plan: &ValuePlan) -> Result<(), Comp
     let ty = |value: ValueId| machine_type(*types.get(value.index()).ok_or_else(invalid)?);
     verify_expression_with(ty, &plan.steps, ty(plan.result)?)
 }
+pub(super) fn verify_expression_types(types: &[Type], steps: &[Step], result: WasmType) -> Result<(), CompileError> {
+    verify_expression_with(|v| machine_type(*types.get(v.index()).ok_or_else(invalid)?), steps, result)
+}
 fn verify_expression_with(
     ty: impl Fn(ValueId) -> Result<WasmType, CompileError>,
     steps: &[Step],

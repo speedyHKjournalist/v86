@@ -128,6 +128,14 @@ for(const release of [false,true]){
             return expected;
         }
 
+        let special=0;
+        for(let i=0;i<cases.length;i++) {
+            if(!cases[i][4])continue;
+            for(let sample=0;sample<12;sample++) for(const precision of [0,1,2,3]) for(let rounding=0;rounding<4;rounding++) {
+                compare(i,()=>{reset(i);e.ir_test_x87_pattern(sample,0x3F|precision<<8|rounding<<10);},102);special++;
+            }
+        }
+        console.log(`PASS (${release?"release":"debug"}): ${special} exact F80 zero/subnormal/infinity/qNaN/sNaN/tie cases across rounding and precision modes`);
         let ordinary=0;
         for(let i=0;i<cases.length;i++){
             const valid=cases[i][4];

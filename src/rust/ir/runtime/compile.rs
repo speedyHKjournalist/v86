@@ -1,11 +1,12 @@
 //! Immutable experimental compiler entry. Deliberately separate from the live JIT cache.
+use super::diagnostics::CompileScope;
 use super::entry::{CpuEntryKey, EntryContract};
 use crate::ir::{
-    backend::wasm::{emit, emit_cpu_entry, Artifact, StateLayout},
+    backend::wasm::{emit, emit_cpu_entry, emit_cpu_fused_entry, Artifact, StateLayout},
     frontend::{
-        decode::{GuestEip, LinearAddress, PhysicalAddress},
+        decode::{decode, Flow, GuestEip, LinearAddress, PhysicalAddress},
         lift::{lift, lift_cpu_with_rep_budget},
-        region::lift_cpu_cfg,
+        region::{lift_cpu_cfg, lift_cpu_cfg_sources, CfgSource, PredictedEdge},
     },
     lowering::{lower, CompileError},
     passes::{licm, run, PassConfig, PassStats},
@@ -87,6 +88,14 @@ pub struct CompiledArtifact {
     pub guest_bytes: usize,
     pub entry: EntryContract,
     pub mappings: Vec<CodeMapping>,
+    /// Additional noncontiguous immutable sources sharing this SSA activation.
+    pub fused_sources: Vec<CapturedRegion>,
+    pub fused_edges: Vec<PredictedEdge>,
+}
+#[derive(Clone, Debug)]
+pub struct CapturedRegion {
+    pub entry: CpuEntryKey,
+    pub source: ImmutableCodeSnapshot,
 }
 impl CompiledArtifact {
     /// Must run before installing a table slot; equality includes dependency versions and reset generation.
@@ -128,6 +137,83 @@ pub fn compile_cpu_cfg_region(
 ) -> Result<CompiledArtifact, CompileError> {
     compile_inner(request, snapshot, config, true, true)
 }
+
+/// Automatic compilation can encounter a graph budget before the decoder's
+/// instruction budget (one x86 instruction may introduce several blocks).
+/// Retry smaller, instruction-aligned prefixes of the same immutable snapshot.
+/// Explicit compilation retains its all-or-error contract above.
+pub fn compile_cpu_cfg_bounded(
+    request: &CompileRequest,
+    snapshot: &ImmutableCodeSnapshot,
+    config: &IrConfig,
+) -> Result<(CompiledArtifact, ImmutableCodeSnapshot, u32), CompileError> {
+    validate_snapshot(request, snapshot, config)?;
+    let mut selected = snapshot.clone();
+    for retries in 0..8 {
+        // A fallthrough-only window already has a single-entry linear lifter.
+        // Building one fragment/parameter frame per instruction only to merge
+        // them again costs most of cold compilation and can hit the CFG cap.
+        let compiled = if fallthrough_only(request, &selected.bytes) {
+            match compile_cpu_region(request, &selected, config) {
+                // Some decoder fallthrough forms use a terminal CPU adapter.
+                // Preserve the CFG frontend's ability to stop before the tail.
+                Err(CompileError::Unsupported(_)) =>
+                    compile_cpu_cfg_region(request, &selected, config),
+                result => result,
+            }
+        } else {
+            compile_cpu_cfg_region(request, &selected, config)
+        };
+        match compiled {
+            Ok(artifact) => return Ok((artifact, selected, retries)),
+            Err(error @ CompileError::Budget(_)) if retries < 7 => {
+                let length = super::region::reachable_length(
+                    &selected.bytes,
+                    request.pc,
+                    request.linear,
+                    request.default_32,
+                    super::region::Policy {
+                        max_bytes: selected.bytes.len() / 2,
+                        max_instructions: 128,
+                    },
+                );
+                if length == 0 || length >= selected.bytes.len() {
+                    return Err(error);
+                }
+                selected.bytes.truncate(length);
+                let pages = ((request.linear.0 & 4095) as usize + length + 4095) / 4096;
+                selected.mappings.truncate(pages);
+                selected.dependencies.retain(|d| {
+                    selected.mappings.iter().any(|mapping| mapping.physical == d.page)
+                });
+            },
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+fn fallthrough_only(request: &CompileRequest, bytes: &[u8]) -> bool {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let Ok(instruction) = decode(
+            &bytes[offset..],
+            GuestEip(request.pc.0.wrapping_add(offset as u32)),
+            LinearAddress(request.linear.0.wrapping_add(offset as u32)),
+            request.default_32,
+        ) else { return false; };
+        // The legacy analyzer marks ordinary memory operands as Boundary.
+        // As in region selection, only an actual encoding block boundary
+        // terminates fallthrough; mode-changing instructions stay on CFG.
+        if !matches!(instruction.flow, Flow::Next | Flow::Boundary)
+            || instruction.encoding.block_boundary
+        {
+            return false;
+        }
+        offset += instruction.length as usize;
+    }
+    offset == bytes.len()
+}
 fn compile_inner(
     request: &CompileRequest,
     snapshot: &ImmutableCodeSnapshot,
@@ -135,6 +221,210 @@ fn compile_inner(
     cpu: bool,
     cfg: bool,
 ) -> Result<CompiledArtifact, CompileError> {
+    validate_snapshot(request, snapshot, config)?;
+    let lift_clock = CompileScope::new(2);
+    let region = if cfg {
+        lift_cpu_cfg(
+            &snapshot.bytes,
+            request.pc,
+            request.linear,
+            request.default_32,
+            config.rep_iteration_budget,
+        )?
+    } else if cpu {
+        lift_cpu_with_rep_budget(
+            &snapshot.bytes,
+            request.pc,
+            request.linear,
+            request.default_32,
+            config.rep_iteration_budget,
+        )?
+    } else {
+        lift(
+            &snapshot.bytes,
+            request.pc,
+            request.linear,
+            request.default_32,
+        )?
+    };
+    drop(lift_clock);
+    compile_lifted(request, snapshot, config, cpu, region, vec![])
+}
+pub fn compile_cpu_fused(
+    request: &CompileRequest,
+    primary: &ImmutableCodeSnapshot,
+    secondary: &CapturedRegion,
+    predictions: &[PredictedEdge],
+    config: &IrConfig,
+) -> Result<CompiledArtifact, CompileError> {
+    compile_cpu_fused_regions(request, primary, std::slice::from_ref(secondary), predictions, config)
+}
+/// Extend only witnessed hot traces, under the same instruction/allocation budgets.
+pub fn compile_cpu_fused_regions(
+    request: &CompileRequest, primary: &ImmutableCodeSnapshot,
+    peers: &[CapturedRegion], predictions: &[PredictedEdge], config: &IrConfig,
+) -> Result<CompiledArtifact, CompileError> {
+    if peers.is_empty() || peers.len() > 3 || predictions.len() > 4 {
+        return Err(CompileError::Budget("fused source count"));
+    }
+    if request.tier != Tier::Two || peers.iter().any(|p|
+        p.entry.default_32 != request.default_32 || p.entry.cs_base() != request.cpu_entry().cs_base()) {
+        return Err(CompileError::Unsupported("incompatible fused CPU entries"));
+    }
+    validate_snapshot(request, primary, config)?;
+    let mut mappings = primary.mappings.clone();
+    let mut sources = vec![CfgSource { bytes: &primary.bytes, pc: request.pc, linear: request.linear }];
+    for peer in peers {
+        let peer_request = CompileRequest { key: request.key, pc: peer.entry.pc,
+            linear: peer.entry.linear, default_32: request.default_32, tier: Tier::Two };
+        validate_snapshot(&peer_request, &peer.source, config)?;
+        for mapping in &peer.source.mappings {
+            if mappings.iter().any(|m| m.linear == mapping.linear && m.physical != mapping.physical) {
+                return Err(CompileError::InvalidIr("conflicting fused code mapping".into()));
+            }
+            mappings.push(*mapping);
+        }
+        sources.push(CfgSource { bytes: &peer.source.bytes, pc: peer.entry.pc, linear: peer.entry.linear });
+    }
+    let lift_clock = CompileScope::new(2);
+    let region = lift_cpu_cfg_sources(&sources, predictions, request.default_32, config.rep_iteration_budget)?;
+    // Extend only audited observer contracts. Interrupt-shadow, memory and host
+    // callback helpers still require a stronger continuation certificate.
+    if peers.len() > 1 && region.instructions.iter().any(|inst| {
+        let crate::ir::hir::Op::CallHelper(id) = inst.op else { return false; };
+        let helper = &region.helpers[id.index()];
+        !(crate::ir::helper::cpu_registry::preserves_code_on_success(&helper.name)
+            || helper.effects.is_pure()
+            || helper.name == "ir_sse_fp_reg_continue"
+                && crate::ir::helper::cpu_registry::xmm_register_operands(&region, &inst.args).is_some())
+    }) {
+        return Err(CompileError::Unsupported("extended fusion observer boundary"));
+    }
+    for peer in peers {
+        if !region.states.iter().any(|s| s.instruction_pc.0.wrapping_sub(peer.entry.pc.0) < peer.source.bytes.len() as u32) {
+            return Err(CompileError::Unsupported("unreachable fused peer"));
+        }
+    }
+    drop(lift_clock);
+    let mut artifact = compile_lifted(request, primary, config, true, region, peers.to_vec())?;
+    artifact.fused_edges = predictions.to_vec();
+    Ok(artifact)
+}
+
+fn compile_lifted(
+    request: &CompileRequest, snapshot: &ImmutableCodeSnapshot, config: &IrConfig,
+    cpu: bool, mut region: crate::ir::hir::Region, fused_sources: Vec<CapturedRegion>,
+) -> Result<CompiledArtifact, CompileError> {
+    let _context = super::diagnostics::CompileContext::new(request.linear.0, if request.tier == Tier::One {1} else {2});
+    let mut dependencies = snapshot.dependencies.clone();
+    for peer in &fused_sources {
+        for dependency in &peer.source.dependencies {
+            if let Some(old) = dependencies.iter().find(|d| d.page == dependency.page) {
+                if old.version != dependency.version {
+                    return Err(CompileError::InvalidIr("conflicting fused code version".into()));
+                }
+            } else { dependencies.push(dependency.clone()); }
+        }
+    }
+    if dependencies.len() > 8 { return Err(CompileError::Budget("fused code dependencies")); }
+    let pass_clock = CompileScope::new(3);
+    let mut passes = if config.optimize {
+        run(&mut region, config.passes).map_err(CompileError::InvalidIr)?
+    } else {
+        PassStats::default()
+    };
+    // Cold Tier 1 never pays for loop discovery. The master optimization switch
+    // and zero-round diagnostic configuration also disable code motion.
+    if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 && config.passes.enabled(9) {
+        passes.loop_hoisted = licm::run(&mut region, licm::DEFAULT_WORK_LIMIT)
+            .map_err(CompileError::InvalidIr)?
+            .hoisted;
+    }
+    let hir_dump = if config.passes.debug.hir() { crate::ir::dump::text(&region) } else { String::new() };
+    drop(pass_clock);
+    let lower_clock = CompileScope::new(4);
+    let mut mir = lower(&region)?;
+    drop(lower_clock);
+    config.passes.debug.check(&mir, true)?;
+    let machine_clock = CompileScope::new(5);
+    drop(region);
+    // Lowering already provides verified typed locals and legal value programs.
+    // Tier 1 must not pay for a second machine optimization/allocation pipeline
+    // on every newly hot block during OS startup.
+    let optimize_machine = config.optimize && request.tier == Tier::Two;
+    let mir_folds = if optimize_machine && config.passes.enabled(10) { let _clock = CompileScope::new(11); let n = mir.fold_constants()?; config.passes.debug.check(&mir, false)?; n } else { 0 };
+    if optimize_machine {
+        if config.passes.enabled(11) { let _clock = CompileScope::new(12); mir.schedule_operand_stack(262_144)?; config.passes.debug.check(&mir, false)?; }
+        if config.passes.enabled(12) { let _clock = CompileScope::new(13); mir.allocate_machine_locals(4_000_000)?; config.passes.debug.check(&mir, false)?; }
+    }
+    if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
+        if cpu {
+            if config.passes.enabled(13) { let _clock = CompileScope::new(14); passes.state_writes_elided = mir.elide_redundant_cpu_state_writes(
+                crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
+            )?; config.passes.debug.check(&mir, false)?; }
+            if config.passes.helper_state {
+                { let _clock = CompileScope::new(15); passes.helper_states_elided = mir.elide_helper_state_observations(
+                    crate::ir::mir::helper_state::DEFAULT_WORK_LIMIT,
+                )?; config.passes.debug.check(&mir, false)?; }
+            }
+            if config.passes.flags {
+                { let _clock = CompileScope::new(16); passes.cpu_values_elided =
+                    mir.elide_dead_cpu_values(crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT)?; config.passes.debug.check(&mir, false)?; }
+            }
+        }
+        // Loop certificates are installed first so ordinary forwarding can
+        // derive a non-overlapping intra-block certificate around them.
+        if config.passes.enabled(14) { let _clock = CompileScope::new(17); passes.ram_forwarded =
+            mir.cache_loop_invariant_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?; config.passes.debug.check(&mir, false)?; }
+        if config.passes.enabled(15) { let _clock = CompileScope::new(18); passes.ram_forwarded +=
+            mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?; config.passes.debug.check(&mir, false)?; }
+        if config.passes.enabled(16) { let _clock = CompileScope::new(19); passes.ram_guards_reused =
+            mir.reuse_ram_guards(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?; config.passes.debug.check(&mir, false)?; }
+    }
+    config.passes.debug.check(&mir, true)?;
+    let mir_dump = if config.passes.debug.mir() { crate::ir::dump::mir(&mir) } else { String::new() };
+    drop(machine_clock);
+    let _emit_clock = CompileScope::new(6);
+    let code = if cpu {
+        let code_pages: Vec<u32> = dependencies.iter().map(|d| d.page.0).collect();
+        let emit_entry = if fused_sources.is_empty() { emit_cpu_entry } else { emit_cpu_fused_entry };
+        emit_entry(
+            &mir,
+            config.execution_budget,
+            request.cpu_entry(),
+            &code_pages,
+        )?
+    } else {
+        emit(&mir, config.layout, config.execution_budget)?
+    };
+    if config.passes.debug.dump != crate::ir::debug::DumpMode::Off {
+        crate::ir::debug::record(request.linear.0, if request.tier == Tier::One { 1 } else { 2 },
+            hir_dump, mir_dump, if config.passes.debug.wasm() { &code.bytes } else { &[] });
+    }
+    Ok(CompiledArtifact {
+        key: request.key,
+        tier: request.tier,
+        dependencies,
+        code,
+        passes,
+        mir_folds,
+        guest_bytes: snapshot.bytes.len() + fused_sources.iter().map(|s| s.source.bytes.len()).sum::<usize>(),
+        mappings: snapshot.mappings.clone(),
+        entry: if cpu {
+            EntryContract::Cpu(request.cpu_entry())
+        } else {
+            EntryContract::Standalone
+        },
+        fused_sources,
+        fused_edges: vec![],
+    })
+}
+
+fn validate_snapshot(
+    request: &CompileRequest,
+    snapshot: &ImmutableCodeSnapshot,
+    config: &IrConfig,
+) -> Result<(), CompileError> {
     if snapshot.bytes.len() > config.max_code_bytes || snapshot.bytes.len() > 15 * 128 {
         return Err(CompileError::Budget("code snapshot"));
     }
@@ -178,95 +468,88 @@ fn compile_inner(
     {
         return Err(CompileError::InvalidIr("unused code dependency".into()));
     }
-    let mut region = if cfg {
-        lift_cpu_cfg(
-            &snapshot.bytes,
-            request.pc,
-            request.linear,
-            request.default_32,
-            config.rep_iteration_budget,
-        )?
-    } else if cpu {
-        lift_cpu_with_rep_budget(
-            &snapshot.bytes,
-            request.pc,
-            request.linear,
-            request.default_32,
-            config.rep_iteration_budget,
-        )?
-    } else {
-        lift(
-            &snapshot.bytes,
-            request.pc,
-            request.linear,
-            request.default_32,
-        )?
-    };
-    let mut passes = if config.optimize {
-        run(&mut region, config.passes).map_err(CompileError::InvalidIr)?
-    } else {
-        PassStats::default()
-    };
-    // Cold Tier 1 never pays for loop discovery. The master optimization switch
-    // and zero-round diagnostic configuration also disable code motion.
-    if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
-        passes.loop_hoisted = licm::run(&mut region, licm::DEFAULT_WORK_LIMIT)
-            .map_err(CompileError::InvalidIr)?
-            .hoisted;
+    Ok(())
+}
+
+/// A shared immutable snapshot may have several (even overlapping x86) entries.
+/// Split it into separately guarded cold artifacts; never admit an unchecked
+/// initial-state selector into the CPU ABI. Return no artifacts if any entry fails.
+#[derive(Clone, Copy, Debug)]
+pub struct CpuEntryRequest {
+    pub offset: usize,
+    pub key: PublicationKey,
+}
+pub fn compile_cpu_entries(
+    origin: &CompileRequest,
+    snapshot: &ImmutableCodeSnapshot,
+    entries: &[CpuEntryRequest],
+    config: &IrConfig,
+) -> Result<Vec<CompiledArtifact>, CompileError> {
+    Ok(compile_entry_batch(origin, snapshot, entries, config, false)?
+        .into_iter().map(|(artifact, _, _)| artifact).collect())
+}
+/// Automatic multi-entry work shares one immutable capture; each entry may
+/// shrink independently at a graph budget. No partial batch escapes on error.
+pub fn compile_cpu_entries_bounded(
+    origin: &CompileRequest,
+    snapshot: &ImmutableCodeSnapshot,
+    entries: &[CpuEntryRequest],
+    config: &IrConfig,
+) -> Result<Vec<(CompiledArtifact, ImmutableCodeSnapshot, u32)>, CompileError> {
+    compile_entry_batch(origin, snapshot, entries, config, true)
+}
+fn compile_entry_batch(
+    origin: &CompileRequest,
+    snapshot: &ImmutableCodeSnapshot,
+    entries: &[CpuEntryRequest],
+    config: &IrConfig,
+    bounded: bool,
+) -> Result<Vec<(CompiledArtifact, ImmutableCodeSnapshot, u32)>, CompileError> {
+    validate_snapshot(origin, snapshot, config)?;
+    if entries.is_empty() || entries.len() > 8 {
+        return Err(CompileError::Budget("CPU entry batch"));
     }
-    let mut mir = lower(&region)?;
-    drop(region);
-    let mir_folds = if config.optimize { mir.fold_constants()? } else { 0 };
-    if config.optimize {
-        mir.schedule_operand_stack(262_144)?;
-        mir.allocate_machine_locals(4_000_000)?;
-    }
-    if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
-        if cpu {
-            passes.state_writes_elided = mir.elide_redundant_cpu_state_writes(
-                crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
-            )?;
-            if config.passes.helper_state {
-                passes.helper_states_elided = mir.elide_helper_state_observations(
-                    crate::ir::mir::helper_state::DEFAULT_WORK_LIMIT,
-                )?;
-            }
-            if config.passes.flags {
-                passes.cpu_values_elided =
-                    mir.elide_dead_cpu_values(crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT)?;
-            }
+    for (i, entry) in entries.iter().enumerate() {
+        if entry.offset >= snapshot.bytes.len()
+            || entry.key.vm_generation != origin.key.vm_generation
+            || entries[..i].iter().any(|e| {
+                e.offset == entry.offset
+                    || (entry.key.slot != 0 && e.key.slot == entry.key.slot)
+                    || e.key.job == entry.key.job
+            })
+        {
+            return Err(CompileError::InvalidIr(
+                "invalid CPU entry batch identity".into(),
+            ));
         }
-        // Loop certificates are installed first so ordinary forwarding can
-        // derive a non-overlapping intra-block certificate around them.
-        passes.ram_forwarded =
-            mir.cache_loop_invariant_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?;
-        passes.ram_forwarded +=
-            mir.forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?;
     }
-    let code = if cpu {
-        let code_pages: Vec<u32> = snapshot.dependencies.iter().map(|d| d.page.0).collect();
-        emit_cpu_entry(
-            &mir,
-            config.execution_budget,
-            request.cpu_entry(),
-            &code_pages,
-        )?
-    } else {
-        emit(&mir, config.layout, config.execution_budget)?
-    };
-    Ok(CompiledArtifact {
-        key: request.key,
-        tier: request.tier,
-        dependencies: snapshot.dependencies.clone(),
-        code,
-        passes,
-        mir_folds,
-        guest_bytes: snapshot.bytes.len(),
-        mappings: snapshot.mappings.clone(),
-        entry: if cpu {
-            EntryContract::Cpu(request.cpu_entry())
+    let mut artifacts = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let request = CompileRequest {
+            key: entry.key,
+            pc: GuestEip(origin.pc.0.wrapping_add(entry.offset as u32)),
+            linear: LinearAddress(origin.linear.0.wrapping_add(entry.offset as u32)),
+            default_32: origin.default_32,
+            tier: origin.tier,
+        };
+        let first = ((origin.linear.0 & 4095) as usize + entry.offset) / 4096;
+        let mappings = snapshot.mappings[first..].to_vec();
+        let dependencies = snapshot
+            .dependencies
+            .iter()
+            .filter(|d| mappings.iter().any(|m| m.physical == d.page))
+            .cloned()
+            .collect();
+        let source = ImmutableCodeSnapshot {
+            bytes: snapshot.bytes[entry.offset..].to_vec(),
+            mappings,
+            dependencies,
+        };
+        artifacts.push(if bounded {
+            compile_cpu_cfg_bounded(&request, &source, config)?
         } else {
-            EntryContract::Standalone
-        },
-    })
+            (compile_cpu_cfg_region(&request, &source, config)?, source, 0)
+        });
+    }
+    Ok(artifacts)
 }

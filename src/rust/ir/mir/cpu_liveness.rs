@@ -1,283 +1,47 @@
-//! CPU-only post-lowering liveness.
-//!
-//! Generic HIR keeps complete StateMaps so standalone emission and verification
-//! remain unchanged. CPU StatePlans may instead recover exact lazy-FLAGS
-//! backing. This certificate follows only values actually consumed by the CPU
-//! plan and explicit guest semantics, allowing the CPU emitter to skip pure
-//! value programs that are needed solely by standalone/concrete FLAGS recovery.
-
-use super::{
-    call::CallPlan,
-    helper_state,
-    materialize::StatePlan,
-    value::Step,
-    MirData,
-};
-use crate::ir::{
-    hir::{Definition, Region, Terminator},
-    ids::{InstId, StateId, ValueId},
-    lowering::CompileError,
-};
-use std::collections::BTreeSet;
-
+//! CPU-only liveness derived from owned MIR at the point it is enabled.
+//! State write/helper trimming is reflected in demand; no HIR is retained and
+//! Tier 1 does not pay for speculative alternative liveness masks.
+use super::MirData;
+use crate::ir::{hir::Region, ids::InstId, lowering::CompileError};
 pub const DEFAULT_WORK_LIMIT: usize = 262_144;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Plan {
-    baseline_live: Vec<bool>,
-    trimmed_live: Vec<bool>,
-    enabled: bool,
-    use_trimmed: bool,
+pub struct Plan { live: Vec<bool>, enabled: bool }
+impl Plan {
+    pub(crate) fn disabled(instructions: usize) -> Self { Self {live: vec![true; instructions], enabled: false} }
 }
-
-fn spend(left: &mut usize, amount: usize) -> Result<(), CompileError> {
-    *left = left
-        .checked_sub(amount)
-        .ok_or(CompileError::Budget("CPU liveness work"))?;
-    Ok(())
-}
-
-fn expression_values(steps: &[Step], work: &mut Vec<ValueId>) {
-    for step in steps {
-        match step {
-            Step::Value(value) => work.push(*value),
-            Step::Packed {
-                destination,
-                source,
-                ..
-            } => {
-                work.push(*destination);
-                work.push(*source);
-            },
-            _ => (),
-        }
-    }
-}
-
-fn state_values(plan: &StatePlan, work: &mut Vec<ValueId>) {
-    for write in &plan.cpu.writes {
-        expression_values(&write.expression, work);
-    }
-    if let Some(base) = plan.cpu.count.base {
-        work.push(base);
-    }
-    expression_values(&plan.decoded_next.expression, work);
-}
-
-fn used_states(
-    region: &Region,
-    calls: &[Option<CallPlan>],
-    helper_plan: &helper_state::Plan,
-    trim_helpers: bool,
-) -> BTreeSet<StateId> {
-    let mut states = BTreeSet::new();
-    for block in &region.blocks {
-        states.extend(block.entry_state);
-        if let Some(Terminator::Exit(state)) = block.terminator {
-            states.insert(state);
-        }
-        for id in &block.instructions {
-            let inst = &region.instructions[id.index()];
-            states.extend(inst.commit);
-            if let Some(state) = inst.state {
-                let trimmed_call = trim_helpers
-                    && calls.get(id.index()).and_then(Option::as_ref).is_some()
-                    && helper_state::plan_eligible(helper_plan, *id);
-                if !trimmed_call {
-                    states.insert(state);
-                }
-            }
-        }
-    }
-    states
-}
-
-fn derive_mask(
-    region: &Region,
-    states: &[StatePlan],
-    calls: &[Option<CallPlan>],
-    helper_plan: &helper_state::Plan,
-    trim_helpers: bool,
-    work_limit: usize,
-) -> Result<Vec<bool>, CompileError> {
-    let mut left = work_limit;
-    spend(
-        &mut left,
-        region.blocks.len() + region.instructions.len() + states.len(),
-    )?;
-    if states.len() != region.states.len() {
-        return Err(CompileError::InvalidIr(
-            "CPU liveness state-plan mismatch".into(),
-        ));
-    }
-
-    let mut live = vec![false; region.instructions.len()];
-    let mut seen_values = vec![false; region.values.len()];
-    let mut work = Vec::new();
-
-    for state in used_states(region, calls, helper_plan, trim_helpers) {
-        let plan = states
-            .get(state.index())
-            .ok_or_else(|| CompileError::InvalidIr("CPU liveness state missing".into()))?;
-        state_values(plan, &mut work);
-    }
-
-    for block in &region.blocks {
-        let term = block
-            .terminator
-            .as_ref()
-            .ok_or_else(|| CompileError::InvalidIr("CPU liveness terminator missing".into()))?;
-        if let Terminator::CondBranch { condition, .. } = term {
-            work.push(*condition);
-        }
-        for id in &block.instructions {
-            let inst = &region.instructions[id.index()];
-            if inst.op.ordered() || inst.state.is_some() || inst.commit.is_some() {
-                if !live[id.index()] {
-                    live[id.index()] = true;
-                    work.extend(&inst.args);
-                }
-            }
-        }
-    }
-
-    while let Some(value) = work.pop() {
-        spend(&mut left, 1)?;
-        let seen = seen_values
-            .get_mut(value.index())
-            .ok_or_else(|| CompileError::InvalidIr("CPU liveness value missing".into()))?;
-        if *seen {
-            continue;
-        }
-        *seen = true;
-        let data = &region.values[value.index()];
-        match data.definition {
-            Definition::Instruction(id, _) => {
-                if !live[id.index()] {
-                    live[id.index()] = true;
-                    work.extend(&region.instructions[id.index()].args);
-                }
-            },
-            Definition::Parameter(block, parameter) => {
-                let parameter = parameter as usize;
-                for source in &region.blocks {
-                    for edge in source
-                        .terminator
-                        .as_ref()
-                        .ok_or_else(|| {
-                            CompileError::InvalidIr("CPU liveness edge source missing".into())
-                        })?
-                        .edges()
-                    {
-                        if edge.target == block {
-                            spend(&mut left, 1)?;
-                            let value = edge.args.get(parameter).ok_or_else(|| {
-                                CompileError::InvalidIr(
-                                    "CPU liveness edge/parameter mismatch".into(),
-                                )
-                            })?;
-                            work.push(*value);
-                        }
-                    }
-                }
-            },
-        }
-    }
-
-    Ok(live)
-}
-
-pub(crate) fn lower(
-    region: &Region,
-    states: &[StatePlan],
-    calls: &[Option<CallPlan>],
-    helper_plan: &helper_state::Plan,
-    work_limit: usize,
-) -> Result<Plan, CompileError> {
-    let fallback = || vec![true; region.instructions.len()];
-    let baseline_live = match derive_mask(
-        region,
-        states,
-        calls,
-        helper_plan,
-        false,
-        work_limit,
-    ) {
-        Ok(live) => live,
-        Err(CompileError::Budget(_)) => fallback(),
-        Err(error) => return Err(error),
-    };
-    let trimmed_live = match derive_mask(
-        region,
-        states,
-        calls,
-        helper_plan,
-        true,
-        work_limit,
-    ) {
-        Ok(live) => live,
-        Err(CompileError::Budget(_)) => fallback(),
-        Err(error) => return Err(error),
-    };
-    Ok(Plan {
-        baseline_live,
-        trimmed_live,
-        enabled: false,
-        use_trimmed: false,
-    })
-}
-
 pub(super) fn verify(region: &Region, data: &MirData) -> Result<(), CompileError> {
-    let expected = lower(
-        region,
-        &data.states,
-        &data.calls,
-        &data.helper_state,
-        DEFAULT_WORK_LIMIT,
-    )?;
-    if data.cpu_liveness.enabled
-        || data.cpu_liveness.use_trimmed
-        || data.cpu_liveness.baseline_live != expected.baseline_live
-        || data.cpu_liveness.trimmed_live != expected.trimmed_live
-    {
-        return Err(CompileError::InvalidIr(
-            "invalid CPU liveness certificate".into(),
-        ));
+    if data.cpu_liveness != Plan::disabled(region.instructions.len()) {
+        return Err(CompileError::InvalidIr("invalid initial CPU liveness plan".into()));
     }
     Ok(())
 }
-
-pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
-    let use_trimmed = helper_state::plan_enabled(&data.helper_state);
-    let live = if use_trimmed {
-        &data.cpu_liveness.trimmed_live
-    } else {
-        &data.cpu_liveness.baseline_live
-    };
-    if live.len() > work_limit {
-        return Err(CompileError::Budget("CPU liveness work"));
+pub(super) fn verify_owned(data: &MirData) -> Result<(), CompileError> {
+    if data.cpu_liveness.live.len() != data.values.len() {
+        return Err(CompileError::InvalidIr("invalid CPU liveness length".into()));
     }
-    let count = live
-        .iter()
-        .enumerate()
-        .filter(|(index, live)| !**live && data.values[*index].is_some())
-        .count();
-    data.cpu_liveness.enabled = true;
-    data.cpu_liveness.use_trimmed = use_trimmed;
+    if data.cpu_liveness.enabled && data.cpu_liveness.live.iter().any(|&live| !live) {
+        let required = super::allocation::cpu_demand(data, DEFAULT_WORK_LIMIT)?;
+        if required.iter().zip(&data.cpu_liveness.live).any(|(&need, &live)| need && !live) {
+            return Err(CompileError::InvalidIr("CPU liveness drops a required machine value".into()));
+        }
+    }
+    Ok(())
+}
+pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
+    if data.values.len() > work_limit { return Err(CompileError::Budget("CPU liveness work")); }
+    let live = match super::allocation::cpu_demand(data, work_limit) {
+        Ok(live) => live,
+        Err(CompileError::Budget(_)) => vec![true; data.values.len()],
+        Err(error) => return Err(error),
+    };
+    let count = live.iter().enumerate().filter(|(i, live)| !**live && data.values[*i].is_some()).count();
+    data.cpu_liveness = Plan { live, enabled: true };
     Ok(count)
 }
-
 pub(super) fn instruction_live(data: &MirData, id: InstId) -> bool {
-    let live = if data.cpu_liveness.use_trimmed {
-        &data.cpu_liveness.trimmed_live
-    } else {
-        &data.cpu_liveness.baseline_live
-    };
-    !data.cpu_liveness.enabled
-        || live.get(id.index()).copied().unwrap_or(true)
-        || !matches!(data.values.get(id.index()), Some(Some(_)))
+    !data.cpu_liveness.enabled || data.cpu_liveness.live[id.index()]
+        || data.values[id.index()].is_none()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -307,6 +71,47 @@ mod tests {
             committed: 296,
             flag_operand: 300,
         }
+    }
+
+    #[test]
+    fn owned_demand_tracks_state_trimming_and_rejects_required_value_removal() {
+        let hir = region(&[0x46, 0x0F, 0x31]);
+        let mut full = lower(&hir).unwrap();
+        let full_dead = full.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
+        let mut trimmed = lower(&hir).unwrap();
+        trimmed.elide_redundant_cpu_state_writes(super::super::state_elision::DEFAULT_WORK_LIMIT).unwrap();
+        let trimmed_dead = trimmed.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
+        assert!(trimmed_dead > full_dead, "entry-equivalent stores no longer keep unused GPR reads live");
+        trimmed.verify().unwrap();
+        let required = trimmed.values.iter().enumerate().find(|(i, p)| p.is_some() && trimmed.cpu_liveness.live[*i]).unwrap().0;
+        trimmed.data.cpu_liveness.live[required] = false;
+        assert!(trimmed.verify().is_err());
+    }
+
+    #[test]
+    fn selective_sse_operands_survive_redundant_snapshot_trimming() {
+        let hir = region(&[0x46, 0xF3, 0x0F, 0x58, 0xC1, 0x66, 0x0F, 0xEF, 0xC8]);
+        let mut mir = lower(&hir).unwrap();
+        mir.elide_redundant_cpu_state_writes(DEFAULT_WORK_LIMIT).unwrap();
+        mir.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
+        let mut checked = 0;
+        for call in mir.calls.iter().flatten() {
+            if let Some((source, destination)) = call.xmm_observation {
+                for write in &mir.states[call.state.index()].cpu.writes {
+                    if [source, destination].iter().any(|&reg| write.address == super::super::value::Address::Absolute(
+                        crate::cpu::global_pointers::get_reg_xmm_offset(reg as u32))) {
+                        for v in super::super::allocation::expression(&write.expression) {
+                            if let Some(id) = mir.value_definitions[v.index()] {
+                                assert!(instruction_live(&mir, id), "selective operand must remain live");
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked >= 2);
+        mir.verify().unwrap();
     }
 
     #[test]

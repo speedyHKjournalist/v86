@@ -13,7 +13,7 @@ pub fn supports(i: &DecodedInstruction) -> bool {
     )
 }
 pub fn terminal(i: &DecodedInstruction) -> bool {
-    i.encoding.opcode != 0x8C
+    !matches!(i.encoding.opcode, 0x8C | 0x8E)
 }
 pub fn lift(
     b: &mut IntegerBuilder,
@@ -84,6 +84,10 @@ pub fn lift(
     };
     let selector = b.node(Op::Extend { signed: false }, vec![selector], Type::I32);
     let segment = b.constant(segment as u32, Type::I32);
+    if op == 0x8E {
+        call(b, "ir_mov_segment_continue", vec![selector, segment], map, false);
+        return Ok(());
+    }
     let register = b.constant(register as u32, Type::I32);
     let bytes = b.constant(bytes as u32, Type::I32);
     call(

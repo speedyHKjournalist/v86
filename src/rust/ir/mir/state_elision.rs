@@ -1,10 +1,18 @@
-//! Conservative CPU backing-state write elision for pure CFG regions.
+//! Conservative CPU backing-state write elision before terminal observations.
 //!
 //! The certificate only removes writes that reconstruct values proven equal to
 //! the CPU backing state present when the IR entry was invoked. Regions with any
-//! resumable memory/helper/commit observation are rejected wholesale. Budget
+//! resumable memory/helper/commit observation are rejected wholesale. Terminal
+//! CpuExit/CpuRep helpers cannot execute a later SSA recovery point: unchanged
+//! entry backing may be reused up to their first observation, including faults. Budget
 //! recovery and the guarded SSE check are allowed because any observing arm
 //! materializes state and immediately exits the current IR entry.
+//!
+//! A separate owned-MIR certificate tracks exact backing reads within a block,
+//! discards them at observations, and seeds fresh facts from normal CpuReload
+//! results. It intersects all uses of each recovery state and never trims PC or
+//! retirement stores. This allows post-observation synchronization independently
+//! of the more restrictive whole-region entry-equivalence certificate.
 
 use super::{materialize::StatePlan, value::Address, MirData};
 use crate::{
@@ -55,6 +63,7 @@ impl Origin {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Plan {
     masks: Vec<Vec<bool>>,
+    sync: Option<Vec<Vec<bool>>>,
     enabled: bool,
 }
 
@@ -71,6 +80,7 @@ fn disabled(states: &[StatePlan]) -> Plan {
             .iter()
             .map(|state| vec![false; state.cpu.writes.len()])
             .collect(),
+        sync: None,
         enabled: false,
     }
 }
@@ -199,6 +209,11 @@ fn is_true(region: &Region, value: ValueId) -> bool {
 fn transparent_helper(region: &Region, inst: &crate::ir::hir::Instruction) -> bool {
     let Op::CallHelper(id) = inst.op else { return false };
     let Some(descriptor) = region.helpers.get(id.index()) else { return false };
+    // Both ABIs leave the activation on every outcome. No later StateMap can
+    // incorrectly reuse entry backing after the observer changes CPU state.
+    if matches!(descriptor.abi, HelperAbi::CpuExit | HelperAbi::CpuRep) {
+        return descriptor.validate().is_ok();
+    }
     descriptor.effects.is_pure()
         && descriptor.exception_owner == ExceptionOwner::CannotFault
         && matches!(
@@ -310,6 +325,7 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
     }
     Ok(Plan {
         masks,
+        sync: None,
         enabled: false,
     })
 }
@@ -328,10 +344,19 @@ pub(crate) fn lower(
 
 pub(super) fn verify(region: &Region, data: &MirData) -> Result<(), CompileError> {
     let expected = lower(region, &data.states, DEFAULT_WORK_LIMIT)?;
-    if data.state_elision.enabled || data.state_elision.masks != expected.masks {
+    if data.state_elision.enabled || data.state_elision.sync.is_some() || data.state_elision.masks != expected.masks {
         return Err(CompileError::InvalidIr(
             "invalid CPU state-elision certificate".into(),
         ));
+    }
+    Ok(())
+}
+
+pub(super) fn verify_owned(data: &MirData) -> Result<(), CompileError> {
+    if let Some(sync) = &data.state_elision.sync {
+        if *sync != super::allocation::backing_sync(data, DEFAULT_WORK_LIMIT)? {
+            return Err(CompileError::InvalidIr("invalid post-observation state synchronization".into()));
+        }
     }
     Ok(())
 }
@@ -348,26 +373,21 @@ pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, Com
     if work > work_limit {
         return Err(CompileError::Budget("MIR state elision work"));
     }
-    let count = data
-        .state_elision
-        .masks
-        .iter()
-        .flatten()
-        .filter(|&&skip| skip)
-        .count();
+    let sync = match super::allocation::backing_sync(data, work_limit) {
+        Ok(sync) => Some(sync),
+        Err(CompileError::Budget(_)) => None,
+        Err(error) => return Err(error),
+    };
+    let count = data.state_elision.masks.iter().enumerate().map(|(s, mask)| mask.iter().enumerate()
+        .filter(|(w, skip)| **skip || sync.as_ref().is_some_and(|m| m[s][*w])).count()).sum();
+    data.state_elision.sync = sync;
     data.state_elision.enabled = true;
     Ok(count)
 }
 
 pub(super) fn elided(data: &MirData, state: StateId, write: usize) -> bool {
-    data.state_elision.enabled
-        && data
-            .state_elision
-            .masks
-            .get(state.index())
-            .and_then(|mask| mask.get(write))
-            .copied()
-            .unwrap_or(false)
+    data.state_elision.enabled && (data.state_elision.masks.get(state.index()).and_then(|mask| mask.get(write)).copied().unwrap_or(false)
+        || data.state_elision.sync.as_ref().and_then(|m| m.get(state.index())).and_then(|m| m.get(write)).copied().unwrap_or(false))
 }
 
 #[cfg(test)]
@@ -468,13 +488,66 @@ mod tests {
                 .any(|(write, &skip)| write.address == Address::Flags && !skip)));
 
         let mut memory = optimized(&[0x8B, 0x06, 0x90]);
-        assert_eq!(enable(&mut memory.data, DEFAULT_WORK_LIMIT).unwrap(), 0);
+        enable(&mut memory.data, DEFAULT_WORK_LIMIT).unwrap();
         assert!(memory
             .state_elision
             .masks
             .iter()
             .flatten()
             .all(|skip| !skip));
+    }
+
+    #[test]
+    fn terminal_observers_reuse_only_unchanged_entry_backing() {
+        for bytes in [vec![0x46,0x0F,0x31], vec![0x43,0xEC], vec![0x43,0xEE], vec![0xF3,0xA4]] {
+            let mut mir = optimized(&bytes);
+            let before = emit_cpu(&mir, 32).unwrap().bytes;
+            assert!(enable(&mut mir.data, DEFAULT_WORK_LIMIT).unwrap() > 0);
+            mir.verify().unwrap();
+            let after = emit_cpu(&mir, 32).unwrap().bytes;
+            assert!(after.len() < before.len(), "terminal state stores reduced: {bytes:?}");
+            // Instruction-pointer and retirement stores are never elided.
+            for (state, mask) in mir.states.iter().zip(&mir.state_elision.masks) {
+                for (write, skip) in state.cpu.writes.iter().zip(mask) {
+                    if matches!(write.address, Address::Eip | Address::Committed) { assert!(!skip); }
+                }
+            }
+        }
+        // A continuing observer may first write a changed register, then later
+        // restore its old SSA value. Entry equivalence is no longer sufficient.
+        let mut continuing = optimized(&[0x40,0xFA,0x48]);
+        enable(&mut continuing.data, DEFAULT_WORK_LIMIT).unwrap();
+        assert!(continuing.state_elision.masks.iter().flatten().all(|skip| !skip));
+        let mut memory = optimized(&[0x8B,0x06,0x0F,0x31]);
+        enable(&mut memory.data, DEFAULT_WORK_LIMIT).unwrap();
+    }
+
+    #[test]
+    fn post_observer_reload_certificates_trim_only_unchanged_backing() {
+        // CVTTSS2SI reloads CPU state; the following INC changes EAX again.
+        let mut mir = optimized(&[0x46, 0xF3, 0x0F, 0x2C, 0xC0, 0x40]);
+        assert!(mir.state_elision.masks.iter().flatten().all(|&v| !v));
+        let before = emit_cpu(&mir, 32).unwrap().bytes.len();
+        enable(&mut mir.data, DEFAULT_WORK_LIMIT).unwrap();
+        let mut exit_skips = 0;
+        for block in &mir.control.blocks {
+            if let super::super::control::Terminator::Exit(s) = block.terminator {
+                for (i, w) in mir.states[s.index()].cpu.writes.iter().enumerate() {
+                    let skip = elided(&mir, s, i);
+                    if matches!(w.address, Address::Gpr(0) | Address::Eip | Address::Committed) {
+                        assert!(!skip, "changed register and accounting must be written");
+                    }
+                    exit_skips += usize::from(skip);
+                }
+            }
+        }
+        assert!(exit_skips > 0, "normal reload proves unchanged exit stores redundant");
+        mir.verify().unwrap();
+        assert!(emit_cpu(&mir, 32).unwrap().bytes.len() < before);
+        let sync = mir.data.state_elision.sync.as_mut().unwrap();
+        let mask = sync.iter_mut().find(|m| !m.is_empty()).unwrap();
+        mask[0] = !mask[0];
+        assert!(mir.verify().is_err(), "independent proof rejects a forged mask");
     }
 
     #[test]

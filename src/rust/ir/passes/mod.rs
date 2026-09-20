@@ -11,6 +11,9 @@ pub mod sccp;
 pub mod simd;
 #[derive(Clone, Copy)]
 pub struct PassConfig {
+    pub debug: super::debug::Config,
+    /// Stable public pass-disable mask; base HIR flags are also cleared by disable().
+    pub disabled: u32,
     pub prune: bool,
     pub merge: bool,
     pub phis: bool,
@@ -27,6 +30,8 @@ pub struct PassConfig {
 impl Default for PassConfig {
     fn default() -> Self {
         Self {
+            debug: Default::default(),
+            disabled: 0,
             prune: true,
             merge: true,
             phis: true,
@@ -41,10 +46,23 @@ impl Default for PassConfig {
     }
 }
 impl PassConfig {
+    pub const MASK: u32 = (1 << 17) - 1;
+    pub fn enabled(&self, bit: u32) -> bool { self.disabled & (1 << bit) == 0 }
+    pub fn disable(mut self, mask: u32) -> Self {
+        self.disabled |= mask;
+        self.prune &= self.enabled(0); self.merge &= self.enabled(1);
+        self.phis &= self.enabled(2); self.copy &= self.enabled(3);
+        self.fold &= self.enabled(4); self.flags &= self.enabled(5);
+        self.helper_state &= self.enabled(6); self.gvn &= self.enabled(7);
+        self.dce &= self.enabled(8);
+        self
+    }
     /// Low-latency Tier-1 canonicalization. This may rewrite only local CFG/SSA
     /// shape; Tier-2 dataflow/state optimizations remain disabled.
     pub fn tier1() -> Self {
         Self {
+            debug: Default::default(),
+            disabled: Self::MASK & !((1 << 9) - 1),
             prune: true,
             merge: true,
             phis: true,
@@ -71,6 +89,7 @@ pub struct PassStats {
     pub removed: usize,
     pub loop_hoisted: usize,
     pub ram_forwarded: usize,
+    pub ram_guards_reused: usize,
     pub state_writes_elided: usize,
     pub helper_states_elided: usize,
     pub cpu_values_elided: usize,
@@ -82,6 +101,7 @@ pub struct PassStats {
     pub sccp_parameters: usize,
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
+    let config = config.disable(config.disabled);
     verify(region).map_err(|e| e.0)?;
     if config.rounds > 8 {
         return Err("pass iteration budget exceeded".into());

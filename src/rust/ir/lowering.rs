@@ -1,3 +1,4 @@
+use super::runtime::diagnostics::CompileScope;
 use super::{
     backend::locals::allocate,
     hir::{Op, Region},
@@ -14,7 +15,9 @@ pub enum CompileError {
     Budget(&'static str),
 }
 pub fn lower(region: &Region) -> Result<MirRegion, CompileError> {
-    lower_draft(region)?.finish()
+    let draft = lower_draft(region)?;
+    let _clock = CompileScope::new(10);
+    draft.finish()
 }
 pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
     if region.blocks.len() > 64 || region.instructions.len() > 8192 || region.values.len() > 16384 {
@@ -163,34 +166,31 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
         .iter()
         .map(|inst| super::mir::value::lower(region, inst))
         .collect();
+    let state_clock = CompileScope::new(8);
     let states: Vec<_> = region
         .states
         .iter()
         .map(|state| super::mir::materialize::lower(region, state))
         .collect();
+    drop(state_clock);
+    let proof_clock = CompileScope::new(9);
     let helper_state = super::mir::helper_state::lower(
         region,
         &calls,
         super::mir::helper_state::DEFAULT_WORK_LIMIT,
     )?;
-    let cpu_liveness = super::mir::cpu_liveness::lower(
-        region,
-        &states,
-        &calls,
-        &helper_state,
-        super::mir::cpu_liveness::DEFAULT_WORK_LIMIT,
-    )?;
+    let cpu_liveness = super::mir::cpu_liveness::Plan::disabled(region.instructions.len());
     let state_elision = super::mir::state_elision::lower(
         region,
         &states,
         super::mir::state_elision::DEFAULT_WORK_LIMIT,
     )?;
-    let allocation = allocate(region).map_err(CompileError::Budget)?;
+    drop(proof_clock);
+    let allocation = { let _clock = CompileScope::new(7); allocate(region).map_err(CompileError::Budget)? };
     let control = super::mir::control::lower(region, &allocation)?;
-    Ok(Draft {
-        hir: region,
-        data: MirData {
+    Ok(Draft::new(region, MirData {
             ram_forwarding: vec![None; region.instructions.len()],
+            ram_guard_reuse: vec![None; region.instructions.len()],
             ram_loop_cache: super::mir::forwarding::LoopPlan::disabled(
                 region.instructions.len(),
                 region.blocks.len(),
@@ -227,6 +227,5 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
             control,
             values,
             states,
-        },
-    })
+        }))
 }

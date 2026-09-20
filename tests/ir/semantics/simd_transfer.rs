@@ -129,7 +129,16 @@ fn simd_transfer_contracts() {
         vec![0x0F, 0x17, 0xC0],
         vec![0xF0, 0x0F, 0x12, 0xC0],
     ] {
-        assert!(lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
+        let result = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true);
+        if bytes[0] == 0xF0 {
+            assert!(result.is_err());
+        } else {
+            assert!(result
+                .unwrap()
+                .helpers
+                .iter()
+                .any(|h| h.name == "ir_invalid_form"));
+        }
     }
     assert!(TransferOp::from_id(5).is_none());
     let mut r = lift_cpu(&[0x0F, 0x16, 0x06], GuestEip(0), LinearAddress(0), true).unwrap();

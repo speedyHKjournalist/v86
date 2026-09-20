@@ -38,6 +38,7 @@ pub struct Materialization {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatePlan {
+    pub after_instruction: bool,
     pub cpu: Materialization,
     pub standalone: Materialization,
     pub decoded_next: Write,
@@ -367,6 +368,7 @@ pub fn lower(region: &Region, state: &StateMap) -> StatePlan {
             .backing_valid
             .is_some_and(|value| !constant_bool(region, value, false));
     StatePlan {
+        after_instruction: state.resume == ResumeKind::AfterInstruction,
         cpu: target(state, true, lazy_flags, dynamic_backing),
         standalone: target(state, false, false, false),
         requires_cpu: !state.xmm.is_empty(),

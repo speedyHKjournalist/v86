@@ -6,7 +6,7 @@ use crate::ir::{effects::Effects, types::Type};
 
 pub fn arity(name: &str) -> Option<usize> {
     Some(match name {
-        "ir_sti_check"
+        "ir_sti_check" | "ir_cli_check"
         | "ir_fwait"
         | "ir_cli"
         | "ir_clts"
@@ -30,6 +30,7 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_in"
         | "ir_invlpg"
         | "ir_io_check"
+        | "ir_mov_segment_continue"
         | "ir_ldmxcsr"
         | "ir_lgdt"
         | "ir_lidt"
@@ -54,7 +55,7 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_str_reg"
         | "ir_write_cr"
         | "ir_write_dr" => 2,
-        "ir_arpl_mem" | "ir_movnti" | "ir_far_jump_mem" | "ir_lar_mem" | "ir_lar_reg"
+        "ir_invalid_form" | "ir_arpl_mem" | "ir_movnti" | "ir_far_jump_mem" | "ir_lar_mem" | "ir_lar_reg"
         | "ir_lsl_mem" | "ir_lsl_reg" | "ir_out" | "ir_pop_segment" => 3,
         "ir_reserved_form"
         | "ir_mmx_mask"
@@ -87,7 +88,7 @@ fn abi(name: &str) -> HelperAbi {
         HelperAbi::CpuRep
     } else if matches!(
         name,
-        "ir_sti_check" | "ir_flags_stack_check" | "ir_io_check"
+        "ir_sti_check" | "ir_cli_check" | "ir_flags_stack_check" | "ir_io_check" | "ir_mov_segment_continue"
     ) {
         HelperAbi::Outcome {
             fault_delivery: None,
@@ -161,4 +162,30 @@ pub fn validate(d: &HelperDescriptor) -> Result<(), &'static str> {
         return Err("CPU call helper observation/outcome contract mismatch");
     }
     Ok(())
+}
+
+/// Audited register-only SSE arithmetic/conversion forms. They read only the
+/// two XMM operands and MXCSR/x87 backing, modify only the destination XMM and
+/// FP backing, and cannot call host observers after the CR0 task guard succeeds.
+/// Integer/FLAGS conversions and every memory form retain the full contract.
+pub fn xmm_register_operands(region: &crate::ir::hir::Region, args: &[crate::ir::ids::ValueId]) -> Option<(u8, u8)> {
+    use crate::ir::hir::{Definition, Op};
+    let constant = |n: usize| {
+        let Definition::Instruction(id, 0) = region.values.get(args.get(n)?.index())?.definition else { return None; };
+        if let Op::Const(v) = region.instructions[id.index()].op { u32::try_from(v).ok() } else { None }
+    };
+    let op = constant(0)?;
+    if !matches!(op, 0x0F51 | 0x0F52 | 0x0F53 | 0x0F58 | 0x0F59 | 0x0F5A | 0x0F5B | 0x0F5C | 0x0F5D | 0x0F5E | 0x0F5F | 0x0FC2
+        | 0x660F51 | 0x660F58 | 0x660F59 | 0x660F5A | 0x660F5B | 0x660F5C | 0x660F5D | 0x660F5E | 0x660F5F | 0x660F7C | 0x660F7D | 0x660FC2 | 0x660FD0 | 0x660FE6
+        | 0xF20F51 | 0xF20F58 | 0xF20F59 | 0xF20F5A | 0xF20F5C | 0xF20F5D | 0xF20F5E | 0xF20F5F | 0xF20F7C | 0xF20F7D | 0xF20FC2 | 0xF20FD0 | 0xF20FE6
+        | 0xF30F51 | 0xF30F52 | 0xF30F53 | 0xF30F58 | 0xF30F59 | 0xF30F5A | 0xF30F5B | 0xF30F5C | 0xF30F5D | 0xF30F5E | 0xF30F5F | 0xF30FC2 | 0xF30FE6) { return None; }
+    let source = constant(1)?; let destination = constant(2)?;
+    if source >= 8 || destination >= 8 { return None; }
+    Some((source as u8, destination as u8))
+}
+
+/// Successful forms have no guest-memory/host observation or mapping writes.
+/// Fault outcomes still exit through full exception recovery and revoke reuse.
+pub fn preserves_code_on_success(name: &str) -> bool {
+    matches!(name, "ir_cli" | "ir_cli_check" | "ir_clts" | "ir_cpuid" | "ir_read_cr" | "ir_read_dr")
 }

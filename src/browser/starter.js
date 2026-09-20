@@ -1,3 +1,4 @@
+import { wasm_fallback_path } from "./wasm_paths.js";
 import { CPUWorkerController, encode_worker_file } from "./cpu_worker.js";
 import { v86 } from "../main.js";
 import { LOG_CPU, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
@@ -131,7 +132,7 @@ export function V86(options)
                 if(options.wasm_path)
                 {
                     v86_bin = options.wasm_path;
-                    v86_bin_fallback = v86_bin.replace("v86.wasm", "v86-fallback.wasm");
+                    v86_bin_fallback = wasm_fallback_path(v86_bin);
                 }
                 else if(typeof window === "undefined" && typeof __dirname === "string")
                 {
@@ -143,6 +144,8 @@ export function V86(options)
                     v86_bin = "build/" + v86_bin;
                     v86_bin_fallback = "build/" + v86_bin_fallback;
                 }
+
+                v86_bin_fallback = options["wasm_fallback_path"] || v86_bin_fallback;
 
                 load_file(v86_bin, {
                     done: async bytes =>
@@ -241,6 +244,11 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.disable_jit = options.disable_jit;
     settings["jit_backend"] = options["jit_backend"];
     settings["ir_region_budget"] = options["ir_region_budget"];
+    settings["ir_stats"] = options["ir_stats"];
+    settings["ir_verify"] = options["ir_verify"];
+    settings["ir_dump"] = options["ir_dump"];
+    settings["ir_opt_level"] = options["ir_opt_level"];
+    settings["ir_passes_disabled"] = options["ir_passes_disabled"];
     settings["x87_fast_math"] = options["x87_fast_math"];
     settings["x87_jit_cache"] = options["x87_jit_cache"];
     settings.load_devices = true;
@@ -1726,6 +1734,22 @@ V86.prototype.get_instruction_stats = function()
     if(this.worker_controller) return this.worker_controller.rpc("get_instruction_stats");
     return print_stats.stats_to_string(this.v86.cpu);
 };
+
+/** Opt-in diagnostics; 0 disables, otherwise a power-of-two sampling period. Clears compiled caches. */
+V86.prototype.configure_ir_diagnostics = function(period)
+{
+    if(this.worker_controller) return this.worker_controller.rpc("configure_ir_diagnostics", [period]);
+    return this.v86.cpu.configure_ir_diagnostics(period);
+};
+V86.prototype["configure_ir_diagnostics"] = V86.prototype.configure_ir_diagnostics;
+
+/** Return the last 16 compiler dumps as independent copies; optionally clear the ring. */
+V86.prototype.get_ir_dumps = function(clear = false)
+{
+    if(this.worker_controller) return this.worker_controller.rpc("get_ir_dumps", [!!clear]);
+    return this.v86.cpu.get_ir_dumps(!!clear);
+};
+V86.prototype["get_ir_dumps"] = V86.prototype.get_ir_dumps;
 
 /** Returns a copied runtime snapshot; in CPU Worker mode returns a Promise. */
 V86.prototype.get_jit_info = function()

@@ -37,6 +37,8 @@ pub struct Encoding {
     pub extra_bytes: u8,
     // Legacy dispatch fetches ModRM before selecting the mandatory-prefix form.
     pub fetch_modrm: bool,
+    pub group_ud: bool,
+    pub task_switch_test: bool,
     pub custom: bool,
     pub e: bool,
     pub ignore_mod: bool,
@@ -108,6 +110,7 @@ pub struct DecodedInstruction {
     pub immediate: Option<u32>,
     pub extra_immediate: Option<u16>,
     pub baseline_ud: bool,
+    pub debug_prefix_assert: bool,
     pub flow: Flow,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -167,39 +170,51 @@ pub fn decode(
 ) -> Result<DecodedInstruction, DecodeStop> {
     let mut c = Cursor { bytes, position: 0 };
     let mut prefixes = Prefixes::default();
+    let mut debug_prefix_assert = false;
     let first = loop {
         let byte = c.read()?;
-        match byte {
-            0x26 => prefixes.segment = Some(0),
-            0x2E => prefixes.segment = Some(1),
-            0x36 => prefixes.segment = Some(2),
-            0x3E => prefixes.segment = Some(3),
-            0x64 => prefixes.segment = Some(4),
-            0x65 => prefixes.segment = Some(5),
-            0x66 => prefixes.operand = true,
-            0x67 => prefixes.address = true,
-            0xF0 => prefixes.lock = true,
-            0xF2 => prefixes.repne = true,
-            0xF3 => prefixes.rep = true,
-            _ => break byte,
+        use crate::decode_rules::{prefix, Prefix};
+        match prefix(byte) {
+            Some(Prefix::Segment(s)) => prefixes.segment = Some(s),
+            Some(Prefix::Operand) => prefixes.operand = true,
+            Some(Prefix::Address) => prefixes.address = true,
+            Some(Prefix::Lock) => prefixes.lock = true,
+            Some(Prefix::Repne) => {
+                debug_prefix_assert |= prefixes.rep || prefixes.repne;
+                prefixes.repne = true;
+            },
+            Some(Prefix::Rep) => {
+                debug_prefix_assert |= prefixes.rep || prefixes.repne;
+                prefixes.rep = true;
+            },
+            None => break byte,
         }
     };
     let base_opcode = if first == 0x0F { 0x0F00 | c.read()? as u32 } else { first as u32 };
     let operand_size = if default_32 != prefixes.operand { 32 } else { 16 };
     let address_size = if default_32 != prefixes.address { 32 } else { 16 };
-    let mut opcode = base_opcode;
-    // Match the fixed baseline's mandatory-prefix precedence, including ignored prefixes.
-    for (present, prefix) in [
-        (first == 0x0F && prefixes.operand, 0x66),
-        (prefixes.repne, 0xF2),
-        (prefixes.rep, 0xF3),
-    ] {
-        let prefixed = prefix << (if first == 0x0F { 16 } else { 8 }) | base_opcode;
-        if present && !candidates(prefixed).is_empty() {
-            opcode = prefixed;
-            break;
+    let mut available = 0;
+    let variants = [
+        (0x66, crate::prefix::PREFIX_66),
+        (0xF2, crate::prefix::PREFIX_F2),
+        (0xF3, crate::prefix::PREFIX_F3),
+    ];
+    let shift = if first == 0x0F { 16 } else { 8 };
+    for (prefix, mask) in variants {
+        if (prefix != 0x66 || first == 0x0F)
+            && !candidates(prefix << shift | base_opcode).is_empty()
+        {
+            available |= mask;
         }
     }
+    let flags = if prefixes.operand { crate::prefix::PREFIX_66 } else { 0 }
+        | if prefixes.repne { crate::prefix::PREFIX_F2 } else { 0 }
+        | if prefixes.rep { crate::prefix::PREFIX_F3 } else { 0 };
+    let selected = crate::decode_rules::mandatory_prefix(flags, available);
+    let opcode = variants
+        .iter()
+        .find(|(_, mask)| *mask == selected)
+        .map_or(base_opcode, |(prefix, _)| prefix << shift | base_opcode);
     let rows = candidates(opcode);
     let first = rows.first().ok_or(DecodeStop::UnknownEncoding { opcode })?;
     let modrm_offset = if first.fetch_modrm { Some(c.position as u8) } else { None };
@@ -208,6 +223,15 @@ pub fn decode(
         .iter()
         .find(|row| row.group < 0 || modrm.map(|m| (m >> 3 & 7) as i8) == Some(row.group))
         .ok_or(DecodeStop::UnknownEncoding { opcode })?;
+    debug_prefix_assert |= available != 0
+        && selected == 0
+        && flags
+            & if encoding.sse {
+                crate::prefix::PREFIX_66 | crate::prefix::PREFIX_F2 | crate::prefix::PREFIX_F3
+            } else {
+                crate::prefix::PREFIX_F2 | crate::prefix::PREFIX_F3
+            }
+            != 0;
     let ea = match modrm {
         Some(m) if encoding.e && m < 0xC0 && !encoding.ignore_mod => {
             Some(decode_ea(&mut c, m, address_size, prefixes.segment)?)
@@ -258,6 +282,7 @@ pub fn decode(
         immediate,
         extra_immediate,
         baseline_ud,
+        debug_prefix_assert,
         flow,
     })
 }
@@ -268,57 +293,20 @@ fn decode_ea(
     size: u8,
     segment: Option<u8>,
 ) -> Result<EffectiveAddress, DecodeStop> {
-    let mode = modrm >> 6;
-    let rm = modrm & 7;
-    let (base, index, scale, absolute) = if size == 16 {
-        let (base, index) = match rm {
-            0 => (Some(3), Some(6)),
-            1 => (Some(3), Some(7)),
-            2 => (Some(5), Some(6)),
-            3 => (Some(5), Some(7)),
-            4 => (Some(6), None),
-            5 => (Some(7), None),
-            6 if mode == 0 => (None, None),
-            6 => (Some(5), None),
-            _ => (Some(3), None),
-        };
-        (base, index, 0, mode == 0 && rm == 6)
-    } else if rm == 4 {
-        let sib = c.read()?;
-        let b = sib & 7;
-        let i = sib >> 3 & 7;
-        (
-            if b == 5 && mode == 0 { None } else { Some(b) },
-            if i == 4 { None } else { Some(i) },
-            sib >> 6,
-            b == 5 && mode == 0,
-        )
-    } else {
-        (
-            if rm == 5 && mode == 0 { None } else { Some(rm) },
-            None,
-            0,
-            rm == 5 && mode == 0,
-        )
-    };
-    let displacement = if mode == 1 {
+    let sib = if size == 32 && modrm & 7 == 4 { Some(c.read()?) } else { None };
+    let form = crate::decode_rules::address_form(modrm, size, sib);
+    let displacement = if form.displacement_bytes == 1 {
         c.read()? as i8 as i32 as u32
-    } else if mode == 2 || absolute {
-        c.integer(size / 8)?
     } else {
-        0
+        c.integer(form.displacement_bytes)?
     };
     Ok(EffectiveAddress {
-        base,
-        index,
-        scale,
+        base: form.base,
+        index: form.index,
+        scale: form.scale,
         displacement,
         address_size: size,
-        segment: segment.unwrap_or(if base == Some(5) || base == Some(4) && size == 32 {
-            2
-        } else {
-            3
-        }),
+        segment: segment.unwrap_or(form.segment),
     })
 }
 

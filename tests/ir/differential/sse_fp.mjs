@@ -38,7 +38,8 @@ for(const release of [false,true]){
             (a,x)=>{observe("write8",a,x);mem[physical(a)]=x;},
             a=>{observe("read32",a);return view.getInt32(physical(a),true);},
             (a,x)=>{observe("write32",a,x);set32(physical(a),x);});
-        const imports={...e,m:e.memory};
+        let registerCalls=0;
+        const imports={...e,m:e.memory,ir_sse_fp_reg_continue:(...args)=>{registerCalls++;return e.ir_sse_fp_reg_continue(...args);}};
         const instances=modules.map(pair=>pair.map(module=>new WebAssembly.Instance(module,{e:imports})));
 
         function desc(n,base,access){
@@ -75,7 +76,7 @@ for(const release of [false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault=false,nullSegment=false,mmio=false,sample=0,rounding=0}={}){
+        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault=false,nullSegment=false,mmio=false,sample=0,rounding=0,denormal=0,masks=true}={}){
             const [bytes,mode,opcode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
             cpu.cr[4]=cr4;
@@ -117,7 +118,7 @@ for(const release of [false,true]){
             linear8[816]=empty;
             linear8[1032]=top;
             mem.fill(0,DATA,DATA+8192);
-            cpu.mxcsr[0]=0x1F80 | rounding<<13;
+            cpu.mxcsr[0]=(masks?0x1F80:0) | rounding<<13 | (denormal&1)<<6 | (denormal>>1)<<15;
             // Includes +/-zero, denormals, infinities, quiet/signaling NaNs,
             // i32 conversion overflow/rounding boundaries and arbitrary upper lanes.
             const patterns=[
@@ -129,6 +130,14 @@ for(const release of [false,true]){
                 [1,0,1,0x80000000],
                 [0,0x7FF00000,0x12345,0x7FF80000],
                 [0,0x41E00000,0,0xC1E00001],
+                [0,0,0,0x80000000],
+                [0x12345,0x7FF00000,0x54321,0xFFF00000],
+                [0xFFFFFFFF,0x000FFFFF,0,0x00100000],
+                [0x007FFFFF,0x00800000,0x807FFFFF,0x80800000],
+                [0x7F7FFFFF,0xFF7FFFFF,0xFFC12345,0xFF812345],
+                [0xFFFFFFFF,0x7FEFFFFF,0xFFFFFFFF,0xFFEFFFFF],
+                [0x3F000000,0xBF000000,0x40200000,0xC0200000],
+                [0,0x3FE00000,0,0xBFE00000],
             ];
             const values=patterns[sample];
             for(let n=0;n<32;n++) cpu.reg_xmm32s[n]=values[n%4];
@@ -166,13 +175,30 @@ for(const release of [false,true]){
             return expected;
         }
 
+        for(const op of [0x0F58,0x0F59,0x0F5C,0x0F5E]) {
+            const i=cases.findIndex(c=>c[1]&&c[2]===op&&!c[3]&&!c[4]&&!c[0].includes(0x67));
+            assert(i>=0);
+            for(const opt of [0,1]) {
+                reset(i);cpu.reg_xmm32s.fill(0x3F800000);registerCalls=0;instances[i][opt].exports.f(0);
+                assert.equal(registerCalls,0,'finite packed arithmetic must use native SIMD');
+                reset(i,{sample:2});registerCalls=0;instances[i][opt].exports.f(0);
+                assert.equal(registerCalls,1,'special values must retain scalar payload semantics');
+                reset(i,{task:8});registerCalls=0;instances[i][opt].exports.f(0);
+                assert.equal(registerCalls,1,'task fault must use precise recovery');
+            }
+        }
         let comparisons=0;
         for(let i=0;i<cases.length;i++) {
             const [,mode,opcode,dirty,memory,width]=cases[i], before=dirty?102:101;
             const aligned=(opcode&255)===0xD0;
-            for(let sample=0;sample<8;sample++) for(let rounding=0;rounding<4;rounding++) {
+            for(let sample=0;sample<16;sample++) for(let rounding=0;rounding<4;rounding++) {
                 const expected=compare(i,()=>reset(i,{sample,rounding}),before+1);
                 assert.equal(expected.ip,PC+cases[i][0].length); comparisons++;
+            }
+            if(mode && !memory && !dirty && !cases[i][0].includes(0x67)) {
+                for(const sample of [1,2,9,10,11,14,15]) for(let rounding=0;rounding<4;rounding++) for(let denormal=0;denormal<4;denormal++) for(const masks of [false,true]) {
+                    compare(i,()=>reset(i,{sample,rounding,denormal,masks}),before+1); comparisons++;
+                }
             }
             if(memory) {
                 for(const mmio of [false,true]) {

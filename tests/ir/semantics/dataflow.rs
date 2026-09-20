@@ -15,6 +15,8 @@ use crate::ir::{
 };
 fn config() -> PassConfig {
     PassConfig {
+        debug: Default::default(),
+        disabled: 0,
         prune: false,
         merge: false,
         phis: false,

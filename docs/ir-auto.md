@@ -34,15 +34,28 @@ legacy generation, including inside a CPU Worker. `ir_region_budget` supplies
 these limits and `get_jit_info()` reports copied runtime statistics. Direct use of
 the Wasm configuration export remains independent of the legacy generation switch.
 
-Heat is a count of observed entry visits, not retired guest instructions. Normal
-CPU dispatch contributes visits; legacy linked entries contribute visits even when
-performance recording is off. The link path only records heat. Compilation waits
+Heat counts eligible entry visits, not retired guest instructions. Interpreted
+entries, Tier-1 promotion candidates, and Tier-2 entries with a hot exit still
+eligible for a fusion attempt contribute heat. Completed and terminal Tier-2
+entries do not crowd unpublished PCs out of the bounded ring. Visit/link counters
+remain separate from heat. Legacy linked entries also contribute when recording
+is off. The link path only records heat. Compilation waits
 until an outer CPU dispatch point with no guest locals alive and no held JIT/cache
-lock. Up to 128 entry-key records are retained in a rotating bounded queue.
+lock. Up to 128 entry-key records are retained with an indexed hot lookup and
+round-robin compilation selection and fixed-slot replacement. New entries update
+only the replaced and inserted index keys; page invalidation rebuilds the index
+only when it actually removes heat records.
 
 Candidate scanning/capture happens at most once per `main_loop` invocation, even
 when no entry is ready. There is at most one current automatic job awaiting
 instantiation; browser work from cancelled/reset jobs can still finish later.
+One capture may compile the selected entry plus one already-hot entry inside its
+byte window, at the same tier/CS/default width. These are separate guarded Wasm
+artifacts sharing an immutable input, not one function with unchecked entry
+selectors. The sibling waits in a bounded queue; each frame publishes at most one
+artifact, and only after the preceding browser task completes. Reset/configuration
+and dependent writes cancel queued siblings. Reservation and publication repeat
+the normal source/mapping/generation checks, including for unnotified changes.
 These limits bound scheduling work; they do not provide a measured
 wall-clock compilation deadline or Worker compiler. Actual compilation currently
 runs synchronously in the CPU Wasm, and browser instantiation is asynchronous.
@@ -50,21 +63,22 @@ runs synchronously in the CPU Wasm, and browser instantiation is asynchronous.
 ## Region selection and two tiers
 
 The selector uses the shared decoder over read-only immutable bytes. Tier 1 scans
-at most 32 decoded instructions in the configured window. Tier 2 scans at most 48
-instructions in twice that window, capped at 960 bytes. Selection normally stays
-within the current linear page; it can extend the initial capture to 15 bytes when
-the first instruction crosses a page. Stop/boundary instructions, calls,
-unconditional branches and backward branches terminate the sequential window.
-Forward direct targets outside the selected window remain explicit exits in the
-existing reachable CFG frontend. An undecodable trailing instruction ends the
-window before it; an unsupported first instruction or unsupported IR lowering is
-a recorded compile stop, followed by ordinary CPU execution.
+at most 32 decoded instructions in the configured window. Tier 2 scans at most 96
+instructions in twice that window, capped at 1920 bytes. Reachable direct edges
+and both conditional arms are followed within the bounded snapshot; external
+edges remain explicit exits. Cross-page capture falls back to the current page
+when the larger window cannot be captured without effects.
 
-Tier 1 uses the shared HIR/MIR/Wasm compiler without the optimization pipeline.
-Tier 2 runs the current verified passes, including GVN, constant branch pruning,
-DCE and budget-preserving block merging. Artifacts now retain their tier metadata.
-This is a functioning lightweight/optimized policy for currently implemented
-lowerings, not the complete planned Tier 1 ISA or mature multi-page Tier 2 selector.
+Automatic fallthrough-only windows use the existing linear CPU frontend to avoid
+creating and merging a fragment CFG for every instruction. Branching windows use
+the reachable CFG frontend. Compiler budget failures can retry up to seven smaller,
+instruction-aligned prefixes, with matching mappings/dependencies. Invalid IR or
+snapshot errors remain failures. The explicit compilation API does not shrink its
+caller's requested region.
+
+Tier 1 runs a single low-cost prune/merge/phi/copy canonicalization round. Tier 2
+uses the full configured optimization pipeline. Both paths retain verifiers,
+recovery maps and publication guards. This is not full OS/performance acceptance.
 
 Queued entry keys need not equal the CPU IP when compilation finally runs. The
 compiler receives the saved IP/CS/default-width key and a fresh snapshot under the
@@ -96,7 +110,7 @@ complete global physical-page version registry.
 
 Automatic requests can evict only automatic published records, and never evict
 the entry they are attempting to upgrade. Explicitly published entries are not
-automatic eviction candidates. The shared cache still holds at most 32 records
+automatic eviction candidates. The shared cache still holds at most 256 records
 within the original 899-slot pool. A failed compilation does not evict a record;
 space is reclaimed only after compilation succeeds. Evicted entry heat is reset
 so inactive historical entries do not continually recompile. Active-frame and
@@ -106,12 +120,15 @@ legacy-lock quiescence rules continue to govern slot collection.
 
 | Field | Meaning |
 |---|---|
-| 0 / 1 | Ordinary / legacy-linked entry observations |
+| 0 / 1 | Ordinary / legacy- or IR-linked entry observations |
 | 2 / 3 | Tier 1 / Tier 2 compilation attempts |
 | 4 / 5 | Tier 1 / Tier 2 successful publication completions |
 | 6 / 7 | Capture/compiler stops / failed publication completions |
 | 8 | Suppressed unchanged failed inputs |
 | 9 / 10 / 11 | Retained heat records / pending task flag / enabled flag |
+| 12 / 13 / 14 | Unsupported / budget / invalid-IR compiler stops |
+| 15 | Budget reductions in successful automatic compilations |
+| 16 / 17 | Extra compiled hot entries from shared captures / queued siblings |
 
 ## Validation scope
 
@@ -122,7 +139,10 @@ A separate case disables legacy generation and checks zero legacy publisher call
 Further cases cover 16-bit CS/AX behavior, a 42-instruction loop spanning lightweight regions and a
 larger optimized region, unsupported-input suppression and changed-code retry,
 failed upgrades retaining Tier 1, a held pending task, reset/late completions,
-snapshot restore/recompilation, premature completion rejection and 40-entry
+snapshot restore/recompilation, guarded stack-store CFG loops with exact retirement,
+actual bounded IR-to-IR continuation with recording off/on, automatic shared-snapshot
+multi-entry publication, and held-batch cancellation through configuration/SMC,
+premature completion rejection and 264-entry
 capacity eviction preserving an explicit entry. The two invariants builds also
 start with actual linked legacy modules and show linked heat producing IR modules
 only after return to cold dispatch. The explicit cache matrix is rerun alongside
@@ -135,3 +155,10 @@ The automatic test workloads deliberately use low thresholds to exercise transit
 they do not modify the guest clock or constitute workload performance measurements.
 Browser-hosted/Worker policy control, complete cross-backend links, the remaining
 ISA and OS/performance acceptance remain outstanding.
+
+## Hot region fusion follow-up
+
+The experimental runtime now fuses two profiled source regions into one guarded
+Tier 2 SSA activation, retaining GPR/FLAGS/XMM and retirement state over internal
+edges. Publication, admission and SMC guards cover both snapshots. See
+[the fusion contract and tests](ir-fusion.md) for bounds, diagnostics and results.

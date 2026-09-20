@@ -15,6 +15,8 @@ fn region(bytes: &[u8]) -> crate::ir::hir::Region {
 }
 fn only_merge() -> PassConfig {
     PassConfig {
+        debug: Default::default(),
+        disabled: 0,
         prune: false,
         merge: true,
         phis: false,

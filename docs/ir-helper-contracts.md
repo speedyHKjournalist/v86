@@ -274,3 +274,18 @@ raw/lazy FLAGS tuple as well as the concrete EFLAGS value. Differential fixtures
 cover integer and SIMD continuation, repeated helpers, loops, MMIO callbacks
 modifying GPR/FLAGS/XMM, and faults before and after a successful helper, in
 straight-line/CFG and optimized/unoptimized variants.
+
+
+## Low-level import registry and extended continuation audit
+
+`helper/imports.rs` now owns the 31 reserved CPU import signatures and return
+protocols. MIR sealing and emission check argument types and protocol consumers;
+emitter entry calls also use registry signatures. Returning FP observers compare
+all eight segment caches, descriptor tables, TSS width and non-arithmetic FLAGS
+before allowing continuation. See [the contract matrix](ir-contract-matrix.md)
+for exact coverage and the continuing scalar memory callback preconditions.
+`ir_request_link` only records a cold-continuation request; it neither mutates
+architectural CPU state nor dispatches recursively.
+`ir_admission_barrier` revokes byte-validation certificates before potentially
+observing imports without changing architectural state. Its interval and emitter
+placement are documented in [fast entry validation](ir-fast-entry.md).

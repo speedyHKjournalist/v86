@@ -118,7 +118,16 @@ fn cmpxchg8b_contract() {
         assert!(lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
         let mut bytes = prefix;
         bytes.extend([0x0F, 0xC7, 0xC8]);
-        assert!(lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
+        let result = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true);
+        if bytes[0] == 0xF0 {
+            assert!(result.is_err());
+        } else {
+            assert!(result
+                .unwrap()
+                .helpers
+                .iter()
+                .any(|h| h.name == "ir_invalid_form"));
+        }
     }
     let r = lift_cpu(&[0x90], GuestEip(0), LinearAddress(0), true).unwrap();
     let mut broken = r.clone();

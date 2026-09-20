@@ -1,3 +1,4 @@
+pub mod diagnostics;
 pub mod compile;
 pub mod entry;
 pub mod far_control;
@@ -39,3 +40,9 @@ mod sse_fp;
 mod mmx;
 
 mod coverage;
+
+/// Host diagnostics: the portable build deliberately declines vector IR emission.
+#[no_mangle]
+pub extern "C" fn ir_wasm_simd_supported() -> u32 {
+    u32::from(cfg!(target_feature = "simd128"))
+}

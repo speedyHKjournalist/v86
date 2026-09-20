@@ -373,6 +373,8 @@ export interface V86Options {
      * @default "build/v86.wasm" or "build/v86-debug.wasm" when debug mode enabled
      */
     wasm_path?: string;
+    /** Portable core URL; defaults to the primary name with -fallback.wasm. */
+    wasm_fallback_path?: string;
 
     /**
      * The memory size in bytes, should be a power of 2.
@@ -608,6 +610,17 @@ export interface V86Options {
     disable_jit?: boolean;
     /** Compiler selection. IR requires an ir-experimental core; default legacy. */
     jit_backend?: "legacy" | "ir";
+    /** 0: no optional optimization; 1: Tier-1 canonicalization; 2: full Tier-2. Default 2. */
+    /** Optional MIR verification: debug builds by default; every_pass also checks release builds. */
+    /** Startup diagnostic sampling: off=0, sampled=128, debug=1. */
+    ir_stats?: "off" | "sampled" | "debug";
+    ir_verify?: "off" | "debug" | "every_pass";
+    /** Bounded compiler dump ring; off by default. */
+    ir_dump?: "off" | "hir" | "mir" | "wasm" | "all";
+    ir_opt_level?: 0 | 1 | 2;
+    /** Startup-only diagnostic controls. Verification and recovery cannot be disabled. */
+    ir_passes_disabled?: Array<"prune" | "merge" | "phis" | "copy" | "fold" | "flags" | "helper_state" |
+        "gvn" | "dce" | "licm" | "mir_fold" | "stack" | "allocation" | "state_elision" | "ram_loop" | "ram_forward" | "ram_guard">;
     /** Bounded automatic IR policy. Only accepted with jit_backend: "ir". */
     ir_region_budget?: {
         /** Entry visits before Tier 1; integer 1..1000000, default 16. */
@@ -987,7 +1000,11 @@ export class V86 {
     get_instruction_stats(): string | Promise<string>;
 
     /** Runtime snapshot. Counters are per core lifetime; IR counters wrap at 2^32. */
+    /** Compiled artifacts, not proof of publication/execution. Truncation bits: HIR=1, MIR=2, Wasm=4. */
+    get_ir_dumps(clear?: boolean): Array<{pc: number; tier: number; hir: string; mir: string; wasm: Uint8Array; truncated: number}> | Promise<Array<{pc: number; tier: number; hir: string; mir: string; wasm: Uint8Array; truncated: number}>>;
     get_jit_info(): V86JitInfo | Promise<V86JitInfo>;
+    /** Clears compiled caches and starts a diagnostic session. 0 disables; otherwise a power of two, max 65536. */
+    configure_ir_diagnostics(sample_period: number): boolean | Promise<boolean>;
 }
 
 export interface V86JitInfo {
@@ -996,12 +1013,45 @@ export interface V86JitInfo {
     legacy_compile_requests: number;
     ir_available: boolean;
     ir_region_budget: Required<NonNullable<V86Options["ir_region_budget"]>> | null;
+    ir_stats: NonNullable<V86Options["ir_stats"]> | null;
+    ir_verify: NonNullable<V86Options["ir_verify"]> | null;
+    ir_dump: NonNullable<V86Options["ir_dump"]> | null;
+    ir_opt_level: 0 | 1 | 2 | null;
+    ir_passes_disabled: NonNullable<V86Options["ir_passes_disabled"]> | null;
     ir: {
         visits: number; linked_visits: number;
         tier1_attempts: number; tier2_attempts: number;
         tier1_published: number; tier2_published: number;
         compile_stops: number; publication_failures: number; suppressed: number;
+        unsupported_stops: number; budget_stops: number; invalid_ir_stops: number;
+        budget_retries: number;
+        batched_entries: number;
+        queued_entries: number;
+        fusion_attempts: number; fusion_budget_stops: number;
+        fusion_unsupported_stops: number; fusion_invalid_stops: number;
         hot_entries: number; pending: number; enabled: number;
-        cache_entries: number; cache_hits: number;
+        cache_entries: number; cache_hits: number; cache_capacity: number; cache_evictions: number;
+        cache_fast_checks: number; cache_full_checks: number;
+        cache_post_fetch_reuses: number; cache_target_hits: number; cache_negative_hits: number;
+        cache_fast_validation: boolean;
+        fused_publications: number; fused_hits: number; fused_guest_steps: number;
+        fusion_enabled: boolean;
+        diagnostics: V86IrDiagnostics | null;
     } | null;
+}
+
+export interface V86IrDiagnostics {
+    schema: number; enabled: boolean; sample_period: number; session: number;
+    empty_scope_sampled_ms: number; empty_scope_wall_ms: number;
+    totals: Record<string, number>;
+    timings: Record<string, {sampled_ms: number; sampled_calls: number; estimated_ms: number}>;
+    exits: Record<string, {count: number; guest_steps: number}>;
+    admission: Record<string, number>;
+    chain_stops: Record<string, number>;
+    compiler: Record<string, {ms: number; calls: number; max_ms: number; max_pc: number; max_tier: number}>;
+    publication: {wall_ms: number; calls: number; succeeded: number};
+    helper_exits: Record<string, {count: number; guest_steps: number}>;
+    interpreter_hotspots: Array<{pc: number; cr3: number; physical: number; samples: number; guest_steps: number; inclusive_ms: number}>;
+    hotspot_replacements: number;
+    hotspots: Array<{pc: number; cr3: number; reason: string; samples: number; guest_steps: number; inclusive_ms: number; tier: number; fused: boolean}>;
 }

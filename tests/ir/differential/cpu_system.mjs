@@ -30,6 +30,16 @@ try{
     const state=()=>({halt:cpu.in_hlt[0],regs:Array.from(cpu.reg32,x=>x>>>0),flags:e.get_eflags()>>>0,last:words[104>>2],ip:cpu.instruction_pointer[0]>>>0,previous:words[560>>2],cr:Array.from(cpu.cr,x=>x>>>0),cpl:words[612>>2]&255,mode:cpu.is_32[0],ss32:cpu.stack_size_32[0],cached:words[108>>2],sreg:Array.from(cpu.sreg.slice(0,6)),base:Array.from(cpu.segment_offsets.slice(0,6),x=>x>>>0),limit:Array.from(cpu.segment_limits.slice(0,6),x=>x>>>0),access:Array.from(cpu.segment_access_bytes.slice(0,6)),null:Array.from(cpu.segment_is_null.slice(0,6)),sysenter:Array.from(words.slice(636>>2,(644>>2)+1)),frames:[STACK-128,0x8F80,0x91F80].map(a=>Buffer.from(mem.slice(a,a+144)))});
     const caught=f=>{try{f();return false;}catch(error){assert(error instanceof WebAssembly.RuntimeError);return true;}};
     function compare(i,configure,count=102,abort=false){configure();assert.equal(caught(()=>instances[i][0].exports.f(0)),abort);assert.equal(words[664>>2],count);const actual=state(),observed=events.slice();if(transfer(cases[i][2])&&count===102)assert.equal(words[620>>2],0xFFFFFFFF);configure();e.ir_test_step();assert.equal(caught(()=>e.ir_test_step()),abort);assert.deepEqual(actual,state(),`system CPU ${i}`);assert.deepEqual(observed,events);configure();assert.equal(caught(()=>instances[i][1].exports.f(0)),abort);assert.equal(words[664>>2],count);assert.deepEqual(state(),actual);assert.deepEqual(events,observed);return actual;}
+    for(const mode of [false,true]) for(const opt of [0,1]) for(const fault of [false,true]) {
+        const i=cases.findIndex(c=>c[1]===mode&&c[2]===0xFA);
+        const configure=()=>{reset(i,{cpl:fault?3:0});mem.set([0x46,0xFA,0x43],PC);};
+        const f=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(`build/ir-cpu-system/cli-${mode}-${opt}.wasm`)),{e:{...e,m:e.memory,ir_cli_check:()=>{
+            assert.equal(cpu.reg32[6]>>>0, fault ? (mode?0x80000000:0x7FFF0000) : 0x7FFFFFFF, "CLI guarded synchronization");
+            return e.ir_cli_check();
+        }}}).exports.f;
+        configure();f(0);const actual=state();assert.equal(words[664>>2],fault?101:103);
+        configure();for(let n=0;n<(fault?2:3);n++)e.ir_test_step();assert.deepEqual(actual,state(),'CLI continues only after privilege success');
+    }
     let ordinary=0;
     for(let i=0;i<cases.length;i++)for(const ss32 of [false,true])for(const base of [0,0x10000])for(const ts of [false,true]){
         const actual=compare(i,()=>reset(i,{ss32,base,ts})),op=cases[i][2];

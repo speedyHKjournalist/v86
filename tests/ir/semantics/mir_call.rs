@@ -138,3 +138,21 @@ fn arena_tombstones_do_not_require_live_calls() {
     assert!(m.calls.iter().all(Option::is_none));
     emit_cpu(&m, 100).unwrap();
 }
+
+#[test]
+fn register_sse_observes_only_operands_when_unused_results_are_preserved_in_ssa() {
+    use crate::ir::{frontend::{lift::lift_cpu, decode::{GuestEip,LinearAddress}}, hir::Op, lowering::lower};
+    let mut r=lift_cpu(&[0x47,0x0F,0x58,0xC1,0x43],GuestEip(0x100000),LinearAddress(0x100000),true).unwrap();
+    let id=r.instructions.iter().position(|i| matches!(i.op,Op::CallHelper(_))).unwrap();
+    let mir=lower(&r).unwrap();
+    let call=mir.calls[id].as_ref().unwrap();
+    assert_eq!(call.xmm_observation,Some((1,0)));
+    assert_eq!(call.reload.len(),1);
+    // Public/custom HIR is allowed to use the full reload ABI. Such a use must
+    // revoke selective observation rather than inventing an uninitialized value.
+    let result=r.instructions[id].results[0];
+    r.states.last_mut().unwrap().gpr[0]=result;
+    let full=lower(&r).unwrap();
+    assert_eq!(full.calls[id].as_ref().unwrap().xmm_observation,None);
+    assert_eq!(full.calls[id].as_ref().unwrap().reload.len(),22);
+}

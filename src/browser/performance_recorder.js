@@ -41,6 +41,7 @@ export class PerformanceRecorder
         this.hotspots_dropped = 0;
         this.next_hotspot = 0;
         this.report = null;
+        this.jit_start = null;
         this.graphics = null;
         this.metadata["wasm_sha256"] = null;
         const source = emulator.wasm_source;
@@ -57,7 +58,8 @@ export class PerformanceRecorder
         if(this.active) throw new Error("Performance recording is already active");
         const cpu = this.emulator.v86.cpu;
         const exports = cpu.wm.exports;
-        this.metadata["jit_backend"] = cpu.get_jit_info?.()["backend"] || "legacy";
+        this.jit_start = cpu.get_jit_info?.() || null;
+        this.metadata["jit_backend"] = this.jit_start?.["backend"] || "legacy";
         this.active = true;
         this.started = this.now();
         this.cleanup = [];
@@ -463,6 +465,7 @@ export class PerformanceRecorder
         this.cleanup = [];
         this.report = { "format": "v86-performance", "version": 6, "reason": reason,
             "recorded_at": new Date().toISOString(), "metadata": { ...this.metadata },
+            "jit": { "start": this.jit_start, "end": this.emulator.v86.cpu.get_jit_info?.() || null },
             "duration_ms": this.now() - this.started, "sample_interval_ms": 500,
             "counter_version": this.counter_version,
             "execution_chunk_sample_probability": this.counter_version === 3 ? 1 / 256 : null,

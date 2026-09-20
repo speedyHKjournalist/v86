@@ -21,6 +21,42 @@ pub enum EntryContract {
     Cpu(CpuEntryKey),
 }
 
+// Set only by a generated ordinary after-instruction exit. Fault, helper,
+// invalidation, budget and interrupt-shadow exits never request a successor.
+static mut LINK_REQUESTED: bool = false;
+// A byte-validation certificate is valid only in a synchronous CPU interval
+// without unobserved host writes. No certificate survives a new CPU batch,
+// interpretation, an observing import, or code/reset invalidation. Saturation
+// disables reuse permanently rather than allowing an ABA through wraparound.
+static mut ADMISSION_EPOCH: u64 = 1;
+// Fused continuation also stops on known code writes, while unrelated entry
+// byte certificates survive: dirty_page retires every affected physical owner.
+static mut CONTINUATION_EPOCH: u64 = 1;
+pub(super) fn code_write_barrier() {
+    unsafe { CONTINUATION_EPOCH = CONTINUATION_EPOCH.saturating_add(1); }
+}
+#[no_mangle]
+pub fn ir_admission_barrier() {
+    unsafe { ADMISSION_EPOCH = ADMISSION_EPOCH.saturating_add(1); }
+    code_write_barrier();
+}
+/// Fused artifacts read this non-shared CPU-owned epoch at recovery polls. Any
+/// observer revokes continuation before entering another guest instruction.
+#[no_mangle]
+pub fn ir_admission_epoch_address() -> u32 { core::ptr::addr_of!(CONTINUATION_EPOCH) as u32 }
+#[cfg(feature = "ir-experimental")]
+pub(super) fn admission_epoch() -> u64 { unsafe { ADMISSION_EPOCH } }
+#[cfg(feature = "ir-experimental")]
+pub(super) fn link_requested() -> bool { unsafe { LINK_REQUESTED } }
+#[no_mangle]
+pub unsafe fn ir_request_link() { LINK_REQUESTED = true; }
+#[cfg(feature = "ir-experimental")]
+pub unsafe fn take_link_request() -> bool {
+    let requested = LINK_REQUESTED;
+    LINK_REQUESTED = false;
+    requested
+}
+
 /// No state writes, memory translation, lazy-FLAGS evaluation or exception delivery.
 /// This guard does NOT validate code versions or grant permission to call a stale slot.
 #[no_mangle]

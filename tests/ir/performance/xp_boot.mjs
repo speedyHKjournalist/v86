@@ -1,0 +1,89 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+import { V86 } from '../../../build/libv86.mjs';
+
+// Headless CPU/disk diagnostic. Disk writes stay in AsyncXHRBuffer's RAM overlay.
+// Run one process per backend so 2 GiB guest memories do not overlap.
+const [disk, backend = 'ir', wasm = 'build/v86-ir-runtime.wasm'] = process.argv.slice(2);
+assert(disk && ['ir', 'legacy'].includes(backend));
+const duration = Number(process.env.IR_BOOT_MS || 30000);
+assert(Number.isFinite(duration) && duration >= 1000);
+const recording = process.env.IR_BENCH_RECORD === '1';
+const target = process.env.IR_BOOT_TARGET || 'time';
+assert(['time', 'desktop'].includes(target));
+let milestone = null;
+const vm = new V86({
+    wasm_path: wasm, jit_backend: backend,
+    memory_size: 2048 * 1024 * 1024, vga_memory_size: 16 * 1024 * 1024,
+    bios: { url: 'bios/seabios.bin' }, vga_bios: { url: 'bios/vgabios.bin' },
+    hda: { url: disk, size: fs.statSync(disk).size, async: true },
+    x87_fast_math: true, x87_jit_cache: true,
+    v86gl_pci: { maxBatchBytes: 16 * 1024 * 1024 },
+    disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+    net_device: { type: 'ne2k' }, autostart: false,
+});
+let started, previous, count, total = 0;
+vm.add_listener('screen-set-size', size => {
+    const ms = started ? performance.now() - started : 0;
+    console.log(JSON.stringify({ event: 'screen', backend, ms, size }));
+    // This is a reproducible display-mode milestone, not proof of desktop idle.
+    if(started && !milestone && size[0] === 800 && size[1] === 600 && size[2] === 32) {
+        milestone = {ms, instructions: total + (((vm.get_instruction_counter() >>> 0) - count) >>> 0)};
+        console.log(JSON.stringify({event:'milestone', name:'800x600x32', backend, ...milestone}));
+    }
+});
+try {
+    await new Promise((resolve, reject) => {
+        vm.add_listener('emulator-loaded', resolve);
+        vm.add_listener('emulator-error', reject);
+    });
+    const cpu = vm.v86.cpu, e = cpu.wm.exports;
+    if(process.env.IR_CACHE_CAPACITY !== undefined) assert.equal(e.ir_cache_set_capacity(Number(process.env.IR_CACHE_CAPACITY)),1);
+    if(process.env.IR_FAST_VALIDATION !== undefined) {
+        assert(['0', '1'].includes(process.env.IR_FAST_VALIDATION));
+        assert.equal(e.ir_cache_set_fast_validation(Number(process.env.IR_FAST_VALIDATION)),1);
+    }
+    if(process.env.IR_FUSION !== undefined) {
+        assert(['0', '1'].includes(process.env.IR_FUSION));
+        assert.equal(e.ir_cache_set_fusion(Number(process.env.IR_FUSION)),1);
+    }
+    if(process.env.IR_DIAGNOSTICS !== undefined) {
+        assert.equal(await vm.configure_ir_diagnostics(Number(process.env.IR_DIAGNOSTICS)), true);
+    }
+    if(recording) e.performance_recording_enable(1);
+    started = previous = performance.now();
+    count = vm.get_instruction_counter() >>> 0;
+    vm.run();
+    while(performance.now() - started < duration && !(target === 'desktop' && milestone)) {
+        await new Promise(resolve => setTimeout(resolve, target === 'desktop' ? 250 : 5000));
+        const now = performance.now(), next = vm.get_instruction_counter() >>> 0;
+        const steps = (next - count) >>> 0;
+        total += steps;
+        console.log(JSON.stringify({ backend, wasm, ms: now - started,
+            requested_ms: duration, overrun_ms: Math.max(0, now - started - duration),
+            mips: steps / (now - previous) / 1000, avg_mips: total / (now - started) / 1000,
+            recording, jit: vm.get_jit_info(),
+            sync_codegen_ms: recording ? e.performance_recording_get(5) : null,
+            sync_codegen_calls: recording ? e.performance_recording_get(7) : null,
+        }));
+        previous = now; count = next;
+    }
+    await vm.stop();
+    console.log(JSON.stringify({event:'result', backend, target, completed:target === 'time' || !!milestone,
+        ms:performance.now()-started, instructions:total, milestone, jit:vm.get_jit_info()}));
+    if(recording) {
+        const rows = Array.from({ length: e.performance_recording_hotspot_count() }, (_, i) =>
+            Array.from({ length: 10 }, (_, j) => e.performance_recording_hotspot_get(i, j)));
+        console.log(JSON.stringify({ event: 'samples', backend, rows }));
+        const counts = new Map();
+        for(const row of rows) counts.set(row[9], (counts.get(row[9]) || 0) + 1);
+        const hot = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([pc, samples]) => ({
+            pc: pc.toString(16), samples,
+            // Physical bytes are useful for early identity-mapped BIOS code only.
+            physical_bytes: Buffer.from(cpu.mem8.subarray(pc, pc + 32)).toString('hex'),
+        }));
+        console.log(JSON.stringify({ event: 'hot', backend, hot }));
+    }
+} finally {
+    await vm.destroy();
+}

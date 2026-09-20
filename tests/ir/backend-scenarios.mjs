@@ -54,6 +54,19 @@ export async function backend_scenarios(V86, options, log = console.log)
             const i = await info(); return i.ir.tier2_published > before.ir.tier2_published && i.ir.cache_hits > before.ir.cache_hits;
         }, "IR Tier 1/2 publish and execute through normal CPU scheduling");
         await vm.stop(); await assert_ir();
+        check(await vm.configure_ir_diagnostics(1), "enable public diagnostics");
+        check((await info()).ir.cache_entries === 0, "diagnostic policy invalidates prior modules");
+        await vm.run();
+        await until(async () => (await info()).ir.diagnostics.totals.ir_activations > 100, "diagnostic IR activations");
+        await vm.stop();
+        const diagnostic = (await info()).ir.diagnostics;
+        check(diagnostic.enabled && diagnostic.totals.instrumentation_errors === 0, "diagnostic timers balanced");
+        check(diagnostic.exits.budget.count > 0 && diagnostic.timings.state_write.sampled_calls > 0, "generated exit/timing instrumentation");
+        diagnostic.exits.budget.count = -1;
+        check((await info()).ir.diagnostics.exits.budget.count > 0, "diagnostic result copied across RPC");
+        check(await vm.configure_ir_diagnostics(0), "disable diagnostics");
+        check(!(await info()).ir.diagnostics.enabled, "off policy reached CPU");
+        log("PASS: opt-in IR timing/exits, copied diagnostics, cache-safe enable/disable");
         const snapshot = await vm.save_state();
         ir_snapshot = snapshot.slice(0);
         const saved = await info();
@@ -77,6 +90,58 @@ export async function backend_scenarios(V86, options, log = console.log)
         await vm.restart(); await boot(); await vm.stop(); await assert_ir();
         log("PASS: public IR backend, bounded policy, copied stats, Tier 1/2, SMC, x87 fallback, save/restore/restart, zero legacy requests");
         await destroy();
+
+        for(const dump of ["off", "hir", "mir", "wasm", "all"]) {
+            const verify = dump === "off" ? "off" : "every_pass";
+            const stats = dump === "hir" ? "sampled" : dump === "all" ? "debug" : "off";
+            await create({jit_backend:"ir", ir_region_budget:budget, ir_verify:verify, ir_dump:dump, ir_stats:stats});
+            check((await info()).ir_stats === stats && (await info()).ir.diagnostics.sample_period === (stats === "off" ? 0 : stats === "sampled" ? 128 : 1), "named statistics reach CPU");
+            check((await info()).ir_verify === verify && (await info()).ir_dump === dump, "debug policy reaches CPU");
+            await boot();
+            await vm.write_memory(Uint8Array.of(0x40, 0xEB, 0xFD), pc);
+            await vm.write_memory(bytes(pc), 0x600);
+            await until(async () => (await info()).ir.tier2_published > 0 && (await info()).ir.cache_hits > 0, "verified compilation publishes");
+            await vm.stop();
+            const records = await vm.get_ir_dumps();
+            check(records.length <= 16 && (dump === "off" ? !records.length : records.length > 0), "bounded opt-in dump ring");
+            for(const r of records) {
+                check(!!r.hir === ["hir", "all"].includes(dump) && !!r.mir === ["mir", "all"].includes(dump)
+                    && !!r.wasm.length === ["wasm", "all"].includes(dump), "selected stages only");
+                check(r.hir.length <= 65536 && r.mir.length <= 65536 && r.wasm.length <= 262144, "bounded artifacts");
+                if(r.wasm.length && !(r.truncated & 4)) check(WebAssembly.validate(r.wasm), "copied executable Wasm dump");
+                r.hir = "mutated"; r.wasm.fill(0);
+            }
+            const copy = await vm.get_ir_dumps(true);
+            if(copy.length) check(copy[0].hir !== "mutated" && (!copy[0].wasm.length || copy[0].wasm[1] === 97), "dump copies isolated");
+            check(!(await vm.get_ir_dumps()).length, "clear dump ring");
+            const snapshot = await vm.save_state(); await vm.restore_state(snapshot);
+            check((await info()).ir_verify === verify && (await info()).ir_dump === dump, "debug policy survives restore");
+            await destroy();
+        }
+        log("PASS: public dump/verify, each stage, bounded copied Wasm, clear, restore, verified Tier 1/2");
+
+        for(const level of [0, 1, 2]) {
+            const disabledPasses = level === 2 ? ["licm", "mir_fold", "allocation", "ram_forward"] : [];
+            await create({jit_backend:"ir", ir_region_budget:budget, ir_opt_level:level, ir_passes_disabled:disabledPasses});
+            const policy = await info();
+            check(policy.ir_opt_level === level && JSON.stringify(policy.ir_passes_disabled) === JSON.stringify(disabledPasses), "optimization policy reached CPU");
+            policy.ir_passes_disabled.push("gvn");
+            check((await info()).ir_passes_disabled.length === disabledPasses.length, "pass list is copied");
+            await vm.configure_ir_diagnostics(1); await boot();
+            await vm.write_memory(Uint8Array.of(0x40,0xEB,0xFD),pc);
+            const beforePolicy = await info(); await vm.write_memory(bytes(pc),0x600);
+            await until(async () => (await info()).ir.tier2_published > beforePolicy.ir.tier2_published, "configured optimizer publishes Tier 2");
+            await vm.stop();
+            const compiled = await info(), phases = compiled.ir.diagnostics.compiler;
+            check(phases.lower.calls > 0 && compiled.ir.cache_hits > 0 && !compiled.legacy_compile_requests, "configured pipeline executed IR");
+            for(const phase of ["machine_fold", "machine_allocation", "machine_forward"])
+                check(phases[phase].calls === 0, "disabled optimization was not invoked: " + phase);
+            if(level === 2) check(phases.machine_stack.calls > 0, "independent enabled pass still runs");
+            const snapshot = await vm.save_state(); await vm.restore_state(snapshot); await vm.restart();
+            check((await info()).ir_opt_level === level && JSON.stringify((await info()).ir_passes_disabled) === JSON.stringify(disabledPasses), "restore/restart preserve destination optimizer policy");
+            await destroy();
+        }
+        log("PASS: optimization levels 0/1/2 and individual pass controls execute, copy and survive restore/restart");
 
         await create({ jit_backend: "ir", ir_region_budget: budget, disable_jit: true });
         await boot(); await vm.stop();
@@ -111,6 +176,18 @@ export async function backend_scenarios(V86, options, log = console.log)
         for(const [extra, error] of [
             [{ jit_backend: "unknown" }, "jit_backend must"],
             [{ jit_backend: null }, "jit_backend must"],
+            [{ ir_stats: "sampled" }, "require jit_backend ir"],
+            [{ jit_backend: "ir", ir_stats: "full" }, "ir_stats must"],
+            [{ ir_verify: "every_pass" }, "require jit_backend ir"],
+            [{ jit_backend: "ir", ir_verify: "always" }, "ir_verify must"],
+            [{ jit_backend: "ir", ir_dump: null }, "ir_dump must"],
+            [{ ir_opt_level: 1 }, "require jit_backend ir"],
+            [{ jit_backend: "ir", ir_opt_level: null }, "ir_opt_level must"],
+            [{ jit_backend: "ir", ir_opt_level: 3 }, "ir_opt_level must"],
+            [{ jit_backend: "ir", ir_opt_level: 1.5 }, "ir_opt_level must"],
+            [{ jit_backend: "ir", ir_passes_disabled: "gvn" }, "ir_passes_disabled must"],
+            [{ jit_backend: "ir", ir_passes_disabled: ["typo"] }, "ir_passes_disabled must"],
+            [{ jit_backend: "ir", ir_passes_disabled: ["gvn", "gvn"] }, "ir_passes_disabled must"],
             [{ jit_backend: "ir", ir_region_budget: { execution_budget: 0 } }, "execution_budget"],
             [{ jit_backend: "ir", ir_region_budget: { hot_threshold: 1.5 } }, "hot_threshold"],
             [{ jit_backend: "ir", ir_region_budget: { promotion_threshold: NaN } }, "promotion_threshold"],

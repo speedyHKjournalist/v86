@@ -94,7 +94,7 @@ CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.j
 	   elf.js kernel.js
 LIB_FILES=9p.js filesystem.js marshall.js
 BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
-	      network.js starter.js worker_bus.js cpu_worker.js dummy_screen.js ansi_screen.js \
+	      network.js starter.js wasm_paths.js worker_bus.js cpu_worker.js dummy_screen.js ansi_screen.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
           print_stats.js filestorage.js modem.js graphics_performance.js performance_recorder.js
 
@@ -652,6 +652,19 @@ ir-cfg-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs build/j
 	cargo test ir::cfg_frontend_tests
 	node tests/ir/differential/cfg.mjs
 
+.PHONY: ir-fusion-tests
+ir-fusion-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	env RUSTFLAGS="-D warnings" cargo test ir::fusion_tests
+	node tests/ir/differential/fusion.mjs
+	node tests/ir/differential/fusion.mjs build/v86-ir-test-release.wasm
+
+.PHONY: ir-diagnostic-tests
+ir-diagnostic-tests: build/v86-ir-runtime.wasm build/v86-ir-cache-test.wasm build/v86-ir-cache-test-release.wasm build/libv86.mjs build/jit-capacity.bin
+	node tests/ir/differential/diagnostics.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/diagnostics.mjs build/v86-ir-cache-test-release.wasm
+	node tests/ir/differential/diagnostics.mjs build/v86-ir-runtime.wasm
+	IR_DIAGNOSTICS=16 node tests/ir/differential/auto.mjs build/v86-ir-runtime.wasm
+
 .PHONY: ir09-completion-tests
 ir09-completion-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs build/jit-capacity.bin
 	env RUSTFLAGS="-D warnings" cargo test ir::backend::structure::tests -- --nocapture
@@ -926,3 +939,45 @@ ir-sti-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-releas
 ir-helper-reload-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
 	cargo test ir::helper_tests::cpu_reload_contract_and_continuation_fixtures
 	node tests/ir/differential/reload.mjs
+
+# Portable IR core: scalar regions compile, vector regions explicitly fall back
+# to the interpreter and participate in normal failed-compilation suppression.
+build/v86-ir-runtime-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+	cargo rustc --release --features ir-experimental $(CARGO_FLAGS_SAFE) -C target-feature=-simd128
+	cp build/wasm32-unknown-unknown/release/v86.wasm $@
+
+build/v86-ir-test-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+	cargo rustc --features ir-test-hooks $(CARGO_FLAGS_SAFE) -C target-feature=-simd128
+	cp build/wasm32-unknown-unknown/debug/v86.wasm $@
+
+.PHONY: ir-decode-contract-tests ir-system-mode-tests ir-portable-tests ir-helper-audit
+ir-decode-contract-tests: ir-analyzer-tests build/v86-ir-test-release.wasm build/jit-capacity.bin
+	cargo test invalid_form_fixtures
+	node tests/ir/decode/staged.mjs
+	node tests/ir/decode/staged.mjs build/v86-ir-test-release.wasm
+	node tests/ir/differential/invalid.mjs
+	node tests/ir/differential/invalid.mjs build/v86-ir-test-release.wasm
+	cargo test multiple_cpu_entries
+	node tests/ir/differential/multientry.mjs
+	node tests/ir/differential/multientry.mjs build/v86-ir-test-release.wasm
+
+ir-system-mode-tests: ir-far-control-tests build/v86-control-reference.wasm build/v86-control-reference-release.wasm
+	node tests/ir/differential/system_modes.mjs
+	node tests/ir/differential/system_modes.mjs build/v86-ir-test-release.wasm
+	node tests/ir/differential/system_modes.mjs build/v86-control-reference.wasm
+	node tests/ir/differential/system_modes.mjs build/v86-control-reference-release.wasm
+
+ir-portable-tests: build/v86-ir-test.wasm build/v86-ir-test-fallback.wasm build/v86-ir-runtime-fallback.wasm build/libv86.mjs build/jit-capacity.bin
+	cargo test portable_core
+	node tests/ir/differential/fallback.mjs
+	node tests/ir/differential/auto.mjs build/v86-ir-runtime-fallback.wasm
+
+# Full fixture set is also produced by cargo test --lib in CI.
+ir-helper-audit: ir-generated-check
+	cargo test ir::simd_
+	cargo test sse_fp_fixtures
+	cargo test mmx_fixtures
+	node tests/ir/differential/helper_audit.mjs
+
+# The pinned resolver is compiled into test cores via #[path].
+build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/v86-ir-test-fallback.wasm build/v86-control-reference.wasm build/v86-control-reference-release.wasm: tests/ir/decode/legacy_modrm.rs

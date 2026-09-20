@@ -321,3 +321,37 @@ unsafe fn memory_semantics(opcode: u32, group: u32, address: i32, width: u32) ->
     }
     Ok(())
 }
+
+/// Exact F80 special values and mode setup, isolated from production exports.
+#[cfg(feature = "ir-test-hooks")]
+#[no_mangle]
+pub unsafe fn ir_test_x87_pattern(sample: u32, control: u32) {
+    use crate::softfloat::F80;
+    const VALUES: [(u64, u16); 12] = [
+        (0, 0),
+        (0, 0x8000),
+        (1, 0),
+        (0x7FFFFFFFFFFFFFFF, 0),
+        (0x8000000000000000, 1),
+        (u64::MAX, 0x7FFE),
+        (0x8000000000000000, 0x7FFF),
+        (0x8000000000000000, 0xFFFF),
+        (0xC000000000012345, 0x7FFF),
+        (0x8000000000054321, 0xFFFF),
+        (0xA000000000000000, 0x4000),
+        (0xA000000000000000, 0xC000),
+    ];
+    assert!(sample < 12 && control <= 65535);
+    ir_test_x87_seed();
+    fpu::set_control_word(control as u16);
+    for i in 0..8 {
+        let (mantissa, sign_exponent) = VALUES[(sample as usize + i) % VALUES.len()];
+        fpu::fpu_write_st(
+            i as i32,
+            F80 {
+                mantissa,
+                sign_exponent,
+            },
+        );
+    }
+}

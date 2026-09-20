@@ -82,7 +82,7 @@ pub fn reachable_length(
             // stop decision, so keep the fallthrough available unless the
             // shared decoder already identifies a baseline #UD form.
             Flow::Next | Flow::Boundary
-                if !instruction.baseline_ud && !instruction.encoding.block_boundary =>
+                if !instruction.baseline_ud && (!instruction.encoding.block_boundary || matches!(instruction.encoding.opcode, 0x8E | 0xFA)) =>
             {
                 if end < bytes.len() {
                     pending.insert(end);

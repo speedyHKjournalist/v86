@@ -46,6 +46,35 @@ try {
     }
     e.performance_recording_enable(0);
     console.log(`PASS: ${wasm}: ${programs} published CFG/store modules executed by normal CPU dispatch, both tier requests, optimization and recording modes`);
+    prepare([0x40,0xF4]);
+    const negatives=e.ir_cache_stat(28);
+    for(let n=0;n<3;n++)await run();
+    assert(e.ir_cache_stat(28)>negatives,"repeated unpublished entry uses a negative lookup witness");
+    cpu.instruction_pointer[0]=PC;cpu.in_hlt[0]=0;assert(await request(1));
+    const afterMissing=e.ir_cache_stat(2);await run();
+    assert.equal(e.ir_cache_stat(2)-afterMissing,1,"publication invalidates a previous negative lookup");
+    clear();const afterRetire=e.ir_cache_stat(2);await run();
+    assert.equal(e.ir_cache_stat(2),afterRetire,"retired owners cannot survive in positive hints");
+    console.log(`PASS: ${wasm}: negative lookup reuse, publication invalidation and retirement`);
+    // Only completed ordinary exits may bypass the outer dispatcher. Budget,
+    // slow memory and I/O exits must yield even with a published successor.
+    for(const spec of [
+        {name:"ordinary",code:[0x40,0x43,0xF4],length:1,next:1,budget:64,links:1},
+        {name:"budget",code:[0x40,0x43,0xF4],length:2,next:1,budget:1,links:0},
+        {name:"cold store",code:[0xA3,...u32(DATA),0x43,0xF4],length:5,next:5,budget:64,links:0},
+        {name:"I/O",code:[0xE6,0x80,0x43,0xF4],length:2,next:2,budget:64,links:0},
+    ]) {
+        prepare(spec.code);
+        assert(await request(spec.length,1,1,1,spec.budget));
+        cpu.instruction_pointer[0]=PC+spec.next;
+        assert(await request(1));
+        const links=e.ir_cache_stat(6),beforeCount=count();
+        await run();
+        assert.equal(e.ir_cache_stat(6)-links,spec.links,`${spec.name} continuation policy`);
+        assert.equal((count()-beforeCount)>>>0,3,`${spec.name} exact retirement`);
+        assert.equal(cpu.reg32[3],1);
+    }
+    console.log(`PASS: ${wasm}: ordinary IR successors chain; budget, cold-store and I/O exits yield with exact retirement`);
     prepare([0x40,0xF4]);assert(await request(1));await run();
     let cachedChecks=e.ir_cache_stat(8),captureFallbacks=e.ir_cache_stat(9),warmHits=e.ir_cache_stat(2);
     let guestSteps=e.ir_cache_stat(10),zeroStepExits=e.ir_cache_stat(12);
@@ -64,6 +93,53 @@ try {
     assert(e.ir_cache_entry_stat(PC,0,1,3)>=1,"entry-scoped maximum records retired work");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,4),entryZero,"normal entry activation is not a zero-step exit");
     assert.equal(e.ir_cache_entry_stat(PC+1,0,1,0),0,"entry diagnostics require an exact entry key");
+    assert.equal(e.ir_cache_set_fast_validation(2),0);
+    for(const recording of [0,1]) {
+        const checks=[];
+        for(const fast of [0,1]) {
+            const other=PC+0x2000,iterations=128;
+            prepare([0x43,0xFF,0xE1]);
+            vm.write_memory(Uint8Array.from([0x4A,0x0F,0x85,...u32(PC-other-7),0xF4]),other);
+            cpu.reg32[1]=other;cpu.reg32[2]=iterations;
+            assert(await request(3));cpu.instruction_pointer[0]=other;assert(await request(7));
+            assert.equal(e.ir_cache_set_fast_validation(fast),1);e.performance_recording_enable(recording);
+            const full=e.ir_cache_stat(19),reuse=e.ir_cache_stat(18),post=e.ir_cache_stat(20),targets=e.ir_cache_stat(21),start=count();
+            await run();
+            assert.equal(cpu.reg32[3],iterations);assert.equal(cpu.reg32[2],0);
+            assert.equal((count()-start)>>>0,iterations*4+1);
+            checks.push(e.ir_cache_stat(19)-full);
+            assert.equal(e.ir_cache_stat(18)>reuse,!!fast);
+            assert.equal(e.ir_cache_stat(20)>post,!!fast);
+            assert(e.ir_cache_stat(21)>targets,"warm targets hit the bounded entry cache");
+        }
+        assert(checks[1]<checks[0]/2,"fast admission eliminates most repeated byte checks");
+    }
+    e.performance_recording_enable(0);assert.equal(e.ir_cache_set_fast_validation(1),1);
+    // A continuing MMIO read may mutate code without notifying the JIT. The
+    // emitted observer barrier must revoke an earlier entry's byte certificate.
+    for(const mutation of ["bytes","mapping"]) {
+        const other=PC+0x2000,alternate=PC+0x1000;
+        prepare([0x43,0xFF,0xE1]);
+        vm.write_memory(Uint8Array.of(0x45,0xFF,0xE1),alternate);
+        vm.write_memory(Uint8Array.from([0x8B,0x06,0x4A,0x0F,0x85,...u32(PC-other-9),0xF4]),other);
+        cpu.reg32[1]=other;cpu.reg32[2]=4;cpu.reg32[6]=0xA0040;
+        let reads=0;
+        cpu.io.mmap_register(0xA0000,0x20000,()=>0,()=>{},()=>{
+            reads++;
+            assert.equal(e.ir_cache_set_fast_validation(0),0,"active guest cannot change admission policy");
+            if(reads===3) {
+                if(mutation==="bytes") cpu.mem8[PC]=0x45;
+                else {set(0x13000+(PC>>>12)*4,alternate|3);e.full_clear_tlb();}
+            }
+            return 0;
+        },()=>{});
+        assert(await request(3));cpu.instruction_pointer[0]=other;assert(await request(9));
+        const start=count();await run();
+        assert.equal(reads,4);assert.equal(cpu.reg32[3],3);assert.equal(cpu.reg32[5],1);
+        assert.equal((count()-start)>>>0,21,`${mutation}: stale successor must never execute`);
+        assert.equal(e.ir_cache_entry_stat(PC,0,1,0),0);
+    }
+    console.log(`PASS: ${wasm}: fast/full admission A/B with recording off/on, exact retirement, fewer byte checks, raw MMIO code writes and callback remapping`);
     console.log(`PASS: ${wasm}: warm one-page IR admission validates cached mapping/source bytes without recapture and records entry-scoped activation work`);
     const structuredPublications=e.ir_cache_stat(13),genericPublications=e.ir_cache_stat(14);
     prepare([0xEB,0xFE]);assert(await request(2));
@@ -156,25 +232,25 @@ try {
     assert.equal(e.ir_cache_stat(1),0);
     console.log(`PASS: ${wasm}: active I/O write/reset retains its table slot until return, rejects nested compilation, and zero-retirement REP exits resume interpretation`);
     // Table capacity accounting includes IR reservations while legacy compilation continues.
-    prepare([0x40,0xF4]);const free=e.jit_get_wasm_table_index_free_list_count();
-    for(let i=0;i<32;i++){const address=PC+i*4096;vm.write_memory(Uint8Array.of(0x40,0xF4),address);cpu.instruction_pointer[0]=address;assert(await request(1));}
-    assert.equal(e.ir_cache_stat(0),32);assert.equal(e.jit_get_wasm_table_index_free_list_count(),free-32);
-    cpu.instruction_pointer[0]=PC+32*4096;vm.write_memory(Uint8Array.of(0x40,0xF4),PC+32*4096);assert.equal(await request(1),false);
+    prepare([0x40,0xF4]);const free=e.jit_get_wasm_table_index_free_list_count(),capacity=e.ir_cache_capacity();assert.equal(capacity,256);assert.equal(e.ir_cache_set_capacity(255),0);assert.equal(e.ir_cache_set_capacity(769),0);assert.equal(e.ir_cache_set_capacity(768),1);assert.equal(e.ir_cache_capacity(),768);assert.equal(e.ir_cache_set_capacity(256),1);
+    for(let i=0;i<capacity;i++){const address=PC+i*4096;vm.write_memory(Uint8Array.of(0x40,0xF4),address);cpu.instruction_pointer[0]=address;assert(await request(1));}
+    assert.equal(e.ir_cache_stat(0),capacity);assert.equal(e.jit_get_wasm_table_index_free_list_count(),free-capacity);
+    cpu.instruction_pointer[0]=PC+capacity*4096;vm.write_memory(Uint8Array.of(0x40,0xF4),PC+capacity*4096);assert.equal(await request(1),false);
     if(e.jit_force_generate_unsafe){
         for(let i=0;i<900;i++){
-            const address=PC+(40+i)*4096;vm.write_memory(Uint8Array.from([0x40,0xF4]),address);cpu.instruction_pointer[0]=address;
+            const address=PC+(capacity+8+i)*4096;vm.write_memory(Uint8Array.from([0x40,0xF4]),address);cpu.instruction_pointer[0]=address;
             await new Promise((resolve,reject)=>{
                 const timer=setTimeout(()=>reject(new Error("legacy publication timeout")),10000);
                 cpu.test_hook_did_finalize_wasm=()=>{clearTimeout(timer);resolve();};
                 try{assert(e.jit_force_generate_unsafe(address));}catch(error){clearTimeout(timer);reject(error);}
             });
         }
-        cpu.test_hook_did_finalize_wasm=undefined;assert.equal(e.ir_cache_stat(0),32);
+        cpu.test_hook_did_finalize_wasm=undefined;assert.equal(e.ir_cache_stat(0),capacity);
         hits=e.ir_cache_stat(2);await run(PC);assert.equal(e.ir_cache_stat(2)-hits,1);
-        console.log(`PASS: ${wasm}: 900 actual legacy publications/evictions preserve all 32 IR reservations and an executable IR entry`);
+        console.log(`PASS: ${wasm}: 900 actual legacy publications/evictions preserve all ${capacity} IR reservations and an executable IR entry`);
     }
     clear();assert.equal(e.jit_get_wasm_table_index_free_list_count(),899);
-    console.log(`PASS: ${wasm}: 32 IR entries share the bounded 899-slot pool, capacity rejection and complete reclamation, legacy coexistence`);
+    console.log(`PASS: ${wasm}: ${capacity} IR entries share the bounded 899-slot pool, capacity rejection and complete reclamation, legacy coexistence`);
     // Browser failures and out-of-order completion use the production JS bridge.
     const original=WebAssembly.instantiate;
     try {

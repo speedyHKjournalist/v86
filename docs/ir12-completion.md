@@ -59,6 +59,15 @@ Missing or stale targets count as link misses and stale records are retired.
 This provides the shared version/link graph needed by the runtime without making
 cross-region linking a second, weaker admission protocol.
 
+Normal completed IR exits now use `ir_request_link` to request actual iterative
+IR-to-IR execution. The runtime permits at most 64 successors within the existing
+CPU batch budget and repeats full admission at each target. It collects linked
+heat without compiling inside the chain. Fault, slow-memory, I/O, budget and
+interrupt-shadow exits yield to ordinary dispatch. This remains a cold ABI with
+architectural state materialized between artifacts; register-carry links and
+cross-backend direct links are not implemented. Automatic compilation can also
+batch two hot entries from one immutable capture, with serial guarded publication.
+
 ## Invalidation graph
 
 The runtime dependency graph now has explicit edges from:
@@ -98,7 +107,7 @@ The matrix covers debug, release and experimental-only runtime builds and includ
 generation reset/restore, same-byte SMC, raw byte changes, mapping changes,
 secondary-page dependencies, active self-modification, pending/duplicate/forged
 publication, slot ABA reuse, browser failure and out-of-order completion,
-32-entry IR capacity pressure, 900 legacy publications, automatic Tier 1/Tier 2
+256-entry IR capacity pressure, 900 legacy publications, automatic Tier 1/Tier 2
 promotion, failed-upgrade retention, one-task cancellation, bounded heat,
 automatic eviction, synchronous I/O invalidation and validated link lookup.
 

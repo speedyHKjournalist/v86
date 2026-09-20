@@ -12,7 +12,7 @@ try{
     const view=new DataView(mem.buffer,mem.byteOffset),set32=(a,v)=>view.setUint32(a,v,true),get32=a=>view.getUint32(a,true),set16=(a,v)=>view.setUint16(a,v,true);
     vm.run();const deadline=performance.now()+10000;while(view.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);}await vm.stop();
     const PC=0x8000,BASE=0x310000,STACK=0x90000,HANDLER=0x180000,cr0=cpu.cr[0];let reads=0,writes=0,calls=0,events=[],onEvent,windows=[],target=BASE;
-    const imports={...e,m:e.memory,ir_memory_read:(...a)=>{reads++;return e.ir_memory_read(...a);},ir_memory_write:(...a)=>{writes++;return e.ir_memory_write(...a);},ir_load_segment:(...a)=>{calls++;return e.ir_load_segment(...a);}};
+    const imports={...e,m:e.memory,ir_mov_segment_continue:(...a)=>{calls++;return e.ir_mov_segment_continue(...a);},ir_memory_read:(...a)=>{reads++;return e.ir_memory_read(...a);},ir_memory_write:(...a)=>{writes++;return e.ir_memory_write(...a);},ir_load_segment:(...a)=>{calls++;return e.ir_load_segment(...a);}};
     const instances=modules.map(pair=>pair.map(m=>new WebAssembly.Instance(m,{e:imports})));
     function desc(index,base,limit,access,flags){set32(0x3000+index*8,limit&65535|base<<16);set32(0x3004+index*8,base&0xFF000000|(base>>>16&255)|access<<8|(limit&0xF0000)|flags<<20);}
     function reset(i,selector=0x20,offset=0x40,hot=false){
@@ -109,4 +109,19 @@ try{
         configure();e.ir_test_step();e.ir_test_step();assert.deepEqual(actual,state(),`VM86 segment ${i}/${selector}/${iopl}`);vmCases++;
     }
     console.log(`PASS: ${vmCases} VM86 segment transfer/far-load cases at IOPL0/3`);
+    for(const seg of [0,2,3,4,5]) for(const opt of [0,1]) for(const vm86 of [false,true]) {
+        const code=[0x41,0x8E,0xC0|seg<<3,[0x26,0x2E,0x36,0x3E,0x64,0x65][seg],0x8B,0x1D,0,4,0,0,0x43];
+        const configure=()=>{
+            reset(cases.findIndex(c=>c[1]&&c[3]===0x8E&&c[4]===seg&&c[5]===0));
+            e.ir_test_set_cr0(vm86?cr0&~0x80000000:cr0&~0x80000001);
+            if(vm86) cpu.flags[0]|=0x20000;
+            cpu.reg32[0]=0x300;cpu.reg32[1]=0x12345678;mem.set(code,PC);set32(0x3400,0x789ABCDE);
+            e.full_clear_tlb();e.update_state_flags();
+        };
+        const instance=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(`build/ir-segments/continue-${seg}-${opt}.wasm`)),{e:imports});
+        configure();instance.exports.f(0);const actual=state();
+        assert.equal(words[664>>2],104);assert.equal(actual.regs[3],0x789ABCDF);assert.equal(actual.regs[1],0x12345679);
+        configure();for(let i=0;i<4;i++)e.ir_test_step();assert.deepEqual(actual,state(),`segment continuation ${seg}/${opt}/${vm86}`);
+    }
+    console.log('PASS: real/VM86 segment continuation keeps dirty SSA state and uses changed DS/ES/SS/FS/GS bases');
 }finally{await vm.destroy();}

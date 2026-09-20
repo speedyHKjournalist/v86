@@ -73,7 +73,7 @@ try {
         put(0x13000 + (page + 1) * 4, (page + 1) * 4096 | 3);
         e.full_clear_tlb();
         mode = "ordinary"; callbacks = 0; events = [];
-        if(hot) e.ir_memory_read(address, [1, 2, 4][index]);
+        if(hot) e.ir_memory_read(address, [1, 2, 4, 4][index]);
         if(fault === "missing") put(0x13000 + page * 4, 0);
         if(fault === "cross") put(0x13000 + (page + 1) * 4, 0);
         if(fault === "segment") cpu.segment_is_null[3] = 1;
@@ -179,7 +179,7 @@ try {
             if(callbackMode === "unmap") {
                 assert.equal(actual.ip, HANDLER, "second read sees callback-induced unmapping");
                 assert.equal(actual.committed, 101);
-                assert.equal(get(STACK - 12), PC + [2, 3, 2][index]);
+                assert.equal(get(STACK - 12), PC + [2, 3, 2, 2][index]);
                 faultCases++;
             } else {
                 assert.equal(actual.committed, 103);

@@ -10,12 +10,17 @@ const DATA = 0x310040;
 const MISSING = 0x320040;
 const programs = {
     continue: Uint8Array.from([0x88, 0x11, 0x43]),
+    rmw_continue: Uint8Array.from([0xFF, 0x01, 0x43]),
+    rmw_fault: Uint8Array.from([0xFF, 0x01, 0x8B, 0x06]),
     fault_after: Uint8Array.from([0x88, 0x11, 0x8B, 0x06]),
     store_load: Uint8Array.from([0x88, 0x11, 0x8A, 0x19]),
+    rmw_load8: Uint8Array.from([0xFE, 0x01, 0x8A, 0x19]),
+    rmw_load16: Uint8Array.from([0x66, 0xFF, 0x01, 0x66, 0x8B, 0x19]),
+    rmw_load32: Uint8Array.from([0xFF, 0x01, 0x8B, 0x19]),
 };
 const modules = Object.fromEntries(Object.keys(programs).map(name => [
     name,
-    [0, 1].map(opt => {
+    [0, 1, 2, 3].map(opt => {
         const bytes = fs.readFileSync(`build/ir-store-continuation/${name}-${opt}.wasm`);
         assert(WebAssembly.validate(bytes), `${name}/${opt} validates`);
         return new WebAssembly.Module(bytes);
@@ -23,7 +28,7 @@ const modules = Object.fromEntries(Object.keys(programs).map(name => [
 ]));
 
 const vm = new V86({
-    wasm_path: "build/v86-ir-test.wasm",
+    wasm_path: process.argv[2] || "build/v86-ir-test.wasm",
     memory_size: 32 << 20,
     bios: {buffer: Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
     disable_keyboard: true,
@@ -123,7 +128,80 @@ try {
     let slowExits = 0;
     let aliasExits = 0;
     let preciseFaults = 0;
-    for(const opt of [0, 1]) {
+    let rmwForwardRuns = 0;
+    const snapshot = address => ({gpr:Array.from(cpu.reg32), flags:e.get_eflags(), ip:cpu.instruction_pointer[0],
+        cr2:cpu.cr[2], bytes:Array.from(mem.slice(address,address+8)),frame:Array.from(mem.slice(STACK-32,STACK))});
+    for(const name of ["rmw_load8","rmw_load16","rmw_load32"])for(const opt of [0,1,2,3])
+    for(const address of [DATA, (DATA&~4095)+4095, PC+programs[name].length-1])for(const hot of [false,true]) {
+        reset(name,address); mapIdentity(address+4); if(hot)primeWrite(address);
+        instances[name][opt].exports.f(0); const actual=snapshot(address),steps=(words[664>>2]-100)>>>0;
+        assert(steps===1||steps===2);
+        reset(name,address); mapIdentity(address+4); if(hot)primeWrite(address);
+        for(let n=0;n<steps;n++)e.ir_test_step();
+        assert.deepEqual(actual,snapshot(address),`${name}/${opt}/${address}/${hot}: committed RMW forwarding`);
+        rmwForwardRuns++;
+    }
+    for(const name of ["rmw_load8","rmw_load16","rmw_load32"])for(const opt of [0,1,2,3])
+    for(const fault of ["readonly","second_page"]) {
+        if(name === "rmw_load8" && fault === "second_page")continue;
+        const address = fault === "readonly" ? DATA : (DATA&~4095)+4095;
+        const prepareFault = () => {
+            reset(name,address); mapIdentity(address+4);
+            const page = (address >>> 12) + (fault === "second_page" ? 1 : 0);
+            set32(0x13000+page*4, fault === "second_page" ? 0 : page*4096|1);
+            e.full_clear_tlb();
+        };
+        prepareFault(); instances[name][opt].exports.f(0);
+        assert.equal(words[664>>2],100,"faulting RMW must not retire or seed a following load");
+        const actual=snapshot(address);prepareFault();e.ir_test_step();
+        assert.deepEqual(actual,snapshot(address),`${name}/${opt}/${fault}: first write-permission fault`);
+        rmwForwardRuns++;
+    }
+    let ioEvents = [];
+    const observerRead = (address,bytes) => {ioEvents.push(["read",address,bytes]);mem[PC+programs.rmw_load8.length-1]=0xCC;return bytes===1?0x7F:0x7FFFFFFF;};
+    cpu.io.mmap_register(0xA0000,0x20000,address=>observerRead(address,1),(address,value)=>ioEvents.push(["write",address,value]),
+        address=>observerRead(address,4),(address,value)=>ioEvents.push(["write",address,value]));
+    for(const name of ["rmw_load8","rmw_load16","rmw_load32"])for(const opt of [0,1,2,3]) {
+        reset(name,0xA0000);ioEvents=[];instances[name][opt].exports.f(0);
+        assert.equal(words[664>>2],101,"MMIO RMW returns after its one commit");
+        const actual=snapshot(0xA0000),events=ioEvents;reset(name,0xA0000);ioEvents=[];e.ir_test_step();
+        assert.deepEqual(actual,snapshot(0xA0000));assert.deepEqual(events,ioEvents,"MMIO callbacks and raw code mutation preserve ordering");
+        rmwForwardRuns++;
+    }
+    console.log(`PASS: ${rmwForwardRuns} RMW forwarding comparisons: narrow/wide, cold/warm, page crossing, write faults, code aliases and MMIO callback mutation`);
+    for(const opt of [0, 1, 2, 3]) {
+        reset("rmw_continue"); primeWrite(DATA);
+        const beforeRmw = get32(DATA);
+        instances.rmw_continue[opt].exports.f(0);
+        assert.equal(get32(DATA), (beforeRmw + 1) >>> 0);
+        assert.equal(cpu.reg32[3] >>> 0, 0x12345679, "native RMW continues with carried flags/state");
+        assert.equal(words[664 >> 2], 102);
+        assert.equal(cpu.instruction_pointer[0] >>> 0, PC + 3);
+
+        reset("rmw_continue");
+        instances.rmw_continue[opt].exports.f(0);
+        assert.equal(cpu.reg32[3] >>> 0, 0x12345678, "cold RMW remains an observing exit");
+        assert.equal(words[664 >> 2], 101);
+
+        reset("rmw_continue");
+        const rmwAlias = 0x800000 + 2;
+        set32(0x13000 + (rmwAlias >>> 12) * 4, CODE_PAGE | 3);
+        e.full_clear_tlb(); e.ir_memory_write(rmwAlias, get32(PC + 2), 4);
+        cpu.reg32[1] = rmwAlias;
+        instances.rmw_continue[opt].exports.f(0);
+        assert.equal(mem[PC + 2], 0x44);
+        assert.equal(cpu.reg32[3] >>> 0, 0x12345678, "RMW alias cannot execute stale next instruction");
+        assert.equal(words[664 >> 2], 101);
+
+        reset("rmw_fault");
+        set32(0x13000 + (MISSING >>> 12) * 4, 0); e.full_clear_tlb(); primeWrite(DATA);
+        const beforeFault = get32(DATA);
+        instances.rmw_fault[opt].exports.f(0);
+        assert.equal(get32(DATA), (beforeFault + 1) >>> 0);
+        assert.equal(cpu.instruction_pointer[0] >>> 0, HANDLER);
+        assert.equal(get32(STACK - 12), PC + 2);
+        assert.equal(words[664 >> 2], 101, "RMW commits once before following #PF");
+
         reset("continue");
         primeWrite(DATA);
         instances.continue[opt].exports.f(0);

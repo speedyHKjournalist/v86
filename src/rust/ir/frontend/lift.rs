@@ -86,8 +86,43 @@ fn lift_inner(
         .map_err(|_| CompileError::Unsupported("decode stop"))?;
         offset += i.length as usize;
         count += 1;
-        if i.baseline_ud || i.prefixes.lock && !super::exchange::lock_supported(&i) {
+        if cfg!(debug_assertions)
+            && (i.debug_prefix_assert
+                || i.encoding.opcode == 0x0FAE && i.encoding.group == 2 && i.ea.is_none())
+        {
+            return Err(CompileError::Unsupported("baseline debug prefix assertion"));
+        }
+        if i.prefixes.lock && !super::exchange::lock_supported(&i) {
             return Err(CompileError::Unsupported("LOCK or invalid operand"));
+        }
+        if i.baseline_ud {
+            if !cpu || offset != bytes.len() {
+                return Err(CompileError::Unsupported(
+                    "invalid form requires terminal CPU region",
+                ));
+            }
+            let state = snapshot(&mut b, i.instruction_pc, i.next_pc, count - 1);
+            b.region.states[state.index()].resume = crate::ir::state::ResumeKind::BeforeInstruction;
+            let guard = b.constant(
+                if i.encoding.sse { 2 } else { i.encoding.task_switch_test as u32 },
+                Type::I32,
+            );
+            let (offset, segment) = if let Some(ea) = i.ea {
+                (
+                    effective_offset(&mut b, &ea),
+                    b.constant(ea.segment as u32, Type::I32),
+                )
+            } else {
+                (b.constant(0, Type::I32), b.constant(u32::MAX, Type::I32))
+            };
+            super::adapters::call(
+                &mut b,
+                "ir_invalid_form",
+                vec![guard, offset, segment],
+                state,
+                true,
+            );
+            return Ok(b.region);
         }
         if i.encoding.opcode == 0xFB {
             if !cpu {
@@ -295,13 +330,18 @@ fn lift_inner(
             return Ok(b.region);
         }
         if super::cpu_system::supports(&i) {
-            if !cpu || offset != bytes.len() {
+            if !cpu || i.encoding.opcode != 0xFA && offset != bytes.len() {
                 return Err(CompileError::Unsupported(
                     "system helper requires terminal CPU region",
                 ));
             }
             super::cpu_system::lift(&mut b, &i, count);
-            return Ok(b.region);
+            if i.encoding.opcode != 0xFA { return Ok(b.region); }
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+            }
+            continue;
         }
         if super::cpu_info::supports(&i) {
             if !cpu || offset != bytes.len() {

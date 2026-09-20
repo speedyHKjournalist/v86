@@ -84,10 +84,29 @@ fn offset(pc: GuestEip, start: GuestEip, len: usize) -> Option<usize> {
     let n = pc.0.wrapping_sub(start.0) as usize;
     (n < len).then_some(n)
 }
-fn successor(state: &StateMap, start: GuestEip, len: usize) -> Option<usize> {
+#[derive(Clone, Copy)]
+pub struct CfgSource<'a> {
+    pub bytes: &'a [u8],
+    pub pc: GuestEip,
+    pub linear: LinearAddress,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct PredictedEdge {
+    pub from: GuestEip,
+    pub target: GuestEip,
+}
+fn locate<'a>(sources: &'a [CfgSource<'a>], pc: GuestEip) -> Option<(CfgSource<'a>, usize)> {
+    sources.iter().find_map(|s| offset(pc, s.pc, s.bytes.len()).map(|at| (*s, at)))
+}
+fn successor(state: &StateMap, sources: &[CfgSource<'_>]) -> Option<usize> {
     (state.resume == ResumeKind::AfterInstruction && state.next_value.is_none())
-        .then(|| offset(state.next_pc, start, len))
+        .then(|| locate(sources, state.next_pc).map(|_| state.next_pc.0 as usize))
         .flatten()
+}
+fn predicted(state: &StateMap, sources: &[CfgSource<'_>], edges: &[PredictedEdge]) -> Option<usize> {
+    if state.resume != ResumeKind::AfterInstruction || state.next_value.is_none() { return None; }
+    edges.iter().find(|e| e.from == state.instruction_pc && locate(sources, e.target).is_some())
+        .map(|e| e.target.0 as usize)
 }
 fn invalid(message: &'static str) -> CompileError {
     CompileError::Unsupported(message)
@@ -100,18 +119,48 @@ pub fn lift_cpu_cfg(
     default_32: bool,
     rep_budget: u32,
 ) -> Result<Region, CompileError> {
-    if bytes.is_empty() {
+    lift_cpu_cfg_sources(&[CfgSource { bytes, pc, linear }], &[], default_32, rep_budget)
+}
+/// Compose separately captured hot regions into one SSA graph. Predictions only
+/// discover candidate edges; every dynamic edge retains an exact target guard.
+pub fn lift_cpu_cfg_sources(
+    sources: &[CfgSource<'_>],
+    predictions: &[PredictedEdge],
+    default_32: bool,
+    rep_budget: u32,
+) -> Result<Region, CompileError> {
+    if sources.is_empty() || sources.iter().any(|s| s.bytes.is_empty()) {
         return Err(invalid("empty CFG snapshot"));
     }
-    if bytes.len() > 15 * 128 {
+    if sources.len() > 4 || sources.iter().any(|s| s.bytes.len() > 15 * 128)
+        || predictions.len() > 4 {
         return Err(CompileError::Budget("CFG code snapshot"));
     }
+    let entry_pc = sources[0].pc;
+    for (i, source) in sources.iter().enumerate() {
+        if source.linear.0.wrapping_sub(source.pc.0) != sources[0].linear.0.wrapping_sub(entry_pc.0) {
+            return Err(invalid("incompatible CFG sources"));
+        }
+        // Overlapping immutable windows are common for hot side entries. Share
+        // identical bytes, but still reject conflicting snapshots and later
+        // reject targets entering the middle of an already decoded instruction.
+        for old in &sources[..i] {
+            for (at, byte) in source.bytes.iter().enumerate() {
+                if let Some(other) = offset(GuestEip(source.pc.0.wrapping_add(at as u32)), old.pc, old.bytes.len()) {
+                    if *byte != old.bytes[other] { return Err(invalid("conflicting CFG source bytes")); }
+                }
+            }
+        }
+    }
     let mut fragments: BTreeMap<usize, Fragment> = BTreeMap::new();
-    let mut pending = BTreeSet::from([0usize]);
-    while let Some(at) = pending.pop_first() {
-        if fragments.contains_key(&at) {
+    let mut pending = BTreeSet::from([entry_pc.0 as usize]);
+    while let Some(address) = pending.pop_first() {
+        if fragments.contains_key(&address) {
             continue;
         }
+        let (source, at) = locate(sources, GuestEip(address as u32))
+            .ok_or_else(|| invalid("missing CFG source"))?;
+        let CfgSource { bytes, pc, linear } = source;
         if fragments.len() >= 128 {
             return Err(CompileError::Budget("CFG decoded instructions"));
         }
@@ -135,7 +184,9 @@ pub fn lift_cpu_cfg(
         let end = at + span;
         if fragments
             .iter()
-            .any(|(&other, f)| at < other + f.span && other < end)
+            .any(|(&other, f)|
+                (address as u32).wrapping_sub(other as u32) < f.span as u32
+                    || (other as u32).wrapping_sub(address as u32) < span as u32)
         {
             return Err(invalid("overlapping guest instruction streams"));
         }
@@ -146,10 +197,21 @@ pub fn lift_cpu_cfg(
             default_32,
             rep_budget,
         )?;
-        // These adapters already own completion/exit; do not create an internal continuation.
+        // Scalar stores can continue through the backend's guarded RAM path.
+        // Cold/MMIO writes and aliases of any immutable code dependency still
+        // commit then exit there. Other commit-bearing adapters own their exit.
+        let incomplete_tail = end < bytes.len()
+            && decode(
+                &bytes[end..],
+                decoded.next_pc,
+                LinearAddress(linear.0.wrapping_add(end as u32)),
+                default_32,
+            ).is_err();
         let stop = decoded.encoding.opcode == 0xFB
             || ir.instructions.iter().any(|i| {
-                i.commit.is_some()
+                (i.commit.is_some()
+                    && (incomplete_tail
+                        || !matches!(i.op, Op::GuestStore { .. } | Op::RmwStore { .. })))
                     || matches!(i.op, Op::CompareExchange8B { .. })
                     || match i.op {
                         Op::CallHelper(id) => matches!(
@@ -163,14 +225,16 @@ pub fn lift_cpu_cfg(
         if !stop {
             for block in &ir.blocks {
                 if let Some(Terminator::Exit(state)) = block.terminator {
-                    if let Some(next) = successor(&ir.states[state.index()], pc, bytes.len()) {
+                    let state = &ir.states[state.index()];
+                    if let Some(next) = successor(state, sources)
+                        .or_else(|| predicted(state, sources, predictions)) {
                         pending.insert(next);
                     }
                 }
             }
         }
         fragments.insert(
-            at,
+            address,
             Fragment {
                 decoded,
                 span,
@@ -233,7 +297,7 @@ pub fn lift_cpu_cfg(
     b.region.terminate(
         b.block,
         Terminator::Branch(Edge {
-            target: roots[&0].0,
+            target: roots[&(entry_pc.0 as usize)].0,
             args: initial.args(),
         }),
     );
@@ -245,10 +309,10 @@ pub fn lift_cpu_cfg(
             &roots,
             &entry_reads,
             at,
-            pc,
-            bytes.len(),
+            sources,
+            predictions,
         )?;
-        if b.region.instructions.len() > 8192 || b.region.values.len() > 16384 {
+        if b.region.instructions.len() > 8192 || b.region.values.len() > 16384 || b.region.blocks.len() > 64 {
             return Err(CompileError::Budget("CFG IR size"));
         }
     }
@@ -262,8 +326,8 @@ fn graft(
     roots: &BTreeMap<usize, (BlockId, Frame)>,
     entry_reads: &[(Op, ValueId)],
     at: usize,
-    pc: GuestEip,
-    len: usize,
+    sources: &[CfgSource<'_>],
+    predictions: &[PredictedEdge],
 ) -> Result<(), CompileError> {
     let src = &fragment.ir;
     let (root, frame) = &roots[&at];
@@ -472,7 +536,9 @@ fn graft(
             Terminator::Exit(old) => {
                 let id = states[old.index()];
                 let state = out.states[id.index()].clone();
-                if let Some(next) = if fragment.stop { None } else { successor(&state, pc, len) } {
+                if let Some(next) = if fragment.stop { None } else {
+                    successor(&state, sources).or_else(|| predicted(&state, sources, predictions))
+                } {
                     let offset = out.append(
                         destination,
                         Op::Const(state.committed_instructions as u64),
@@ -494,10 +560,22 @@ fn graft(
                         count,
                         effect: effects[index],
                     };
-                    Terminator::Branch(Edge {
+                    let next = Edge {
                         target: roots[&next].0,
                         args: next_frame.args(),
-                    })
+                    };
+                    if let Some(target) = state.next_value {
+                        let expected = out.append(destination, Op::Const(
+                            out.states[out.blocks[next.target.index()].entry_state.unwrap().index()].instruction_pc.0 as u64
+                        ), vec![], &[Type::I32], None)[0];
+                        let condition = out.append(destination, Op::Binary(Binary::Eq),
+                            vec![target, expected], &[Type::I1], None)[0];
+                        let fallback = out.block(false);
+                        out.blocks[fallback.index()].entry_state = Some(id);
+                        out.terminate(fallback, Terminator::Exit(id));
+                        Terminator::CondBranch { condition, taken: next,
+                            not_taken: Edge { target: fallback, args: vec![] } }
+                    } else { Terminator::Branch(next) }
                 } else {
                     Terminator::Exit(id)
                 }

@@ -91,3 +91,23 @@ pub unsafe fn ir_sti_finish(depth: u32) {
         cpu::handle_irqs();
     }
 }
+
+/// Catalogue-invalid operands still perform the baseline task/segment guards.
+/// Missing group selectors have no guards or EA (the interpreter rejects sooner).
+#[no_mangle]
+pub unsafe fn ir_invalid_form(guard: u32, offset: u32, segment: u32) -> u32 {
+    assert!(!cpu::in_jit && guard <= 2 && (segment < 6 || segment == u32::MAX));
+    if guard == 1 && !cpu::task_switch_test() || guard == 2 && !cpu::task_switch_test_mmx() {
+        return Outcome::ControlTransferred as u32;
+    }
+    if segment != u32::MAX && super::memory::ir_segment_address(offset, segment) >> 32 != 0 {
+        return Outcome::ControlTransferred as u32;
+    }
+    cpu::trigger_ud();
+    Outcome::ControlTransferred as u32
+}
+
+/// CLI uses the same pinned privilege predicate as STI; HIR owns clearing IF
+/// after success, so GPR and lazy arithmetic state remain live across the call.
+#[no_mangle]
+pub unsafe fn ir_cli_check() -> u32 { ir_sti_check() }

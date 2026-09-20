@@ -14,7 +14,7 @@ live result to a cache reservation, and asynchronously instantiates the copy. It
 returns a Promise<boolean>. Without the experimental exports it resolves false.
 This is an internal CPU API, not a new V86 starter/Worker RPC or backend option.
 
-The cache holds at most 32 records, including pending and retired records awaiting
+The cache holds at most 256 records, including pending and retired records awaiting
 collection. Slots come from the same 899-slot pool as legacy modules. IR owners
 are included in the pool's disjointness/capacity invariants; they do not enter
 legacy page entry tables or legacy direct links. Legacy capacity eviction operates
@@ -51,6 +51,7 @@ Experimental Rust exports:
 | `ir_cache_validate(id, slot)` | Pending ownership/source validation before installation |
 | `ir_cache_finish(id, slot)` | Makes a validated matching reservation visible |
 | `ir_cache_cancel(id, slot)` | Retires only the matching non-retired record |
+| `ir_cache_capacity()` | Maximum retained records (currently 256) |
 | `ir_cache_collect()` | Number of retired records collected at a cold point |
 | `ir_cache_stat(field)` | 0 published, 1 retained records, 2 actual hits, 3 validation rejections, 4 cancellations, 5 collected records |
 
@@ -71,10 +72,16 @@ clear retires all records without adding runtime metadata to guest snapshots.
 Exact byte/mapping capture at publication and admission additionally detects raw
 writes and remaps that bypass notification. This is not a complete global page
 version registry or an audit of every shared-memory/device write ingress.
+Within a bounded synchronous admission epoch, a record may reuse an earlier byte
+check while rechecking its generation, exact entry and CPU-visible mappings.
+Host observers, interpretation, new CPU batches and invalidation revoke reuse;
+see [fast entry validation](ir-fast-entry.md) for the certificate and A/B switch.
 
 After matching an entry, the CPU performs its normal initial instruction-fetch
 translation, including page-table accessed-bit effects. It then revalidates the
 source: code can alias its own page table and be changed by that A-bit write.
+When the pre-fetch check already proved all translations visible and the epoch
+is unchanged, the fetch cannot write A bits, so its post-check reuses that proof.
 Every source mapping must already have a usable CPU TLB translation before an IR
 call. Missing secondary translations cause a cache miss and ordinary execution;
 admission does not eagerly access unreachable pages. A later entry can hit once
@@ -87,10 +94,15 @@ Publication and collection also require the legacy JIT lock to be available; a
 synchronous generator host callback cannot reenter its reservation/free machinery.
 Dirty/reset/cancel hooks can retire the running record during a guest I/O callback,
 but its function slot remains owned until the call returns. The outer dispatcher
-then collects retired slots. The existing terminal store/helper and CPU-owned
-slow exits prevent continuing stale guest code after a side effect. No IR links
-or nested IR activations are introduced. This is quiescent reclamation for this
-cold dispatch path, not the completed planned cross-backend link dependency graph.
+then collects retired slots. Terminal helper, slow-memory and code-alias store
+exits prevent continuing stale guest code after a side effect. Normal completed
+IR exits may request an iterative cold continuation, capped at 64 successors and
+the existing CPU batch instruction budget. Every successor satisfies entry,
+source/mapping and post-fetch admission, using bounded certificates where valid;
+no guest locals or active frames cross
+that boundary. Budget, fault, I/O and interrupt-shadow exits do not request links.
+Halt or IF/TF/VM changes also stop the batch. This does not implement register-carry
+links or direct IR-to-legacy links.
 Host-aborting traps are not a recoverable guest exit protocol.
 
 Actual IR calls contribute retirement steps to performance recording with recording
@@ -112,8 +124,15 @@ nested compilation refusal; zero-budget REP recovery; and browser/export/table
 failures and out-of-order completion.
 Host identity changes and a synchronous legacy-generator callback are also checked.
 
-Each invariants build additionally publishes 900 actual legacy modules while 32 IR
+Each invariants build additionally publishes 900 actual legacy modules while 256 IR
 records remain installed, exercises legacy eviction and executes a surviving IR
 entry, then checks complete reclamation to 899 free slots. These are Node-hosted
 CPU tests. They do not establish browser/Worker IR scheduling, all-ISA production
 coverage, OS boot or workload performance acceptance.
+
+## Hot region fusion follow-up
+
+The experimental runtime now fuses two profiled source regions into one guarded
+Tier 2 SSA activation, retaining GPR/FLAGS/XMM and retirement state over internal
+edges. Publication, admission and SMC guards cover both snapshots. See
+[the fusion contract and tests](ir-fusion.md) for bounds, diagnostics and results.

@@ -280,6 +280,8 @@ fn cpu_reload_contract_and_continuation_fixtures() {
                 if variant & 1 != 0 {
                     mir.schedule_operand_stack(262_144).unwrap();
                     mir.allocate_machine_locals(4_000_000).unwrap();
+                    mir.elide_redundant_cpu_state_writes(262_144).unwrap();
+                    mir.elide_dead_cpu_values(262_144).unwrap();
                 }
                 std::fs::write(
                     format!("build/ir-reload/{}-{variant}.wasm", cases.len()),

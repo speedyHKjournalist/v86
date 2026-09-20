@@ -106,6 +106,18 @@ fn eligible_store(plan: &MemoryPlan) -> bool {
             ]
 }
 
+// The affine RMW ticket ties this commit to one original, write-checked read.
+// Only the native commit can reach the next instruction; MMIO/cross-page/code
+// aliases exit before the emitter establishes the forwarding value.
+fn committed_rmw(data: &MirData, effect: &EffectPlan) -> Option<(ValueId, u8)> {
+    let EffectPlan::RmwCommit { bytes, ticket, .. } = effect else { return None; };
+    let definition = data.value_definitions.get(ticket.index()).copied().flatten()?;
+    let read = data.memory.get(definition.index())?.as_ref()?;
+    if !matches!(read.native, NativeMemory::ScalarLoad { ticket: Some(t), .. } if t == *ticket)
+        || read.guard != RamGuard::new(*bytes, true) { return None; }
+    Some((read.address, *bytes))
+}
+
 fn segment(plan: &EffectPlan) -> Option<(ValueId, AddressKey)> {
     match *plan {
         EffectPlan::Address {
@@ -319,6 +331,11 @@ fn plan_with_loops(
                 }
             } else if let Some(effect) = &data.effects[index] {
                 if segment(effect).is_some() {
+                    continue;
+                }
+                if let Some((address, bytes)) = committed_rmw(data, effect) {
+                    let key = addresses[address.index()].unwrap_or(AddressKey::Value(address));
+                    previous = Some((key, bytes, id));
                     continue;
                 }
             } else if data.calls[index].is_none() && data.control.polls[index].is_none() {
@@ -635,6 +652,69 @@ fn loop_plan(data: &MirData, work_limit: usize) -> Result<LoopPlan, CompileError
     Ok(result)
 }
 
+// Reuse a successful same-address guard, not its loaded value. A wider access
+// proves a narrower range, and a write guard proves read permission. No effect
+// capable of changing mapping/CPL or observing memory may intervene. Keep this
+// certificate separate from value forwarding/loop caching to avoid mixed roots.
+fn guard_plan(data: &MirData, work_limit: usize) -> Result<Vec<Option<Forwarding>>, CompileError> {
+    validate_arenas(data)?;
+    let mut left = work_limit;
+    let addresses = address_keys(data, &mut left)?;
+    let mut result = vec![None; data.memory.len()];
+    for block in &data.control.blocks {
+        let mut previous: Option<(AddressKey, RamGuard, InstId)> = None;
+        for &id in &block.instructions {
+            spend(&mut left, 1)?;
+            let i = id.index();
+            if data.ram_forwarding[i].is_some() || data.ram_loop_cache.instructions[i].is_some() {
+                previous = None;
+                continue;
+            }
+            if let Some(memory) = &data.memory[i] {
+                if eligible_load(memory) || eligible_store(memory) {
+                    let key = key_for(&addresses, memory);
+                    if let Some((old_key, old_guard, old)) = &previous {
+                        if key == *old_key && old_guard.bytes >= memory.guard.bytes
+                            && old_guard.flags_mask & memory.guard.flags_mask == memory.guard.flags_mask
+                            && old_guard.user_mask == memory.guard.user_mask
+                            && old_guard.required_flags == memory.guard.required_flags
+                        {
+                            if result[old.index()].is_none() { result[old.index()] = Some(Forwarding::Begin); }
+                            result[i] = Some(Forwarding::Reuse { previous: *old });
+                        }
+                    }
+                    previous = Some((key, memory.guard.clone(), id));
+                    continue;
+                }
+            } else if let Some(effect) = &data.effects[i] {
+                if segment(effect).is_some() { continue; }
+            } else if let Some(poll) = &data.control.polls[i] {
+                if poll.cost == 1 { continue; }
+            } else if data.calls[i].is_none() {
+                if let Some(value) = &data.values[i] {
+                    spend(&mut left, value.steps.len())?;
+                    if value.steps.iter().all(|step| !matches!(step,
+                        Step::Read { cpu: Reading::Call { .. }, .. })) { continue; }
+                }
+            }
+            previous = None;
+        }
+    }
+    Ok(result)
+}
+pub(super) fn optimize_guards(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
+    let next = guard_plan(data, work_limit)?;
+    let count = next.iter().filter(|p| matches!(p, Some(Forwarding::Reuse { .. }))).count();
+    data.ram_guard_reuse = next;
+    Ok(count)
+}
+pub(super) fn verify_guards(data: &MirData) -> Result<(), CompileError> {
+    if data.ram_guard_reuse.len() != data.memory.len()
+        || (data.ram_guard_reuse.iter().any(Option::is_some)
+            && data.ram_guard_reuse != guard_plan(data, DEFAULT_WORK_LIMIT)?)
+    { return Err(CompileError::InvalidIr("invalid RAM guard reuse certificate".into())); }
+    Ok(())
+}
 pub(super) fn optimize(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
     let next = plan(data, work_limit)?;
     let count = next
@@ -652,7 +732,9 @@ pub(super) fn optimize_loops(
     let next_loop = loop_plan(data, work_limit)?;
     // Keep the update transactional: derive the compatible intra-block
     // certificate before publishing either plan.
-    let next_forward = plan_with_loops(data, &next_loop, DEFAULT_WORK_LIMIT)?;
+    let next_forward = if data.ram_forwarding.iter().any(Option::is_some) {
+        plan_with_loops(data, &next_loop, DEFAULT_WORK_LIMIT)?
+    } else { vec![None; data.memory.len()] };
     let count = next_loop.instructions.iter().filter(|p| p.is_some()).count();
     data.ram_loop_cache = next_loop;
     data.ram_forwarding = next_forward;
@@ -660,6 +742,7 @@ pub(super) fn optimize_loops(
 }
 
 pub(super) fn verify(data: &MirData) -> Result<(), CompileError> {
+    verify_guards(data)?;
     if data.ram_forwarding.len() != data.memory.len()
         || data.ram_loop_cache.instructions.len() != data.memory.len()
         || data.ram_loop_cache.resets.len() != data.control.blocks.len()

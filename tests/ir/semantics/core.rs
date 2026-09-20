@@ -410,6 +410,8 @@ fn dce_keeps_snapshot_only_values_and_ordered_helpers() {
     let stats = run(
         &mut r,
         PassConfig {
+        debug: Default::default(),
+        disabled: 0,
             prune: false,
             merge: false,
             phis: false,

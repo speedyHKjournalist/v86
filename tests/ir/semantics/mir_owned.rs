@@ -150,6 +150,9 @@ fn optimized_compile_request_runs_the_machine_pass() {
             .mir_folds
             > 0
     );
+    let tier_one = CompileRequest { tier: Tier::One, ..request };
+    assert_eq!(compile_cpu_region(&tier_one, &snapshot, &config).unwrap().mir_folds, 0);
+    assert_eq!(compile_cpu_cfg_region(&tier_one, &snapshot, &config).unwrap().mir_folds, 0);
 }
 #[test]
 fn folding_keeps_observations_and_rejects_machine_type_errors() {

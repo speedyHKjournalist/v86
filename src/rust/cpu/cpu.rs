@@ -3078,8 +3078,16 @@ pub unsafe fn cycle_internal() {
     profiler::stat_increment(stat::CYCLE_INTERNAL);
     #[cfg(feature = "ir-experimental")]
     {
-        crate::ir::runtime::schedule::visit();
+        {
+            if crate::ir::runtime::diagnostics::enabled() {
+                let _scope = crate::ir::runtime::diagnostics::Scope::new(crate::ir::runtime::diagnostics::Stage::Scheduler);
+                crate::ir::runtime::schedule::visit();
+            } else { crate::ir::runtime::schedule::visit(); }
+        }
         if crate::ir::runtime::cache::execute() { return; }
+        crate::ir::runtime::schedule::note_interpreted();
+        // The interpreter/legacy path can call devices and mutate raw RAM.
+        crate::ir::runtime::entry::ir_admission_barrier();
     }
     let mut jit_entry = None;
     let initial_eip = *instruction_pointer;
@@ -3141,11 +3149,18 @@ pub unsafe fn cycle_internal() {
             in_jit = true;
         }
         let function = wasm_table_index as i32 + WASM_TABLE_OFFSET as i32;
+        #[cfg(feature = "ir-experimental")]
+        let legacy_scope = crate::ir::runtime::diagnostics::Scope::new(crate::ir::runtime::diagnostics::Stage::Legacy);
         if profiler::performance_recording_enabled() {
             run_jit_recorded(function, initial_state, initial_eip);
         }
         else {
             wasm::call_indirect1(function, initial_state);
+        }
+        #[cfg(feature = "ir-experimental")]
+        {
+            drop(legacy_scope);
+            crate::ir::runtime::diagnostics::steps(true, (*instruction_counter).wrapping_sub(initial_instruction_counter));
         }
         #[cfg(any(debug_assertions, feature = "ir-experimental"))]
         {
@@ -3219,6 +3234,11 @@ pub unsafe fn cycle_internal() {
         let performance_sample = profiler::performance_chunk_start(
             false, initial_eip as u32, *cr.offset(3) as u32, *cpl,
         );
+        #[cfg(feature = "ir-experimental")]
+        if crate::ir::runtime::diagnostics::enabled() {
+            jit_run_interpreted_diagnostic(phys_addr);
+        } else { jit_run_interpreted(phys_addr); }
+        #[cfg(not(feature = "ir-experimental"))]
         jit_run_interpreted(phys_addr);
         profiler::performance_chunk_finish(
             performance_sample, (*instruction_counter).wrapping_sub(initial_instruction_counter),
@@ -3272,11 +3292,29 @@ pub unsafe fn get_phys_eip() -> OrPageFault<u32> {
     return Ok(phys_addr);
 }
 
+#[cfg(feature = "ir-experimental")]
+#[inline(never)]
+unsafe fn jit_run_interpreted_diagnostic(phys_addr: u32) {
+    let before = *instruction_counter;
+    let pc = *instruction_pointer as u32;
+    let cr3 = *cr.offset(3) as u32;
+    let scope = crate::ir::runtime::diagnostics::Scope::new(crate::ir::runtime::diagnostics::Stage::Interpreter);
+    jit_run_interpreted(phys_addr);
+    let count = (*instruction_counter).wrapping_sub(before);
+    crate::ir::runtime::diagnostics::steps(false, count);
+    crate::ir::runtime::diagnostics::interpreter(pc, cr3, phys_addr, count, scope.finish());
+}
+
 unsafe fn jit_run_interpreted(mut phys_addr: u32) {
     profiler::stat_increment(stat::RUN_INTERPRETED);
     dbg_assert!(!memory::in_mapped_range(phys_addr));
 
     jit_block_boundary = false;
+    // IR hotness is collected at outer dispatch. A same-page interpreted loop
+    // must expose its backedge before the legacy 100,001-instruction limit, or
+    // an already hot/published side entry can remain invisible to IR selection.
+    #[cfg(feature = "ir-experimental")]
+    let ir_dispatch = crate::ir::runtime::schedule::enabled();
     let mut i = 0;
 
     loop {
@@ -3296,6 +3334,9 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
         dbg_assert!(*prefixes == 0);
         run_instruction(opcode | (*is_32 as i32) << 8);
         dbg_assert!(*prefixes == 0);
+
+        #[cfg(feature = "ir-experimental")]
+        if ir_dispatch && (i >= 64 || (*instruction_pointer as u32) <= start_eip as u32) { break; }
 
         if jit_block_boundary
             || Page::page_of(start_eip as u32) != Page::page_of(*instruction_pointer as u32)
@@ -3345,7 +3386,7 @@ pub unsafe fn run_prefix_instruction() {
 
 pub unsafe fn segment_prefix_op(seg: i32) {
     dbg_assert!(seg <= 5 && seg >= 0);
-    *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (seg as u8 + 1);
+    *prefixes = crate::decode_rules::apply_prefix(*prefixes, [0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65][seg as usize]).unwrap();
     run_prefix_instruction();
     *prefixes = 0
 }
@@ -3438,6 +3479,10 @@ static mut jit_link_count: u32 = 0;
 pub unsafe fn get_jit_link_count() -> u32 { jit_link_count }
 static mut jit_link_batch: bool = false;
 static mut jit_link_batch_start: u32 = 0;
+#[cfg(feature = "ir-experimental")]
+pub unsafe fn ir_link_budget_available() -> bool {
+    jit_link_batch && (*instruction_counter).wrapping_sub(jit_link_batch_start) < LOOP_COUNTER as u32
+}
 #[no_mangle]
 pub unsafe fn jit_link_once() {
     if jit_link_active { jit_link_requested = true; return; }
@@ -3450,7 +3495,7 @@ pub unsafe fn jit_link_once() {
         let eip = *instruction_pointer as u32;
         let Some((function, state)) = lookup_linked_target(eip) else { break; };
         #[cfg(feature = "ir-experimental")]
-        crate::ir::runtime::schedule::note();
+        crate::ir::runtime::schedule::note_legacy_link();
         // Epoch guards invalidate cached slots before any subsequent use.
         let before = *instruction_counter;
         jit_link_requested = false;
@@ -3462,7 +3507,11 @@ pub unsafe fn jit_link_once() {
 }
 
 pub unsafe fn do_many_cycles_native() {
+    #[cfg(feature = "ir-experimental")]
+    let diagnostic_start = crate::ir::runtime::diagnostics::batch_start();
     profiler::stat_increment(stat::DO_MANY_CYCLES);
+    #[cfg(feature = "ir-experimental")]
+    crate::ir::runtime::entry::ir_admission_barrier();
     let initial_instruction_counter = *instruction_counter;
     jit_link_batch_start = initial_instruction_counter;
     jit_link_batch = true;
@@ -3472,6 +3521,8 @@ pub unsafe fn do_many_cycles_native() {
         cycle_internal();
     }
     jit_link_batch = false;
+    #[cfg(feature = "ir-experimental")]
+    crate::ir::runtime::diagnostics::batch_end(diagnostic_start);
 }
 
 #[cold]

@@ -45,6 +45,88 @@ fn prefixes_boundaries_and_missing_page() {
 }
 
 #[test]
+fn prefix_product_and_missing_groups_are_explicit() {
+    use crate::decode_rules::{apply_prefix, mandatory_prefix};
+    use crate::prefix::*;
+    // All presence combinations, variant subsets and ordered repeated prefixes.
+    for flags in 0..256u16 {
+        for available in 0..8 {
+            let mask = (if available & 1 != 0 { PREFIX_66 } else { 0 })
+                | (if available & 2 != 0 { PREFIX_F2 } else { 0 })
+                | (if available & 4 != 0 { PREFIX_F3 } else { 0 });
+            let expected = [PREFIX_66, PREFIX_F2, PREFIX_F3]
+                .into_iter()
+                .find(|p| flags as u8 & mask & p != 0)
+                .unwrap_or(0);
+            assert_eq!(mandatory_prefix(flags as u8, mask), expected);
+        }
+    }
+    for a in [
+        0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67, 0xF0, 0xF2, 0xF3,
+    ] {
+        for b in [
+            0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67, 0xF0, 0xF2, 0xF3,
+        ] {
+            for mode in [false, true] {
+                let mut bytes = vec![a, b, a, 0x0F, 0x10, 0xC0];
+                let decoded = d(&bytes, mode);
+                let flags = [a, b, a]
+                    .into_iter()
+                    .fold(0, |f, p| apply_prefix(f, p).unwrap());
+                let expected = match mandatory_prefix(flags, PREFIX_66 | PREFIX_F2 | PREFIX_F3) {
+                    PREFIX_66 => 0x660F10,
+                    PREFIX_F2 => 0xF20F10,
+                    PREFIX_F3 => 0xF30F10,
+                    _ => 0x0F10,
+                };
+                assert_eq!(decoded.encoding.opcode, expected);
+                assert_eq!(
+                    decoded.debug_prefix_assert,
+                    [a, b, a]
+                        .iter()
+                        .filter(|p| matches!(p, 0xF2 | 0xF3))
+                        .count()
+                        > 1
+                );
+                // No read past the supplied snapshot, including prefix and ModRM boundaries.
+                for n in 0..bytes.len() {
+                    assert!(matches!(
+                        decode(&bytes[..n], GuestEip(4094), LinearAddress(4094), mode),
+                        Err(DecodeStop::Incomplete { .. })
+                    ));
+                }
+                bytes[4] = 0x71;
+                bytes[5] = 0x00;
+                if matches!(decode(&bytes, GuestEip(0),LinearAddress(0),mode),Ok(ref i) if i.encoding.group_ud)
+                {
+                    let i = d(&bytes, mode);
+                    assert!(i.baseline_ud);
+                    assert!(i.ea.is_none());
+                    assert!(i.immediate.is_none());
+                }
+            }
+        }
+    }
+    for e in encodings().iter().filter(|e| e.group_ud) {
+        let mut bytes = Vec::new();
+        if e.opcode > 0xFFFF {
+            bytes.push((e.opcode >> 16) as u8);
+        }
+        if e.opcode > 0xFF {
+            bytes.push((e.opcode >> 8) as u8);
+        }
+        bytes.extend([e.opcode as u8, (e.group as u8) << 3 | 4]);
+        let i = d(&bytes, true);
+        assert!(i.baseline_ud && i.ea.is_none());
+        assert_eq!(
+            i.length as usize,
+            bytes.len(),
+            "missing /g must not fetch SIB/displacement/immediate"
+        );
+    }
+}
+
+#[test]
 fn ea_and_wrapping() {
     let gpr = [0xFFFFFFFF, 0x1111, 0x2222, 0xFFFF, 0x100, 0xFFFE, 3, 5];
     let i = d(&[0x8B, 0x44, 0x88, 0xFC], true); // [eax + ecx*4 - 4]
@@ -162,24 +244,52 @@ fn catalogue_lengths_and_all_modrm_sib_forms() {
     }
     // Repeat, conflicting and address/segment prefixes against every catalogue
     // opcode in both modes. Padding allows prefix selection to change its form.
-    let prefix_sets: &[&[u8]] = &[&[0x66], &[0x67], &[0x66, 0x67], &[0xF0], &[0xF2], &[0xF3],
-        &[0xF2, 0xF3], &[0xF3, 0xF2], &[0x66, 0xF2, 0xF3], &[0xF3, 0x66, 0xF2],
-        &[0x26, 0x36, 0x64, 0x65], &[0x66, 0x66, 0x67, 0x67], &[0xF3, 0xF3]];
-    for encoding in encodings() { for mode32 in [false, true] { for prefixes in prefix_sets { for memory in [false, true] {
-        let mut sample = prefixes.to_vec();
-        if encoding.opcode > 0xFFFF { sample.push((encoding.opcode >> 16) as u8); }
-        if encoding.opcode > 0xFF { sample.push((encoding.opcode >> 8) as u8); }
-        sample.push(encoding.opcode as u8);
-        if encoding.fetch_modrm {
-            sample.push((if memory { 4 } else { 0xC0 }) | (encoding.group.max(0) as u8) << 3);
-            if memory { sample.push(0x9D); }
+    let prefix_sets: &[&[u8]] = &[
+        &[0x66],
+        &[0x67],
+        &[0x66, 0x67],
+        &[0xF0],
+        &[0xF2],
+        &[0xF3],
+        &[0xF2, 0xF3],
+        &[0xF3, 0xF2],
+        &[0x66, 0xF2, 0xF3],
+        &[0xF3, 0x66, 0xF2],
+        &[0x26, 0x36, 0x64, 0x65],
+        &[0x66, 0x66, 0x67, 0x67],
+        &[0xF3, 0xF3],
+    ];
+    for encoding in encodings() {
+        for mode32 in [false, true] {
+            for prefixes in prefix_sets {
+                for memory in [false, true] {
+                    let mut sample = prefixes.to_vec();
+                    if encoding.opcode > 0xFFFF {
+                        sample.push((encoding.opcode >> 16) as u8);
+                    }
+                    if encoding.opcode > 0xFF {
+                        sample.push((encoding.opcode >> 8) as u8);
+                    }
+                    sample.push(encoding.opcode as u8);
+                    if encoding.fetch_modrm {
+                        sample.push(
+                            (if memory { 4 } else { 0xC0 }) | (encoding.group.max(0) as u8) << 3,
+                        );
+                        if memory {
+                            sample.push(0x9D);
+                        }
+                    }
+                    sample.resize(15, 0x25);
+                    if let Ok(decoded) = decode(&sample, GuestEip(0), LinearAddress(0), mode32) {
+                        oracle_records.push(mode32 as u8);
+                        oracle_records.push(decoded.length);
+                        oracle_records.extend_from_slice(&decoded.bytes);
+                        count += 1;
+                    }
+                }
+            }
         }
-        sample.resize(15, 0x25);
-        if let Ok(decoded) = decode(&sample, GuestEip(0), LinearAddress(0), mode32) {
-            oracle_records.push(mode32 as u8); oracle_records.push(decoded.length);
-            oracle_records.extend_from_slice(&decoded.bytes); count += 1;
-        }
-    } } } }
+    }
     std::fs::create_dir_all("build/ir-decode").unwrap();
     std::fs::write("build/ir-decode/legacy-forms.bin", oracle_records).unwrap();
     assert!(count > 1_000_000);
@@ -257,7 +367,10 @@ fn legacy_dispatch_boundary_and_invalid_form_fetch() {
     let bare = d(&[0x0F, 0x7C, 0x05], true);
     assert_eq!(bare.length, 3);
     assert!(bare.ea.is_none());
-    assert!(matches!(decode(&[0x0F, 0x7C], GuestEip(0), LinearAddress(0), true), Err(DecodeStop::Incomplete { .. })));
+    assert!(matches!(
+        decode(&[0x0F, 0x7C], GuestEip(0), LinearAddress(0), true),
+        Err(DecodeStop::Incomplete { .. })
+    ));
     let prefixed = d(&[0x66, 0x0F, 0x7C, 0x05, 1, 2, 3, 4], true);
     assert_eq!(prefixed.length, 8);
     assert!(prefixed.ea.is_some());

@@ -1,6 +1,6 @@
 # IR-00–IR-14 实施状态
 
-更新：2026-09-19。固定基线：`8ee73e538daaab15411344d39a1f271e778ac7f3`。
+更新：2026-09-20。固定基线：`8ee73e538daaab15411344d39a1f271e778ac7f3`。
 
 **完整请求尚未完成。** 本次落地了可执行的实验性 IR 编译器与 WasmBuilder
 前置改造。默认后端仍为 legacy；显式选择 IR 时已有自动编译和升档，
@@ -9,15 +9,15 @@
 
 | 工作包 | 状态 | 已落地及剩余工作 |
 |---|---|---|
-| IR-00 | 部分完成 | 已固定 SHA、保存 release 基线、建立测试入口、编译器配置类型及初始测量记录；已有公开 legacy/ir 后端选择、区域参数、Worker 传递和状态查询；其余公开调试/优化配置及完整工作负载仍待实现 |
+| IR-00 | 部分完成 | 已固定 SHA、保存 release 基线、建立测试入口、编译器配置类型及初始测量记录；已有公开 legacy/ir 后端选择、区域参数、Worker 传递和状态查询；新增公开 ir_opt_level 与 17 类 pass 禁用、实际编译路径验证和页面参数保留；已补 ir_verify/ir_dump/ir_stats 的公开配置、真实 Worker 与复制读取接口；完整工作负载验收仍待完成 |
 | IR-01 | Builder 改造已实现 | u32 locals、完整 LEB 索引/长度、结构签名、类型复用及真实模块执行边界测试；在线 table 容量仍是运行时策略 |
-| IR-02 | 部分完成 | 生产区域分析已消费共享 decoded，2,670,035 例与旧 analyzer/EA 解码逐项一致；补齐 helper 块边界及前缀分派 ModRM 读取规则；未知编码仍回退旧分析器，解释器及复杂非法编码模型尚未共用 |
-| IR-03 | 部分完成 | HIR arena、SSA、effect、支配/verifier、dump、可执行 dispatcher、边复制和 local 复用；已将标量/RMW 读取和 XMM 访存的 guard、物理动作、CPU 调用与退出策略迁入 MIR 计划；已增加 RMW 提交、地址/范围检查和 SSE 守卫的 effect 计划；已加入 CMPXCHG8B/除法的边界、寄存器与提交计划及通用 helper 调用点的观察/暂存/出口计划；已加入 lowering 拥有的 dispatcher CFG 和 typed 边复制调度；已加入标量/向量值程序、packed kernel 选择及机器栈类型检查；已加入有序状态物化与独立计数阶段，以及 SSA 动态计数基数；已移除保留的 HIR 副本，加入受校验的 lowering 事务、独立 MIR 所有权和机器常量折叠；已增加 HIR 丢弃后的受预算约束栈融合、typed local 后置分配及边复制重建；更广泛的 MIR 图变换、其余动作和入口拆分仍待实现 |
-| IR-04 | 部分完成 | StateMap、helper 副作用及异常所有权、可执行 outcome ABI；42 例 Wasm 验证状态物化、快照槽位复用和单次派发；已适配 CPU 分段/安全访存及真实 #PF/#GP；已增加终端 CPU 状态 helper 契约；byte frontend 的 CPU CallHelper 已有集中签名/outcome registry；已增加 CpuReload 正常返回时的 GPR/FLAGS/XMM 重载及 CFG 续执行；低层 import 注册、其他 ABI 与更多隐含状态仍待审计 |
+| IR-02 | 部分完成 | 生产区域分析已消费共享 decoded，2,678,271 例与旧 analyzer 一致；解释器与快照 decoder 已共享前缀和 ModRM/SIB 规则，新增 71 个缺失分组和显式非法形式 CPU 路径；已验跨页取指/空段优先级，剩余完整状态组合仍须工作负载验收 |
+| IR-03 | 部分完成 | HIR arena、SSA、effect、支配/verifier、dump、可执行 dispatcher、边复制和 local 复用；已将标量/RMW 读取和 XMM 访存的 guard、物理动作、CPU 调用与退出策略迁入 MIR 计划；已增加 RMW 提交、地址/范围检查和 SSE 守卫的 effect 计划；已加入 CMPXCHG8B/除法的边界、寄存器与提交计划及通用 helper 调用点的观察/暂存/出口计划；已加入 lowering 拥有的 dispatcher CFG 和 typed 边复制调度；已加入标量/向量值程序、packed kernel 选择及机器栈类型检查；已加入有序状态物化与独立计数阶段，以及 SSA 动态计数基数；已移除保留的 HIR 副本，加入受校验的 lowering 事务、独立 MIR 所有权和机器常量折叠；已增加 HIR 丢弃后的受预算约束栈融合、typed local 后置分配及边复制重建；已加入不可变快照多入口拆分及独立守卫；更广泛的 MIR 图变换和其余动作仍待实现 |
+| IR-04 | 部分完成 | StateMap、helper 副作用及异常所有权、可执行 outcome ABI；42 例 Wasm 验证状态物化、快照槽位复用和单次派发；已适配 CPU 分段/安全访存及真实 #PF/#GP；已增加终端 CPU 状态 helper 契约；byte frontend 的 CPU CallHelper 已有集中签名/outcome registry；已增加 CpuReload 正常返回时的 GPR/FLAGS/XMM 重载及 CFG 续执行；已登记 31 个低层 import 并校验类型/返回协议；续执行审计已包含描述符、TR/LDTR 和控制 FLAGS；其他 ABI 仍须按引入范围审计 |
 | IR-05 | 部分完成 | 寄存器算术、FLAGS、别名、条件码、移位/旋转、SHLD/SHRD、乘除法及终端分支可生成 Wasm；last_op1 和原始 ZF 来源已进入 SSA/快照；已增加位测试/修改、位扫描、POPCNT、BSWAP、XADD、CMPXCHG、BCD、FLAGS 传送、符号扩展和计数分支；已增加可达直接 CFG 字节 lifting；已接入 TEST alias、ARPL 等剩余粗粒度形式及有界在线区域选择；完整模式/前缀与多入口验收未完成 |
 | IR-06 | 部分完成 | MOV/moffs/XLAT、整数 ALU/比较/条件操作及 INC/DEC/NEG/NOT 访存；成对 RMW ticket、原生 RAM 和精确 MMU/MMIO；已增加 PUSH/POP、PUSHA/POPA、LEAVE、ENTER 和多次访存提交；已增加交换指令、原生 RAM CMPXCHG8B 及非共享单线程 ABI 下经审计的 LOCK；已增加 FLAGS/段栈操作、段 MOV 和远指针加载；通用 proof 及其余访存待实现 |
-| IR-07 | 部分完成 | 近 CALL/RET、FF /2 与 /4 间接转移及动态 EIP StateMap；已增加单次 MOVS/CMPS/STOS/LODS/SCAS 原生执行；已增加标量 IN/OUT 和单次 INS/OUTS；已接入有界 REP HIR、进度映射及最终提交；已增加 CPUID/RDTSC/RDMSR/WRMSR 终端适配；已增加 SYSENTER/SYSEXIT、HLT/CLI/CLTS/WBINVD；已增加 CR/DR 传送与 CPU 地址映射变更适配；已增加描述符表、SMSW/LMSW 与 INVLPG；已增加 SLDT/STR 与 LLDT/LTR；已增加 LAR/LSL、VERR/VERW；已增加远 CALL/JMP/RETF、INT/INTO/IRET 的终端 helper；已增加 STI shadow 与嵌套 STI 的不可分割片段；任务/门切换、VM86 及完整系统验收仍未完成 |
-| IR-08 | 部分完成 | XMM V128 SSA、快照、typed locals/边复制，以及 packed/scalar SIMD 传送的原生 RAM 与精确慢路径已实现；已增加 38 种 packed integer 算术/比较/乘法/逻辑及 PS/PD 逻辑别名、打包/解包与 packed 移位、PSHUF/SHUF、半部传送、MOVD/MOVQ、lane、MASKMOVDQU 等；新增 D8-DF x87 寄存器形式的 terminal CpuX87Helper，复用 canonical F80 CPU 语义并显式处理 CR0.EM/TS #NM、legacy x87 cache barrier 与 nested #UD。已增加 x87 memory/environment、FXSAVE/FXRSTOR 与 MXCSR；保留基线不支持形式。已增加 274 个 MMX 和 272 个 SSE FP/conversion 粗粒度形式；完整 FP/模式矩阵与无 SIMD 降级仍待完成 |
+| IR-07 | 部分完成 | 近 CALL/RET、FF /2 与 /4 间接转移及动态 EIP StateMap；已增加单次 MOVS/CMPS/STOS/LODS/SCAS 原生执行；已增加标量 IN/OUT 和单次 INS/OUTS；已接入有界 REP HIR、进度映射及最终提交；已增加 CPUID/RDTSC/RDMSR/WRMSR 终端适配；已增加 SYSENTER/SYSEXIT、HLT/CLI/CLTS/WBINVD；已增加 CR/DR 传送与 CPU 地址映射变更适配；已增加描述符表、SMSW/LMSW 与 INVLPG；已增加 SLDT/STR 与 LLDT/LTR；已增加 LAR/LSL、VERR/VERW；已增加远 CALL/JMP/RETF、INT/INTO/IRET 的终端 helper；已增加 STI shadow 与嵌套 STI 的不可分割片段；新增 VM86、调用/任务门、任务切换、跨特权 IRET 和多访问故障对照；保留基线 panic/未实现分支，完整 OS 系统验收仍未完成 |
+| IR-08 | 部分完成 | XMM V128 SSA、快照、typed locals/边复制，以及 packed/scalar SIMD 传送的原生 RAM 与精确慢路径已实现；已增加 38 种 packed integer 算术/比较/乘法/逻辑及 PS/PD 逻辑别名、打包/解包与 packed 移位、PSHUF/SHUF、半部传送、MOVD/MOVQ、lane、MASKMOVDQU 等；新增 D8-DF x87 寄存器形式的 terminal CpuX87Helper，复用 canonical F80 CPU 语义并显式处理 CR0.EM/TS #NM、legacy x87 cache barrier 与 nested #UD。已增加 x87 memory/environment、FXSAVE/FXRSTOR 与 MXCSR；保留基线不支持形式。已增加 274 个 MMX 和 272 个 SSE FP/conversion 粗粒度形式；已扩展 F80/F32/F64 特殊值与控制模式矩阵，修复 IR/解释器 NaN payload 内联分歧，接入无 SIMD 便携核心与解释器降级；仍待完整工作负载/性能验收 |
 | IR-09 | backend/Tier-1 infrastructure 完成 | IR 自有 Wasm backend 已形成完整路径：typed locals、MIR parallel-copy/phi edge、StateMap/预算/故障出口统一发射；新增通用 single-entry reducible CFG structurer，以 SCC/唯一循环入口递归生成 Wasm Block/Loop，nested branch/nested loop 均不再依赖逐 case detector，多入口/irreducible SCC 才使用 IR 自有 pc-local dispatcher fallback；`src/rust/ir` completion gate 禁止引用 legacy `jit_instruction`/`jit_instructions`/`codegen`/`control_flow` emitter。自动 Tier 1/2 均使用共享 decoder 的 bounded reachable-CFG region formation 和同一 HIR→MIR→Wasm backend；Tier 1 固定一轮低成本 prune/merge/phi/copy canonicalization，Tier-2-only FLAGS/GVN/DCE/helper-state/LICM/RAM forwarding 保持隔离。IR-09 对当前可 lowering 语义的 backend/Tier-1 职责完成；实验粗粒度 Pending 已清零，但 IR-05～IR-08 的完整前缀/模式/异常及 OS 验收仍待完成，不计入 IR-09 backend 完成声明。详见 ir09-completion.md |
 | IR-10 | 完成 | Tier 2 基础数据流优化已按实施计划的 FLAGS / DCE / GVN / copy / CFG / helper-state 六类验收收口：CFG 清理、trivial phi、常量与独立 copy propagation、逐位 FLAGS demand/CPU liveness、StateMap-aware DCE、支配关系 GVN/CSE、经审计 pure helper 的 CPU state observation trimming 均有独立开关/计数、正例/负例与逐-pass differential；特殊 FLAGS 或读取/写入 CPU state 的 helper 继续保守 materialize，不猜测未证明状态。IR-11 的 RAM proof/forwarding、LICM、强度削弱和高级 SIMD/循环优化不计入 IR-10 |
 | IR-11 | 完成 | Tier 2 已收口受预算约束的纯 SSA LICM、整数 SIMD peephole、owned-MIR RAM 证明与 fault-preserving memory LICM：地址关系按 Exact/Disjoint/MayAlias 保守分类，已证明不相交的 native 标量 store 可保留既有 load cache；自然循环采用唯一 preheader 重置的 loop cache，首次访问仍在原故障点执行且只有成功 native RAM guard/load 才建立有效值，任一慢速 guest-memory 路径在 MMIO/page-walk 前清空全部 loop cache；含 store/RMW/vector memory/未知 helper/effect 的循环不做 memory LICM。证书由 verifier 独立重算，伪造/预算失败不会部分发布。详见 ir11-completion.md |
@@ -853,3 +853,119 @@ Cargo feature 允许 IR 入口参与 CPU 分派，并提供可选的自动编译
 - MIR 增加受预算约束的纯值栈融合与 HIR 丢弃后的 typed local 分配，保留恢复根并重建 parallel edge copies；预算失败不发布部分结果。低层 memory import 仍保持独立类型契约。
 - `make ir-control-reference-tests` 使用 debug/release 和固定旧语义版本进行对照，并接入 IR-core。契约、基线限制及测试范围见 [本批说明](ir-control-fp-increment.md)。
 - Experimental Pending 950 → 0；production Pending 保持 3,728。粗粒度清零包含原基线不支持、debug assertion/release #UD 等行为，不能代替完整前缀/模式/异常验收；XP、应用、性能、无 SIMD 降级与 IR-14 继续待完成。
+
+
+## 2026-09-19 共享解码与契约矩阵增量
+
+按共享解码 → MIR/helper → 系统模式 → FP/SIMD 顺序补齐本次增量。
+详细行为、验证计数和基线边界见 [共享解码、CPU 契约、系统模式与 FP 验收](ir-contract-matrix.md)。
+目录更新为 935 编码/3,972 形式；生产 Pending 3,728、实验 Pending 0。
+新增便携核心、主线程/Worker fallback URL 和常用 SIMD helper 导入审计。
+本次没有将工作负载/性能、默认切换或 IR-14 旧路径退役标记完成。
+
+## 2026-09-19 XP 冷启动性能排查
+
+使用提供的 XP 系统盘、独立实例及内存写入覆盖层复现旧 IR 前 30 秒约
+15.78 mIPS。补齐自动编译预算退让/直线路径，减少 Tier 1 编译工作，扩大并索引缓存，
+索引热度记录并固定槽位替换，接通已有安全 RAM 写入后继续执行的 CFG 路径。
+更新后同一诊断约 25.30 mIPS，首次 640×480×4 模式切换从 35.51 秒降至 17.78 秒。
+legacy 最终对照仍约 129.81 mIPS；Node 无渲染诊断不能替代完整浏览器 XP 验收。
+差分、缓存失效、精确异常、主线程/Worker 与无 SIMD 测试结果及测量边界见
+[IR-13 性能排查](ir13-tuning.md)。IR-13 性能验收和 IR-14 继续待完成。
+
+## 2026-09-19 连续执行、自动多入口和访存复用
+
+- 普通 IR 出口现在实际请求 IR→IR 连续执行，每批最多 64 个后继，并受 CPU 原有
+  指令预算约束。每个入口保留完整 admission；故障、预算、慢访存、I/O 和中断
+  shadow 出口返回外层调度。链接执行累计热度，但不在链内编译。
+- 同一不可变快照可自动编译主入口与一个已热邻近入口；产物是独立守卫的函数，
+  浏览器串行发布。配置、SMC、reset/restore 会取消排队产物，发布前再次校验。
+- 安全普通 RAM 标量写入后不再立即全量写回状态，而在下一观察点/故障/出口物化。
+  Tier 2 增加同一地址、访问范围与权限兼容的 RAM guard 复用；仍执行真实数据访问，
+  慢路径在页表遍历和 MMIO callback 前清除缓存。证书由 verifier 独立重算。
+- 新低层 `ir_request_link` 只设置请求标志，低层 import 总数为 26。公开统计增加
+  `batched_entries` 与 `queued_entries`。
+- 220 项原生测试通过；新增实际链接/预算/冷写入/I/O 退出、真实排队兄弟入口取消、
+  混合宽度 RAM/跨页故障/设备重映射测试。缓存/自动编译在 debug/release 不变量核心、
+  生产 IR 核心及无 SIMD 自动编译路径通过；浏览器主线程和 Worker 回归通过。
+
+这仍未实现跨区域寄存器直接传递、跨 backend 直连、任意多入口区域合并或通用别名
+分析；不能据此宣称 IR-00～IR-14 全部完成或已经超过 legacy。
+
+## 2026-09-19 快速入口校验
+
+- 已接入受控同步区间的字节校验证书：同一 epoch 可复用完整校验结果，但每次仍检查
+  精确入口、VM generation、源页 TLB 映射和 CPL 读取权限。新 CPU 批次、解释器回退、
+  观察型 import、代码失效和 reset 撤销证书；不会把固定 snapshot version 当成真实页版本。
+- 热取指已有可见映射且 epoch 未变时复用前置检查，省略重复的取指后字节比较；
+  冷取指保留 A-bit/PTE-code alias 检查。64 槽入口缓存减少 BTreeMap 查找，回收压缩时清空。
+- 新增 `ir_admission_barrier` 契约和 fast/full/post-fetch/target 命中统计；冷点诊断开关
+  可在同一核心内比较两种校验策略。详情及测试命令见 [快速入口校验](ir-fast-entry.md)。
+- 220 项原生测试通过。缓存矩阵新增 recording 开/关下的校验 A/B、真实指令计数、
+  回调直接改代码及回调改映射；debug/release、无 SIMD、浏览器主线程/Worker 回归通过。
+
+## Hot region fusion follow-up
+
+The experimental runtime now fuses two profiled source regions into one guarded
+Tier 2 SSA activation, retaining GPR/FLAGS/XMM and retirement state over internal
+edges. Publication, admission and SMC guards cover both snapshots. See
+[the fusion contract and tests](ir-fusion.md) for bounds, diagnostics and results.
+
+## Timing and exit diagnostics (2026-09-20)
+
+Opt-in exclusive CPU-batch sampling, exact exit/admission/chain counters, compiler
+phase timing and separate asynchronous publication latency are implemented. Public
+API and Worker RPC return copied reports. See [diagnostic contracts and results](ir-diagnostics.md).
+This adds attribution, not an IR-13 performance pass or an IR-14 default switch.
+
+## XP 与固定 CPU 验收进展（2026-09-20）
+
+本轮补齐编译子阶段/最长调用、helper 退出类别和解释器热点统计；减少干涉图和
+CFG 合并的重复工作，增加 liveness 预算、RMW 连续执行、重叠快照、受限四区域
+合并、选择性 XMM 同步和有限值 SIMD 路径、实模式/VM86 段切换及 CLI 连续执行。
+代码写入与观察点失效分开，映射仍逐入口核验；缓存默认容量保持 256。
+
+后续减少已优化区域的重复热度记录，并缓存未编译入口的查找失败；发布和压缩记录
+会清除此类缓存。三次同核复测：固定 CPU 几何平均为 legacy 的 1.075 倍，四项均
+不低于 0.9 倍；XP 首次 800×600×32 里程碑为 IR 31.943 秒 / legacy 18.627 秒，
+吞吐 48.258 / 117.771 mIPS，**未达到目标**。这是 Node 下的显示模式里程碑，
+不是浏览器完整桌面就绪时间。四区域含 helper 的扩展因 XP 回退而禁止发布，
+保留已工作的较短区域；隐藏状态/观察点的更大范围合并仍是缺口。
+详情和限制见 [IR-13 排查与验收](ir13-tuning.md)。IR-13、IR-14 仍未完成。
+
+## IR-00～IR-12 后续补缺（2026-09-20）
+
+新增可执行的公开优化级别、17 类 pass 禁用及主线程/Worker/页面启动参数接入；
+新增经仿射 RMW ticket 证明的提交后读取复用，保留故障、MMIO 和代码别名退出。
+231 项原生测试、debug/release RMW 差分、真实 Worker 与便携核心测试通过。
+固定 CPU 三轮几何平均为 legacy 的 1.092 倍，部分单项仍落后；不是 XP 达标声明。
+实现边界、原始日志和仍未补齐的功能见 [本轮补缺记录](ir00-ir12-followup.md)。
+
+
+## 2026-09-20：公开诊断、owned MIR 校验及 helper 区域扩展
+
+- `ir_verify`、`ir_dump`、`ir_stats` 已贯通 CPU/Worker 和页面 URL；dump 默认关闭、
+  有界保留且复制读取，必要 correctness 校验不能被关闭。
+- owned MIR 独立校验 SSA 支配/使用、状态表达式、typed locals 干涉、边复制、
+  import 与 RAM 证书；在丢弃 HIR 后可运行，并支持 release `every_pass`。
+- CLI 正常实模式/内核路径选择性同步；三/四区域允许审计过的 CLI 和寄存器 SSE
+  helper。STI、通用内存/host observer 扩展仍保留限制。
+- **这些增量不表示 IR-00～IR-13 全部完成**。XP 配对性能和更广泛的观察点续执行
+  仍是验收缺口，详见 [本轮记录](ir-debug-helper-followup.md)。
+
+
+同轮继续消除 lowering 中重复 allocator，以及 Tier-1 预计算 CPU liveness 的成本；
+新增终端 CpuExit/CpuRep 的入口等价状态写回裁剪，Tier-2 liveness 直接消费 owned
+MIR 的实际观察点需求。独立 verifier 已检查 effect 链、RMW affine ticket、
+实际机器定义和 CPU liveness 所需值。236 项原生测试通过，性能仍以配对验收为准。
+
+再新增基本块内 post-CpuReload 的相同 backing 值写回复用、StateId 多使用点交集
+和独立证书校验；修复选择性 SSE adapter 的隐含操作数被 CPU liveness 删除的问题。
+当前 238 项原生测试及组合差分通过。固定 CPU 工作量三轮几何平均为 legacy 的
+1.095 倍，部分单项仍落后；XP 性能验收另行记录，不据此宣布 IR-13 完成。
+
+本轮 XP 三组配对中位数：IR 33.717 秒 / 45.688 mIPS，legacy 19.251 秒 /
+110.088 mIPS，两个门槛均未通过。独立采样确认入口/分派和解释器仍是主要成本，
+lowering 最长 47.81 ms、机器优化最长 5.47 ms；没有复现长停顿。容量 768 的
+单次对照仍需约 33.2 秒，保留默认 256。详细原始数据及统计限制见
+[本轮诊断与验收记录](ir-debug-helper-followup.md)。

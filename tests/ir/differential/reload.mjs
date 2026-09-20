@@ -40,6 +40,9 @@ for(const release of [false,true]){
                 observe("read32",a);
                 if(mutate){cpu.reg32[0]=0x12345670;cpu.reg_xmm32s[8]=0x3F800000;cpu.flags[0]^=1;cpu.flags_changed[0]=0;}
                 if(contextMutation==="segment") cpu.segment_offsets[3]=0x100;
+                if(contextMutation==="descriptor") cpu.gdtr_size[0]=31;
+                if(contextMutation==="task") cpu.segment_offsets[6]=0x123000;
+                if(contextMutation==="control-flags") cpu.flags[0]|=0x400;
                 if(contextMutation==="paging") {cpu.cr[4]^=0x80;e.full_clear_tlb();}
                 if(contextMutation==="mode") {cpu.is_32[0]^=1;e.update_state_flags();}
                 if(contextMutation==="redirect") cpu.instruction_pointer[0]=PC+0x100;
@@ -79,7 +82,7 @@ for(const release of [false,true]){
                 ip:cpu.instruction_pointer[0]>>>0,
                 previous:linear32[560>>2]>>>0,
                 cr2:cpu.cr[2]>>>0,
-                context:[cpu.cr[4],cpu.is_32[0],...cpu.segment_offsets],
+                context:[cpu.cr[4],cpu.is_32[0],...cpu.segment_offsets,cpu.gdtr_size[0]],
                 code:Buffer.from(mem.slice(PC,PC+cases[activeCase][0].length)),
                 fpu:fpu_state(),xmm:Array.from(cpu.reg_xmm32s),mxcsr:cpu.mxcsr[0],
                 data:Buffer.from(mem.slice(DATA, DATA+8192)),
@@ -93,7 +96,7 @@ for(const release of [false,true]){
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
             cpu.cr[4]=cr4;
             cpu.cr[2]=0xBADF000;
-            cpu.segment_offsets.fill(0,0,6);
+            cpu.segment_offsets.fill(0);
             cpu.segment_limits.fill(0xFFFFFFFF,0,6);
             cpu.segment_is_null.fill(0,0,6);
             cpu.sreg.set([16,8,16,16,16,16]);
@@ -189,7 +192,7 @@ for(const release of [false,true]){
                 compare(i,()=>reset(i,{mmio:true,callbackMutation}));comparisons++;
                 assert.equal(compare(i,()=>reset(i,{delta:0xFFF,pageFault:true})).ip,PF);comparisons++;
             }
-            if(kind===3) for(const changeContext of ["segment","paging","mode","redirect","code","cache","walk"]) {
+            if(kind===3) for(const changeContext of ["segment","paging","mode","redirect","code","cache","walk","descriptor","task","control-flags"]) {
                 const configure=()=>reset(i,{mmio:true,callbackMutation:true,changeContext});
                 configure();e.ir_test_step();e.ir_test_step();
                 const expected=state();

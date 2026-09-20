@@ -92,6 +92,9 @@ pub struct CallPlan {
     /// Pop order for multi-results; assignments occur only after the outcome check.
     pub staged: Vec<ResultSlot>,
     pub reload: Vec<(ValueId, super::value::Reading)>,
+    pub xmm_observation: Option<(u8, u8)>,
+    /// Finite packed-single fast path; exceptional values retain scalar helper semantics.
+    pub native_fp: Option<u32>,
     pub delivery: Option<Delivery>,
     pub exits: Vec<u32>,
     pub normal: Option<u32>,
@@ -106,7 +109,28 @@ pub fn lower(
     };
     let call = helpers[helper.index()].as_ref()?;
     let state = inst.state.unwrap();
+    let xmm_observation = if call.cpu_reload && call.name == "ir_sse_fp_reg_continue" {
+        crate::ir::helper::cpu_registry::xmm_register_operands(region, &inst.args).filter(|&(_, destination)| {
+            // Hand-built HIR may use every ABI result. Restrict narrowing to
+            // calls whose only live data result is the audited destination.
+            let other: Vec<_> = inst.results[..inst.results.len()-1].iter().enumerate()
+                .filter(|(n, _)| *n != 14 + destination as usize).map(|(_, v)| *v).collect();
+            !region.instructions.iter().any(|i| i.args.iter().any(|v| other.contains(v)))
+                && !region.states.iter().any(|s| s.values().iter().any(|v| other.contains(v)))
+                && !region.blocks.iter().any(|b| b.terminator.as_ref().is_some_and(|t|
+                    t.edges().iter().any(|e| e.args.iter().any(|v| other.contains(v)))
+                    || matches!(b.terminator, Some(crate::ir::hir::Terminator::CondBranch { condition, .. }) if other.contains(&condition))))
+        })
+    } else { None };
+    let native_fp = xmm_observation.and_then(|_| {
+        let crate::ir::hir::Definition::Instruction(id, 0) = region.values[inst.args[0].index()].definition else { return None; };
+        match region.instructions[id.index()].op {
+            Op::Const(0x0F58) => Some(0xE4), Op::Const(0x0F59) => Some(0xE6),
+            Op::Const(0x0F5C) => Some(0xE5), Op::Const(0x0F5E) => Some(0xE7), _ => None,
+        }
+    });
     Some(CallPlan {
+        xmm_observation, native_fp,
         helper,
         state,
         cpu_observation: if matches!(
@@ -133,7 +157,8 @@ pub fn lower(
                 .iter()
                 .copied()
                 .zip(reload_readings())
-                .collect()
+                .enumerate().filter(|(n, _)| xmm_observation.is_none_or(|(_, d)| *n == 14 + d as usize))
+                .map(|(_, pair)| pair).collect()
         } else {
             vec![]
         },

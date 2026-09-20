@@ -60,3 +60,17 @@ pub unsafe fn ir_load_segment(
     *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);
     Outcome::Invalidated as u32
 }
+
+/// Only real/VM86 MOV Sreg may continue: this path changes segment backing,
+/// never observes memory/host state, and preserves every HIR GPR/FLAGS value.
+/// Protected-mode descriptor walks keep the terminal, precise-state contract.
+#[no_mangle]
+pub unsafe fn ir_mov_segment_continue(selector: u32, segment: u32) -> u32 {
+    assert!(!cpu::in_jit && segment < 6 && segment != 1);
+    if !*gp::protected_mode || cpu::vm86_mode() {
+        assert!(cpu::switch_seg(segment as i32, (selector & 65535) as i32));
+        Outcome::Normal as u32
+    } else {
+        ir_load_segment(selector, segment, 0, 0, 0)
+    }
+}

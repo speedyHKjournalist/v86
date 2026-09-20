@@ -11,7 +11,8 @@ struct ContinuationContext {
     count: u32,
     controls: [i32; 5],
     mode: [u32; 8],
-    segments: [(u16, i32, u32, u8, bool); 6],
+    segments: [(u16, i32, u32, u8, bool); 8],
+    descriptors: [i32; 5],
 }
 impl ContinuationContext {
     unsafe fn capture() -> Self {
@@ -29,7 +30,14 @@ impl ContinuationContext {
                 *gp::in_hlt as u32,
                 *gp::prefixes as u32,
                 (*gp::state_flags).to_u32(),
-                (*gp::flags as u32) & (1 << 17),
+                (*gp::flags as u32) & !0x8D5, // all non-arithmetic FLAGS affect continuation policy
+            ],
+            descriptors: [
+                *gp::gdtr_offset,
+                *gp::gdtr_size,
+                *gp::idtr_offset,
+                *gp::idtr_size,
+                *gp::tss_size_32 as i32,
             ],
             segments: std::array::from_fn(|i| {
                 (

@@ -1,5 +1,5 @@
 //! Eliminate straight-line dispatcher edges while preserving every budget boundary.
-use super::{replace, PassStats};
+use super::{rewrite_values, PassStats};
 use crate::ir::{hir::*, ids::*, types::Type};
 
 pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), String> {
@@ -47,9 +47,16 @@ pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), Stri
         )[0];
         // Inputs cannot depend on the target's parameters: its only predecessor
         // is this distinct block, and the verified graph has no entry at target.
+        // Rewrite the whole phi tuple in one scan. Repeating a full arena scan
+        // for each GPR/FLAGS/XMM parameter makes cold CFG merging quadratic in
+        // the architectural tuple size, although these substitutions are independent.
+        let mut aliases = vec![None; region.values.len()];
         for (p, (&param, &arg)) in params.iter().zip(&args).enumerate() {
-            replace(region, param, if p == effect_index { effect } else { arg });
+            aliases[param.index()] = Some(if p == effect_index { effect } else { arg });
         }
+        rewrite_values(region, |value| {
+            if let Some(new) = aliases[value.index()] { *value = new; }
+        });
         let instructions = std::mem::take(&mut region.blocks[b].instructions);
         region.blocks[a].instructions.extend(instructions);
         region.blocks[a].terminator = region.blocks[b].terminator.take();

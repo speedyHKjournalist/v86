@@ -19,6 +19,25 @@ fn config(optimize: bool) -> IrConfig {
         },
     }
 }
+
+#[test]
+fn optimization_policy_disables_all_optional_stages_and_caps_level_one() {
+    use crate::ir::passes::PassConfig;
+    for bytes in [vec![0x40,0x49,0x75,0xFC],vec![0xFF,0x06,0x8B,0x1E,0x43],vec![0x31,0xC0,0x83,0xC0,0x01]] {
+        let mut req = request(0x100000,0x100000,true); req.tier = Tier::Two;
+        let snapshot = ImmutableCodeSnapshot { bytes, dependencies: vec![CodeDependency {page:PhysicalAddress(0x100000),version:1}],
+            mappings:vec![CodeMapping {linear:LinearAddress(0x100000),physical:PhysicalAddress(0x100000)}] };
+        let plain = compile_cpu_cfg_region(&req,&snapshot,&config(false)).unwrap();
+        let mut disabled = config(true); disabled.passes = PassConfig::default().disable(PassConfig::MASK);
+        let off = compile_cpu_cfg_region(&req,&snapshot,&disabled).unwrap();
+        assert_eq!(plain.code.bytes,off.code.bytes,"every optional stage can be disabled independently of correctness checks");
+        let mut small = config(true); small.passes = PassConfig::tier1();
+        let mut cold = request(0x100000,0x100000,true); cold.tier=Tier::One;
+        let one = compile_cpu_cfg_region(&cold,&snapshot,&small).unwrap();
+        let capped = compile_cpu_cfg_region(&req,&snapshot,&small).unwrap();
+        assert_eq!(one.code.bytes,capped.code.bytes,"level one must not run Tier-2-only machine or loop passes");
+    }
+}
 fn request(pc: u32, linear: u32, mode: bool) -> CompileRequest {
     CompileRequest {
         key: PublicationKey {
@@ -46,6 +65,62 @@ fn snapshot(bytes: Vec<u8>, linear: u32) -> ImmutableCodeSnapshot {
         }],
     }
 }
+#[test]
+fn automatic_cfg_budget_shrinks_without_weakening_snapshot_checks() {
+    let mut req = request(0x1FFC0, 0x1FFC0, true);
+    req.tier = Tier::Two;
+    let mut program = vec![0x40; 95];
+    program.extend([0x75, 0]);
+    let mut bytes = snapshot(program, 0x1F000);
+    bytes.mappings.push(CodeMapping {
+        linear: LinearAddress(0x20000),
+        physical: PhysicalAddress(0x101000),
+    });
+    bytes.dependencies.push(CodeDependency {
+        page: PhysicalAddress(0x101000),
+        version: 8,
+    });
+    let options = config(true);
+    assert_eq!(
+        compile_cpu_cfg_region(&req, &bytes, &options).err(),
+        Some(crate::ir::lowering::CompileError::Budget("CFG block count")),
+    );
+    let (artifact, shortened, retries) = compile_cpu_cfg_bounded(&req, &bytes, &options).unwrap();
+    assert!(retries > 0);
+    assert!(shortened.bytes.len() <= 48);
+    assert_eq!(shortened.mappings.len(), 1);
+    assert_eq!(shortened.dependencies.len(), 1);
+    assert_eq!(artifact.guest_bytes, shortened.bytes.len());
+    assert!(artifact.current(req.key, &shortened.dependencies,
+        EntryContract::Cpu(req.cpu_entry()), &shortened.mappings));
+    assert_eq!(bytes.bytes.len(), 97, "original failed-input fingerprint survives");
+
+    bytes.mappings[1].physical = PhysicalAddress(0x102000);
+    assert!(matches!(compile_cpu_cfg_bounded(&req, &bytes, &options),
+        Err(crate::ir::lowering::CompileError::InvalidIr(_))));
+
+    // A byte-budget split inside MOV's immediate must stop at the previous
+    // complete instruction, never publish a truncated instruction.
+    let mut req = request(0x100000, 0x100000, true);
+    req.tier = Tier::Two;
+    let mut program = [0xB8, 1, 0, 0, 0].repeat(95);
+    program.extend([0xEB, 0]);
+    let bytes = snapshot(program, 0x100000);
+    let mut options = config(true);
+    options.max_code_bytes = 512;
+    let (_, shortened, retries) = compile_cpu_cfg_bounded(&req, &bytes, &options).unwrap();
+    assert!(retries > 0);
+    assert_eq!(shortened.bytes.len() % 5, 0);
+
+    // The automatic path should never construct a 96-block CFG for straight
+    // code that the existing linear CPU frontend represents in one block.
+    let bytes = snapshot(vec![0x40; 96], 0x100000);
+    let (artifact, selected, retries) = compile_cpu_cfg_bounded(&req, &bytes, &options).unwrap();
+    assert_eq!(retries, 0);
+    assert_eq!(selected.bytes.len(), 96);
+    assert_eq!(artifact.guest_bytes, 96);
+}
+
 #[test]
 fn entry_publication_contract() {
     let req = request(0xFFFFFFFC, 0x100000, true);
@@ -246,4 +321,64 @@ fn guarded_ram_forwarding_is_tier_two_only_in_both_cpu_compile_entry_points() {
             }
         }
     }
+}
+
+#[test]
+fn multiple_cpu_entries_split_and_validate_independently() {
+    let req = request(0x1FFD, 0x1FFD, true);
+    // Alternate entry 1 decodes INC bytes embedded in entry 0's immediate.
+    let mut source = snapshot(vec![0xB8, 0x40, 0x40, 0x40, 0x40, 0x40], 0x1000);
+    source.mappings.push(CodeMapping {
+        linear: LinearAddress(0x2000),
+        physical: PhysicalAddress(0x200000),
+    });
+    source.dependencies.push(CodeDependency {
+        page: PhysicalAddress(0x200000),
+        version: 19,
+    });
+    std::fs::create_dir_all("build/ir-multientry").unwrap();
+    let entries = [0, 1, 5].map(|offset| CpuEntryRequest {
+        offset,
+        key: PublicationKey {
+            job: offset as u64 + 20,
+            slot: offset as u32 + 4,
+            ..req.key
+        },
+    });
+    for opt in [false, true] {
+        let compiled = compile_cpu_entries(&req, &source, &entries, &config(opt)).unwrap();
+        assert_eq!(compiled.len(), 3);
+        for (i, artifact) in compiled.iter().enumerate() {
+            let expected = request(
+                req.pc.0 + entries[i].offset as u32,
+                req.linear.0 + entries[i].offset as u32,
+                true,
+            )
+            .cpu_entry();
+            assert_eq!(artifact.entry, EntryContract::Cpu(expected));
+            assert_eq!(artifact.key, entries[i].key);
+            std::fs::write(
+                format!("build/ir-multientry/{i}-{}.wasm", u8::from(opt)),
+                &artifact.code.bytes,
+            )
+            .unwrap();
+            assert_eq!(artifact.dependencies.len(), if i == 2 { 1 } else { 2 });
+            let mut stale = artifact.dependencies.clone();
+            stale[0].version += 1;
+            assert!(!artifact.current(artifact.key, &stale, artifact.entry, &artifact.mappings));
+        }
+    }
+    for mutation in 0..5 {
+        let mut bad = entries;
+        match mutation {
+            0 => bad[1].offset = bad[0].offset,
+            1 => bad[1].key.slot = bad[0].key.slot,
+            2 => bad[1].key.job = bad[0].key.job,
+            3 => bad[1].key.vm_generation += 1,
+            _ => bad[1].offset = source.bytes.len(),
+        };
+        assert!(compile_cpu_entries(&req, &source, &bad, &config(true)).is_err());
+    }
+    source.bytes.push(0x0F); // A later entry cannot publish a partially successful batch.
+    assert!(compile_cpu_entries(&req, &source, &entries, &config(true)).is_err());
 }

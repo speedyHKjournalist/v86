@@ -148,6 +148,20 @@ for(const release of [false,true]){
             return expected;
         }
 
+        let special=0;
+        for(let i=0;i<cases.length;i++) {
+            const [,mode,width,op,group,invalid,unimpl]=cases[i];
+            if(invalid||unimpl||!mode||width!==32||![0xD8,0xDA,0xDC,0xDE].includes(op))continue;
+            for(let sample=0;sample<12;sample++)for(const precision of [0,2,3])for(let rounding=0;rounding<4;rounding++) {
+                compare(i,()=>{
+                    reset(i);e.ir_test_x87_pattern(sample,0x3F|precision<<8|rounding<<10);
+                    // Rotate raw F32/F64/integer encodings independently of ST values.
+                    const words=[0,0x80000000,1,0x7F800000,0x7F812345,0x7FC54321,0xFFFFFFFF,0x7FF00000,0x7FF80000,0xFFF00000,0x3FF80000,0x80000001];
+                    for(let n=0;n<4;n++)set32(DATA+n*4,words[(sample+n)%words.length]);
+                },102);special++;
+            }
+        }
+        console.log(`PASS (${release?"release":"debug"}): ${special} x87 memory arithmetic special-value/control-mode cases`);
         let comparisons=0;
         for(let i=0;i<cases.length;i++) {
             const [,mode,width,op,group,invalid,unimpl]=cases[i];

@@ -46,7 +46,11 @@ fn io_fixtures() {
                                 }
                                 std::fs::write(
                                     format!("build/ir-io/{}-{opt}.wasm", cases.len()),
-                                    emit_cpu(&lower(&r).unwrap(), 100).unwrap().bytes,
+                                    {
+                                        let mut mir = lower(&r).unwrap();
+                                        if opt != 0 { mir.elide_redundant_cpu_state_writes(crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT).unwrap(); mir.elide_dead_cpu_values(crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT).unwrap(); }
+                                        emit_cpu(&mir, 100).unwrap().bytes
+                                    },
                                 )
                                 .unwrap();
                             }

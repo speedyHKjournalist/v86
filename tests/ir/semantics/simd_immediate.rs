@@ -106,7 +106,16 @@ fn simd_immediate_contracts() {
         vec![0x66, 0x0F, 0x71, 0x10, 1],
         vec![0xF0, 0x66, 0x0F, 0x71, 0xD0, 1],
     ] {
-        assert!(lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
+        let result = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true);
+        if bytes[0] == 0xF0 {
+            assert!(result.is_err());
+        } else {
+            assert!(result
+                .unwrap()
+                .helpers
+                .iter()
+                .any(|h| h.name == "ir_invalid_form"));
+        }
     }
     let mmx = lift_cpu(&[0x0F, 0x71, 0xD0, 1], GuestEip(0), LinearAddress(0), true).unwrap();
     assert!(mmx.helpers.iter().any(|h| h.name == "ir_mmx_reg"));
