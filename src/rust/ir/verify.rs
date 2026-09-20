@@ -540,7 +540,8 @@ pub fn verify(region: &Region) -> Result<()> {
                         && region.entries.contains(&BlockId(b as u32)),
                     "GPR initialization outside entry",
                 )?,
-                Op::ReadFlags
+                Op::ReadEntryLinear
+                | Op::ReadFlags
                 | Op::ReadRawFlags
                 | Op::ReadFlagChanges
                 | Op::ReadFlagOperand

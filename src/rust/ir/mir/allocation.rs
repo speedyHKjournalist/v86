@@ -210,7 +210,7 @@ pub fn reallocate(data: &mut MirData, work_limit: usize) -> Result<usize, Compil
     }
     let mut interference = Interference::new(data.value_types.len());
     let mut connect = |live: &BTreeSet<ValueId>| -> Result<(), CompileError> {
-        spend(&mut left, live.len().saturating_mul(live.len()))?;
+        spend(&mut left, interference.connection_work(live))?;
         interference.connect(live, |v| data.value_types[v.index()]);
         Ok(())
     };
@@ -343,10 +343,11 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
         let is_entry = entries.get_mut(e.index()).ok_or_else(invalid)?;
         require(!*is_entry)?; *is_entry = true;
     }
+    let cold_dispatch = data.control.cold_dispatch()?;
     for (b, block) in graph.blocks.iter().enumerate() {
         let control = &data.control.blocks[b];
         require(control.instructions == block.instructions && control.recovery == block.recovery_id
-            && control.budget_cost == 1)?;
+            && control.budget_cost == if cold_dispatch[b] { 0 } else { 1 })?;
         for &v in &block.params {
             require(ty(v)? != Type::RmwTicket)?;
             produced[v.index()] = true;

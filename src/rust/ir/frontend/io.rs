@@ -37,7 +37,7 @@ pub fn lift(
     if !string {
         let input = op & 2 == 0;
         if input {
-            call(b, "ir_in", vec![port, bytes], map, true);
+            super::adapters::call_abi(b, "ir_in_continue", vec![port, bytes], map, crate::ir::helper::HelperAbi::CpuReload);
         } else {
             let value = b.read(0, width);
             let value = if width < 32 {
@@ -45,7 +45,7 @@ pub fn lift(
             } else {
                 value
             };
-            call(b, "ir_out", vec![port, bytes, value], map, true);
+            super::adapters::call_abi(b, "ir_out_continue", vec![port, bytes, value], map, crate::ir::helper::HelperAbi::CpuReload);
         }
         return Ok(());
     }

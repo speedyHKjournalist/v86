@@ -72,7 +72,13 @@ fn io_contract_boundaries() {
         assert!(lift(bytes, GuestEip(0), LinearAddress(0), true).is_err());
         let mut suffix = bytes.to_vec();
         suffix.push(0x90);
-        assert!(lift_cpu(&suffix, GuestEip(0), LinearAddress(0), true).is_err());
+        assert_eq!(lift_cpu(&suffix, GuestEip(0), LinearAddress(0), true).is_ok(), bytes[0] >= 0xE4);
+        if bytes[0] >= 0xE4 {
+            let region = lift_cpu(&suffix, GuestEip(0), LinearAddress(0), true).unwrap();
+            assert!(matches!(region.helpers[0].abi, crate::ir::helper::HelperAbi::CpuReload));
+            assert_eq!(region.helpers[0].results, vec![crate::ir::types::Type::I32; 14]);
+            lower(&region).unwrap().verify().unwrap();
+        }
         let mut lock = vec![0xF0];
         lock.extend(bytes);
         assert!(lift_cpu(&lock, GuestEip(0), LinearAddress(0), true).is_err());

@@ -21,7 +21,9 @@ pub enum HelperAbi {
     /// Metadata alone does not authorize calling a legacy helper.
     Unadapted,
     /// Outcome-only CPU ABI. On Normal, new SSA results reload GPRs, concrete
-    /// and lazy FLAGS backing, then XMMs. The adapter preserves EIP, segments,
+    /// and lazy FLAGS backing, then XMMs for vector adapters. Audited scalar
+    /// observers verify XMM backing instead and return only 14 scalar values.
+    /// The adapter preserves EIP, segments,
     /// privilege/mode, translation and counters on Normal. Faults are CPU-owned.
     CpuReload,
     /// CPU state is authoritative after this terminal call. The adapter owns
@@ -68,7 +70,7 @@ impl HelperDescriptor {
     pub fn validate(&self) -> Result<(), &'static str> {
         cpu_registry::validate(self)?;
         if matches!(self.abi, HelperAbi::CpuReload)
-            && (self.results != cpu_reload_types()
+            && (self.results != cpu_registry::reload_types(&self.name)
                 || self.exception_owner != ExceptionOwner::Helper)
         {
             return Err("invalid CPU normal-reload contract");

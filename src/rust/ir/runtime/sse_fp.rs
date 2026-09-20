@@ -3,54 +3,8 @@
 use crate::cpu::{cpu, fpu, global_pointers as gp, instructions_0f as sem};
 use crate::ir::helper::Outcome;
 
-#[derive(PartialEq, Eq)]
-struct ContinuationContext {
-    epoch: u64,
-    pc: i32,
-    previous_pc: i32,
-    count: u32,
-    controls: [i32; 5],
-    mode: [u32; 8],
-    segments: [(u16, i32, u32, u8, bool); 8],
-    descriptors: [i32; 5],
-}
-impl ContinuationContext {
-    unsafe fn capture() -> Self {
-        Self {
-            epoch: super::live::continuation_epoch(),
-            pc: *gp::instruction_pointer,
-            previous_pc: *gp::previous_ip,
-            count: *gp::instruction_counter,
-            controls: std::array::from_fn(|i| *gp::cr.add(i)),
-            mode: [
-                *gp::protected_mode as u32,
-                *gp::is_32 as u32,
-                *gp::stack_size_32 as u32,
-                *gp::cpl as u32,
-                *gp::in_hlt as u32,
-                *gp::prefixes as u32,
-                (*gp::state_flags).to_u32(),
-                (*gp::flags as u32) & !0x8D5, // all non-arithmetic FLAGS affect continuation policy
-            ],
-            descriptors: [
-                *gp::gdtr_offset,
-                *gp::gdtr_size,
-                *gp::idtr_offset,
-                *gp::idtr_size,
-                *gp::tss_size_32 as i32,
-            ],
-            segments: std::array::from_fn(|i| {
-                (
-                    *gp::sreg.add(i),
-                    *gp::segment_offsets.add(i),
-                    *gp::segment_limits.add(i),
-                    *gp::segment_access_bytes.add(i),
-                    *gp::segment_is_null.add(i),
-                )
-            }),
-        }
-    }
-}
+use super::continuation::ContinuationContext;
+
 unsafe fn finish(success: bool) -> u32 {
     if success {
         Outcome::Normal as u32

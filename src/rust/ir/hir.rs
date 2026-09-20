@@ -35,6 +35,9 @@ pub enum Op {
     Insert {
         lsb: u8,
     },
+    /// Read the already-validated CPU entry's linear PC in the cold prologue.
+    /// This is not an x86 register and cannot appear after a guest instruction.
+    ReadEntryLinear,
     ReadGpr(u8),
     ReadXmm(u8),
     /// Terminal selective byte stores, following a full sixteen-byte write preflight.

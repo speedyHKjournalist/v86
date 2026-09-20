@@ -100,18 +100,20 @@ try{
         cpu.reg32[1]=other;cpu.reg32[2]=PC;
         const disabled=e.get_jit_config(0);e.set_jit_config(0,1);configure();vm.run();
         try {
-            await until(()=>e.ir_cache_entry_stat(PC,0,1,10)===2 && e.ir_cache_entry_stat(PC,0,1,3)>=3,
-                'a terminal I/O peer fuses without a normal outgoing edge');
+            await until(()=>[PC,other].some(at=>e.ir_cache_entry_stat(at,0,1,10)>=2 && e.ir_cache_entry_stat(at,0,1,3)>=3),
+                "an observed I/O cycle executes inside one fused owner");
             await vm.stop();
             const ip=cpu.instruction_pointer[0];
             const pending=new Map([[PC,0],[PC+1,3],[other,2],[other+2,1]]);
             assert(pending.has(ip));
             assert.equal(new Uint32Array(e.memory.buffer)[664>>2],(cpu.reg32[3]*4-pending.get(ip))>>>0);
+            const active=[PC,other].filter(at=>e.ir_cache_entry_stat(at,0,1,10)>=2 && e.ir_cache_entry_stat(at,0,1,3)>=3);
+            assert(active.length>0);
             vm.write_memory(cpu.mem8.slice(other,other+1),other);
-            assert.equal(e.ir_cache_entry_stat(PC,0,1,0),0,'terminal peer dependency invalidates its fused root');
+            for(const at of active) assert.equal(e.ir_cache_entry_stat(at,0,1,0),0,"peer code invalidates every executing fused owner");
         } finally {await vm.stop();e.set_jit_config(0,disabled);}
     }
-    console.log(`PASS: ${wasm}: terminal successor fusion preserves I/O exit, retirement and source invalidation`);
+    console.log(`PASS: ${wasm}: observed successor fusion preserves I/O state, retirement and source invalidation`);
     {
         const addresses=[PC,PC+0x2000,PC+0x4000,PC+0x6000];
         await prepare([0x40,0xFF,0xE2]);
@@ -128,7 +130,7 @@ try{
             assert.equal(e.ir_cache_entry_stat(root,0,1,0),0,'fourth source write retires extended fusion');
         } finally {await vm.stop();e.set_jit_config(0,disabled);}
     }
-    console.log(`PASS: ${wasm}: progressive four-source fusion, exact carried state/count and fourth-source invalidation`);
+    console.log(`PASS: ${wasm}: closed four-source fusion, exact carried state/count and fourth-source invalidation`);
     for(const recording of [0,1]) {
         await prepare([0x40,0xFF,0xE2]);
         const other=PC+0x2000;
@@ -160,19 +162,30 @@ try{
         await prepare([0x40,0xA9,...u32(1),0x0F,0x85,...u32(other-PC-12),0x41,0xE9,...u32(other-PC-18)]);
         vm.write_memory(Uint8Array.of(0x46,0x83,0xF2,12,0xFF,0xE2),other);
         cpu.reg32[2]=PC;
-        const batches=e.ir_auto_stat(16),disabled=e.get_jit_config(0);
+        // Seed both siblings at the same tier; wall-clock frame endings must
+        // not decide whether one sibling races ahead to Tier 2 alone.
+        for(const [at,length] of [[PC,18],[peer,6],[other,6]]) {
+            cpu.instruction_pointer[0]=at;assert(await cpu.ir_compile_cached(length,1,1,1,256,64));
+        }
+        cpu.instruction_pointer[0]=PC;
+        // Isolate alias ownership from independent trace promotion, which can
+        // legitimately replace only one alias while preserving the other owner.
+        assert.equal(e.ir_cache_set_fusion(0),1);
+        const batches=e.ir_auto_stat(25),disabled=e.get_jit_config(0);
         e.set_jit_config(0,1);configure();vm.run();
         try {
-            await until(()=>e.ir_auto_stat(16)>batches && e.ir_cache_entry_stat(PC,0,1,0) && e.ir_cache_entry_stat(peer,0,1,0),"hot entries from one snapshot publish automatically");
+            await until(()=>e.ir_auto_stat(25)>batches && e.ir_cache_entry_stat(PC,0,1,11)>=2 && e.ir_cache_entry_stat(PC,0,1,12)===e.ir_cache_entry_stat(peer,0,1,12),"hot entries share one automatically published body");
             await vm.stop();
             const ip=cpu.instruction_pointer[0];
             const pending=new Map([[PC,0],[PC+1,2],[PC+6,1],[peer,0],[peer+1,1],[other,0],[other+1,2],[other+4,1]]);
             assert(pending.has(ip));
             assert.equal(new Uint32Array(e.memory.buffer)[664>>2],(3*cpu.reg32[0]+2*cpu.reg32[1]+3*cpu.reg32[6]-pending.get(ip))>>>0);
-            configure(0);assert.equal(e.ir_auto_stat(17),0,"configuration cancels queued batch siblings");
-        } finally {await vm.stop();e.set_jit_config(0,disabled);}
+            assert(e.ir_cache_entry_stat(PC,0,1,11) >= 2);
+            assert.equal(e.ir_cache_entry_stat(PC,0,1,12),e.ir_cache_entry_stat(peer,0,1,12),"aliases use the same table slot");
+            configure(0);assert.equal(e.ir_auto_stat(17),0,"shared artifact has no queued duplicate body");
+        } finally {await vm.stop();e.set_jit_config(0,disabled);assert.equal(e.ir_cache_set_fusion(1),1);}
     }
-    console.log(`PASS: ${wasm}: automatic shared-snapshot hot entries, serial publication, cancellation and independently checked retirement`);
+    console.log(`PASS: ${wasm}: automatic shared-body hot entries, one table slot, cancellation and independently checked retirement`);
     await prepare([0xEB,0x02,0xCC,0xCC,0x40,0xEB,0xF9]);let before=stats();let reachable_hits=e.ir_cache_stat(2);configure();vm.run();
     await until(()=>e.ir_cache_entry_stat(PC,0,1,5)===2&&e.ir_cache_stat(2)>reachable_hits,"reachable forward-edge Tier 1/2 region");await vm.stop();
     assert([PC,PC+4,PC+5].includes(cpu.instruction_pointer[0]),"forward target and loop header remain inside the compiled region");
@@ -216,21 +229,28 @@ try{
         const other=PC+0x2000,peer=PC+12;
         await prepare([0x40,0xA9,...u32(1),0x0F,0x85,...u32(other-PC-12),0x41,0xE9,...u32(other-PC-18)]);
         vm.write_memory(Uint8Array.of(0x46,0x83,0xF2,12,0xFF,0xE2),other);cpu.reg32[2]=PC;
-        const disabled=e.get_jit_config(0);e.set_jit_config(0,1);
+        for(const [at,length] of [[PC,18],[peer,6],[other,6]]) {
+            cpu.instruction_pointer[0]=at;assert(await cpu.ir_compile_cached(length,1,1,1,256,64));
+        }
+        cpu.instruction_pointer[0]=PC;
+        const disabled=e.get_jit_config(0),shared=e.ir_auto_stat(25),published=e.ir_cache_stat(31);e.set_jit_config(0,1);
+        assert.equal(e.ir_cache_set_fusion(0),1);
         try {
-            WebAssembly.instantiate=(code,imports)=>isIR(code)&&e.ir_auto_stat(17)>0
+            WebAssembly.instantiate=(code,imports)=>isIR(code)&&e.ir_auto_stat(25)>shared
                 ?new Promise((resolve,reject)=>{held={code,imports,resolve,reject};})
                 :original(code,imports);
-            configure();vm.run();await until(()=>held,"hold primary publication with queued sibling");await vm.stop();
-            assert.equal(e.ir_auto_stat(17),1);
+            configure();vm.run();await until(()=>held,"hold shared-body publication before either alias installs");await vm.stop();
+            assert.equal(e.ir_auto_stat(17),0,"shared body does not compile duplicate siblings");
             if(invalidate==="configure") configure(0);
             else vm.write_memory(Uint8Array.of(0x41),peer);
-            assert.equal(e.ir_auto_stat(17),0,`${invalidate} cancels a real queued sibling`);
+            assert.equal(e.ir_auto_stat(17),0,`${invalidate} leaves no queued stale duplicate`);
             held.resolve(await original(held.code,held.imports));await sleep(20);
             assert.equal(e.ir_auto_stat(10),0);
-        } finally {await vm.stop();WebAssembly.instantiate=original;e.set_jit_config(0,disabled);}
+            assert.equal(e.ir_cache_stat(31),published,"a cancelled shared owner never publishes");
+            assert(e.ir_cache_entry_stat(peer,0,1,11)<=1,"only a prior independent owner may survive cancellation");
+        } finally {await vm.stop();WebAssembly.instantiate=original;e.set_jit_config(0,disabled);assert.equal(e.ir_cache_set_fusion(1),1);}
     }
-    console.log(`PASS: ${wasm}: held multi-entry publication rejects queued siblings after configuration changes and same-byte SMC`);
+    console.log(`PASS: ${wasm}: held shared-body publication rejects all aliases after configuration changes and same-byte SMC`);
     try{
         await prepare();before=stats();configure(1,2,1000000);vm.run();await until(()=>e.ir_auto_stat(4)>before[4],"Tier 1 before rejected upgrade");await vm.stop();
         WebAssembly.instantiate=(code,imports)=>isIR(code)?Promise.reject(new WebAssembly.CompileError("controlled auto failure")):original(code,imports);

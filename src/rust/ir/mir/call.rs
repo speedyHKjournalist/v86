@@ -153,7 +153,7 @@ pub fn lower(
             })
             .collect(),
         reload: if call.cpu_reload {
-            inst.results
+            inst.results[..inst.results.len() - 1]
                 .iter()
                 .copied()
                 .zip(reload_readings())

@@ -108,6 +108,21 @@ pub unsafe fn ir_sti_finish_link(depth: u32) {
     }
 }
 
+/// No acknowledge, host callback, FLAGS change, or CPU state materialization.
+/// The emitter may discard a completed shadow scope only when this is true.
+#[no_mangle]
+pub unsafe fn ir_sti_no_pending_irq() -> bool {
+    assert!(!cpu::in_jit);
+    super::continuation::no_pending_irq()
+}
+/// Slow completed-shadow path. Its AfterInstruction snapshot has already
+/// retired STI and its shadow. IRQ delivery owns post-state; never resume SSA.
+#[no_mangle]
+pub unsafe fn ir_sti_finish_continue(depth: u32) -> u32 {
+    ir_sti_finish_link(depth);
+    Outcome::Invalidated as u32
+}
+
 /// Catalogue-invalid operands still perform the baseline task/segment guards.
 /// Missing group selectors have no guards or EA (the interpreter rejects sooner).
 #[no_mangle]

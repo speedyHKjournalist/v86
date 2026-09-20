@@ -15,19 +15,19 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_flags_stack_check"
         | "ir_hlt"
         | "ir_rdmsr"
-        | "ir_rdtsc"
+        | "ir_rdtsc" | "ir_rdtsc_continue"
         | "ir_sysenter"
         | "ir_sysexit"
         | "ir_wbinvd"
         | "ir_wrmsr" => 0,
-        "ir_iret" | "ir_verr_mem" | "ir_verr_reg" | "ir_verw_mem" | "ir_verw_reg" => 1,
+        "ir_sti_finish_continue" | "ir_iret" | "ir_verr_mem" | "ir_verr_reg" | "ir_verw_mem" | "ir_verw_reg" => 1,
         "ir_arpl_reg"
         | "ir_rdrand"
         | "ir_descriptor_ud"
         | "ir_far_return"
         | "ir_fxrstor"
         | "ir_fxsave"
-        | "ir_in"
+        | "ir_in" | "ir_in_continue"
         | "ir_invlpg"
         | "ir_io_check"
         | "ir_mov_segment_continue"
@@ -56,7 +56,7 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_write_cr"
         | "ir_write_dr" => 2,
         "ir_invalid_form" | "ir_arpl_mem" | "ir_movnti" | "ir_far_jump_mem" | "ir_lar_mem" | "ir_lar_reg"
-        | "ir_lsl_mem" | "ir_lsl_reg" | "ir_out" | "ir_pop_segment" => 3,
+        | "ir_lsl_mem" | "ir_lsl_reg" | "ir_out" | "ir_out_continue" | "ir_pop_segment" => 3,
         "ir_reserved_form"
         | "ir_mmx_mask"
         | "ir_mmx_reg"
@@ -82,13 +82,13 @@ pub fn arity(name: &str) -> Option<usize> {
     })
 }
 fn abi(name: &str) -> HelperAbi {
-    if matches!(name, "ir_sse_fp_reg_continue" | "ir_sse_fp_mem_continue") {
+    if checked_scalar_continuation(name) || matches!(name, "ir_sse_fp_reg_continue" | "ir_sse_fp_mem_continue") {
         HelperAbi::CpuReload
     } else if name.starts_with("ir_rep_") {
         HelperAbi::CpuRep
     } else if matches!(
         name,
-        "ir_sti_check" | "ir_cli_check" | "ir_flags_stack_check" | "ir_io_check" | "ir_mov_segment_continue"
+        "ir_sti_finish_continue" | "ir_sti_check" | "ir_cli_check" | "ir_flags_stack_check" | "ir_io_check" | "ir_mov_segment_continue"
     ) {
         HelperAbi::Outcome {
             fault_delivery: None,
@@ -106,7 +106,7 @@ pub fn descriptor(name: &str, params: Vec<Type>) -> Result<HelperDescriptor, &'s
         name: name.into(),
         params,
         results: if matches!(abi(name), HelperAbi::CpuReload) {
-            super::cpu_reload_types()
+            reload_types(name)
         } else {
             vec![]
         },
@@ -124,7 +124,7 @@ pub fn validate(d: &HelperDescriptor) -> Result<(), &'static str> {
     if d.params.len() != count
         || d.results
             != if matches!(abi(&d.name), HelperAbi::CpuReload) {
-                super::cpu_reload_types()
+                reload_types(&d.name)
             } else {
                 vec![]
             }
@@ -188,4 +188,14 @@ pub fn xmm_register_operands(region: &crate::ir::hir::Region, args: &[crate::ir:
 /// Fault outcomes still exit through full exception recovery and revoke reuse.
 pub fn preserves_code_on_success(name: &str) -> bool {
     matches!(name, "ir_cli" | "ir_cli_check" | "ir_clts" | "ir_cpuid" | "ir_read_cr" | "ir_read_dr")
+}
+
+/// These adapters verify all captured code/mappings and control context after
+/// any host observation, preserving XMMs or declining Normal altogether.
+pub fn checked_scalar_continuation(name: &str) -> bool {
+    matches!(name, "ir_in_continue" | "ir_out_continue" | "ir_rdtsc_continue")
+}
+pub fn reload_types(name: &str) -> Vec<Type> {
+    if checked_scalar_continuation(name) { vec![Type::I32; 14] }
+    else { super::cpu_reload_types() }
 }

@@ -30,6 +30,18 @@ pub unsafe fn ir_rdtsc() -> u32 {
     instructions_0f::instr_0F31();
     commit()
 }
+/// Only an unchanged active code/context certificate authorizes SSA resumption.
+#[no_mangle]
+pub unsafe fn ir_rdtsc_continue() -> u32 {
+    assert!(!cpu::in_jit);
+    if *gp::cpl != 0 && *gp::cr.offset(4) & cpu::CR4_TSD != 0 {
+        cpu::trigger_gp(0);
+        return Outcome::ControlTransferred as u32;
+    }
+    let observer = super::continuation::ScalarObserver::capture();
+    instructions_0f::instr_0F31();
+    observer.finish()
+}
 #[no_mangle]
 pub unsafe fn ir_rdmsr() -> u32 {
     if !ring0() {

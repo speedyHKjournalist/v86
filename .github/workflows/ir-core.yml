@@ -108,7 +108,7 @@ jobs:
       - name: IR-12 cache, publication and scheduling lifecycle
         run: |
           set -o pipefail
-          make ir-live-tests ir-cache-tests ir-auto-tests ir-fusion-tests ir-diagnostic-tests 2>&1 | tee build/ir12-lifecycle.log
+          make ir-entry-tests ir-live-tests ir-cache-tests ir-auto-tests ir-fusion-tests ir-diagnostic-tests 2>&1 | tee build/ir12-lifecycle.log
       - name: IR-13 host, browser and device acceptance smoke
         run: |
           set -o pipefail

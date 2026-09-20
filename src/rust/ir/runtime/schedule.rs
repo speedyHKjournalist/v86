@@ -34,9 +34,8 @@ struct Hot {
 struct Pending {
     id: u64,
     slot: u32,
-    entry: CpuEntryKey,
+    entries: Vec<(CpuEntryKey, Option<f64>)>,
     tier: u32,
-    discovered: Option<f64>,
 }
 struct Scheduler {
     debug: crate::ir::debug::Config,
@@ -53,7 +52,7 @@ struct Scheduler {
     pending: Option<Pending>,
     ready: VecDeque<Job>,
     credit: bool,
-    stats: [u32; 20],
+    stats: [u32; 22],
 }
 static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
     debug: crate::ir::debug::Config { verify: crate::ir::debug::VerifyMode::Debug, dump: crate::ir::debug::DumpMode::Off },
@@ -77,7 +76,7 @@ static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
     pending: None,
     ready: VecDeque::new(),
     credit: false,
-    stats: [0; 20],
+    stats: [0; 22],
 });
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -275,8 +274,8 @@ pub unsafe fn note_cached(entry: CpuEntryKey, linked: bool, needs_heat: bool) {
 pub unsafe fn note_interpreted() { record(live::entry()); }
 pub(super) fn diagnose_missing(entry: CpuEntryKey) {
     let s = SCHEDULER.try_lock().unwrap();
-    let reason = if s.pending.as_ref().is_some_and(|p| p.entry == entry)
-        || s.ready.iter().any(|j| j.artifact.entry == super::entry::EntryContract::Cpu(entry)) { 3 }
+    let reason = if s.pending.as_ref().is_some_and(|p| p.entries.iter().any(|(key, _)| *key == entry))
+        || s.ready.iter().any(|j| j.artifact.accepts_entry(entry)) { 3 }
         else { match s.hot_index.get(entry).map(|i| &s.hot[i]) {
             None => {
                 let hint = ((entry.linear.0 >> 1 ^ entry.pc.0 >> 12) & 255) as usize;
@@ -310,7 +309,7 @@ pub unsafe fn visit() {
         if s.config.enabled && *gp::prefixes == 0 && !*gp::in_hlt {
             s.stats[0] = s.stats[0].wrapping_add(1);
         }
-        if !s.config.enabled || !s.credit || s.pending.is_some() {
+        if !s.config.enabled || s.pending.is_some() {
             return;
         }
     }
@@ -319,9 +318,9 @@ pub unsafe fn visit() {
     }
     let ready = {
         let mut s = SCHEDULER.try_lock().unwrap();
-        let ready = s.ready.pop_front();
-        if ready.is_some() { s.credit = false; }
-        ready
+        // Publication and compilation have different budgets. An already
+        // compiled sibling must not wait another frame merely to reach JS.
+        s.ready.pop_front()
     };
     if let Some(job) = ready {
         publish(job);
@@ -336,7 +335,12 @@ pub unsafe fn visit() {
         // accumulating during the frame; the next frame can compile it.
         s.credit = false;
         let config = s.config;
-        let mut selected = None;
+        let current = live::entry();
+        let mut selected = s.hot_index.get(current).and_then(|index| {
+            let hot = &s.hot[index];
+            (hot.hits >= config.threshold && hot.failed == 0 && cache::tier(current) == 0)
+                .then_some((current, 1, config))
+        });
         for _ in 0..s.hot.len() {
             let index = s.cursor;
             s.cursor = (s.cursor + 1) % s.hot.len();
@@ -471,7 +475,12 @@ pub unsafe fn visit() {
         crate::profiler::performance_codegen_finish(started);
         return; // One failed fusion attempt leaves the working Tier 2 intact.
     } else if entries.len() > 1 {
-        compile_cpu_entries_available(&request, &snapshot, &entries, &config)
+        match compile_cpu_shared_entries(&request, &snapshot, &entries, &config) {
+            Ok(artifact) => Ok(vec![(artifact, snapshot.clone(), 0)]),
+            // Overlapping x86 streams, graph budgets and unsupported side
+            // entries retain independent, fully validated suffix artifacts.
+            Err(_) => compile_cpu_entries_available(&request, &snapshot, &entries, &config),
+        }
     } else {
         compile_cpu_cfg_bounded(&request, &snapshot, &config).map(|a| vec![a])
     };
@@ -501,6 +510,10 @@ pub unsafe fn visit() {
         s.stats[tier as usize + 1] = s.stats[tier as usize + 1].wrapping_add(peers);
         s.stats[13] = s.stats[13].wrapping_add(peers);
         for (artifact, source, retries) in compiled {
+            if !artifact.alternate_entries.is_empty() {
+                s.stats[20] = s.stats[20].wrapping_add(1);
+                s.stats[21] = s.stats[21].wrapping_add(artifact.alternate_entries.len() as u32);
+            }
             s.stats[12] = s.stats[12].wrapping_add(retries);
             if let super::entry::EntryContract::Cpu(compiled_entry) = artifact.entry {
                 if let Some(h) = s.hot.iter_mut().find(|h| h.entry == compiled_entry) {
@@ -528,6 +541,7 @@ unsafe fn publish(job: Job) {
     if !cache::make_room(entry) {
         return;
     }
+    let members = job.artifact.cpu_entries().collect::<Vec<_>>();
     let ptr = job.artifact.code.bytes.as_ptr() as u32;
     let len = job.artifact.code.bytes.len() as u32;
     // Keep the original capture fingerprint for bounded-prefix compilation:
@@ -545,9 +559,11 @@ unsafe fn publish(job: Job) {
         s.pending = Some(Pending {
             id: key.job,
             slot,
-            entry,
+            entries: members.into_iter().map(|key| {
+                let discovered = s.hot_index.get(key).and_then(|i| s.hot[i].discovered);
+                (key, discovered)
+            }).collect(),
             tier,
-            discovered: s.hot_index.get(entry).and_then(|i| s.hot[i].discovered),
         });
     }
     // JS copies bytes now; all Rust locks have been released. Completion is a
@@ -567,12 +583,16 @@ pub fn ir_auto_complete(id: u64, success: u32) {
         return;
     }
     let p = s.pending.take().unwrap();
-    if success { super::diagnostics::discovery_complete(p.discovered, p.tier); }
+    if success {
+        for (_, discovered) in &p.entries { super::diagnostics::discovery_complete(*discovered, p.tier); }
+    }
     let stat = if success { p.tier as usize + 3 } else { 7 };
     s.stats[stat] = s.stats[stat].wrapping_add(1);
-    if let Some(h) = s.hot.iter_mut().find(|h| h.entry == p.entry) {
-        h.hits = 0;
-        h.failed = if success { 0 } else { p.tier };
+    for hot in &mut s.hot {
+        if p.entries.iter().any(|(key, _)| *key == hot.entry) {
+            hot.hits = 0;
+            hot.failed = if success { 0 } else { p.tier };
+        }
     }
 }
 #[no_mangle]
@@ -590,6 +610,8 @@ pub fn ir_auto_stat(field: u32) -> u32 {
         22 => s.stats[18],
         23 => s.stats[19],
         24 => u32::from(s.hot_filter),
+        25 => s.stats[20], // compiled shared functions (publication counted separately)
+        26 => s.stats[21], // additional entries supplied by shared functions
         _ => 0,
     }
 }

@@ -69,7 +69,7 @@ impl IntegerBuilder {
         }
     }
     pub fn reload_cpu_state(&mut self, values: &[ValueId]) {
-        assert_eq!(values.len(), 22);
+        assert!(matches!(values.len(), 14 | 22));
         self.gpr.copy_from_slice(&values[..8]);
         let flags = values[8];
         let raw = values[9];
@@ -91,7 +91,7 @@ impl IntegerBuilder {
             last_op_size: Some(values[13]),
             backing_valid: Some(valid),
         };
-        self.xmm = values[14..].to_vec();
+        if values.len() == 22 { self.xmm = values[14..].to_vec(); }
     }
     pub fn ty(&self, value: ValueId) -> Type {
         self.region.values[value.index()].ty

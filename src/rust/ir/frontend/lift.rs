@@ -37,7 +37,7 @@ pub fn lift(
     linear: LinearAddress,
     default_32: bool,
 ) -> Result<Region, CompileError> {
-    lift_inner(bytes, pc, linear, default_32, false, 128)
+    lift_inner(bytes, pc, linear, default_32, false, 128, false)
 }
 pub fn lift_cpu(
     bytes: &[u8],
@@ -54,7 +54,14 @@ pub fn lift_cpu_with_rep_budget(
     default_32: bool,
     rep_budget: u32,
 ) -> Result<Region, CompileError> {
-    lift_inner(bytes, pc, linear, default_32, true, rep_budget)
+    lift_inner(bytes, pc, linear, default_32, true, rep_budget, false)
+}
+/// Compact CFG fragments retain the original per-instruction budget checks,
+/// without materializing a separate phi frame and block for each instruction.
+pub(super) fn lift_cpu_with_polls(
+    bytes: &[u8], pc: GuestEip, linear: LinearAddress, default_32: bool, rep_budget: u32,
+) -> Result<Region, CompileError> {
+    lift_inner(bytes, pc, linear, default_32, true, rep_budget, true)
 }
 fn lift_inner(
     bytes: &[u8],
@@ -63,6 +70,7 @@ fn lift_inner(
     default_32: bool,
     cpu: bool,
     rep_budget: u32,
+    instruction_polls: bool,
 ) -> Result<Region, CompileError> {
     if rep_budget > 4096 {
         return Err(CompileError::Budget("REP iteration budget"));
@@ -84,6 +92,12 @@ fn lift_inner(
             default_32,
         )
         .map_err(|_| CompileError::Unsupported("decode stop"))?;
+        if instruction_polls && count != 0 {
+            let state = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+            b.region.states[state.index()].resume = ResumeKind::BeforeInstruction;
+            b.effect = b.region.append(b.block, Op::PollBudget, vec![b.effect],
+                &[Type::Effect], Some(state))[0];
+        }
         offset += i.length as usize;
         count += 1;
         if cfg!(debug_assertions)
@@ -344,13 +358,19 @@ fn lift_inner(
             continue;
         }
         if super::cpu_info::supports(&i) {
-            if !cpu || offset != bytes.len() {
+            let continuing = i.encoding.opcode == 0x0F31;
+            if !cpu || !continuing && offset != bytes.len() {
                 return Err(CompileError::Unsupported(
                     "CPU information helper requires terminal CPU region",
                 ));
             }
             super::cpu_info::lift(&mut b, &i, count);
-            return Ok(b.region);
+            if !continuing { return Ok(b.region); }
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+            }
+            continue;
         }
         if super::rep::supports(&i) {
             if !cpu || offset != bytes.len() {
@@ -362,13 +382,19 @@ fn lift_inner(
             return Ok(b.region);
         }
         if super::io::supports(&i) {
-            if !cpu || offset != bytes.len() {
+            let continuing = i.encoding.opcode >= 0xE4;
+            if !cpu || !continuing && offset != bytes.len() {
                 return Err(CompileError::Unsupported(
                     "I/O requires terminal CPU region",
                 ));
             }
             super::io::lift(&mut b, &i, count)?;
-            return Ok(b.region);
+            if !continuing { return Ok(b.region); }
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+            }
+            continue;
         }
         if super::string::supports(&i) {
             if !cpu {

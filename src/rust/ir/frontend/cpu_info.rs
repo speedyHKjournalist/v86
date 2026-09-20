@@ -10,9 +10,11 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     let name = match i.encoding.opcode {
         0x0FA2 => "ir_cpuid",
         0x0F30 => "ir_wrmsr",
-        0x0F31 => "ir_rdtsc",
+        0x0F31 => "ir_rdtsc_continue",
         0x0F32 => "ir_rdmsr",
         _ => unreachable!(),
     };
-    call(b, name, vec![], state, true);
+    if i.encoding.opcode == 0x0F31 {
+        super::adapters::call_abi(b, name, vec![], state, crate::ir::helper::HelperAbi::CpuReload);
+    } else { call(b, name, vec![], state, true); }
 }
