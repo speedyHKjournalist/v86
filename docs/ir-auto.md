@@ -41,18 +41,24 @@ entries do not crowd unpublished PCs out of the bounded ring. Visit/link counter
 remain separate from heat. Legacy linked entries also contribute when recording
 is off. The link path only records heat. Compilation waits
 until an outer CPU dispatch point with no guest locals alive and no held JIT/cache
-lock. Up to 128 entry-key records are retained with an indexed hot lookup and
+lock. Up to 128 entry-key records are retained with a 512-slot fixed hash index and
 round-robin compilation selection and fixed-slot replacement. New entries update
 only the replaced and inserted index keys; page invalidation rebuilds the index
-only when it actually removes heat records.
+only when it actually removes heat records. Lookup/replacement allocates no tree
+nodes. The startup-only `ir_auto_set_hot_filter(0|1)` experiment filters first-use
+PCs through a bounded witness table. It defaults to **off**: XP measurements showed
+that retaining more recurrent PCs could increase cold compilation and evictions.
+The default thresholds and replacement/selection order are unchanged.
 
 Candidate scanning/capture happens at most once per `main_loop` invocation, even
 when no entry is ready. There is at most one current automatic job awaiting
 instantiation; browser work from cancelled/reset jobs can still finish later.
-One capture may compile the selected entry plus one already-hot entry inside its
-byte window, at the same tier/CS/default width. These are separate guarded Wasm
+One capture may compile up to four Tier 1 entries or two Tier 2 entries inside its
+byte window, at the same tier/CS/default width. Siblings are selected by heat, and
+their combined source-tail lengths cannot exceed one original window. These are separate guarded Wasm
 artifacts sharing an immutable input, not one function with unchecked entry
-selectors. The sibling waits in a bounded queue; each frame publishes at most one
+selectors. A failed optional sibling does not discard or recompile the successful
+primary; explicit multi-entry APIs retain atomic error behavior. Siblings wait in a bounded queue; each frame publishes at most one
 artifact, and only after the preceding browser task completes. Reset/configuration
 and dependent writes cancel queued siblings. Reservation and publication repeat
 the normal source/mapping/generation checks, including for unnotified changes.
@@ -69,9 +75,10 @@ and both conditional arms are followed within the bounded snapshot; external
 edges remain explicit exits. Cross-page capture falls back to the current page
 when the larger window cannot be captured without effects.
 
-Automatic fallthrough-only windows use the existing linear CPU frontend to avoid
-creating and merging a fragment CFG for every instruction. Branching windows use
-the reachable CFG frontend. Compiler budget failures can retry up to seven smaller,
+Automatic linear windows, including a final external transfer or terminal helper,
+use the existing linear CPU frontend to avoid creating and merging a fragment CFG
+for every instruction. Internal branches and STI shadow regions use the reachable
+CFG frontend. Compiler budget failures can retry up to seven smaller,
 instruction-aligned prefixes, with matching mappings/dependencies. Invalid IR or
 snapshot errors remain failures. The explicit compilation API does not shrink its
 caller's requested region.
@@ -129,6 +136,12 @@ legacy-lock quiescence rules continue to govern slot collection.
 | 12 / 13 / 14 | Unsupported / budget / invalid-IR compiler stops |
 | 15 | Budget reductions in successful automatic compilations |
 | 16 / 17 | Extra compiled hot entries from shared captures / queued siblings |
+| 18–21 | Fusion attempts / budget / unsupported / invalid-IR stops |
+| 22 / 23 / 24 | Replaced heat records / probation visits / hot-filter policy |
+
+With diagnostics enabled, discovery latency measures first retained observation to
+successful publication; replacement or invalidation starts a new retained history.
+Missing-entry counters distinguish unseen, heating, ready, pending and failed PCs.
 
 ## Validation scope
 

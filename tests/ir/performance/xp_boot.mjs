@@ -12,6 +12,7 @@ const recording = process.env.IR_BENCH_RECORD === '1';
 const target = process.env.IR_BOOT_TARGET || 'time';
 assert(['time', 'desktop'].includes(target));
 let milestone = null;
+let phase = 'bios';
 const vm = new V86({
     wasm_path: wasm, jit_backend: backend,
     memory_size: 2048 * 1024 * 1024, vga_memory_size: 16 * 1024 * 1024,
@@ -25,6 +26,7 @@ const vm = new V86({
 let started, previous, count, total = 0;
 vm.add_listener('screen-set-size', size => {
     const ms = started ? performance.now() - started : 0;
+    phase = size.join('x');
     console.log(JSON.stringify({ event: 'screen', backend, ms, size }));
     // This is a reproducible display-mode milestone, not proof of desktop idle.
     if(started && !milestone && size[0] === 800 && size[1] === 600 && size[2] === 32) {
@@ -38,6 +40,7 @@ try {
         vm.add_listener('emulator-error', reject);
     });
     const cpu = vm.v86.cpu, e = cpu.wm.exports;
+    if(process.env.IR_HOT_FILTER !== undefined) assert.equal(e.ir_auto_set_hot_filter(Number(process.env.IR_HOT_FILTER)),1);
     if(process.env.IR_CACHE_CAPACITY !== undefined) assert.equal(e.ir_cache_set_capacity(Number(process.env.IR_CACHE_CAPACITY)),1);
     if(process.env.IR_FAST_VALIDATION !== undefined) {
         assert(['0', '1'].includes(process.env.IR_FAST_VALIDATION));
@@ -53,13 +56,22 @@ try {
     if(recording) e.performance_recording_enable(1);
     started = previous = performance.now();
     count = vm.get_instruction_counter() >>> 0;
+    let priorIr = [e.ir_cache_stat(10) >>> 0, e.ir_cache_stat(2) >>> 0, e.ir_cache_stat(19) >>> 0];
     vm.run();
     while(performance.now() - started < duration && !(target === 'desktop' && milestone)) {
         await new Promise(resolve => setTimeout(resolve, target === 'desktop' ? 250 : 5000));
         const now = performance.now(), next = vm.get_instruction_counter() >>> 0;
         const steps = (next - count) >>> 0;
         total += steps;
+        const currentIr = [e.ir_cache_stat(10) >>> 0, e.ir_cache_stat(2) >>> 0, e.ir_cache_stat(19) >>> 0];
+        const delta = currentIr.map((value,i)=>(value-priorIr[i])>>>0);
+        priorIr = currentIr;
         console.log(JSON.stringify({ backend, wasm, ms: now - started,
+            phase, instructions: total,
+            interval_ir: {steps:delta[0], activations:delta[1], full_checks:delta[2],
+                coverage:steps ? delta[0]/steps : 0,
+                activations_per_million:steps ? delta[1]*1e6/steps : 0,
+                full_checks_per_million:steps ? delta[2]*1e6/steps : 0},
             requested_ms: duration, overrun_ms: Math.max(0, now - started - duration),
             mips: steps / (now - previous) / 1000, avg_mips: total / (now - started) / 1000,
             recording, jit: vm.get_jit_info(),

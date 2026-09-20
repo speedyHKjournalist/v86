@@ -13,7 +13,8 @@ use crate::{
     ir::backend::wasm::StateLayout,
     jit,
 };
-use std::{collections::{BTreeMap, VecDeque}, sync::Mutex};
+use std::{collections::VecDeque, sync::Mutex};
+use super::hot_index::HotIndex;
 #[derive(Clone, Copy)]
 struct Config {
     enabled: bool,
@@ -28,12 +29,14 @@ struct Hot {
     hits: u32,
     source: Option<ImmutableCodeSnapshot>,
     failed: u32,
+    discovered: Option<f64>,
 }
 struct Pending {
     id: u64,
     slot: u32,
     entry: CpuEntryKey,
     tier: u32,
+    discovered: Option<f64>,
 }
 struct Scheduler {
     debug: crate::ir::debug::Config,
@@ -41,14 +44,16 @@ struct Scheduler {
     passes_disabled: u32,
     config: Config,
     hot: Vec<Hot>,
-    hot_index: BTreeMap<(u32, u32, bool), usize>,
+    hot_index: HotIndex,
     hot_hints: [u16; 256],
+    hot_filter: bool,
+    probation: [Option<(CpuEntryKey, Option<f64>)>; 256],
     cursor: usize,
     replacement: usize,
     pending: Option<Pending>,
     ready: VecDeque<Job>,
     credit: bool,
-    stats: [u32; 18],
+    stats: [u32; 20],
 }
 static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
     debug: crate::ir::debug::Config { verify: crate::ir::debug::VerifyMode::Debug, dump: crate::ir::debug::DumpMode::Off },
@@ -63,14 +68,16 @@ static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
         rep: 64,
     },
     hot: Vec::new(),
-    hot_index: BTreeMap::new(),
+    hot_index: HotIndex::new(),
     hot_hints: [u16::MAX; 256],
+    hot_filter: false,
+    probation: [None; 256],
     cursor: 0,
     replacement: 0,
     pending: None,
     ready: VecDeque::new(),
     credit: false,
-    stats: [0; 18],
+    stats: [0; 20],
 });
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -80,6 +87,7 @@ pub fn invalidate() {
     let mut s = SCHEDULER.try_lock().unwrap();
     s.hot.clear();
     s.hot_index.clear();
+    s.probation.fill(None);
     s.cursor = 0;
     s.replacement = 0;
     s.pending = None;
@@ -99,18 +107,24 @@ pub fn dirty_page(page: u32) {
         rebuild_hot_index(&mut s);
     }
 }
-fn hot_key(entry: CpuEntryKey) -> (u32, u32, bool) {
-    (entry.linear.0, entry.pc.0, entry.default_32)
-}
 fn rebuild_hot_index(s: &mut Scheduler) {
     s.hot_index.clear();
     for (index, h) in s.hot.iter().enumerate() {
-        s.hot_index.insert(hot_key(h.entry), index);
+        s.hot_index.insert(h.entry, index);
     }
     s.cursor = 0;
     s.replacement = 0;
 }
 pub fn enabled() -> bool { SCHEDULER.try_lock().unwrap().config.enabled }
+/// Startup-only experiment: admission filtering can save bookkeeping while
+/// increasing compilation of marginally hot PCs. Keep it opt-in after XP A/B.
+#[no_mangle]
+pub unsafe fn ir_auto_set_hot_filter(enabled: u32) -> bool {
+    if enabled > 1 || !cold() { return false; }
+    let mut s = SCHEDULER.try_lock().unwrap();
+    if !s.hot.is_empty() || s.pending.is_some() || !s.ready.is_empty() { return false; }
+    s.hot_filter = enabled != 0; s.probation.fill(None); true
+}
 /// Startup-only policy: no enabled scheduler, pending work or cached artifacts.
 /// Snapshot restore/reset keep the destination policy, like backend selection.
 #[no_mangle]
@@ -188,6 +202,7 @@ pub unsafe fn ir_auto_config(
         s.hot.clear();
         s.ready.clear();
         s.hot_index.clear();
+        s.probation.fill(None);
         s.cursor = 0;
         s.replacement = 0;
         s.credit = false;
@@ -209,30 +224,42 @@ unsafe fn record(entry: CpuEntryKey) {
     let hint = ((entry.linear.0 >> 1 ^ entry.pc.0 >> 12) & 255) as usize;
     let saved = s.hot_hints[hint] as usize;
     let index = if s.hot.get(saved).is_some_and(|h| h.entry == entry) { Some(saved) }
-        else { s.hot_index.get(&hot_key(entry)).copied() };
+        else { s.hot_index.get(entry) };
     if let Some(index) = index {
         s.hot_hints[hint] = index as u16;
         let h = &mut s.hot[index];
         h.hits = h.hits.saturating_add(1);
     } else {
+        // A single-use PC does not displace a recurrent entry. The witness owns
+        // no code and carries no admission authority; count both observed visits
+        // when promoting it into the hot ring. Threshold-one tests remain exact.
+        let witness = s.probation[hint].filter(|(key, _)| *key == entry);
+        if s.hot_filter && s.config.threshold > 1 && witness.is_none() {
+            s.probation[hint] = Some((entry, super::diagnostics::discovery_start()));
+            s.stats[19] = s.stats[19].wrapping_add(1);
+            return;
+        }
+        s.probation[hint] = None;
         let new = Hot {
             entry,
-            hits: 1,
+            hits: if witness.is_some() { 2 } else { 1 },
             source: None,
             failed: 0,
+            discovered: witness.and_then(|(_, start)| start).or_else(super::diagnostics::discovery_start),
         };
         let index = if s.hot.len() == 128 {
             let index = s.replacement;
             s.replacement = (index + 1) % 128;
             let old = std::mem::replace(&mut s.hot[index], new);
-            s.hot_index.remove(&hot_key(old.entry));
+            s.hot_index.remove(old.entry);
+            s.stats[18] = s.stats[18].wrapping_add(1);
             index
         } else {
             let index = s.hot.len();
             s.hot.push(new);
             index
         };
-        s.hot_index.insert(hot_key(entry), index);
+        s.hot_index.insert(entry, index);
         s.hot_hints[hint] = index as u16;
     }
 }
@@ -246,6 +273,19 @@ pub unsafe fn note_cached(entry: CpuEntryKey, linked: bool, needs_heat: bool) {
     if needs_heat { record(entry); }
 }
 pub unsafe fn note_interpreted() { record(live::entry()); }
+pub(super) fn diagnose_missing(entry: CpuEntryKey) {
+    let s = SCHEDULER.try_lock().unwrap();
+    let reason = if s.pending.as_ref().is_some_and(|p| p.entry == entry)
+        || s.ready.iter().any(|j| j.artifact.entry == super::entry::EntryContract::Cpu(entry)) { 3 }
+        else { match s.hot_index.get(entry).map(|i| &s.hot[i]) {
+            None => {
+                let hint = ((entry.linear.0 >> 1 ^ entry.pc.0 >> 12) & 255) as usize;
+                u32::from(s.probation[hint].is_some_and(|(key, _)| key == entry)) as usize
+            }, Some(h) if h.failed != 0 => 4,
+            Some(h) if h.hits < s.config.threshold => 1, Some(_) => 2,
+        } };
+    super::diagnostics::missing(reason);
+}
 pub unsafe fn note_legacy_link() { note_cached(live::entry(), true, true); }
 /// Tier-aware reachable-CFG source selection. Direct targets outside the
 /// bounded immutable window remain explicit exits in the shared frontend.
@@ -307,9 +347,7 @@ pub unsafe fn visit() {
                 (tier < 2 || cache::fusion_ready(h.entry)) {
                 selected = Some((h.entry, (tier + 1).min(2), config));
             }
-            if selected.is_some() {
-                break;
-            }
+            if selected.is_some() { break; }
         }
         selected
     };
@@ -360,21 +398,29 @@ pub unsafe fn visit() {
         default_32: entry.default_32,
         tier: compile_tier,
     };
-    // At most one nearby hot peer per batch: share immutable code capture while
-    // bounding cold compilation latency and keeping browser publication serial.
-    let peer = {
+    // Tier 1 can share capture across four hot entries; total sibling source
+    // bytes stay within one window, no more aggregate input than the old pair.
+    // Tier 2 retains the two-entry limit for its more expensive machine passes.
+    let peers = {
         let s = SCHEDULER.try_lock().unwrap();
-        s.hot.iter().find(|h| {
+        let mut candidates: Vec<_> = s.hot.iter().filter(|h| {
             h.entry.cs_base() == entry.cs_base()
                 && h.entry.default_32 == entry.default_32
                 && h.entry.linear.0.wrapping_sub(entry.linear.0) > 0
                 && (h.entry.linear.0.wrapping_sub(entry.linear.0) as usize) < snapshot.bytes.len()
                 && h.hits >= if tier == 1 { config.threshold } else { config.promote }
                 && h.failed != tier && cache::tier(h.entry) + 1 == tier
-        }).map(|h| h.entry)
+        }).map(|h| (h.entry, h.hits)).collect();
+        candidates.sort_by_key(|(entry, hits)| (std::cmp::Reverse(*hits), entry.linear.0));
+        let mut bytes = 0;
+        candidates.into_iter().filter_map(|(peer, _)| {
+            let length = snapshot.bytes.len() - peer.linear.0.wrapping_sub(entry.linear.0) as usize;
+            if bytes + length > snapshot.bytes.len() { return None; }
+            bytes += length; Some(peer)
+        }).take(if tier == 1 { 3 } else { 1 }).collect::<Vec<_>>()
     };
     let mut entries = vec![CpuEntryRequest { offset: 0, key }];
-    if let Some(peer) = peer {
+    for peer in peers {
         if let Some(key) = live::publication_key() {
             entries.push(CpuEntryRequest {
                 offset: peer.linear.0.wrapping_sub(entry.linear.0) as usize, key,
@@ -425,9 +471,7 @@ pub unsafe fn visit() {
         crate::profiler::performance_codegen_finish(started);
         return; // One failed fusion attempt leaves the working Tier 2 intact.
     } else if entries.len() > 1 {
-        compile_cpu_entries_bounded(&request, &snapshot, &entries, &config)
-            // A difficult peer must not prevent a valid primary from publishing.
-            .or_else(|_| compile_cpu_cfg_bounded(&request, &snapshot, &config).map(|a| vec![a]))
+        compile_cpu_entries_available(&request, &snapshot, &entries, &config)
     } else {
         compile_cpu_cfg_bounded(&request, &snapshot, &config).map(|a| vec![a])
     };
@@ -503,6 +547,7 @@ unsafe fn publish(job: Job) {
             slot,
             entry,
             tier,
+            discovered: s.hot_index.get(entry).and_then(|i| s.hot[i].discovered),
         });
     }
     // JS copies bytes now; all Rust locks have been released. Completion is a
@@ -522,6 +567,7 @@ pub fn ir_auto_complete(id: u64, success: u32) {
         return;
     }
     let p = s.pending.take().unwrap();
+    if success { super::diagnostics::discovery_complete(p.discovered, p.tier); }
     let stat = if success { p.tier as usize + 3 } else { 7 };
     s.stats[stat] = s.stats[stat].wrapping_add(1);
     if let Some(h) = s.hot.iter_mut().find(|h| h.entry == p.entry) {
@@ -541,6 +587,9 @@ pub fn ir_auto_stat(field: u32) -> u32 {
         16 => s.stats[13],
         17 => s.ready.len() as u32,
         18..=21 => s.stats[field as usize - 4],
+        22 => s.stats[18],
+        23 => s.stats[19],
+        24 => u32::from(s.hot_filter),
         _ => 0,
     }
 }

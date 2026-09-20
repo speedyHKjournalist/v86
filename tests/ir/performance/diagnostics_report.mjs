@@ -33,6 +33,7 @@ for(const file of process.argv.slice(2)) {
         instructions_per_activation:t.ir_steps/t.ir_activations||0,
         stages,exits,admission:d.admission,chain_stops:d.chain_stops,compiler:d.compiler,publication:d.publication,
         helper_exits:d.helper_exits,
+        control_exits:d.control_exits,discovery_latency:d.discovery_latency,missing_entries:d.missing_entries,
         interpreter_hotspots:d.interpreter_hotspots?.sort((a,b)=>b.inclusive_ms-a.inclusive_ms).slice(0,20),
         hotspot_replacements:d.hotspot_replacements,
         hotspots:d.hotspots.sort((a,b)=>b.inclusive_ms-a.inclusive_ms).slice(0,20),

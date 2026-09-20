@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 const wasm=process.argv[2]||"build/v86-ir-cache-test.wasm";
-const vm=new V86({wasm_path:wasm,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
+let clockMutation=null;
+const vm=new V86({wasm_fn:async imports=>{
+    const tick=imports.env.microtick;
+    imports.env.microtick=()=>{if(clockMutation)clockMutation();return tick();};
+    return (await WebAssembly.instantiate(fs.readFileSync(wasm),imports)).instance.exports;
+},memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)),u32=n=>[n&255,n>>>8&255,n>>>16&255,n>>>24];
 const PC=0x100000, DATA=0x200000, OFFSET=1024;
 try {
@@ -57,12 +62,13 @@ try {
     assert.equal(e.ir_cache_stat(2),afterRetire,"retired owners cannot survive in positive hints");
     console.log(`PASS: ${wasm}: negative lookup reuse, publication invalidation and retirement`);
     // Only completed ordinary exits may bypass the outer dispatcher. Budget,
-    // slow memory and I/O exits must yield even with a published successor.
+    // slow memory exits yield. Completed observer calls may request cold admission.
     for(const spec of [
         {name:"ordinary",code:[0x40,0x43,0xF4],length:1,next:1,budget:64,links:1},
         {name:"budget",code:[0x40,0x43,0xF4],length:2,next:1,budget:1,links:0},
         {name:"cold store",code:[0xA3,...u32(DATA),0x43,0xF4],length:5,next:5,budget:64,links:0},
-        {name:"I/O",code:[0xE6,0x80,0x43,0xF4],length:2,next:2,budget:64,links:0},
+        {name:"I/O",code:[0xE6,0x80,0x43,0xF4],length:2,next:2,budget:64,links:1},
+        {name:"TSC",code:[0x0F,0x31,0x43,0xF4],length:2,next:2,budget:64,links:1},
     ]) {
         prepare(spec.code);
         assert(await request(spec.length,1,1,1,spec.budget));
@@ -74,7 +80,48 @@ try {
         assert.equal((count()-beforeCount)>>>0,3,`${spec.name} exact retirement`);
         assert.equal(cpu.reg32[3],1);
     }
-    console.log(`PASS: ${wasm}: ordinary IR successors chain; budget, cold-store and I/O exits yield with exact retirement`);
+    console.log(`PASS: ${wasm}: ordinary and completed I/O/TSC successors chain; budget and cold-store exits yield with exact retirement`);
+    for(const mutation of ['bytes','mapping','context']) {
+        prepare([0xE4,0x93,0x43,0xF4]);
+        const alternate=PC+0x4000;
+        vm.write_memory(Uint8Array.of(0xE4,0x93,0x4B,0xF4),alternate);
+        cpu.io.register_read(0x93,null,()=>{
+            if(mutation==='bytes') cpu.mem8[PC+2]=0x4B;
+            else if(mutation==='mapping') {set(0x13000+(PC>>>12)*4,alternate|3);e.full_clear_tlb();}
+            else cpu.instruction_pointer[0]=alternate+2;
+            return 0x7A;
+        });
+        assert(await request(2));cpu.instruction_pointer[0]=PC+2;assert(await request(1));
+        const before=count();await run();
+        assert.equal(cpu.reg32[3],-1,`${mutation}: observer successor must use the changed instruction`);
+        assert.equal(cpu.reg32[0]&255,0x7A);assert.equal((count()-before)>>>0,3);
+    }
+    console.log(`PASS: ${wasm}: I/O cold continuation revalidates raw code writes, remapping and changed control flow`);
+    for(const mutation of ['bytes','mapping','context']) {
+        prepare([0x43,0x0F,0x31,0x43,0xF4]);
+        const alternate=PC+0x4000;
+        vm.write_memory(Uint8Array.of(0x43,0x0F,0x31,0x4B,0xF4),alternate);
+        assert(await request(3));cpu.instruction_pointer[0]=PC+3;assert(await request(1));
+        let observed=false;
+        clockMutation=()=>{
+            if(cpu.instruction_pointer[0]!==PC+3)return;
+            clockMutation=null;observed=true;
+            assert.equal(cpu.reg32[3],1,'timestamp observer sees the preceding dirty GPR');
+            if(mutation==='bytes')cpu.mem8[PC+3]=0x4B;
+            else if(mutation==='mapping'){set(0x13000+(PC>>>12)*4,alternate|3);e.full_clear_tlb();}
+            else cpu.instruction_pointer[0]=alternate+3;
+        };
+        const before=count();await run();assert(observed);
+        assert.equal(cpu.reg32[3],0);assert.equal((count()-before)>>>0,4);
+    }
+    console.log(`PASS: ${wasm}: TSC observer sees precise state and rejects stale code, remappings and changed targets`);
+    for(const enabled of [false,true]) {
+        prepare([0xFB,0x90,0x43,0xF4]);cpu.flags[0]=enabled?0x202:2;
+        assert(await request(2));cpu.instruction_pointer[0]=PC+2;assert(await request(1));
+        const links=e.ir_cache_stat(6),before=count();await run();
+        assert.equal(cpu.reg32[3],1);assert.equal((count()-before)>>>0,4);
+        assert.equal(e.ir_cache_stat(6)-links,enabled?1:0,'STI observes IRQs and respects changed control flags before chaining');
+    }
     prepare([0x40,0xF4]);assert(await request(1));await run();
     let cachedChecks=e.ir_cache_stat(8),captureFallbacks=e.ir_cache_stat(9),warmHits=e.ir_cache_stat(2);
     let guestSteps=e.ir_cache_stat(10),zeroStepExits=e.ir_cache_stat(12);
@@ -104,6 +151,7 @@ try {
             assert(await request(3));cpu.instruction_pointer[0]=other;assert(await request(7));
             assert.equal(e.ir_cache_set_fast_validation(fast),1);e.performance_recording_enable(recording);
             const full=e.ir_cache_stat(19),reuse=e.ir_cache_stat(18),post=e.ir_cache_stat(20),targets=e.ir_cache_stat(21),start=count();
+            const successors=e.ir_cache_stat(29);
             await run();
             assert.equal(cpu.reg32[3],iterations);assert.equal(cpu.reg32[2],0);
             assert.equal((count()-start)>>>0,iterations*4+1);
@@ -111,6 +159,7 @@ try {
             assert.equal(e.ir_cache_stat(18)>reuse,!!fast);
             assert.equal(e.ir_cache_stat(20)>post,!!fast);
             assert(e.ir_cache_stat(21)>targets,"warm targets hit the bounded entry cache");
+            assert(e.ir_cache_stat(29)>successors,"repeated normal edges reuse an owner-checked successor");
         }
         assert(checks[1]<checks[0]/2,"fast admission eliminates most repeated byte checks");
     }

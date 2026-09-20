@@ -91,6 +91,22 @@ pub unsafe fn ir_sti_finish(depth: u32) {
         cpu::handle_irqs();
     }
 }
+/// The shadow has completed normally and its full state is already committed.
+/// Observe IRQs before considering a successor; never carry SSA state across it.
+#[no_mangle]
+pub unsafe fn ir_sti_finish_link(depth: u32) {
+    let ip = *gp::instruction_pointer as u32;
+    let cs = cpu::get_seg_cs() as u32;
+    let mode = u32::from(*gp::is_32);
+    let cpl = *gp::cpl;
+    let flags = *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM);
+    super::entry::ir_admission_barrier();
+    ir_sti_finish(depth);
+    if super::entry::ir_entry_matches(ip, cs, mode) && *gp::cpl == cpl
+        && *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM) == flags {
+        super::entry::ir_request_observer_link();
+    }
+}
 
 /// Catalogue-invalid operands still perform the baseline task/segment guards.
 /// Missing group selectors have no guards or EA (the interpreter rejects sooner).

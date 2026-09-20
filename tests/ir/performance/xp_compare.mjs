@@ -2,14 +2,18 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 const [disk, prefix='build/ir13-xp-paired'] = process.argv.slice(2);
 assert(disk);
 const runs = Number(process.env.IR_COMPARE_RUNS || 3);
 assert(Number.isInteger(runs) && runs >= 3 && runs <= 10);
 const rows=[];
-for(let round=0;round<runs;round++) for(const backend of round%2?['legacy','ir']:['ir','legacy']) {
-    const file=`${prefix}-${round}-${backend}.jsonl`, fd=fs.openSync(file,'w');
-    const child=spawnSync(process.execPath,['tests/ir/performance/xp_boot.mjs',disk,backend],{
+const variants=process.env.IR_BASELINE_WASM?['ir','legacy','baseline_ir']:['ir','legacy'];
+for(let round=0;round<runs;round++) for(const variant of round%2?[...variants].reverse():variants) {
+    const backend=variant==='baseline_ir'?'ir':variant;
+    const wasm=variant==='baseline_ir'?process.env.IR_BASELINE_WASM:'build/v86-ir-runtime.wasm';
+    const file=`${prefix}-${round}-${variant}.jsonl`, fd=fs.openSync(file,'w');
+    const child=spawnSync(process.execPath,['tests/ir/performance/xp_boot.mjs',disk,backend,wasm],{
         env:{...process.env,IR_BOOT_MS:process.env.IR_BOOT_MS||'180000',IR_BOOT_TARGET:'desktop',IR_DIAGNOSTICS:'0',IR_BENCH_RECORD:'0'},
         stdio:['ignore',fd,fd],timeout:300000,
     });
@@ -18,17 +22,27 @@ for(let round=0;round<runs;round++) for(const backend of round%2?['legacy','ir']
     const events=fs.readFileSync(file,'utf8').split('\n').filter(l=>l.startsWith('{')).map(l=>JSON.parse(l));
     const result=events.findLast(e=>e.event==='result');
     assert(result?.completed&&result.milestone,`milestone not reached: ${file}`);
-    const row={round,backend,file,...result.milestone,mips:result.milestone.instructions/result.milestone.ms/1000};
+    const ir=result.jit?.ir;
+    const row={round,backend:variant,file,wasm,...result.milestone,mips:result.milestone.instructions/result.milestone.ms/1000,
+        // These counters are sampled at stop, slightly after the display event.
+        stop_metrics:ir?{instructions:result.instructions,ir_coverage:ir.cache_guest_steps/result.instructions,
+            instructions_per_activation:ir.cache_guest_steps/ir.cache_hits||0,
+            activations_per_million:ir.cache_hits*1e6/result.instructions,
+            full_checks_per_million:ir.cache_full_checks*1e6/result.instructions,
+            publications:ir.tier1_published+ir.tier2_published,evictions:ir.cache_evictions}:null};
     rows.push(row);console.log(JSON.stringify(row));
 }
 const median=a=>a.sort((a,b)=>a-b)[Math.floor(a.length/2)];
-const medians=Object.fromEntries(['ir','legacy'].map(backend=>[backend,{
+const medians=Object.fromEntries(variants.map(backend=>[backend,{
     ms:median(rows.filter(r=>r.backend===backend).map(r=>r.ms)),
     mips:median(rows.filter(r=>r.backend===backend).map(r=>r.mips)),
     instructions:median(rows.filter(r=>r.backend===backend).map(r=>r.instructions)),
 }]));
 const result={milestone:'first 800x600x32 mode (not desktop idle)',runs,rows,medians,
+    artifacts:Object.fromEntries([...new Set(rows.map(r=>r.wasm))].map(file=>[file,createHash('sha256').update(fs.readFileSync(file)).digest('hex')])),
     time_ratio:medians.ir.ms/medians.legacy.ms,throughput_ratio:medians.ir.mips/medians.legacy.mips,
+    baseline_time_ratio:medians.baseline_ir?medians.ir.ms/medians.baseline_ir.ms:null,
+    baseline_throughput_ratio:medians.baseline_ir?medians.ir.mips/medians.baseline_ir.mips:null,
     pass:medians.ir.ms<=medians.legacy.ms&&medians.ir.mips>=medians.legacy.mips};
 fs.writeFileSync(`${prefix}-summary.json`,JSON.stringify(result,null,2)+'\n');
 console.log(JSON.stringify(result));

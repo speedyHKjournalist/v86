@@ -108,6 +108,19 @@ calls. `interpreter_hotspots` is a separate 256-slot sampled table of linear PC,
 CR3, physical PC, batches, steps and inclusive time. Collisions replace entries;
 it locates remaining interpreted work without claiming exhaustive coverage.
 
+`control_exits` subdivides terminal CPU-control exits into RDTSC, CPUID, CR reads,
+CR writes and CLTS; STI-check exits are also reported separately. These are subsets
+of the existing helper families, not additional activations. `missing_entries`
+partitions absent-target admissions into unseen, heating, ready, pending and failed.
+`discovery_latency` reports total/count/maximum milliseconds from the first retained
+hot observation to publication, separately for each tier. It is bounded-history
+latency, not the first-ever execution of a PC; eviction/invalidation loses history.
+No discovery clock reads occur with diagnostics disabled.
+
+The XP runner emits interval retirement, IR coverage, activations per million
+retired instructions and full checks per million, labeled by the current display
+mode. These display phases are observable milestones, not OS-internal boot stages.
+
 ## Reproduction
 
 Run one process at a time, with no concurrent build/test load. The XP runner uses

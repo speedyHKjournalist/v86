@@ -27,6 +27,10 @@ enum Phase {
     Published,
     Retired,
 }
+#[derive(Clone, Copy)]
+struct Owner { index: usize, id: u64 }
+#[derive(Clone, Copy)]
+struct Successor { key: EntryIndexKey, owner: Owner }
 struct Record {
     job: Job,
     slot: u32,
@@ -41,6 +45,7 @@ struct Record {
     validated_epoch: u64,
     hot_exit: Option<(PredictedEdge, super::entry::CpuEntryKey, u32)>,
     fusion_attempted: bool,
+    successor: Option<Successor>,
 }
 struct Cache {
     records: Vec<Record>,
@@ -55,6 +60,7 @@ struct Cache {
     full_checks: u32,
     post_fetch_reuses: u32,
     target_hits: u32,
+    successor_hits: u32,
     fusion_enabled: bool,
     fused_publications: u32,
     fused_hits: u32,
@@ -92,6 +98,7 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     full_checks: 0,
     post_fetch_reuses: 0,
     target_hits: 0,
+    successor_hits: 0,
     fusion_enabled: true,
     fused_publications: 0,
     fused_hits: 0,
@@ -192,6 +199,21 @@ fn target(cache: &mut Cache, key: EntryIndexKey) -> Option<usize> {
     cache.targets[slot] = Some((key, index));
     Some(index)
 }
+fn successor_target(cache: &mut Cache, key: EntryIndexKey, previous: Option<Owner>) -> Option<usize> {
+    // Indices are hints, never owners: compaction, replacement and slot reuse
+    // must all fail the non-repeating publication identity check.
+    let successor = previous.and_then(|p| cache.records.get(p.index)
+        .filter(|r| r.phase == Phase::Published && r.job.artifact.key.job == p.id)
+        .and_then(|r| r.successor));
+    if let Some(s) = successor.filter(|s| s.key == key) {
+        if cache.records.get(s.owner.index).is_some_and(|r|
+            r.phase == Phase::Published && r.job.artifact.key.job == s.owner.id) {
+            cache.successor_hits = cache.successor_hits.wrapping_add(1);
+            return Some(s.owner.index);
+        }
+    }
+    target(cache, key)
+}
 unsafe fn cached_current(job: &Job) -> CachedMatch {
     if !live::generation_current(job.artifact.key) {
         return CachedMatch::Stale;
@@ -246,7 +268,9 @@ fn fusion_indices(cache: &Cache, entry: super::entry::CpuEntryKey) -> Option<(us
     let peer = &cache.records[b];
     // Wait for both sides to acquire a profile. Publishing immediately after a
     // peer's promotion otherwise freezes a one-way trace with no return edge.
-    if peer.hot_exit.is_none_or(|(_, _, hits)| hits < 8) { return None; }
+    // Terminal peers cannot request a normal successor. Once repeatedly used,
+    // they can still be the last fragment of a trace (with their full exit ABI).
+    if peer.hot_exit.map_or(peer.hits < 8, |(_, _, hits)| hits < 8) { return None; }
     if peer.phase != Phase::Published { return None; }
     let mut entries = vec![entry];
     entries.extend(root.job.artifact.fused_sources.iter().map(|s| s.entry));
@@ -297,6 +321,9 @@ pub unsafe fn ir_cache_set_fusion(enabled: u32) -> bool {
 /// Release only retired owners, outside any guest activation or CACHE lock.
 #[no_mangle]
 pub unsafe fn ir_cache_collect() -> u32 {
+    // The normal activation path has nothing to reclaim. Avoid re-entering the
+    // quiescence protocol several times per short region just to discover that.
+    if !CACHE.try_lock().unwrap().needs_collection { return 0; }
     if !cold() {
         return 0;
     }
@@ -390,6 +417,7 @@ pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
         validated_epoch: 0,
         hot_exit: None,
         fusion_attempted: false,
+        successor: None,
     });
     slot
 }
@@ -598,6 +626,7 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         26 => u32::from(cache.fusion_enabled),
         27 => cache.evictions,
         28 => cache.negative_hits,
+        29 => cache.successor_hits,
         _ => 0,
     }
 }
@@ -719,7 +748,8 @@ unsafe fn execute_mode<const PROFILE: bool>() -> bool {
     use super::entry::take_link_request;
     take_link_request();
     let control = *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM);
-    if !execute_one::<PROFILE>(false) { return false; }
+    let mut owner = None;
+    if !execute_one::<PROFILE>(false, None, &mut owner) { return false; }
     // Iterative cold chaining keeps host stack bounded and retains full entry,
     // source, mapping and post-fetch admission checks at each successor.
     let mut limit = true;
@@ -730,13 +760,14 @@ unsafe fn execute_mode<const PROFILE: bool>() -> bool {
             else if *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM) != control { Some(3) }
             else { None };
         if let Some(reason) = stop { if PROFILE { diag::chain(reason); } limit = false; break; }
-        if !execute_one::<PROFILE>(true) { if PROFILE { diag::chain(4); } limit = false; break; }
+        let previous = owner.take();
+        if !execute_one::<PROFILE>(true, previous, &mut owner) { if PROFILE { diag::chain(4); } limit = false; break; }
     }
     if limit { if PROFILE { diag::chain(5); } }
     take_link_request();
     true
 }
-unsafe fn execute_one<const PROFILE: bool>(linked: bool) -> bool {
+unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>, owner: &mut Option<Owner>) -> bool {
     let admission_scope = PROFILE.then(|| Scope::new(Stage::Admission));
     if PROFILE { diag::admission(Admission::Attempt); }
     if !cold() {
@@ -748,8 +779,8 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool) -> bool {
     let selected = {
         let mut cache = CACHE.try_lock().unwrap();
         let mut selected = None;
-        let index = target(&mut cache, index_key(entry));
-        if index.is_none() { if PROFILE { diag::admission(Admission::Missing); } }
+        let index = successor_target(&mut cache, index_key(entry), previous);
+        if index.is_none() { if PROFILE { diag::admission(Admission::Missing); super::schedule::diagnose_missing(entry); } }
         let index = index.filter(|_| {
             let valid = ir_entry_matches(entry.linear.0, entry.cs_base(), entry.default_32 as u32);
             if !valid { if PROFILE { diag::admission(Admission::Context); } }
@@ -865,6 +896,14 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool) -> bool {
                 || cache.fusion_enabled && !record.fusion_attempted
                     && record.job.artifact.fused_sources.len() < 3
                     && record.hot_exit.is_some_and(|(_, _, hits)| hits >= 8);
+            let current = Owner { index, id };
+            *owner = Some(current);
+            if let Some(p) = previous {
+                if let Some(r) = cache.records.get_mut(p.index)
+                    .filter(|r| r.phase == Phase::Published && r.job.artifact.key.job == p.id) {
+                    r.successor = Some(Successor { key: index_key(entry), owner: current });
+                }
+            }
             Some((index, needs_heat))
         } else { None }
     };
@@ -899,7 +938,7 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool) -> bool {
     // not pass through an emitted continuing-call barrier.
     if !super::entry::link_requested() { ir_admission_barrier(); }
     let steps = (*gp::instruction_counter).wrapping_sub(before);
-    let observed_exit = if steps != 0 && super::entry::link_requested() {
+    let observed_exit = if steps != 0 && super::entry::profile_link_requested() {
         let target = live::entry();
         Some((PredictedEdge { from: GuestEip((*gp::previous_ip as u32).wrapping_sub(entry.cs_base())),
             target: target.pc }, target))

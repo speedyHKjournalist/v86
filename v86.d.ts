@@ -1030,9 +1030,13 @@ export interface V86JitInfo {
         fusion_attempts: number; fusion_budget_stops: number;
         fusion_unsupported_stops: number; fusion_invalid_stops: number;
         hot_entries: number; pending: number; enabled: number;
+        hot_replacements: number;
+        probation_visits: number;
+        hot_filter: boolean;
         cache_entries: number; cache_hits: number; cache_capacity: number; cache_evictions: number;
         cache_fast_checks: number; cache_full_checks: number;
         cache_post_fetch_reuses: number; cache_target_hits: number; cache_negative_hits: number;
+        cache_successor_hits: number;
         cache_fast_validation: boolean;
         fused_publications: number; fused_hits: number; fused_guest_steps: number;
         fusion_enabled: boolean;
@@ -1050,7 +1054,10 @@ export interface V86IrDiagnostics {
     chain_stops: Record<string, number>;
     compiler: Record<string, {ms: number; calls: number; max_ms: number; max_pc: number; max_tier: number}>;
     publication: {wall_ms: number; calls: number; succeeded: number};
+    discovery_latency: Record<string, {ms: number; count: number; max_ms: number}>;
+    missing_entries: Record<string, number>;
     helper_exits: Record<string, {count: number; guest_steps: number}>;
+    control_exits: Record<string, {count: number; guest_steps: number}>;
     interpreter_hotspots: Array<{pc: number; cr3: number; physical: number; samples: number; guest_steps: number; inclusive_ms: number}>;
     hotspot_replacements: number;
     hotspots: Array<{pc: number; cr3: number; reason: string; samples: number; guest_steps: number; inclusive_ms: number; tier: number; fused: boolean}>;

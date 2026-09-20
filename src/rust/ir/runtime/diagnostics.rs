@@ -46,6 +46,9 @@ const COMPILE_PHASES: usize = 20;
 static mut COMPILER: [[f64; 5]; COMPILE_PHASES] = [[0.0; 5]; COMPILE_PHASES];
 static mut COMPILE_CONTEXT: (u32, u32) = (0, 0);
 static mut PUBLICATION: [f64; 3] = [0.0; 3];
+// Discovery-to-publication latency for retained entries: total ms, count, max.
+static mut DISCOVERY: [[f64; 3]; 2] = [[0.0; 3]; 2];
+static mut MISSING: [u64; 5] = [0; 5];
 // Direct-mapped sampled hotspots: PC, CR3, exit, samples, steps, inclusive IR ms,
 // tier, fused. Collisions replace a row; aggregate reason totals never lose events.
 static mut HOT: [[f64; 8]; 512] = [[0.0; 8]; 512];
@@ -53,15 +56,17 @@ static mut HOT_REPLACEMENTS: u64 = 0;
 // Sampled interpreter entry PC/CR3/physical PC, batches, retired work and time.
 static mut INTERPRETER_HOT: [[f64; 6]; 256] = [[0.0; 6]; 256];
 static mut HELPER_EXITS: [[u64; 2]; 12] = [[0; 2]; 12];
+static mut CONTROL_EXITS: [[u64; 2]; 6] = [[0; 2]; 6];
 pub fn helper_category(name: &str) -> u32 {
     match name {
         "ir_load_segment" | "ir_pop_segment" | "ir_mov_segment_continue" => 1,
         "ir_in" | "ir_ins" => 2, "ir_out" | "ir_outs" => 3,
         n if n.starts_with("ir_rep_") => 4,
         n if n.starts_with("ir_far_") || n == "ir_iret" || n == "ir_software_interrupt" => 5,
-        "ir_pop_flags" | "ir_cli" | "ir_cli_check" | "ir_sti_check" => 6,
+        "ir_pop_flags" | "ir_cli" | "ir_cli_check" => 6,
         "ir_lgdt" | "ir_lidt" | "ir_ltr_reg" | "ir_lldt_reg" | "ir_invlpg" => 7,
-        "ir_rdtsc" | "ir_cpuid" | "ir_read_cr" | "ir_write_cr" | "ir_clts" => 8,
+        "ir_rdtsc" => 12, "ir_cpuid" => 13, "ir_read_cr" => 14,
+        "ir_write_cr" => 15, "ir_clts" => 16, "ir_sti_check" => 17,
         n if n.starts_with("ir_x87") || n.starts_with("ir_sse") || n.starts_with("ir_mmx") => 9,
         "ir_hlt" => 10, "ir_invalid_form" | "ir_reserved_form" => 11, _ => 0,
     }
@@ -89,6 +94,15 @@ fn now() -> f64 {
         START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0
     }
 }
+pub fn discovery_start() -> Option<f64> { enabled().then(now) }
+pub fn discovery_complete(start: Option<f64>, tier: u32) {
+    if let Some(start) = start.filter(|_| enabled()) {
+        let ms = (now() - start).max(0.0);
+        unsafe { let row = &mut DISCOVERY[(tier - 1).min(1) as usize];
+            row[0] += ms; row[1] += 1.0; row[2] = row[2].max(ms); }
+    }
+}
+pub fn missing(reason: usize) { unsafe { if enabled() { MISSING[reason] += 1; } } }
 #[no_mangle]
 pub fn ir_diagnostic_address() -> u32 { core::ptr::addr_of!(CELLS) as u32 }
 /// A new session clears compiled artifacts so off mode emits no diagnostic code.
@@ -112,7 +126,9 @@ pub unsafe fn ir_diagnostic_config(period: u32) -> bool {
     TIMES = [0.0; STAGES]; CALLS = [0; STAGES]; REASONS = [[0; 2]; EXITS];
     ADMISSION = [0; ADMISSIONS]; CHAIN = [0; 6]; TOTALS = [0.0; 10]; COMPILER = [[0.0; 5]; COMPILE_PHASES];
     INTERPRETER_HOT = [[0.0; 6]; 256]; HELPER_EXITS = [[0; 2]; 12];
+    CONTROL_EXITS = [[0; 2]; 6];
     PUBLICATION = [0.0; 3]; HOT = [[0.0; 8]; 512]; HOT_REPLACEMENTS = 0;
+    DISCOVERY = [[0.0; 3]; 2]; MISSING = [0; 5];
     true
 }
 #[no_mangle]
@@ -130,6 +146,9 @@ pub unsafe fn ir_diagnostic_get(group: u32, index: u32, field: u32) -> f64 {
         8 => CHAIN.get(i).copied().unwrap_or(0) as f64,
         9 => INTERPRETER_HOT.get(i).and_then(|r|r.get(f)).copied().unwrap_or(0.0),
         10 => HELPER_EXITS.get(i).and_then(|r|r.get(f)).copied().unwrap_or(0) as f64,
+        11 => DISCOVERY.get(i).and_then(|r|r.get(f)).copied().unwrap_or(0.0),
+        12 => MISSING.get(i).copied().unwrap_or(0) as f64,
+        13 => CONTROL_EXITS.get(i).and_then(|r|r.get(f)).copied().unwrap_or(0) as f64,
         7 => HOT.get(i).and_then(|r|r.get(f)).copied().unwrap_or(0.0),
         _=>0.0,
     }
@@ -205,7 +224,12 @@ pub unsafe fn activation_end(pc: u32, cr3: u32, count: u32, duration: Option<f64
     if !enabled() { return; }
     let reason=(CELLS.reason as usize).min(EXITS-1);
     if (Exit::HelperTransfer as usize..=Exit::HelperInvalidated as usize).contains(&reason) {
-        let row=&mut HELPER_EXITS[(CELLS.helper as usize).min(11)]; row[0]+=1; row[1]+=count as u64;
+        let category = CELLS.helper as usize;
+        if (12..18).contains(&category) {
+            let row = &mut CONTROL_EXITS[category - 12]; row[0] += 1; row[1] += count as u64;
+        }
+        let parent = if category == 17 { 6 } else if category >= 12 { 8 } else { category };
+        let row=&mut HELPER_EXITS[parent.min(11)]; row[0]+=1; row[1]+=count as u64;
     }
     REASONS[reason][0]+=1; REASONS[reason][1]+=count as u64;
     TOTALS[6]+=1.0; TOTALS[7]+=count as f64;

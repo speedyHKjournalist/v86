@@ -46,9 +46,11 @@ imports! {
     "ir_diagnostic_end": [] -> [], Entry, "close sampled timing scope; no guest state or admission epoch changes";
     "ir_enter": [] -> [], Entry, "writes previous_ip and REP result; requires !in_jit";
     "ir_request_link": [] -> [], Entry, "sets cold continuation request; no guest state change or dispatch";
+    "ir_request_observer_link": [] -> [], Entry, "requests cold admission after committed observation; never an SSA fusion edge";
     "ir_admission_barrier": [] -> [], Entry, "revokes synchronous entry-validation certificates before observers; no guest state change";
     "ir_admission_epoch_address": [] -> [I32], Pure, "address of non-shared admission epoch for fused-region recovery polls";
     "ir_sti_finish": [I32] -> [], InterruptFinish, "IRQ delivery owns CPU state; terminal shadow unwind";
+    "ir_sti_finish_link": [I32] -> [], InterruptFinish, "completed shadow unwinds IRQs, revokes admission and requests a cold successor only if control context survives";
     "ir_entry_matches": [I32,I32,I32] -> [I32], Pure, "reads prefixes, mode, CS, IP, halt and in_jit; no writes";
     "ir_tlb_base": [] -> [I32], Pure, "TLB array address";
     "ir_memory_base": [] -> [I32], Pure, "RAM base address";

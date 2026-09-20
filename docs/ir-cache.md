@@ -99,8 +99,17 @@ exits prevent continuing stale guest code after a side effect. Normal completed
 IR exits may request an iterative cold continuation, capped at 64 successors and
 the existing CPU batch instruction budget. Every successor satisfies entry,
 source/mapping and post-fetch admission, using bounded certificates where valid;
-no guest locals or active frames cross
-that boundary. Budget, fault, I/O and interrupt-shadow exits do not request links.
+no guest locals or active frames cross that boundary. Each predecessor can cache
+one successor key and publication identity; retirement, replacement or compaction
+makes stale identities miss. `cache_successor_hits` (`ir_cache_stat(29)`) counts
+this lookup shortcut; it does not bypass admission checks.
+
+Successful scalar port I/O and RDTSC may request a cold continuation after full
+state synchronization and an admission barrier, provided IP/CS/mode/CPL still
+match. Normal STI-shadow completion first delivers pending IRQs and only requests
+a cold successor when the execution context and IF/TF/VM remain unchanged.
+Observer continuations cannot seed an SSA-fusion prediction. Budget and fault
+exits still return to dispatch.
 Halt or IF/TF/VM changes also stop the batch. This does not implement register-carry
 links or direct IR-to-legacy links.
 Host-aborting traps are not a recoverable guest exit protocol.

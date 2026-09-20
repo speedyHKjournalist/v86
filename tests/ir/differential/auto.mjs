@@ -10,6 +10,8 @@ try{
     const word=a=>new DataView(cpu.mem8.buffer,cpu.mem8.byteOffset).getUint32(a,true);
     vm.run();await until(()=>(word(0x500)&65535)===0xCAFE,"boot");await vm.stop();await sleep(20);
     if(process.env.IR_DIAGNOSTICS) assert.equal(await vm.configure_ir_diagnostics(Number(process.env.IR_DIAGNOSTICS)),true);
+    assert.equal(e.ir_auto_set_hot_filter(2),0);
+    if(process.env.IR_HOT_FILTER !== undefined) assert.equal(e.ir_auto_set_hot_filter(Number(process.env.IR_HOT_FILTER)),1);
     const configure=(enabled=1,threshold=2,promote=4)=>assert.equal(e.ir_auto_config(enabled,threshold,promote,192,256,64),1);
     const stats=()=>Array.from({length:12},(_,i)=>e.ir_auto_stat(i));
     const publisher=cpu.ir_auto_publish;let coldPublications=0;
@@ -91,6 +93,25 @@ try{
         assert.equal(cpu.reg32[2]>>>0,(eax-(offset<2||offset===3?1:0))>>>0);
     } finally {await vm.stop();e.set_jit_config(0,stackLegacy);}
     console.log(`PASS: ${wasm}: guarded stack stores continue through the CFG backedge with exact ESP/register/retirement state`);
+    {
+        const other=PC+0x2000;
+        await prepare([0x43,0xFF,0xE1]);
+        vm.write_memory(Uint8Array.of(0xE6,0x80,0xFF,0xE2),other);
+        cpu.reg32[1]=other;cpu.reg32[2]=PC;
+        const disabled=e.get_jit_config(0);e.set_jit_config(0,1);configure();vm.run();
+        try {
+            await until(()=>e.ir_cache_entry_stat(PC,0,1,10)===2 && e.ir_cache_entry_stat(PC,0,1,3)>=3,
+                'a terminal I/O peer fuses without a normal outgoing edge');
+            await vm.stop();
+            const ip=cpu.instruction_pointer[0];
+            const pending=new Map([[PC,0],[PC+1,3],[other,2],[other+2,1]]);
+            assert(pending.has(ip));
+            assert.equal(new Uint32Array(e.memory.buffer)[664>>2],(cpu.reg32[3]*4-pending.get(ip))>>>0);
+            vm.write_memory(cpu.mem8.slice(other,other+1),other);
+            assert.equal(e.ir_cache_entry_stat(PC,0,1,0),0,'terminal peer dependency invalidates its fused root');
+        } finally {await vm.stop();e.set_jit_config(0,disabled);}
+    }
+    console.log(`PASS: ${wasm}: terminal successor fusion preserves I/O exit, retirement and source invalidation`);
     {
         const addresses=[PC,PC+0x2000,PC+0x4000,PC+0x6000];
         await prepare([0x40,0xFF,0xE2]);
@@ -264,5 +285,7 @@ try{
         assert.equal(d.totals.instrumentation_errors,0);
         assert.equal(Object.values(d.exits).reduce((n,r)=>n+r.count,0),d.totals.ir_activations);
         assert(d.exits.budget.count>0 && d.exits.normal.count>0);
+        assert(d.discovery_latency.tier1.count>0 && d.discovery_latency.tier1.ms>0);
+        assert.equal(Object.values(d.missing_entries).reduce((a,b)=>a+b,0),d.admission.missing);
     }
 }finally{await vm.destroy();}

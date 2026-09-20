@@ -21,9 +21,10 @@ pub enum EntryContract {
     Cpu(CpuEntryKey),
 }
 
-// Set only by a generated ordinary after-instruction exit. Fault, helper,
-// invalidation, budget and interrupt-shadow exits never request a successor.
+// Normal edges and audited, committed observer exits can request a successor.
+// Fault, invalidation and budget exits never authorize unchecked continuation.
 static mut LINK_REQUESTED: bool = false;
+static mut OBSERVER_LINK: bool = false;
 // A byte-validation certificate is valid only in a synchronous CPU interval
 // without unobserved host writes. No certificate survives a new CPU batch,
 // interpretation, an observing import, or code/reset invalidation. Saturation
@@ -48,12 +49,19 @@ pub fn ir_admission_epoch_address() -> u32 { core::ptr::addr_of!(CONTINUATION_EP
 pub(super) fn admission_epoch() -> u64 { unsafe { ADMISSION_EPOCH } }
 #[cfg(feature = "ir-experimental")]
 pub(super) fn link_requested() -> bool { unsafe { LINK_REQUESTED } }
+#[cfg(feature = "ir-experimental")]
+pub(super) fn profile_link_requested() -> bool { unsafe { LINK_REQUESTED && !OBSERVER_LINK } }
 #[no_mangle]
-pub unsafe fn ir_request_link() { LINK_REQUESTED = true; }
+pub unsafe fn ir_request_link() { LINK_REQUESTED = true; OBSERVER_LINK = false; }
+/// This successor starts from fully committed CPU state after an observer.
+/// It is not a normal SSA edge and must not seed a fusion prediction.
+#[no_mangle]
+pub unsafe fn ir_request_observer_link() { LINK_REQUESTED = true; OBSERVER_LINK = true; }
 #[cfg(feature = "ir-experimental")]
 pub unsafe fn take_link_request() -> bool {
     let requested = LINK_REQUESTED;
     LINK_REQUESTED = false;
+    OBSERVER_LINK = false;
     requested
 }
 

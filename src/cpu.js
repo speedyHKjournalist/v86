@@ -1116,8 +1116,11 @@ CPU.prototype.get_ir_diagnostics = function()
         "empty_scope_sampled_ms":get(0,4,0),"empty_scope_wall_ms":get(0,5,0),
         "totals":totals,"timings":timings,"exits":reasons,"admission":admission,"compiler":compiler,
         "publication":{"wall_ms":get(6,0,0),"calls":get(6,1,0),"succeeded":get(6,2,0)},
+        "discovery_latency":Object.fromEntries(["tier1","tier2"].map((name,i)=>[name,{"ms":get(11,i,0),"count":get(11,i,1),"max_ms":get(11,i,2)}])),
+        "missing_entries":Object.fromEntries(["unseen","heating","ready","pending","failed"].map((name,i)=>[name,get(12,i,0)])),
         "chain_stops":Object.fromEntries(["no_request","cpu_budget","halt","control_flags","target_miss","chain_limit"].map((name,i)=>[name,get(8,i,0)])),
         "interpreter_hotspots":interpreter_hotspots,"helper_exits":helper_exits,
+        "control_exits":Object.fromEntries(["rdtsc","cpuid","read_cr","write_cr","clts","sti_check"].map((name,i)=>[name,{"count":get(13,i,0),"guest_steps":get(13,i,1)}])),
         "hotspot_replacements":get(0,2,0),"hotspots":hotspots};
 };
 
@@ -1136,6 +1139,9 @@ CPU.prototype.get_jit_info = function()
         });
         ir["batched_entries"] = exports["ir_auto_stat"](16) >>> 0;
         ir["queued_entries"] = exports["ir_auto_stat"](17) >>> 0;
+        ir["hot_replacements"] = exports["ir_auto_stat"](22) >>> 0;
+        ir["probation_visits"] = exports["ir_auto_stat"](23) >>> 0;
+        ir["hot_filter"] = !!exports["ir_auto_stat"](24);
         ["fusion_attempts", "fusion_budget_stops", "fusion_unsupported_stops", "fusion_invalid_stops"].forEach((name, index) => {
             ir[name] = exports["ir_auto_stat"](18 + index) >>> 0;
         });
@@ -1158,6 +1164,7 @@ CPU.prototype.get_jit_info = function()
         ir["cache_post_fetch_reuses"] = exports["ir_cache_stat"](20) >>> 0;
         ir["cache_target_hits"] = exports["ir_cache_stat"](21) >>> 0;
         ir["cache_negative_hits"] = exports["ir_cache_stat"](28) >>> 0;
+        ir["cache_successor_hits"] = exports["ir_cache_stat"](29) >>> 0;
         ir["cache_fast_validation"] = !!exports["ir_cache_stat"](22);
         ir["fused_publications"] = exports["ir_cache_stat"](23) >>> 0;
         ir["fused_hits"] = exports["ir_cache_stat"](24) >>> 0;

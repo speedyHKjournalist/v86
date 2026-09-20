@@ -64,6 +64,7 @@ struct Emitter<'a> {
     layout: StateLayout,
     cpu: bool,
     linkable_entry: bool,
+    entry: Option<CpuEntryKey>,
     accounted: Option<WasmLocal>,
     tlb: Option<WasmLocal>,
     read_cache: Option<(WasmLocal, WasmLocal)>,
@@ -114,19 +115,20 @@ impl Emitter<'_> {
             self.w.call_signature("ir_request_link", crate::ir::helper::imports::signature("ir_request_link"));
             if self.interrupt_shadow.is_some() { self.w.block_end(); }
         }
-        self.return_to_cpu();
+        self.return_to_cpu_with_link(true);
     }
     fn return_to_cpu(&mut self) {
+        self.return_to_cpu_with_link(false);
+    }
+    fn return_to_cpu_with_link(&mut self, completed: bool) {
         if let Some(depth) = &self.interrupt_shadow {
             self.w.get_local(depth);
             self.w.if_void();
             let depth = depth.unsafe_clone();
             self.diagnostic_exit(DiagnosticExit::InterruptShadow);
             self.w.get_local(&depth);
-            self.w.call_signature(
-                "ir_sti_finish",
-                crate::ir::helper::imports::signature("ir_sti_finish"),
-            );
+            let name = if completed && self.linkable_entry { "ir_sti_finish_link" } else { "ir_sti_finish" };
+            self.w.call_signature(name, crate::ir::helper::imports::signature(name));
             self.w.block_end();
         }
         self.w.return_();
@@ -1167,7 +1169,8 @@ impl Emitter<'_> {
         let call = self.mir.helpers[plan.helper.index()].as_ref().unwrap();
         let code_preserved = crate::ir::helper::cpu_registry::preserves_code_on_success(&call.name);
         let segment_continue = self.cpu && call.name == "ir_mov_segment_continue";
-        if selective.is_none() && !code_preserved && !segment_continue { self.admission_barrier(); }
+        let interrupt_check = self.cpu && matches!(call.name.as_str(), "ir_cli_check" | "ir_sti_check");
+        if selective.is_none() && !code_preserved && !segment_continue && !interrupt_check { self.admission_barrier(); }
         let trim_state = self.cpu && self.mir.helper_state_observation_elided(id);
         if segment_continue {
             // Real/VM86 segment transfers cannot observe SSA state or host RAM.
@@ -1177,7 +1180,7 @@ impl Emitter<'_> {
             self.w.load_fixed_i32(gp::flags as u32);
             self.w.const_i32(crate::cpu::cpu::FLAG_VM); self.w.and_i32(); self.w.eqz_i32(); self.w.and_i32();
             self.w.if_void(); self.admission_barrier(); self.prepare_memory_call(plan.state); self.w.block_end();
-        } else if self.cpu && call.name == "ir_cli_check" {
+        } else if interrupt_check {
             // The normal real-mode / ring-0 non-VM86 path reads only backing
             // privilege bits and cannot observe GPRs, arithmetic flags or RAM.
             // Other paths retain full precise materialization before any fault.
@@ -1212,6 +1215,17 @@ impl Emitter<'_> {
                 Observation::DecodedNextPc => self.prepare_memory_call(plan.state),
             }
         }
+        // Observers retain full state synchronization. Only a successful,
+        // unchanged execution context may request another cold admission. The
+        // pre-call barrier forces source/mapping validation after raw host writes.
+        let observer_link = self.entry.filter(|_| matches!(call.name.as_str(), "ir_in" | "ir_out" | "ir_rdtsc"))
+            .map(|entry| {
+                self.w.load_fixed_i32(gp::instruction_pointer as u32);
+                let next = self.w.set_new_local();
+                self.w.load_fixed_u8(gp::cpl as u32);
+                let cpl = self.w.set_new_local();
+                (entry, next, cpl)
+            });
         self.diagnostic_begin(DiagnosticStage::Helper);
         for &arg in &plan.args {
             self.get(arg);
@@ -1250,6 +1264,21 @@ impl Emitter<'_> {
                     self.w.call_signature("ir_request_link", crate::ir::helper::imports::signature("ir_request_link"));
                     if self.interrupt_shadow.is_some() { self.w.block_end(); }
                 } else { self.admission_barrier(); }
+            }
+            if exit == 4 {
+                if let Some((entry, next, cpl)) = &observer_link {
+                    self.w.get_local(next);
+                    self.w.const_i32(entry.cs_base() as i32);
+                    self.w.const_i32(i32::from(entry.default_32));
+                    self.w.call_signature("ir_entry_matches", crate::ir::helper::imports::signature("ir_entry_matches"));
+                    self.w.load_fixed_u8(gp::cpl as u32); self.w.get_local(cpl); self.w.eq_i32(); self.w.and_i32();
+                    if let Some(depth) = &self.interrupt_shadow {
+                        self.w.get_local(depth); self.w.eqz_i32(); self.w.and_i32();
+                    }
+                    self.w.if_void();
+                    self.w.call_signature("ir_request_observer_link", crate::ir::helper::imports::signature("ir_request_observer_link"));
+                    self.w.block_end();
+                }
             }
             if let Some((base, _)) = &self.diagnostic {
                 self.w.get_local(base);
@@ -1293,6 +1322,9 @@ impl Emitter<'_> {
             self.free_temporary(temp);
         }
         self.w.free_local(outcome);
+        if let Some((_, next, cpl)) = observer_link {
+            self.w.free_local(next); self.w.free_local(cpl);
+        }
     }
     fn address(&self, address: Address) -> u32 {
         match address {
@@ -1590,6 +1622,7 @@ fn emit_inner(
         layout,
         cpu,
         linkable_entry: entry.is_some(),
+        entry,
         accounted: None,
         tlb: None,
         read_cache: None,

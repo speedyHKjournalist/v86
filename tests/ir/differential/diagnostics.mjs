@@ -32,9 +32,11 @@ try {
   assert.equal(Object.values(d.exits).reduce((n,r)=>n+r.guest_steps,0),tot.ir_steps);
   assert.equal(tot.ir_steps+tot.interpreter_steps+tot.legacy_steps,words()[664>>2]);
   assert.equal(d.admission.accepted,tot.ir_activations);assert.equal(tot.instrumentation_errors,0);
+  assert.equal(Object.values(d.missing_entries).reduce((a,b)=>a+b,0),d.admission.missing);
   const sum=Object.values(d.timings).reduce((n,r)=>n+r.sampled_ms,0);
   assert(Math.abs(sum-tot.sampled_batch_ms)<0.01,`exclusive timers conserve time: ${sum}/${tot.sampled_batch_ms}`);
   assert.equal(Object.values(d.helper_exits).reduce((n,r)=>n+r.count,0),d.exits.helper_control_or_fault.count+d.exits.helper_yield.count+d.exits.helper_invalidated.count);
+  assert.equal(['rdtsc','cpuid','read_cr','write_cr','clts'].reduce((n,k)=>n+d.control_exits[k].count,0),d.helper_exits.cpu_control.count);
   assert.equal(d.exits.unclassified.count,0,'all executed test exits classified');
   return d;
  };

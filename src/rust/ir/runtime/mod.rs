@@ -31,6 +31,8 @@ pub mod cache;
 pub mod live;
 #[cfg(feature = "ir-experimental")]
 pub mod schedule;
+#[cfg(any(feature = "ir-experimental", test))]
+mod hot_index;
 pub mod snapshot;
 
 pub mod fp_state;

@@ -150,10 +150,11 @@ pub fn compile_cpu_cfg_bounded(
     validate_snapshot(request, snapshot, config)?;
     let mut selected = snapshot.clone();
     for retries in 0..8 {
-        // A fallthrough-only window already has a single-entry linear lifter.
+        // A linear window, including its final external transfer/helper, already
+        // has a single-entry lifter. Only actual internal edges require CFG SSA.
         // Building one fragment/parameter frame per instruction only to merge
         // them again costs most of cold compilation and can hit the CFG cap.
-        let compiled = if fallthrough_only(request, &selected.bytes) {
+        let compiled = if linear_candidate(request, &selected.bytes) {
             match compile_cpu_region(request, &selected, config) {
                 // Some decoder fallthrough forms use a terminal CPU adapter.
                 // Preserve the CFG frontend's ability to stop before the tail.
@@ -193,7 +194,7 @@ pub fn compile_cpu_cfg_bounded(
     unreachable!()
 }
 
-fn fallthrough_only(request: &CompileRequest, bytes: &[u8]) -> bool {
+fn linear_candidate(request: &CompileRequest, bytes: &[u8]) -> bool {
     let mut offset = 0;
     while offset < bytes.len() {
         let Ok(instruction) = decode(
@@ -208,7 +209,16 @@ fn fallthrough_only(request: &CompileRequest, bytes: &[u8]) -> bool {
         if !matches!(instruction.flow, Flow::Next | Flow::Boundary)
             || instruction.encoding.block_boundary
         {
-            return false;
+            if offset + instruction.length as usize != bytes.len() { return false; }
+            return match instruction.flow {
+                Flow::Relative { displacement, call: false, .. } => {
+                    let target = instruction.next_pc.0.wrapping_add(displacement as u32);
+                    let target = if instruction.operand_size == 16 { target & 65535 } else { target };
+                    target.wrapping_sub(request.pc.0) as usize >= bytes.len()
+                },
+                Flow::Sti => false, // the shadow is a compound CFG fragment
+                _ => true,
+            };
         }
         offset += instruction.length as usize;
     }
@@ -485,7 +495,7 @@ pub fn compile_cpu_entries(
     entries: &[CpuEntryRequest],
     config: &IrConfig,
 ) -> Result<Vec<CompiledArtifact>, CompileError> {
-    Ok(compile_entry_batch(origin, snapshot, entries, config, false)?
+    Ok(compile_entry_batch(origin, snapshot, entries, config, false, false)?
         .into_iter().map(|(artifact, _, _)| artifact).collect())
 }
 /// Automatic multi-entry work shares one immutable capture; each entry may
@@ -496,7 +506,16 @@ pub fn compile_cpu_entries_bounded(
     entries: &[CpuEntryRequest],
     config: &IrConfig,
 ) -> Result<Vec<(CompiledArtifact, ImmutableCodeSnapshot, u32)>, CompileError> {
-    compile_entry_batch(origin, snapshot, entries, config, true)
+    compile_entry_batch(origin, snapshot, entries, config, true, false)
+}
+/// Online siblings are opportunistic. Preserve an already compiled primary if a
+/// sibling cannot lower, instead of discarding it and compiling it a second time.
+/// Batch identity validation remains atomic; explicit callers retain strict APIs.
+pub fn compile_cpu_entries_available(
+    origin: &CompileRequest, snapshot: &ImmutableCodeSnapshot,
+    entries: &[CpuEntryRequest], config: &IrConfig,
+) -> Result<Vec<(CompiledArtifact, ImmutableCodeSnapshot, u32)>, CompileError> {
+    compile_entry_batch(origin, snapshot, entries, config, true, true)
 }
 fn compile_entry_batch(
     origin: &CompileRequest,
@@ -504,6 +523,7 @@ fn compile_entry_batch(
     entries: &[CpuEntryRequest],
     config: &IrConfig,
     bounded: bool,
+    tolerate_siblings: bool,
 ) -> Result<Vec<(CompiledArtifact, ImmutableCodeSnapshot, u32)>, CompileError> {
     validate_snapshot(origin, snapshot, config)?;
     if entries.is_empty() || entries.len() > 8 {
@@ -545,11 +565,52 @@ fn compile_entry_batch(
             mappings,
             dependencies,
         };
-        artifacts.push(if bounded {
-            compile_cpu_cfg_bounded(&request, &source, config)?
+        let compiled = if bounded {
+            compile_cpu_cfg_bounded(&request, &source, config)
         } else {
-            (compile_cpu_cfg_region(&request, &source, config)?, source, 0)
-        });
+            compile_cpu_cfg_region(&request, &source, config).map(|artifact| (artifact, source, 0))
+        };
+        match compiled {
+            Ok(artifact) => artifacts.push(artifact),
+            Err(_) if tolerate_siblings && !artifacts.is_empty() => {},
+            Err(error) => return Err(error),
+        }
     }
     Ok(artifacts)
+}
+
+#[cfg(test)]
+mod cold_tests {
+    use super::*;
+    fn request() -> CompileRequest {
+        CompileRequest { key: PublicationKey { job: 1, vm_generation: 1, slot: 0, slot_generation: 0 },
+            pc: GuestEip(0x100000), linear: LinearAddress(0x100000), default_32: true, tier: Tier::One }
+    }
+    #[test]
+    fn linear_external_edges_and_helpers_keep_internal_branches_on_cfg() {
+        let r = request();
+        for bytes in [&[0x40,0xFF,0xE2][..], &[0x40,0xE4,0x80], &[0x40,0x0F,0x31],
+            &[0x40,0xF4], &[0x40,0x75,0x20], &[0x40,0xEB,0x20]] {
+            assert!(linear_candidate(&r, bytes), "{bytes:x?}");
+        }
+        for bytes in [&[0x40,0x75,0xFD][..], &[0x40,0xEB,0xFD], &[0xFB,0x90], &[0xEB,0x02,0x40,0x40,0xF4]] {
+            assert!(!linear_candidate(&r, bytes), "{bytes:x?}");
+        }
+    }
+    #[test]
+    fn failed_sibling_keeps_primary_but_bad_batch_identity_is_atomic() {
+        let r = request();
+        let snapshot = ImmutableCodeSnapshot { bytes: vec![0xEB,0xFE,0x0F],
+            mappings: vec![CodeMapping { linear: r.linear, physical: PhysicalAddress(r.linear.0) }],
+            dependencies: vec![CodeDependency { page: PhysicalAddress(r.linear.0), version: 1 }] };
+        let config = IrConfig { optimize: true, passes: crate::ir::passes::PassConfig::tier1(),
+            execution_budget: 32, rep_iteration_budget: 8, max_code_bytes: 192,
+            layout: StateLayout {gpr:0,flags:32,eip:36,committed:40,flag_operand:44} };
+        let mut entries = [CpuEntryRequest {offset:0,key:r.key}, CpuEntryRequest {offset:2,key:PublicationKey {job:2,..r.key}}];
+        assert!(compile_cpu_entries_bounded(&r,&snapshot,&entries,&config).is_err());
+        let artifacts = compile_cpu_entries_available(&r,&snapshot,&entries,&config).unwrap();
+        assert_eq!(artifacts.len(),1); assert_eq!(artifacts[0].0.key,r.key);
+        entries[1].key = r.key;
+        assert!(compile_cpu_entries_available(&r,&snapshot,&entries,&config).is_err());
+    }
 }

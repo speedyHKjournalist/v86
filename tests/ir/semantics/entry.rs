@@ -70,7 +70,7 @@ fn automatic_cfg_budget_shrinks_without_weakening_snapshot_checks() {
     let mut req = request(0x1FFC0, 0x1FFC0, true);
     req.tier = Tier::Two;
     let mut program = vec![0x40; 95];
-    program.extend([0x75, 0]);
+    program.extend([0x75, (-97i8) as u8]); // genuine internal backedge requires CFG
     let mut bytes = snapshot(program, 0x1F000);
     bytes.mappings.push(CodeMapping {
         linear: LinearAddress(0x20000),
@@ -104,7 +104,7 @@ fn automatic_cfg_budget_shrinks_without_weakening_snapshot_checks() {
     let mut req = request(0x100000, 0x100000, true);
     req.tier = Tier::Two;
     let mut program = [0xB8, 1, 0, 0, 0].repeat(95);
-    program.extend([0xEB, 0]);
+    program.extend([0xEB, (-37i8) as u8]); // backedge to a complete MOV inside the window
     let bytes = snapshot(program, 0x100000);
     let mut options = config(true);
     options.max_code_bytes = 512;
