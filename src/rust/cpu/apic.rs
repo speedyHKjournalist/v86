@@ -596,6 +596,8 @@ fn highest_isr(apic: &mut Apic) -> Option<u8> {
     highest
 }
 
+/// Read-only; does not acknowledge or reprioritize an interrupt.
+pub fn has_pending_irq() -> bool { get_apic().irr.iter().any(|&bits| bits != 0) }
 pub fn acknowledge_irq() -> Option<u8> { acknowledge_irq_internal(&mut get_apic()) }
 
 fn acknowledge_irq_internal(apic: &mut Apic) -> Option<u8> {

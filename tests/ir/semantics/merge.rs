@@ -2,7 +2,7 @@ use crate::ir::{
     backend::wasm::emit_cpu,
     frontend::{
         decode::{GuestEip, LinearAddress},
-        region::lift_cpu_cfg,
+        region::lift_cpu_cfg_uncoalesced as lift_cpu_cfg,
     },
     hir::{Op, Terminator},
     ids::StateId,

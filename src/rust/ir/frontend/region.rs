@@ -129,12 +129,41 @@ pub fn lift_cpu_cfg_sources(
     default_32: bool,
     rep_budget: u32,
 ) -> Result<Region, CompileError> {
+    let entries: Vec<_> = sources.first().map(|s| vec![s.pc]).unwrap_or_default();
+    lift_cpu_cfg_sources_inner(sources, predictions, &entries, default_32, rep_budget, true)
+}
+/// One SSA graph with a shared cold prologue and exact-PC dispatch. External
+/// entries remain CFG leaders, even when a fallthrough predecessor exists.
+pub fn lift_cpu_cfg_entries(
+    sources: &[CfgSource<'_>], predictions: &[PredictedEdge], entries: &[GuestEip],
+    default_32: bool, rep_budget: u32,
+) -> Result<Region, CompileError> {
+    lift_cpu_cfg_sources_inner(sources, predictions, entries, default_32, rep_budget, true)
+}
+#[cfg(test)]
+pub(crate) fn lift_cpu_cfg_uncoalesced(
+    bytes: &[u8], pc: GuestEip, linear: LinearAddress, default_32: bool, rep_budget: u32,
+) -> Result<Region, CompileError> {
+    lift_cpu_cfg_sources_inner(&[CfgSource { bytes, pc, linear }], &[], &[pc], default_32, rep_budget, false)
+}
+fn lift_cpu_cfg_sources_inner(
+    sources: &[CfgSource<'_>], predictions: &[PredictedEdge], entries: &[GuestEip],
+    default_32: bool, rep_budget: u32, compact: bool,
+) -> Result<Region, CompileError> {
     if sources.is_empty() || sources.iter().any(|s| s.bytes.is_empty()) {
         return Err(invalid("empty CFG snapshot"));
     }
     if sources.len() > 4 || sources.iter().any(|s| s.bytes.len() > 15 * 128)
         || predictions.len() > 4 {
         return Err(CompileError::Budget("CFG code snapshot"));
+    }
+    if entries.is_empty() || entries.len() > 8 {
+        return Err(CompileError::Budget("CFG external entries"));
+    }
+    for (i, pc) in entries.iter().enumerate() {
+        if locate(sources, *pc).is_none() || entries[..i].contains(pc) {
+            return Err(invalid("invalid CFG external entry"));
+        }
     }
     let entry_pc = sources[0].pc;
     for (i, source) in sources.iter().enumerate() {
@@ -153,7 +182,7 @@ pub fn lift_cpu_cfg_sources(
         }
     }
     let mut fragments: BTreeMap<usize, Fragment> = BTreeMap::new();
-    let mut pending = BTreeSet::from([entry_pc.0 as usize]);
+    let mut pending: BTreeSet<_> = entries.iter().map(|pc| pc.0 as usize).collect();
     while let Some(address) = pending.pop_first() {
         if fragments.contains_key(&address) {
             continue;
@@ -207,8 +236,7 @@ pub fn lift_cpu_cfg_sources(
                 LinearAddress(linear.0.wrapping_add(end as u32)),
                 default_32,
             ).is_err();
-        let stop = decoded.encoding.opcode == 0xFB
-            || ir.instructions.iter().any(|i| {
+        let stop = ir.instructions.iter().any(|i| {
                 (i.commit.is_some()
                     && (incomplete_tail
                         || !matches!(i.op, Op::GuestStore { .. } | Op::RmwStore { .. })))
@@ -243,7 +271,13 @@ pub fn lift_cpu_cfg_sources(
             },
         );
     }
-    let block_count = 1 + fragments.values().map(|f| f.ir.blocks.len()).sum::<usize>();
+    // Pay CFG/block-parameter costs per straight-line run, not per x86
+    // instruction. Branch destinations and externally callable entries remain
+    // leaders; a failed compound lift keeps the original precise fragments.
+    if compact {
+        coalesce_fragments(&mut fragments, sources, predictions, entries, default_32, rep_budget);
+    }
+    let block_count = entries.len() + fragments.values().map(|f| f.ir.blocks.len()).sum::<usize>();
     if block_count > 64 {
         return Err(CompileError::Budget("CFG block count"));
     }
@@ -294,13 +328,35 @@ pub fn lift_cpu_cfg_sources(
         b.region.blocks[block.index()].entry_state = Some(state);
         roots.insert(at, (block, frame));
     }
-    b.region.terminate(
-        b.block,
-        Terminator::Branch(Edge {
-            target: roots[&(entry_pc.0 as usize)].0,
-            args: initial.args(),
-        }),
-    );
+    // All architectural reads dominate every cold entry. No entry selector is
+    // trusted: the emitter first validates the actual CPU PC against this list.
+    let tests = if entries.len() > 1 {
+        let current = b.node(Op::ReadEntryLinear, vec![], Type::I32);
+        let cs_base = sources[0].linear.0.wrapping_sub(entry_pc.0);
+        entries[..entries.len() - 1].iter().map(|pc| {
+            let target = b.constant(cs_base.wrapping_add(pc.0), Type::I32);
+            b.node(Op::Binary(Binary::Eq), vec![current, target], Type::I1)
+        }).collect::<Vec<_>>()
+    } else { Vec::new() };
+    let mut dispatch = b.block;
+    let mut dispatch_effect = initial.effect;
+    for (index, &pc) in entries.iter().enumerate() {
+        let mut args = initial.args();
+        *args.last_mut().unwrap() = dispatch_effect;
+        let edge = Edge { target: roots[&(pc.0 as usize)].0, args };
+        if index + 1 == entries.len() {
+            b.region.terminate(dispatch, Terminator::Branch(edge));
+        } else {
+            let next = b.region.block(false);
+            let effect = b.region.param(next, Type::Effect);
+            b.region.terminate(dispatch, Terminator::CondBranch {
+                condition: tests[index], taken: edge,
+                not_taken: Edge { target: next, args: vec![dispatch_effect] },
+            });
+            dispatch = next;
+            dispatch_effect = effect;
+        }
+    }
     for (&at, fragment) in &fragments {
         graft(
             &mut b.region,
@@ -319,6 +375,82 @@ pub fn lift_cpu_cfg_sources(
     crate::ir::verify::verify(&b.region).map_err(|e| CompileError::InvalidIr(e.0))?;
     Ok(b.region)
 }
+/// Collapse only uniquely reached, contiguous fallthrough chains. This happens
+/// before the graph budget: otherwise 64 ordinary instructions exhaust the
+/// block cap even though they need just one machine block. Guest instruction
+/// counts and every fault/commit StateMap still come from the audited lifter.
+fn coalesce_fragments(
+    fragments: &mut BTreeMap<usize, Fragment>,
+    sources: &[CfgSource<'_>],
+    predictions: &[PredictedEdge],
+    entries: &[GuestEip],
+    default_32: bool,
+    rep_budget: u32,
+) {
+    let mut incoming = BTreeMap::<usize, usize>::new();
+    for fragment in fragments.values().filter(|f| !f.stop) {
+        for block in &fragment.ir.blocks {
+            if let Some(Terminator::Exit(id)) = block.terminator {
+                if let Some(next) = successor(&fragment.ir.states[id.index()], sources)
+                    .or_else(|| predicted(&fragment.ir.states[id.index()], sources, predictions)) {
+                    *incoming.entry(next).or_default() += 1;
+                }
+            }
+        }
+    }
+    let mut considered = BTreeSet::new();
+    let starts: Vec<_> = fragments.keys().copied().collect();
+    for start in starts {
+        if !considered.insert(start) || !fragments.contains_key(&start) { continue; }
+        let mut chain = vec![start];
+        let mut at = start;
+        loop {
+            let fragment = &fragments[&at];
+            if fragment.stop || fragment.decoded.encoding.opcode == 0xFB || !matches!(fragment.decoded.flow,
+                super::decode::Flow::Next | super::decode::Flow::Boundary)
+                || chain.len() == 32 { break; }
+            let next = (at as u32).wrapping_add(fragment.span as u32) as usize;
+            if entries.iter().any(|pc| pc.0 as usize == next)
+                || incoming.get(&next) != Some(&1)
+                || considered.contains(&next) || !fragments.contains_key(&next)
+                || fragments[&next].decoded.encoding.opcode == 0xFB { break; }
+            // Only one fallthrough exit may feed the next fragment. A helper
+            // fault/conditional exit must never be turned into fallthrough.
+            let exits: Vec<_> = fragment.ir.blocks.iter().filter_map(|block| {
+                if let Some(Terminator::Exit(id)) = block.terminator {
+                    Some(&fragment.ir.states[id.index()])
+                } else { None }
+            }).collect();
+            if exits.len() != 1 || successor(exits[0], sources) != Some(next) { break; }
+            considered.insert(next);
+            chain.push(next);
+            at = next;
+        }
+        if chain.len() == 1 { continue; }
+        let mut bytes = Vec::new();
+        for &address in &chain {
+            let fragment = &fragments[&address];
+            let Some((source, offset)) = locate(sources, GuestEip(address as u32)) else {
+                bytes.clear(); break;
+            };
+            let Some(part) = source.bytes.get(offset..offset + fragment.span) else {
+                bytes.clear(); break;
+            };
+            bytes.extend_from_slice(part);
+        }
+        if bytes.is_empty() || bytes.len() > 15 * 128 { continue; }
+        let first = &fragments[&start];
+        let Ok(ir) = super::lift::lift_cpu_with_polls(&bytes, first.decoded.instruction_pc,
+            first.decoded.linear_pc, default_32, rep_budget) else { continue; };
+        let stop = fragments[chain.last().unwrap()].stop;
+        let first = fragments.get_mut(&start).unwrap();
+        first.ir = ir;
+        first.span = bytes.len();
+        first.stop = stop;
+        for &address in &chain[1..] { fragments.remove(&address); }
+    }
+}
+
 fn graft(
     out: &mut Region,
     fragment: &Fragment,
@@ -539,6 +671,19 @@ fn graft(
                 if let Some(next) = if fragment.stop { None } else {
                     successor(&state, sources).or_else(|| predicted(&state, sources, predictions))
                 } {
+                    if fragment.decoded.encoding.opcode == 0xFB {
+                        // Only a normally completed compound shadow can reach
+                        // this edge. Keep fault/terminal paths on their original
+                        // unwind; the fast finish may not observe stale SSA state.
+                        let depth = src.helpers.iter().filter(|h| h.name == "ir_sti_check").count();
+                        let depth = out.append(destination, Op::Const(depth as u64),
+                            vec![], &[Type::I32], None)[0];
+                        let helper = HelperId(out.helpers.len() as u32);
+                        out.helpers.push(crate::ir::helper::cpu_registry::descriptor(
+                            "ir_sti_finish_continue", vec![Type::I32]).unwrap());
+                        effects[index] = out.append(destination, Op::CallHelper(helper),
+                            vec![depth, effects[index]], &[Type::Effect], Some(id))[0];
+                    }
                     let offset = out.append(
                         destination,
                         Op::Const(state.committed_instructions as u64),
@@ -584,4 +729,29 @@ fn graft(
         out.terminate(destination, term);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod formation_tests {
+    use super::*;
+
+    #[test]
+    fn long_fallthrough_is_not_one_cfg_block_per_instruction() {
+        // The old per-instruction graph exceeds the 64-block budget here.
+        let bytes = vec![0x40; 96];
+        let region = lift_cpu_cfg(&bytes, GuestEip(0x1000), LinearAddress(0x2000), true, 64).unwrap();
+        assert!(region.blocks.len() < 8, "{} blocks", region.blocks.len());
+        assert_eq!(region.states.iter().map(|s| s.committed_instructions).max(), Some(32));
+        crate::ir::lowering::lower(&region).unwrap();
+    }
+
+    #[test]
+    fn loop_entry_and_branch_join_stay_leaders() {
+        // INC; DEC ECX; JNZ entry; INC EBX. The shared loop carries SSA state.
+        let region = lift_cpu_cfg(&[0x40, 0x49, 0x75, 0xFC, 0x43],
+            GuestEip(0x1000), LinearAddress(0x2000), true, 64).unwrap();
+        crate::ir::verify::verify(&region).unwrap();
+        crate::ir::lowering::lower(&region).unwrap();
+        assert!(region.states.iter().any(|s| s.instruction_pc == GuestEip(0x1000)));
+    }
 }

@@ -840,6 +840,8 @@ ir-entry-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-rele
 	cargo test ir::entry_tests
 	node tests/ir/differential/entry.mjs
 	node tests/ir/differential/entry.mjs build/v86-ir-test-release.wasm
+	node tests/ir/differential/shared_entry.mjs
+	node tests/ir/differential/shared_entry.mjs build/v86-ir-test-release.wasm
 
 .PHONY: ir-live-tests
 ir-live-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/v86-ir-runtime.wasm build/libv86.mjs build/jit-capacity.bin

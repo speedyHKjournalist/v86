@@ -38,6 +38,7 @@ pub mod snapshot;
 pub mod fp_state;
 
 mod sse_fp;
+mod continuation;
 
 mod mmx;
 

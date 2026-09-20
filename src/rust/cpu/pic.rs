@@ -291,6 +291,11 @@ impl Pic {
 }
 
 // called by the cpu
+/// Read-only conservative observer/interrupt-shadow continuation predicate.
+pub fn has_pending_irq() -> bool {
+    let pic = get_pic();
+    pic.master.irr != 0 || pic.slave.irr != 0
+}
 pub fn pic_acknowledge_irq() -> Option<u8> {
     let mut pic = get_pic();
     let irq = match pic.master.get_irq() {

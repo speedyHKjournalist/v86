@@ -217,8 +217,9 @@ fn cfg_boundaries_and_immutable_compile() {
             "overlapping guest instruction streams"
         ))
     ));
+    assert!(lift(&vec![0x90; 65]).is_ok(), "straight-line leaders fit the CFG budget");
     assert!(matches!(
-        lift(&vec![0x90; 65]),
+        lift(&vec![0x90; 129]),
         Err(CompileError::Budget(_))
     ));
     let request = CompileRequest {

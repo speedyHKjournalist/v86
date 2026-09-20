@@ -115,6 +115,51 @@ try {
         assert.equal(cpu.reg32[3],0);assert.equal((count()-before)>>>0,4);
     }
     console.log(`PASS: ${wasm}: TSC observer sees precise state and rejects stale code, remappings and changed targets`);
+    // Unlike the preceding cold-link cases, the tail is in the *same* owner.
+    // No timer callback is needed to boot these straight-line cases once set up.
+    for(const kind of ["port","clock"]) for(const mutation of ["none","bytes","mapping","context","xmm","irq"]) {
+        const op=kind==="port"?[0xE4,0x93]:[0x0F,0x31];
+        prepare([0x43,...op,0x43,0xF4]);
+        const raw=new Uint8Array(e.memory.buffer);
+        // Quiescent test setup: clear both PIC IRRs, not a production bypass.
+        raw[e.get_pic_addr_master()+3]=0;raw[e.get_pic_addr_slave()+3]=0;
+        const alternate=PC+0x4000;
+        vm.write_memory(Uint8Array.of(0x43,...op,0x4B,0xF4),alternate);
+        let observations=0;
+        const observe=()=>{
+            observations++;assert.equal(cpu.reg32[3],1,"observer sees preceding dirty SSA value");
+            if(mutation==="bytes")cpu.mem8[PC+3]=0x4B;
+            if(mutation==="mapping"){set(0x13000+(PC>>>12)*4,alternate|3);e.full_clear_tlb();}
+            if(mutation==="context")cpu.instruction_pointer[0]=alternate+3;
+            if(mutation==="xmm")cpu.reg_xmm32s[0]=0x12345678;
+            if(mutation==="irq")raw[e.get_pic_addr_master()+3]=1;
+            return 0x7A;
+        };
+        cpu.io.register_read(0x93,null,observe);
+        if(kind==="clock")clockMutation=()=>{if(cpu.instruction_pointer[0]===PC+3){clockMutation=null;observe();}};
+        assert(await request(4));const before=count(),checked=e.ir_cache_stat(32),rejected=e.ir_cache_stat(33);
+        await run();clockMutation=null;
+        assert.equal(observations,1,`${kind}/${mutation}: never replay completed observer`);
+        assert.equal((count()-before)>>>0,4);
+        assert.equal(cpu.reg32[3],["bytes","mapping","context"].includes(mutation)?0:2);
+        if(mutation==="xmm")assert.equal(cpu.reg_xmm32s[0],0x12345678,"failed reload cannot overwrite host XMM mutation");
+        if(mutation==="none"){
+            assert(e.ir_cache_stat(32)>checked,"owner bytes/mappings actually checked");
+            assert.equal(e.ir_cache_stat(33),rejected);
+            assert.equal(e.ir_cache_entry_stat(PC,0,1,3),3,"observer and tail execute in one activation");
+        }
+    }
+    clockMutation=null;
+    console.log(`PASS: ${wasm}: in-owner scalar port/TSC continuation, exact retirement and raw-code/mapping/context/XMM/IRQ barriers`);
+    for(const depth of [1,2]) {
+        const code=[0x43,...Array(depth).fill(0xFB),0x90,0x43,0xF4];prepare(code);
+        const raw=new Uint8Array(e.memory.buffer);
+        raw[e.get_pic_addr_master()+3]=0;raw[e.get_pic_addr_slave()+3]=0;
+        assert(await request(code.length-1));const before=count();await run();
+        assert.equal(cpu.reg32[3],2);assert.equal((count()-before)>>>0,depth+4);
+        assert.equal(e.ir_cache_entry_stat(PC,0,1,3),depth+3,"STI shadow retains SSA into its following block");
+    }
+    console.log(`PASS: ${wasm}: no-pending single/nested STI shadow keeps following arithmetic in the same activation`);
     for(const enabled of [false,true]) {
         prepare([0xFB,0x90,0x43,0xF4]);cpu.flags[0]=enabled?0x202:2;
         assert(await request(2));cpu.instruction_pointer[0]=PC+2;assert(await request(1));

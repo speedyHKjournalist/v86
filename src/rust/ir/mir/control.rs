@@ -161,7 +161,7 @@ pub fn lower(region: &Region, allocation: &Allocation) -> Result<ControlFlow, Co
             .collect::<Result<Vec<_>, CompileError>>()?;
         schedule(edge.target, &pairs, &allocation.local_types)
     };
-    let blocks = region
+    let mut blocks = region
         .blocks
         .iter()
         .map(|block| {
@@ -208,6 +208,10 @@ pub fn lower(region: &Region, allocation: &Allocation) -> Result<ControlFlow, Co
         && states
             .iter()
             .all(|id| region.states[id.index()].count_base.is_some());
+    let cold = cold_dispatch(&region.entries, &blocks)?;
+    for (index, block) in blocks.iter_mut().enumerate() {
+        if cold[index] { block.budget_cost = 0; }
+    }
     Ok(ControlFlow {
         entries: region.entries.clone(),
         blocks,
@@ -239,7 +243,46 @@ pub fn verify(
     }
     Ok(())
 }
+/// Empty, recovery-free blocks may only extend an acyclic cold prologue.
+/// Require every predecessor to be an entry or an already certified dispatcher;
+/// an ordinary guest edge, an orphan, and a recovery-free cycle all fail closed.
+/// The proof uses machine CFG data and is repeated after machine optimization.
+fn cold_dispatch(entries: &[BlockId], blocks: &[Block]) -> Result<Vec<bool>, CompileError> {
+    let mut incoming = vec![Vec::new(); blocks.len()];
+    for (index, block) in blocks.iter().enumerate() {
+        for edge in block.terminator.edges() {
+            incoming.get_mut(edge.target.index()).ok_or_else(invalid)?.push(index);
+        }
+    }
+    let mut admitted = vec![false; blocks.len()];
+    for entry in entries {
+        if !incoming.get(entry.index()).ok_or_else(invalid)?.is_empty() {
+            return Err(invalid());
+        }
+        *admitted.get_mut(entry.index()).ok_or_else(invalid)? = true;
+    }
+    let mut cold = vec![false; blocks.len()];
+    loop {
+        let mut changed = false;
+        for (index, block) in blocks.iter().enumerate() {
+            if !admitted[index] && block.recovery.is_none()
+                && block.instructions.is_empty() && block.params.is_empty()
+                && !block.terminator.edges().is_empty() && !incoming[index].is_empty()
+                && incoming[index].iter().all(|&from| admitted[from])
+            {
+                admitted[index] = true;
+                cold[index] = true;
+                changed = true;
+            }
+        }
+        if !changed { break; }
+    }
+    Ok(cold)
+}
 impl ControlFlow {
+    pub(super) fn cold_dispatch(&self) -> Result<Vec<bool>, CompileError> {
+        cold_dispatch(&self.entries, &self.blocks)
+    }
     /// Target restrictions use the lowered graph, not HIR control-flow policy.
     pub fn check_target(&self, cpu: bool) -> Result<(), CompileError> {
         let mut degrees = vec![0usize; self.blocks.len()];
@@ -248,14 +291,16 @@ impl ControlFlow {
                 *degrees.get_mut(edge.target.index()).ok_or_else(invalid)? += 1;
             }
         }
+        let cold = self.cold_dispatch()?;
         for (index, block) in self.blocks.iter().enumerate() {
+            if block.budget_cost != if cold[index] { 0 } else { 1 } { return Err(invalid()); }
             if self.entries.contains(&BlockId(index as u32)) {
                 if degrees[index] != 0 || !block.params.is_empty() {
                     return Err(CompileError::Unsupported(
                         "entry prologue with internal predecessors/parameters",
                     ));
                 }
-            } else if block.recovery.is_none() {
+            } else if block.recovery.is_none() && !cold[index] {
                 return Err(CompileError::Unsupported(
                     "block budget recovery map missing",
                 ));
@@ -286,5 +331,35 @@ impl ControlFlow {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cold_dispatch_tests {
+    use super::*;
+    fn edge(target: u32) -> Edge { Edge { target: BlockId(target), scratch: vec![], copies: vec![] } }
+    #[test]
+    fn only_bounded_cold_scaffolding_can_have_zero_budget_cost() {
+        let entry = Block { params: vec![], instructions: vec![InstId(0)], recovery: None,
+            budget_cost: 1, terminator: Terminator::Jump(edge(1)) };
+        let cold = Block { params: vec![], instructions: vec![], recovery: None,
+            budget_cost: 0, terminator: Terminator::Jump(edge(2)) };
+        let guest = Block { params: vec![], instructions: vec![InstId(1)], recovery: Some(StateId(0)),
+            budget_cost: 1, terminator: Terminator::Exit(StateId(0)) };
+        let graph = ControlFlow { entries: vec![BlockId(0)], blocks: vec![entry,cold,guest],
+            dynamic_counts: true, polls: vec![] };
+        assert_eq!(graph.cold_dispatch().unwrap(), vec![false,true,false]);
+        graph.check_target(true).unwrap();
+        for variant in 0..5 {
+            let mut invalid = graph.clone();
+            match variant {
+                0 => invalid.blocks[1].instructions.push(InstId(2)),
+                1 => invalid.blocks[1].params.push(0),
+                2 => invalid.blocks[1].terminator = Terminator::Jump(edge(1)),
+                3 => invalid.blocks[2].terminator = Terminator::Jump(edge(1)),
+                _ => invalid.blocks[0].terminator = Terminator::Jump(edge(2)),
+            }
+            assert!(invalid.check_target(true).is_err(), "variant {variant} must pay normal budget and provide recovery");
+        }
     }
 }

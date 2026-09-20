@@ -81,15 +81,12 @@ fn automatic_cfg_budget_shrinks_without_weakening_snapshot_checks() {
         version: 8,
     });
     let options = config(true);
-    assert_eq!(
-        compile_cpu_cfg_region(&req, &bytes, &options).err(),
-        Some(crate::ir::lowering::CompileError::Budget("CFG block count")),
-    );
+    compile_cpu_cfg_region(&req, &bytes, &options).unwrap();
     let (artifact, shortened, retries) = compile_cpu_cfg_bounded(&req, &bytes, &options).unwrap();
-    assert!(retries > 0);
-    assert!(shortened.bytes.len() <= 48);
-    assert_eq!(shortened.mappings.len(), 1);
-    assert_eq!(shortened.dependencies.len(), 1);
+    assert_eq!(retries, 0, "compact CFG retains the whole hot loop");
+    assert_eq!(shortened.bytes.len(), 97);
+    assert_eq!(shortened.mappings.len(), 2);
+    assert_eq!(shortened.dependencies.len(), 2);
     assert_eq!(artifact.guest_bytes, shortened.bytes.len());
     assert!(artifact.current(req.key, &shortened.dependencies,
         EntryContract::Cpu(req.cpu_entry()), &shortened.mappings));
@@ -109,8 +106,16 @@ fn automatic_cfg_budget_shrinks_without_weakening_snapshot_checks() {
     let mut options = config(true);
     options.max_code_bytes = 512;
     let (_, shortened, retries) = compile_cpu_cfg_bounded(&req, &bytes, &options).unwrap();
+    assert_eq!(retries, 0);
+    assert_eq!(shortened.bytes.len(), 477, "instruction-aligned internal target survives");
+
+    // Branch-heavy graphs still exercise the bounded fallback; compacting
+    // fallthrough must not bypass decode/graph limits or publish partial opcodes.
+    let bytes = snapshot([0xEB, 0].repeat(95), 0x100000);
+    let (_, shortened, retries) = compile_cpu_cfg_bounded(&req, &bytes, &options).unwrap();
     assert!(retries > 0);
-    assert_eq!(shortened.bytes.len() % 5, 0);
+    assert_eq!(shortened.bytes.len() % 2, 0);
+    assert!(shortened.bytes.len() < bytes.bytes.len());
 
     // The automatic path should never construct a 96-block CFG for straight
     // code that the existing linear CPU frontend represents in one block.
@@ -381,4 +386,52 @@ fn multiple_cpu_entries_split_and_validate_independently() {
     }
     source.bytes.push(0x0F); // A later entry cannot publish a partially successful batch.
     assert!(compile_cpu_entries(&req, &source, &entries, &config(true)).is_err());
+}
+
+#[test]
+fn shared_entries_compile_one_guarded_body() {
+    std::fs::create_dir_all("build/ir-shared-entry").unwrap();
+    let mut cases = Vec::new();
+    for mode in [false, true] {
+        for budget in [1, 2, 5, 40] {
+            for optimize in [false, true] {
+                let req = request(0x1000, 0x100000, mode);
+                let bytes = snapshot(vec![0x40, 0x43, 0x49, 0x75, 0xFB], 0x100000);
+                let entries: Vec<_> = [0, 1, 2].iter().enumerate().map(|(i, &offset)| CpuEntryRequest {
+                    offset, key: PublicationKey { job: req.key.job + i as u64,
+                        slot: req.key.slot + i as u32, ..req.key },
+                }).collect();
+                let mut options = config(optimize); options.execution_budget = budget;
+                let artifact = compile_cpu_shared_entries(&req, &bytes, &entries, &options).unwrap();
+                assert_eq!(artifact.alternate_entries.len(), 2);
+                assert_eq!(artifact.cpu_entries().count(), 3);
+                assert_eq!(artifact.guest_bytes, bytes.bytes.len());
+                assert_eq!(artifact.dependencies, bytes.dependencies);
+                for entry in artifact.cpu_entries() { assert!(artifact.accepts_entry(entry)); }
+                assert!(!artifact.accepts_entry(request(0x1003, 0x100003, mode).cpu_entry()));
+                std::fs::write(format!("build/ir-shared-entry/{}.wasm", cases.len()), &artifact.code.bytes).unwrap();
+                cases.push(format!("[{mode},{budget},{optimize}]"));
+            }
+        }
+    }
+    std::fs::write("build/ir-shared-entry/cases.json", format!("[{}]", cases.join(","))).unwrap();
+}
+
+#[test]
+fn shared_entries_reject_ambiguous_streams_and_bad_identity() {
+    let req = request(0x1000, 0x100000, true);
+    let bytes = snapshot(vec![0xB8, 0x40, 0x40, 0x40, 0x40, 0x40], 0x100000);
+    let first = CpuEntryRequest { offset: 0, key: req.key };
+    let second = CpuEntryRequest { offset: 1, key: PublicationKey { job: 18, slot: 4, ..req.key } };
+    assert!(matches!(compile_cpu_shared_entries(&req, &bytes, &[first.clone(), second], &config(true)),
+        Err(crate::ir::lowering::CompileError::Unsupported("overlapping guest instruction streams"))));
+    for (offset, key) in [(0, PublicationKey { job: 18, slot: 4, ..req.key }),
+        (6, PublicationKey { job: 18, slot: 4, ..req.key }), (5, req.key),
+        (5, PublicationKey { job: 18, slot: 4, vm_generation: 3, ..req.key })] {
+        assert!(compile_cpu_shared_entries(&req, &bytes,
+            &[first.clone(), CpuEntryRequest { offset, key }], &config(true)).is_err());
+    }
+    let artifact = compile_cpu_shared_entries(&req, &bytes,
+        &[first, CpuEntryRequest { offset: 5, key: PublicationKey { job: 18, slot: 4, ..req.key } }], &config(true)).unwrap();
+    assert_eq!(artifact.alternate_entries.len(), 1, "instruction-aligned sibling shares the body");
 }

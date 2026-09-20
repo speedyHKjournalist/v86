@@ -32,6 +32,9 @@ struct Owner { index: usize, id: u64 }
 #[derive(Clone, Copy)]
 struct Successor { key: EntryIndexKey, owner: Owner }
 struct Record {
+    /// Active index aliases. A replacement may supersede one entry without
+    /// destroying a shared owner still serving its other entries.
+    entries: Vec<super::entry::CpuEntryKey>,
     job: Job,
     slot: u32,
     phase: Phase,
@@ -63,10 +66,14 @@ struct Cache {
     successor_hits: u32,
     fusion_enabled: bool,
     fused_publications: u32,
+    shared_publications: u32,
     fused_hits: u32,
     fused_steps: u32,
     needs_collection: bool,
     active: bool,
+    active_owner: Option<Owner>,
+    observer_checks: u32,
+    observer_rejections: u32,
     hits: u32,
     rejected: u32,
     failed: u32,
@@ -101,10 +108,14 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     successor_hits: 0,
     fusion_enabled: true,
     fused_publications: 0,
+    shared_publications: 0,
     fused_hits: 0,
     fused_steps: 0,
     needs_collection: false,
     active: false,
+    active_owner: None,
+    observer_checks: 0,
+    observer_rejections: 0,
     hits: 0,
     rejected: 0,
     failed: 0,
@@ -179,7 +190,7 @@ pub unsafe fn ir_cache_set_fast_validation(enabled: u32) -> bool {
 fn target(cache: &mut Cache, key: EntryIndexKey) -> Option<usize> {
     let slot = ((key.0 >> 1 ^ key.0 >> 12 ^ key.1) & 63) as usize;
     if let Some((saved, index)) = cache.targets[slot] {
-        if saved == key && cache.records.get(index).is_some_and(|r| r.phase == Phase::Published) {
+        if saved == key && cache.records.get(index).is_some_and(|r| r.phase == Phase::Published && r.entries.iter().any(|entry| index_key(*entry) == key)) {
             cache.target_hits = cache.target_hits.wrapping_add(1);
             return Some(index);
         }
@@ -207,7 +218,8 @@ fn successor_target(cache: &mut Cache, key: EntryIndexKey, previous: Option<Owne
         .and_then(|r| r.successor));
     if let Some(s) = successor.filter(|s| s.key == key) {
         if cache.records.get(s.owner.index).is_some_and(|r|
-            r.phase == Phase::Published && r.job.artifact.key.job == s.owner.id) {
+            r.phase == Phase::Published && r.job.artifact.key.job == s.owner.id
+                && r.entries.iter().any(|entry| index_key(*entry) == key)) {
             cache.successor_hits = cache.successor_hits.wrapping_add(1);
             return Some(s.owner.index);
         }
@@ -228,6 +240,19 @@ unsafe fn cached_current(job: &Job) -> CachedMatch {
         if current != CachedMatch::Match { return current; }
     }
     CachedMatch::Match
+}
+/// A host callback can mutate RAM without a dirty notification. Reuse no epoch
+/// shortcut here: verify every source and mapping of the still-published owner.
+/// Never perform a guest fetch, publish work, or run a second observer.
+pub(super) unsafe fn observer_continuation() -> bool {
+    let mut cache = CACHE.try_lock().unwrap();
+    cache.observer_checks = cache.observer_checks.wrapping_add(1);
+    let valid = cache.active && cache.active_owner.is_some_and(|owner|
+        cache.records.get(owner.index).is_some_and(|record|
+            record.job.artifact.key.job == owner.id && record.phase == Phase::Published
+                && cached_current(&record.job) == CachedMatch::Match));
+    if !valid { cache.observer_rejections = cache.observer_rejections.wrapping_add(1); }
+    valid
 }
 unsafe fn mappings_current(job: &Job) -> bool {
     mappings_cached(&job.source) && job.artifact.fused_sources.iter()
@@ -257,20 +282,27 @@ fn fusion_indices(cache: &Cache, entry: super::entry::CpuEntryKey) -> Option<(us
     if !cache.fusion_enabled { return None; }
     let a = *cache.published.get(&index_key(entry))?;
     let root = &cache.records[a];
-    if root.phase != Phase::Published || root.fusion_attempted || root.job.artifact.fused_sources.len() >= 3 {
+    // The snapshot starts at the canonical root, not at an arbitrary alias.
+    // Alias promotion may compile separately; never reinterpret root bytes at
+    // an alias PC while constructing a fused source.
+    if root.job.artifact.entry != EntryContract::Cpu(entry)
+        || root.phase != Phase::Published || root.fusion_attempted {
         return None;
     }
     let (_, target, hits) = root.hot_exit?;
-    if root.job.artifact.fused_sources.iter().any(|s| s.entry == target) { return None; }
-    if hits < 8 || entry == target || entry.cs_base() != target.cs_base()
+    // At the source cap, a later witnessed edge can still close the existing
+    // trace. Reject only an already installed prediction, not its captured
+    // target; otherwise four-source cycles remain permanently open.
+    let (observed, _, _) = root.hot_exit?;
+    if root.job.artifact.fused_edges.iter().any(|edge| edge.from == observed.from && edge.target == observed.target) { return None; }
+    if hits < 8 || entry == target && root.job.artifact.fused_sources.is_empty()
+        || entry.cs_base() != target.cs_base()
         || entry.default_32 != target.default_32 { return None; }
     let b = *cache.published.get(&index_key(target))?;
     let peer = &cache.records[b];
-    // Wait for both sides to acquire a profile. Publishing immediately after a
-    // peer's promotion otherwise freezes a one-way trace with no return edge.
-    // Terminal peers cannot request a normal successor. Once repeatedly used,
-    // they can still be the last fragment of a trace (with their full exit ABI).
-    if peer.hot_exit.map_or(peer.hits < 8, |(_, _, hits)| hits < 8) { return None; }
+    // The root's witnessed edge is sufficient authority to attempt fusion.
+    // A newly published peer need not wait for another eight activations: its
+    // unknown successors remain ordinary guarded exits, never guessed links.
     if peer.phase != Phase::Published { return None; }
     let mut entries = vec![entry];
     entries.extend(root.job.artifact.fused_sources.iter().map(|s| s.entry));
@@ -287,22 +319,46 @@ pub(super) unsafe fn take_fusion(entry: super::entry::CpuEntryKey)
     cache.records[a].fusion_attempted = true;
     if !unchanged_full(&cache.records[a].job) || !unchanged_full(&cache.records[b].job) { return None; }
     let root = &cache.records[a];
-    let peer = &cache.records[b];
-    let (_, target, _) = root.hot_exit?;
+    let mut sources = vec![CapturedRegion { entry, source: root.job.source.clone() }];
+    sources.extend(root.job.artifact.fused_sources.clone());
     let mut edges = root.job.artifact.fused_edges.clone();
-    for (edge, _, _) in [root.hot_exit, peer.hot_exit].iter().flatten() {
-        if let Some(old) = edges.iter_mut().find(|e| e.from == edge.from) { *old = *edge; }
-        else if edges.len() < 4 { edges.push(*edge); }
+    let mut visited = vec![a];
+    let mut next = Some(b);
+    // Close a witnessed chain in one cold compile instead of repeatedly
+    // rebuilding A+B, then A+B+C, then A+B+C+D. Count/page/graph budgets and
+    // exact dynamic-target guards remain unchanged.
+    while let Some(index) = next {
+        if visited.contains(&index) { break; }
+        let record = &cache.records[index];
+        if record.phase != Phase::Published || !unchanged_full(&record.job) { break; }
+        let EntryContract::Cpu(peer_entry) = record.job.artifact.entry else { break; };
+        if peer_entry.cs_base() != entry.cs_base() || peer_entry.default_32 != entry.default_32 { break; }
+        let candidates = std::iter::once(CapturedRegion { entry: peer_entry, source: record.job.source.clone() })
+            .chain(record.job.artifact.fused_sources.iter().cloned());
+        let mut additions = Vec::new();
+        for candidate in candidates {
+            if !sources.iter().any(|s| s.entry == candidate.entry)
+                && !additions.iter().any(|s: &CapturedRegion| s.entry == candidate.entry) {
+                additions.push(candidate);
+            }
+        }
+        if sources.len() + additions.len() > 4 { break; }
+        sources.extend(additions);
+        visited.push(index);
+        next = record.hot_exit.filter(|(_, _, hits)| *hits >= 8)
+            .and_then(|(_, target, _)| cache.published.get(&index_key(target)).copied());
     }
-    for edge in &peer.job.artifact.fused_edges {
-        if !edges.iter().any(|e| e.from == edge.from) && edges.len() < 4 { edges.push(*edge); }
+    for index in visited {
+        let record = &cache.records[index];
+        let observed = record.hot_exit.map(|(edge, _, _)| edge);
+        for edge in record.job.artifact.fused_edges.iter().copied().chain(observed) {
+            if let Some(old) = edges.iter_mut().find(|e| e.from == edge.from) { *old = edge; }
+            else if edges.len() < 4 { edges.push(edge); }
+        }
     }
-    let mut peers = root.job.artifact.fused_sources.clone();
-    for candidate in std::iter::once(CapturedRegion { entry: target, source: peer.job.source.clone() })
-        .chain(peer.job.artifact.fused_sources.iter().cloned()) {
-        if candidate.entry != entry && !peers.iter().any(|p| p.entry == candidate.entry) { peers.push(candidate); }
-    }
-    Some((root.job.source.clone(), peers, edges))
+    if sources.len() < 2 { return None; }
+    let primary = sources.remove(0).source;
+    Some((primary, sources, edges))
 }
 #[no_mangle]
 pub unsafe fn ir_cache_set_fusion(enabled: u32) -> bool {
@@ -344,14 +400,10 @@ pub unsafe fn ir_cache_collect() -> u32 {
                 true
             }
         });
-        cache.published = cache.records.iter().enumerate().filter_map(|(index, r)| {
-            if r.phase == Phase::Published {
-                if let EntryContract::Cpu(entry) = r.job.artifact.entry {
-                    return Some((index_key(entry), index));
-                }
-            }
-            None
-        }).collect();
+        cache.published = cache.records.iter().enumerate()
+            .filter(|(_, record)| record.phase == Phase::Published)
+            .flat_map(|(index, record)| record.entries.iter().map(move |entry| (index_key(*entry), index)))
+            .collect();
         cache.needs_collection = false;
         cache.reclaimed = cache.reclaimed.wrapping_add(retired.len() as u32);
         retired
@@ -404,7 +456,9 @@ pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
     let mut cache = CACHE.try_lock().unwrap();
     cache.clock = cache.clock.wrapping_add(1);
     let last_used = cache.clock;
+    let entries = job.artifact.cpu_entries().collect();
     cache.records.push(Record {
+        entries,
         job,
         slot,
         phase: Phase::Pending,
@@ -429,7 +483,7 @@ pub(super) fn can_make_room(entry: super::entry::CpuEntryKey) -> bool {
             r.phase == Phase::Retired
                 || r.automatic
                     && r.phase == Phase::Published
-                    && r.job.artifact.entry != EntryContract::Cpu(entry)
+                    && !r.entries.contains(&entry)
         })
 }
 pub(super) unsafe fn make_room(entry: super::entry::CpuEntryKey) -> bool {
@@ -449,23 +503,23 @@ pub(super) unsafe fn make_room(entry: super::entry::CpuEntryKey) -> bool {
             .filter(|(_, r)| {
                 r.automatic
                     && r.phase == Phase::Published
-                    && r.job.artifact.entry != EntryContract::Cpu(entry)
+                    && !r.entries.contains(&entry)
             })
             .min_by_key(|(_, r)| (r.last_used, r.job.artifact.key.job))
             .map(|(index, _)| index);
         if let Some(index) = victim {
             let r = &mut cache.records[index];
             r.phase = Phase::Retired;
-            let entry = r.job.artifact.entry;
+            let entries = r.entries.clone();
             cache.evictions = cache.evictions.wrapping_add(1);
             cache.needs_collection = true;
-            Some(entry)
+            Some(entries)
         } else {
             None
         }
     };
-    if let Some(EntryContract::Cpu(entry)) = evicted {
-        super::schedule::evicted(entry);
+    if let Some(entries) = evicted {
+        for entry in entries { super::schedule::evicted(entry); }
     }
     ir_cache_collect();
     { let c=CACHE.try_lock().unwrap(); c.records.len() < c.capacity }
@@ -545,18 +599,20 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
         cache.needs_collection = true;
         return false;
     }
-    let entry = cache.records[index].job.artifact.entry;
-    for (i, r) in cache.records.iter_mut().enumerate() {
-        if i != index && r.job.artifact.entry == entry && r.phase == Phase::Published {
-            r.phase = Phase::Retired;
+    let entries = cache.records[index].entries.clone();
+    for (i, record) in cache.records.iter_mut().enumerate() {
+        if i != index && record.phase == Phase::Published {
+            record.entries.retain(|entry| !entries.contains(entry));
+            if record.entries.is_empty() { record.phase = Phase::Retired; }
         }
     }
     cache.records[index].phase = Phase::Published;
     cache.needs_collection = true;
-    if let EntryContract::Cpu(entry) = entry {
-        cache.published.insert(index_key(entry), index);
-        cache.missing_targets.fill(None);
-    }
+    for entry in &entries { cache.published.insert(index_key(*entry), index); }
+    // Cached predecessor hints must not retain authority over superseded aliases.
+    cache.targets.fill(None);
+    cache.missing_targets.fill(None);
+    if entries.len() > 1 { cache.shared_publications = cache.shared_publications.wrapping_add(1); }
     let structured = cache.records[index].job.artifact.code.structured_cfg;
     if !cache.records[index].job.artifact.fused_sources.is_empty() {
         cache.fused_publications = cache.fused_publications.wrapping_add(1);
@@ -627,6 +683,10 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         27 => cache.evictions,
         28 => cache.negative_hits,
         29 => cache.successor_hits,
+        30 => cache.records.iter().filter(|r| r.phase == Phase::Published).map(|r| r.entries.len() as u32).sum(),
+        31 => cache.shared_publications,
+        32 => cache.observer_checks,
+        33 => cache.observer_rejections,
         _ => 0,
     }
 }
@@ -643,12 +703,9 @@ pub fn ir_cache_entry_stat(
         if record.phase != Phase::Published {
             return false;
         }
-        let EntryContract::Cpu(entry) = record.job.artifact.entry else {
-            return false;
-        };
-        entry.linear.0 == linear
+        record.entries.iter().any(|entry| entry.linear.0 == linear
             && entry.cs_base() == cs_base
-            && u32::from(entry.default_32) == default_32
+            && u32::from(entry.default_32) == default_32)
     }) else {
         return 0;
     };
@@ -670,6 +727,8 @@ pub fn ir_cache_entry_stat(
         8 => record.job.artifact.code.generic_dispatch_edges,
         9 => record.job.artifact.code.structured_edges,
         10 => 1 + record.job.artifact.fused_sources.len() as u32,
+        11 => record.entries.len() as u32,
+        12 => record.slot,
         _ => 0,
     }
 }
@@ -694,17 +753,18 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
             .records
             .iter()
             .find(|r| {
-                r.phase == Phase::Published && r.job.artifact.entry == EntryContract::Cpu(entry)
+                r.phase == Phase::Published && r.entries.contains(&entry)
             })
-            .map(|r| (r.job.artifact.key.job, r.job.artifact.key, r.job.source.clone(), r.job.artifact.fused_sources.clone()))
+            .map(|r| (r.job.artifact.key.job, r.job.artifact.key, r.job.artifact.entry,
+                r.job.source.clone(), r.job.artifact.fused_sources.clone()))
     };
-    let Some((id, key, source, peers)) = candidate else {
+    let Some((id, key, EntryContract::Cpu(canonical), source, peers)) = candidate else {
         let mut cache = CACHE.try_lock().unwrap();
         cache.link_misses = cache.link_misses.wrapping_add(1);
         return None;
     };
     let valid = live::generation_current(key)
-        && source_current(entry, &source)
+        && source_current(canonical, &source)
         && peers.iter().all(|s| source_current(s.entry, &s.source));
     let mut cache = CACHE.try_lock().unwrap();
     let Some(index) = cache
@@ -888,14 +948,13 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
             let stamp = cache.clock;
             cache.records[index.unwrap()].last_used = stamp;
             cache.active = true;
+            cache.active_owner = Some(Owner { index: index.unwrap(), id });
             cache.hits = cache.hits.wrapping_add(1);
         }
         if valid {
             let index = index.unwrap(); let record = &cache.records[index];
             let needs_heat = record.job.artifact.tier == super::compile::Tier::One
-                || cache.fusion_enabled && !record.fusion_attempted
-                    && record.job.artifact.fused_sources.len() < 3
-                    && record.hot_exit.is_some_and(|(_, _, hits)| hits >= 8);
+                || fusion_indices(&cache, entry).is_some();
             let current = Owner { index, id };
             *owner = Some(current);
             if let Some(p) = previous {
@@ -950,6 +1009,7 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
     {
         let mut cache = CACHE.try_lock().unwrap();
         cache.active = false;
+        cache.active_owner = None;
         cache.guest_steps = cache.guest_steps.wrapping_add(steps);
         cache.max_guest_steps = cache.max_guest_steps.max(steps);
         if steps == 0 {

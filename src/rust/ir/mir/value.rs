@@ -151,7 +151,7 @@ pub fn lower(region: &Region, inst: &Instruction) -> Option<ValuePlan> {
     let mut steps = vec![];
     let requires_cpu = matches!(
         inst.op,
-        Op::ReadSegment(_) | Op::ReadStack32 | Op::ReadXmm(_)
+        Op::ReadEntryLinear | Op::ReadSegment(_) | Op::ReadStack32 | Op::ReadXmm(_)
     );
     match inst.op {
         Op::Const(n) => steps.push(if ty(inst.results[0]) == Type::I64 {
@@ -169,6 +169,7 @@ pub fn lower(region: &Region, inst: &Instruction) -> Option<ValuePlan> {
             Address::Absolute(gp::stack_size_32 as u32),
             Load::U8,
         ),
+        Op::ReadEntryLinear => read(&mut steps, Address::Eip, Load::I32),
         Op::ReadGpr(reg) => read(&mut steps, Address::Gpr(reg), Load::I32),
         Op::ReadXmm(reg) => read(
             &mut steps,

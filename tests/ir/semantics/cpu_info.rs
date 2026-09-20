@@ -53,15 +53,21 @@ fn cpu_info_fixtures() {
     .unwrap();
 }
 #[test]
-fn cpu_info_terminal_contract() {
+fn cpu_info_observer_and_terminal_contracts() {
     for op in [0xA2, 0x30, 0x31, 0x32] {
         let bytes = [0x0F, op];
         assert!(lift(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
         assert!(lift_cpu(&[0xF0, 0x0F, op], GuestEip(0), LinearAddress(0), true).is_err());
-        assert!(lift_cpu(&[0x0F, op, 0x90], GuestEip(0), LinearAddress(0), true).is_err());
+        assert_eq!(lift_cpu(&[0x0F, op, 0x90], GuestEip(0), LinearAddress(0), true).is_ok(), op == 0x31);
         let r = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).unwrap();
         assert_eq!(r.helpers.len(), 1);
-        assert!(matches!(r.helpers[0].abi, HelperAbi::CpuExit));
-        assert!(r.helpers[0].results.is_empty());
+        if op == 0x31 {
+            assert!(matches!(r.helpers[0].abi, HelperAbi::CpuReload));
+            assert_eq!(r.helpers[0].results, vec![crate::ir::types::Type::I32; 14]);
+            lower(&r).unwrap().verify().unwrap();
+        } else {
+            assert!(matches!(r.helpers[0].abi, HelperAbi::CpuExit));
+            assert!(r.helpers[0].results.is_empty());
+        }
     }
 }

@@ -2,11 +2,11 @@
 use super::diagnostics::CompileScope;
 use super::entry::{CpuEntryKey, EntryContract};
 use crate::ir::{
-    backend::wasm::{emit, emit_cpu_entry, emit_cpu_fused_entry, Artifact, StateLayout},
+    backend::wasm::{emit, emit_cpu_entry, emit_cpu_fused_entry, emit_cpu_shared_entry, Artifact, StateLayout},
     frontend::{
         decode::{decode, Flow, GuestEip, LinearAddress, PhysicalAddress},
         lift::{lift, lift_cpu_with_rep_budget},
-        region::{lift_cpu_cfg, lift_cpu_cfg_sources, CfgSource, PredictedEdge},
+        region::{lift_cpu_cfg, lift_cpu_cfg_sources, lift_cpu_cfg_entries, CfgSource, PredictedEdge},
     },
     lowering::{lower, CompileError},
     passes::{licm, run, PassConfig, PassStats},
@@ -91,6 +91,8 @@ pub struct CompiledArtifact {
     /// Additional noncontiguous immutable sources sharing this SSA activation.
     pub fused_sources: Vec<CapturedRegion>,
     pub fused_edges: Vec<PredictedEdge>,
+    /// Exact alternative PCs sharing this function, snapshot and table owner.
+    pub alternate_entries: Vec<CpuEntryKey>,
 }
 #[derive(Clone, Debug)]
 pub struct CapturedRegion {
@@ -98,6 +100,13 @@ pub struct CapturedRegion {
     pub source: ImmutableCodeSnapshot,
 }
 impl CompiledArtifact {
+    pub fn cpu_entries(&self) -> impl Iterator<Item = CpuEntryKey> + '_ {
+        let primary = match self.entry { EntryContract::Cpu(entry) => Some(entry), _ => None };
+        primary.into_iter().chain(self.alternate_entries.iter().copied())
+    }
+    pub fn accepts_entry(&self, entry: CpuEntryKey) -> bool {
+        self.cpu_entries().any(|key| key == entry)
+    }
     /// Must run before installing a table slot; equality includes dependency versions and reset generation.
     /// This is a compiler-side check, not yet the production JS publication protocol.
     pub fn current(
@@ -258,7 +267,7 @@ fn compile_inner(
         )?
     };
     drop(lift_clock);
-    compile_lifted(request, snapshot, config, cpu, region, vec![])
+    compile_lifted(request, snapshot, config, cpu, region, vec![], vec![])
 }
 pub fn compile_cpu_fused(
     request: &CompileRequest,
@@ -304,6 +313,8 @@ pub fn compile_cpu_fused_regions(
         let crate::ir::hir::Op::CallHelper(id) = inst.op else { return false; };
         let helper = &region.helpers[id.index()];
         !(crate::ir::helper::cpu_registry::preserves_code_on_success(&helper.name)
+            || crate::ir::helper::cpu_registry::checked_scalar_continuation(&helper.name)
+            || helper.name == "ir_sti_finish_continue"
             || helper.effects.is_pure()
             || helper.name == "ir_sse_fp_reg_continue"
                 && crate::ir::helper::cpu_registry::xmm_register_operands(&region, &inst.args).is_some())
@@ -316,7 +327,7 @@ pub fn compile_cpu_fused_regions(
         }
     }
     drop(lift_clock);
-    let mut artifact = compile_lifted(request, primary, config, true, region, peers.to_vec())?;
+    let mut artifact = compile_lifted(request, primary, config, true, region, peers.to_vec(), vec![])?;
     artifact.fused_edges = predictions.to_vec();
     Ok(artifact)
 }
@@ -324,6 +335,7 @@ pub fn compile_cpu_fused_regions(
 fn compile_lifted(
     request: &CompileRequest, snapshot: &ImmutableCodeSnapshot, config: &IrConfig,
     cpu: bool, mut region: crate::ir::hir::Region, fused_sources: Vec<CapturedRegion>,
+    alternate_entries: Vec<CpuEntryKey>,
 ) -> Result<CompiledArtifact, CompileError> {
     let _context = super::diagnostics::CompileContext::new(request.linear.0, if request.tier == Tier::One {1} else {2});
     let mut dependencies = snapshot.dependencies.clone();
@@ -397,13 +409,13 @@ fn compile_lifted(
     let _emit_clock = CompileScope::new(6);
     let code = if cpu {
         let code_pages: Vec<u32> = dependencies.iter().map(|d| d.page.0).collect();
-        let emit_entry = if fused_sources.is_empty() { emit_cpu_entry } else { emit_cpu_fused_entry };
-        emit_entry(
-            &mir,
-            config.execution_budget,
-            request.cpu_entry(),
-            &code_pages,
-        )?
+        if alternate_entries.is_empty() {
+            let emit_entry = if fused_sources.is_empty() { emit_cpu_entry } else { emit_cpu_fused_entry };
+            emit_entry(&mir, config.execution_budget, request.cpu_entry(), &code_pages)?
+        } else {
+            emit_cpu_shared_entry(&mir, config.execution_budget, request.cpu_entry(),
+                &alternate_entries, &code_pages, !fused_sources.is_empty())?
+        }
     } else {
         emit(&mir, config.layout, config.execution_budget)?
     };
@@ -427,6 +439,7 @@ fn compile_lifted(
         },
         fused_sources,
         fused_edges: vec![],
+        alternate_entries,
     })
 }
 
@@ -497,6 +510,41 @@ pub fn compile_cpu_entries(
 ) -> Result<Vec<CompiledArtifact>, CompileError> {
     Ok(compile_entry_batch(origin, snapshot, entries, config, false, false)?
         .into_iter().map(|(artifact, _, _)| artifact).collect())
+}
+/// Compile one shared graph/code body, not one suffix module per entry.
+/// Overlapping instruction streams are deliberately declined by CFG formation;
+/// the caller may retain the existing independently guarded fallback artifacts.
+pub fn compile_cpu_shared_entries(
+    origin: &CompileRequest, snapshot: &ImmutableCodeSnapshot,
+    entries: &[CpuEntryRequest], config: &IrConfig,
+) -> Result<CompiledArtifact, CompileError> {
+    validate_snapshot(origin, snapshot, config)?;
+    if entries.is_empty() || entries.len() > 8 {
+        return Err(CompileError::Budget("CPU entry batch"));
+    }
+    if entries[0].offset != 0 || entries[0].key != origin.key {
+        return Err(CompileError::InvalidIr("shared entry origin mismatch".into()));
+    }
+    for (i, entry) in entries.iter().enumerate() {
+        if entry.offset >= snapshot.bytes.len() || entry.key.vm_generation != origin.key.vm_generation
+            || entries[..i].iter().any(|old| old.offset == entry.offset
+                || old.key.job == entry.key.job
+                || entry.key.slot != 0 && old.key.slot == entry.key.slot) {
+            return Err(CompileError::InvalidIr("invalid shared entry identity".into()));
+        }
+    }
+    let keys: Vec<_> = entries.iter().map(|entry| CpuEntryKey {
+        pc: GuestEip(origin.pc.0.wrapping_add(entry.offset as u32)),
+        linear: LinearAddress(origin.linear.0.wrapping_add(entry.offset as u32)),
+        default_32: origin.default_32,
+    }).collect();
+    let lift_clock = CompileScope::new(2);
+    let region = lift_cpu_cfg_entries(&[CfgSource {
+        bytes: &snapshot.bytes, pc: origin.pc, linear: origin.linear,
+    }], &[], &keys.iter().map(|key| key.pc).collect::<Vec<_>>(),
+        origin.default_32, config.rep_iteration_budget)?;
+    drop(lift_clock);
+    compile_lifted(origin, snapshot, config, true, region, vec![], keys[1..].to_vec())
 }
 /// Automatic multi-entry work shares one immutable capture; each entry may
 /// shrink independently at a graph budget. No partial batch escapes on error.

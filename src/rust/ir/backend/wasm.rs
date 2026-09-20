@@ -1137,6 +1137,18 @@ impl Emitter<'_> {
         }
     }
     fn planned_call(&mut self, id: InstId, plan: &CallPlan) {
+        if self.cpu && self.mir.helpers[plan.helper.index()].as_ref().unwrap().name == "ir_sti_finish_continue" {
+            self.w.call_signature("ir_sti_no_pending_irq",
+                crate::ir::helper::imports::signature("ir_sti_no_pending_irq"));
+            // Clear before either arm: the slow helper owns the entire unwind,
+            // and return_to_cpu must not deliver the same IRQ scope twice.
+            self.w.const_i32(0);
+            self.w.set_local(self.interrupt_shadow.as_ref().expect("completed STI scope"));
+            self.w.eqz_i32(); self.w.if_void();
+            self.planned_call_slow(id, plan);
+            self.w.block_end();
+            return;
+        }
         if let Some(opcode) = plan.native_fp.filter(|_| self.cpu) {
             let (source, destination) = plan.xmm_observation.unwrap();
             let operand = |reg: u8| self.mir.states[plan.state.index()].cpu.writes.iter()
@@ -1218,7 +1230,7 @@ impl Emitter<'_> {
         // Observers retain full state synchronization. Only a successful,
         // unchanged execution context may request another cold admission. The
         // pre-call barrier forces source/mapping validation after raw host writes.
-        let observer_link = self.entry.filter(|_| matches!(call.name.as_str(), "ir_in" | "ir_out" | "ir_rdtsc"))
+        let observer_link = self.entry.filter(|_| matches!(call.name.as_str(), "ir_in" | "ir_out" | "ir_rdtsc" | "ir_in_continue" | "ir_out_continue" | "ir_rdtsc_continue"))
             .map(|entry| {
                 self.w.load_fixed_i32(gp::instruction_pointer as u32);
                 let next = self.w.set_new_local();
@@ -1301,6 +1313,14 @@ impl Emitter<'_> {
             self.w.block_end();
         } else {
             self.w.unreachable();
+        }
+        // A checked observer explicitly revalidated this exact active owner.
+        // Refresh the fused poll certificate only on its verified Normal path.
+        if crate::ir::helper::cpu_registry::checked_scalar_continuation(&call.name) {
+            if let Some((address, epoch)) = &self.fused_epoch {
+                self.w.get_local(address); self.w.load_unaligned_i64(0);
+                self.w.set_local_i64(epoch);
+            }
         }
         if call.starts_interrupt_shadow {
             let depth = self.interrupt_shadow.as_ref().expect("STI local");
@@ -1453,11 +1473,11 @@ impl Emitter<'_> {
 }
 
 pub fn emit(mir: &MirRegion, layout: StateLayout, budget: u32) -> Result<Artifact, CompileError> {
-    emit_inner(mir, layout, budget, false, None, &[], false)
+    emit_inner(mir, layout, budget, false, None, &[], false, &[])
 }
 /// Cold CPU entry, outside the legacy JIT frame. Uses actual CPU globals and MMU.
 pub fn emit_cpu(mir: &MirRegion, budget: u32) -> Result<Artifact, CompileError> {
-    emit_cpu_inner(mir, budget, None, &[], false)
+    emit_cpu_inner(mir, budget, None, &[], false, &[])
 }
 /// CPU ABI fixture with an explicit immutable physical code dependency set.
 pub(crate) fn emit_cpu_with_code_pages(
@@ -1465,7 +1485,7 @@ pub(crate) fn emit_cpu_with_code_pages(
     budget: u32,
     code_pages: &[u32],
 ) -> Result<Artifact, CompileError> {
-    emit_cpu_inner(mir, budget, None, code_pages, false)
+    emit_cpu_inner(mir, budget, None, code_pages, false, &[])
 }
 /// CompileRequest owns the association between this key and the lifted guest bytes.
 pub(crate) fn emit_cpu_entry(
@@ -1479,7 +1499,7 @@ pub(crate) fn emit_cpu_entry(
             "CPU entry key requires a single external entry",
         ));
     }
-    emit_cpu_inner(mir, budget, Some(entry), code_pages, false)
+    emit_cpu_inner(mir, budget, Some(entry), code_pages, false, &[])
 }
 pub(crate) fn emit_cpu_fused_entry(
     mir: &MirRegion, budget: u32, entry: CpuEntryKey, code_pages: &[u32],
@@ -1487,7 +1507,24 @@ pub(crate) fn emit_cpu_fused_entry(
     if mir.control.entries.len() != 1 {
         return Err(CompileError::Unsupported("fused entry requires one cold root"));
     }
-    emit_cpu_inner(mir, budget, Some(entry), code_pages, true)
+    emit_cpu_inner(mir, budget, Some(entry), code_pages, true, &[])
+}
+/// A single function/table owner for several instruction-aligned cold entries.
+/// The runtime still validates the whole immutable code snapshot on admission.
+pub(crate) fn emit_cpu_shared_entry(
+    mir: &MirRegion, budget: u32, entry: CpuEntryKey,
+    aliases: &[CpuEntryKey], code_pages: &[u32], fused: bool,
+) -> Result<Artifact, CompileError> {
+    if aliases.is_empty() || aliases.len() > 7 || mir.control.entries.len() != 1 {
+        return Err(CompileError::Budget("shared CPU entry count"));
+    }
+    for (i, alias) in aliases.iter().enumerate() {
+        if *alias == entry || aliases[..i].contains(alias)
+            || alias.cs_base() != entry.cs_base() || alias.default_32 != entry.default_32 {
+            return Err(CompileError::InvalidIr("incompatible shared CPU entry".into()));
+        }
+    }
+    emit_cpu_inner(mir, budget, Some(entry), code_pages, fused, aliases)
 }
 fn emit_cpu_inner(
     mir: &MirRegion,
@@ -1495,6 +1532,7 @@ fn emit_cpu_inner(
     entry: Option<CpuEntryKey>,
     code_pages: &[u32],
     fused: bool,
+    aliases: &[CpuEntryKey],
 ) -> Result<Artifact, CompileError> {
     emit_inner(
         mir,
@@ -1510,6 +1548,7 @@ fn emit_cpu_inner(
         entry,
         code_pages,
         fused,
+        aliases,
     )
 }
 fn emit_inner(
@@ -1520,6 +1559,7 @@ fn emit_inner(
     entry: Option<CpuEntryKey>,
     code_pages: &[u32],
     fused: bool,
+    aliases: &[CpuEntryKey],
 ) -> Result<Artifact, CompileError> {
     #[cfg(test)]
     mir.verify()?;
@@ -1670,6 +1710,14 @@ fn emit_inner(
             "ir_entry_matches",
             crate::ir::helper::imports::signature("ir_entry_matches"),
         );
+        for alias in aliases {
+            e.w.const_i32(alias.linear.0 as i32);
+            e.w.const_i32(alias.cs_base() as i32);
+            e.w.const_i32(i32::from(alias.default_32));
+            e.w.call_signature("ir_entry_matches",
+                crate::ir::helper::imports::signature("ir_entry_matches"));
+            e.w.or_i32();
+        }
         e.w.eqz_i32();
         e.w.if_void();
         e.diagnostic_exit(DiagnosticExit::EntryGuard);
