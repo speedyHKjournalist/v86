@@ -60,12 +60,12 @@ static mut CONTROL_EXITS: [[u64; 2]; 6] = [[0; 2]; 6];
 pub fn helper_category(name: &str) -> u32 {
     match name {
         "ir_load_segment" | "ir_pop_segment" | "ir_mov_segment_continue" => 1,
-        "ir_in" | "ir_ins" => 2, "ir_out" | "ir_outs" => 3,
+        "ir_in" | "ir_in_continue" | "ir_ins" => 2, "ir_out" | "ir_out_continue" | "ir_outs" => 3,
         n if n.starts_with("ir_rep_") => 4,
         n if n.starts_with("ir_far_") || n == "ir_iret" || n == "ir_software_interrupt" => 5,
-        "ir_pop_flags" | "ir_cli" | "ir_cli_check" => 6,
+        "ir_pop_flags" | "ir_cli" | "ir_cli_check" | "ir_sti_finish_continue" => 6,
         "ir_lgdt" | "ir_lidt" | "ir_ltr_reg" | "ir_lldt_reg" | "ir_invlpg" => 7,
-        "ir_rdtsc" => 12, "ir_cpuid" => 13, "ir_read_cr" => 14,
+        "ir_rdtsc" | "ir_rdtsc_continue" => 12, "ir_cpuid" => 13, "ir_read_cr" => 14,
         "ir_write_cr" => 15, "ir_clts" => 16, "ir_sti_check" => 17,
         n if n.starts_with("ir_x87") || n.starts_with("ir_sse") || n.starts_with("ir_mmx") => 9,
         "ir_hlt" => 10, "ir_invalid_form" | "ir_reserved_form" => 11, _ => 0,

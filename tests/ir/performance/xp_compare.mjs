@@ -23,13 +23,17 @@ for(let round=0;round<runs;round++) for(const variant of round%2?[...variants].r
     const result=events.findLast(e=>e.event==='result');
     assert(result?.completed&&result.milestone,`milestone not reached: ${file}`);
     const ir=result.jit?.ir;
+    const work=result.ir_work||{guest_steps:ir?.cache_guest_steps,activations:ir?.cache_hits,full_checks:ir?.cache_full_checks,observer_checks:0};
     const row={round,backend:variant,file,wasm,...result.milestone,mips:result.milestone.instructions/result.milestone.ms/1000,
         // These counters are sampled at stop, slightly after the display event.
-        stop_metrics:ir?{instructions:result.instructions,ir_coverage:ir.cache_guest_steps/result.instructions,
-            instructions_per_activation:ir.cache_guest_steps/ir.cache_hits||0,
-            activations_per_million:ir.cache_hits*1e6/result.instructions,
-            full_checks_per_million:ir.cache_full_checks*1e6/result.instructions,
-            publications:ir.tier1_published+ir.tier2_published,evictions:ir.cache_evictions}:null};
+        stop_metrics:ir?{instructions:result.instructions,ir_coverage:work.guest_steps/result.instructions,
+            instructions_per_activation:work.guest_steps/work.activations||0,
+            activations_per_million:work.activations*1e6/result.instructions,
+            full_checks_per_million:work.full_checks*1e6/result.instructions,
+            observer_checks_per_million:work.observer_checks*1e6/result.instructions,
+            validation_attempts_per_million:(work.full_checks+work.observer_checks)*1e6/result.instructions,
+            publications:ir.tier1_published+ir.tier2_published,evictions:ir.cache_evictions,
+            ...result.boundary_counters}:null};
     rows.push(row);console.log(JSON.stringify(row));
 }
 const median=a=>a.sort((a,b)=>a-b)[Math.floor(a.length/2)];

@@ -130,7 +130,18 @@ try{
     id=compile(1);assert(id);assert.equal(e.ir_live_release(id),1);assert.equal(e.ir_live_release(id),0);
     id=compile(1);assert(id);assert.equal(compile(1921),0n);assert.equal(e.ir_live_error(),1);assert.equal(e.ir_live_info(id,0),0);
     mem[PC]=0x0F;assert.equal(compile(1),0n);assert.equal(e.ir_live_error(),6);
-    mem.fill(0x90,PC,PC+65);assert.equal(compile(65),0n);assert.equal(e.ir_live_error(),7);
+    // Straight-line coalescing makes 65 NOPs legal. Preserve exact execution
+    // budgets and keep a separate, genuinely over-budget CFG rejection case.
+    defaults();mem.fill(0x90,PC,PC+65);id=compile(65);assert(id>0n);assert.equal(valid(id),1);
+    const nopState=state(),nopCount=words[664>>2];module(id).instance.exports.f(0);refresh();
+    const nops=(words[664>>2]-nopCount)>>>0;
+    // Work units include CFG dispatch as well as instruction polls.
+    assert(nops>0&&nops<=32,"coalesced NOPs stop within the execution work budget");
+    assert.deepEqual(state(),{...nopState,ip:PC+nops},"budget exit preserves exact retirement and architectural state");
+    defaults();const branches=Uint8Array.from({length:130},(_,i)=>i%2?0:0x75);mem.set(branches,PC);
+    assert.equal(compile(branches.length),0n,"distinct conditional blocks still exceed the CFG budget");
+    assert.equal(e.ir_live_error(),7);assert.equal(e.ir_live_info(id,0),0,"failed compilation discards the previous artifact");
+    mem.fill(0x90,PC,PC+129);assert.equal(compile(129),0n);assert.equal(e.ir_live_error(),7,"decoded-instruction cap remains enforced");
     defaults();mem[PC]=0x40;cpu.in_hlt[0]=1;assert.equal(compile(1),0n);assert.equal(e.ir_live_error(),2);
     cpu.in_hlt[0]=0;raw[648]=1;assert.equal(compile(1),0n);assert.equal(e.ir_live_error(),2);raw[648]=0;
     assert.equal(e.ir_live_info(0xFFFFFFFFFFFFFFFFn,0),0);assert.equal(e.ir_live_release(0xFFFFFFFFFFFFFFFFn),0);

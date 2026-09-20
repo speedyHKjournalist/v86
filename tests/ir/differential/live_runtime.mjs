@@ -17,7 +17,10 @@ try{
         const bytes=new Uint8Array(e.memory.buffer,e.ir_live_info(id,0),e.ir_live_info(id,1)).slice();
         const {instance}=await WebAssembly.instantiate(bytes,{e:{...e,m:e.memory}});assert.equal(e.ir_live_validate(id),1);instance.exports.f(0);
         assert.equal(cpu.reg32[0]>>>0,0x80000002);assert.equal(new DataView(cpu.mem8.buffer,cpu.mem8.byteOffset).getUint32(0x600,true),0x80000002);
-        assert.equal(new Uint32Array(e.memory.buffer)[664>>2],7);assert.equal(cpu.instruction_pointer[0],0x10000E);
+        // The coalesced tail now reaches HLT after the store: MOV + three
+        // INC/DEC/JNZ iterations + store + HLT retire twelve instructions.
+        assert.equal(new Uint32Array(e.memory.buffer)[664>>2],8);
+        assert.equal(cpu.instruction_pointer[0],0x10000F);assert.equal(cpu.in_hlt[0],1);
         assert.equal(e.ir_live_release(id),1);
     }
     console.log("PASS: experimental-only release compiles, instantiates and executes IR CFG/store artifacts with exact wrapped counts, in both tier requests and optimization modes, without any test-hook exports");

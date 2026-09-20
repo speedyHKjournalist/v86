@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {V86} from '../../../build/libv86.mjs';
 const wasm=process.argv[2]||'build/v86-ir-cache-test.wasm';
-const vm=new V86({wasm_path:wasm,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync('build/jit-capacity.bin')).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:'none'},autostart:false});
+let clockObserver=null,rdtscActive=false;
+const vm=new V86({wasm_fn:async imports=>{
+ const tick=imports.env.microtick;
+ imports.env.microtick=()=>{if(rdtscActive)clockObserver?.();return tick();};
+ return (await WebAssembly.instantiate(fs.readFileSync(wasm),imports)).instance.exports;
+},memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync('build/jit-capacity.bin')).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:'none'},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 try {
  await new Promise(r=>vm.add_listener('emulator-loaded',r));
@@ -14,6 +19,10 @@ try {
  let imported=false;const instantiate=WebAssembly.instantiate;
  WebAssembly.instantiate=(code,imports)=>{
   imported=WebAssembly.Module.imports(new WebAssembly.Module(code)).some(i=>i.name==='ir_diagnostic_begin');
+  const rdtsc=imports.e?.ir_rdtsc_continue;
+  if(rdtsc)imports={...imports,e:{...imports.e,ir_rdtsc_continue:(...args)=>{
+   rdtscActive=true;try{return rdtsc(...args);}finally{rdtscActive=false;}
+  }}};
   return instantiate(code,imports);
  };
  const prepare=async(period,code)=>{
@@ -59,6 +68,19 @@ try {
  vm.write_memory(Uint8Array.of(0xF4),HANDLER);v().setUint32(0x13000+(DATA>>>12)*4,0,true);e.full_clear_tlb();
  assert(await cpu.ir_compile_cached(3,2,1,1,32,8));await run();d=check();assert.equal(d.exits.fault.count,1);assert.equal(d.exits.fault.guest_steps,0);assert.equal(cpu.cr[2]>>>0,DATA);
  v().setUint32(0x13000+(DATA>>>12)*4,DATA|3,true);e.full_clear_tlb();
+ // Rejected in-owner continuations keep their semantic family in diagnostics.
+ // An observer's XMM mutation must survive without stale SSA writeback.
+ for(const [name,code,family] of [['in',[0xE4,0x93],'port_read'],['out',[0xE6,0x93],'port_write'],['rdtsc',[0x0F,0x31],'cpu_control']]) {
+  await prepare(1,[...code,0x43,0xF4]);let observed=0;
+  const mutate=()=>{observed++;cpu.reg_xmm32s[0]^=1;return 7;};
+  if(name==='in')cpu.io.register_read(0x93,null,mutate);
+  else if(name==='out')cpu.io.register_write(0x93,null,mutate);
+  else clockObserver=()=>{if(cpu.instruction_pointer[0]===PC+2){clockObserver=null;mutate();}};
+  assert(await cpu.ir_compile_cached(3,2,1,1,32,8));await run();clockObserver=null;
+  d=check();assert.equal(observed,1);assert.equal(cpu.reg32[3],1);assert.equal(words()[664>>2],3);
+  assert.equal(d.helper_exits[family].count,1,`${name}: declined continuation remains classified`);
+  if(name==='rdtsc')assert.equal(d.control_exits.rdtsc.count,1);
+ }
  // Delayed compilation cannot reinstall diagnostic code after switching off.
  await prepare(1,loop);let resolve,held;
  WebAssembly.instantiate=(code,imports)=>new Promise(r=>{resolve=r;held={code,imports};});

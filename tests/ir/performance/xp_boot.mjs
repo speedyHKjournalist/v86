@@ -56,22 +56,27 @@ try {
     if(recording) e.performance_recording_enable(1);
     started = previous = performance.now();
     count = vm.get_instruction_counter() >>> 0;
-    let priorIr = [e.ir_cache_stat(10) >>> 0, e.ir_cache_stat(2) >>> 0, e.ir_cache_stat(19) >>> 0];
+    const readIr = () => [10,2,19,32].map(field=>e.ir_cache_stat(field)>>>0);
+    let priorIr = readIr();
+    const totalIr = [0,0,0,0];
+    const sampleIr = () => {
+        const current = readIr(), delta = current.map((value,i)=>(value-priorIr[i])>>>0);
+        delta.forEach((value,i)=>totalIr[i]+=value);priorIr=current;return delta;
+    };
     vm.run();
     while(performance.now() - started < duration && !(target === 'desktop' && milestone)) {
         await new Promise(resolve => setTimeout(resolve, target === 'desktop' ? 250 : 5000));
         const now = performance.now(), next = vm.get_instruction_counter() >>> 0;
         const steps = (next - count) >>> 0;
         total += steps;
-        const currentIr = [e.ir_cache_stat(10) >>> 0, e.ir_cache_stat(2) >>> 0, e.ir_cache_stat(19) >>> 0];
-        const delta = currentIr.map((value,i)=>(value-priorIr[i])>>>0);
-        priorIr = currentIr;
+        const delta = sampleIr();
         console.log(JSON.stringify({ backend, wasm, ms: now - started,
             phase, instructions: total,
-            interval_ir: {steps:delta[0], activations:delta[1], full_checks:delta[2],
+            interval_ir: {steps:delta[0], activations:delta[1], full_checks:delta[2], observer_checks:delta[3],
                 coverage:steps ? delta[0]/steps : 0,
                 activations_per_million:steps ? delta[1]*1e6/steps : 0,
-                full_checks_per_million:steps ? delta[2]*1e6/steps : 0},
+                full_checks_per_million:steps ? delta[2]*1e6/steps : 0,
+                validation_attempts_per_million:steps ? (delta[2]+delta[3])*1e6/steps : 0},
             requested_ms: duration, overrun_ms: Math.max(0, now - started - duration),
             mips: steps / (now - previous) / 1000, avg_mips: total / (now - started) / 1000,
             recording, jit: vm.get_jit_info(),
@@ -81,8 +86,14 @@ try {
         previous = now; count = next;
     }
     await vm.stop();
+    total+=((vm.get_instruction_counter()>>>0)-count)>>>0;sampleIr();
     console.log(JSON.stringify({event:'result', backend, target, completed:target === 'time' || !!milestone,
-        ms:performance.now()-started, instructions:total, milestone, jit:vm.get_jit_info()}));
+        ms:performance.now()-started, instructions:total, milestone, jit:vm.get_jit_info(),
+        // Accumulate wrapping counters per interval; long boots can exceed 2^32.
+        ir_work:{guest_steps:totalIr[0],activations:totalIr[1],full_checks:totalIr[2],observer_checks:totalIr[3]},
+        boundary_counters:{entry_aliases:e.ir_cache_stat(30)>>>0,shared_publications:e.ir_cache_stat(31)>>>0,
+            observer_rejections:e.ir_cache_stat(33)>>>0,shared_compilations:e.ir_auto_stat(25)>>>0,
+            shared_extra_entries:e.ir_auto_stat(26)>>>0}}));
     if(recording) {
         const rows = Array.from({ length: e.performance_recording_hotspot_count() }, (_, i) =>
             Array.from({ length: 10 }, (_, j) => e.performance_recording_hotspot_get(i, j)));
