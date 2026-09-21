@@ -66,6 +66,7 @@ pub fn dirty_page(page: u32) {
 pub(super) fn continuation_epoch() -> u64 {
     LIVE.try_lock().unwrap().continuation_epoch
 }
+#[inline(always)]
 pub(super) unsafe fn entry() -> CpuEntryKey {
     let linear = *gp::instruction_pointer as u32;
     CpuEntryKey {
@@ -90,6 +91,7 @@ pub(super) fn publication_key() -> Option<PublicationKey> {
     })
 }
 #[cfg(feature = "ir-experimental")]
+#[inline(always)]
 pub(super) fn generation_current(key: PublicationKey) -> bool {
     let state = LIVE.try_lock().unwrap();
     !state.exhausted && state.generation == key.vm_generation

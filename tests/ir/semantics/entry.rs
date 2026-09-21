@@ -435,3 +435,28 @@ fn shared_entries_reject_ambiguous_streams_and_bad_identity() {
         &[first, CpuEntryRequest { offset: 5, key: PublicationKey { job: 18, slot: 4, ..req.key } }], &config(true)).unwrap();
     assert_eq!(artifact.alternate_entries.len(), 1, "instruction-aligned sibling shares the body");
 }
+
+#[test]
+fn cpu_prologue_imports_only_pointer_bases_used_by_machine_plans() {
+    // The emitter owns these names in the import section; register-only code
+    // must not call opaque imports whose results have no machine-plan consumer.
+    let programs: &[(&[u8], bool, bool)] = &[
+        (&[0x40, 0x43], false, false),                    // GPR arithmetic
+        (&[0x66, 0x0F, 0xEF, 0xC0], false, false),        // PXOR XMM0,XMM0
+        (&[0x8B, 0x06], true, false),                    // scalar load
+        (&[0x89, 0x06], true, true),                     // scalar store + code guard
+        (&[0xFF, 0x06], true, true),                     // RMW read + separate commit
+        (&[0x0F, 0xC7, 0x0E], true, false),              // CMPXCHG8B guarded effect
+    ];
+    for &(code, tlb, ram) in programs {
+        let req = request(0x1000, 0x100000, true);
+        let input = snapshot(code.to_vec(), 0x100000);
+        for optimize in [false, true] {
+            let artifact = compile_cpu_region(&req, &input, &config(optimize)).unwrap();
+            for (name, needed) in [("ir_tlb_base", tlb), ("ir_memory_base", ram)] {
+                assert_eq!(artifact.code.bytes.windows(name.len()).any(|w| w == name.as_bytes()),
+                    needed, "{code:02X?}, optimized={optimize}: {name}");
+            }
+        }
+    }
+}

@@ -4,7 +4,7 @@
 use super::diagnostics::{self as diag, Admission, Scope, Stage};
 use super::{
     compile::CapturedRegion,
-    entry::{admission_epoch, ir_admission_barrier, ir_entry_matches, EntryContract},
+    entry::{admission_epoch, ir_admission_barrier, matches_current as ir_entry_matches, EntryContract},
     live::{self, Job},
     snapshot::{capture, cached_match, mappings_cached, CachedMatch},
 };
@@ -65,6 +65,7 @@ struct Cache {
     fast_checks: u32,
     full_checks: u32,
     post_fetch_reuses: u32,
+    warm_admissions: u32,
     target_hits: u32,
     successor_hits: u32,
     fusion_enabled: bool,
@@ -107,6 +108,7 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     fast_checks: 0,
     full_checks: 0,
     post_fetch_reuses: 0,
+    warm_admissions: 0,
     target_hits: 0,
     successor_hits: 0,
     fusion_enabled: true,
@@ -245,6 +247,7 @@ fn target(cache: &mut Cache, key: EntryIndexKey) -> Option<usize> {
     cache.targets[slot] = Some((key, index));
     Some(index)
 }
+#[inline(always)]
 fn successor_target(cache: &mut Cache, key: EntryIndexKey, previous: Option<Owner>) -> Option<usize> {
     // Indices are hints, never owners: compaction, replacement and slot reuse
     // must all fail the non-repeating publication identity check.
@@ -296,6 +299,7 @@ pub(super) unsafe fn observer_continuation() -> bool {
     if !valid { cache.observer_rejections = cache.observer_rejections.wrapping_add(1); }
     valid
 }
+#[inline(always)]
 unsafe fn mappings_current(job: &Job) -> bool {
     mappings_cached(&job.source) && job.artifact.fused_sources.iter()
         .all(|s| mappings_cached(&s.source))
@@ -755,6 +759,7 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         31 => cache.shared_publications,
         32 => cache.observer_checks,
         33 => cache.observer_rejections,
+        34 => cache.warm_admissions,
         _ => 0,
     }
 }
@@ -895,6 +900,51 @@ unsafe fn execute_mode<const PROFILE: bool>() -> bool {
     take_link_request();
     true
 }
+/// Collection is almost always unnecessary on an ordinary control-flow edge.
+/// Inline only that decision; leave compaction, alias reconstruction and table
+/// reclamation in the existing cold collector, with all its quiescence checks.
+#[inline(always)]
+unsafe fn collect_if_needed() {
+    let needed = CACHE.try_lock().unwrap().needs_collection;
+    if needed { ir_cache_collect(); }
+}
+/// A published owner admitted under a single cache guard. No guard/reference
+/// survives the subsequent generated-code call.
+struct Activation {
+    slot: u32,
+    owner: Owner,
+    needs_heat: bool,
+}
+enum Selected {
+    Ready(Activation),
+    Fetch { slot: u32, owner: Owner, warm: bool, epoch: u64 },
+}
+#[inline(always)]
+fn activate<const PROFILE: bool>(
+    cache: &mut Cache, index: usize, entry: super::entry::CpuEntryKey,
+    previous: Option<Owner>, linked: bool,
+) -> Activation {
+    if PROFILE { diag::admission(Admission::Accepted); }
+    cache.clock = cache.clock.wrapping_add(1);
+    let stamp = cache.clock;
+    let record = &mut cache.records[index];
+    record.last_used = stamp;
+    let owner = Owner { index, id: record.job.artifact.key.job };
+    let needs_heat = record.job.artifact.tier == super::compile::Tier::One
+        || record.fusion_candidate && record.job.artifact.entry == EntryContract::Cpu(entry);
+    let slot = record.slot;
+    cache.active = true;
+    cache.active_owner = Some(owner);
+    cache.hits = cache.hits.wrapping_add(1);
+    if linked { cache.links = cache.links.wrapping_add(1); }
+    if let Some(p) = previous {
+        if let Some(r) = cache.records.get_mut(p.index)
+            .filter(|r| r.phase == Phase::Published && r.job.artifact.key.job == p.id) {
+            r.successor = Some(Successor { key: index_key(entry), owner });
+        }
+    }
+    Activation { slot, owner, needs_heat }
+}
 unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>, owner: &mut Option<Owner>) -> bool {
     let admission_scope = PROFILE.then(|| Scope::new(Stage::Admission));
     if PROFILE { diag::admission(Admission::Attempt); }
@@ -902,7 +952,7 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
         if PROFILE { diag::admission(Admission::Busy); }
         return false;
     }
-    ir_cache_collect();
+    collect_if_needed();
     let entry = live::entry();
     let selected = {
         let mut cache = CACHE.try_lock().unwrap();
@@ -946,107 +996,111 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
                 cache.records[index].phase = Phase::Retired;
                 cache.needs_collection = true;
             } else {
-                selected = Some((
-                    cache.records[index].slot,
-                    cache.records[index].job.artifact.key.job,
-                    index,
-                    cache.fast_validation && cached == CachedMatch::Match,
-                    epoch,
-                ));
+                let warm = cache.fast_validation && cached == CachedMatch::Match
+                    && epoch != u64::MAX;
+                selected = Some(if !PROFILE && warm {
+                    // All source translations (including this actual alias PC)
+                    // have just passed mappings_cached. Thus get_phys_eip can
+                    // only read the instruction cache/TLB: no page walk, A-bit
+                    // write, fault delivery or host callback can occur here.
+                    // Keep real fetch semantics, but avoid dropping/reacquiring
+                    // the cache and rediscovering the same owner afterwards.
+                    // Instrumented fetches stay on the reference path below:
+                    // their timing imports are host observations, not TLB reads.
+                    *gp::previous_ip = *gp::instruction_pointer;
+                    cpu::get_phys_eip().expect("validated IR fetch must hit the CPU TLB");
+                    cache.post_fetch_reuses = cache.post_fetch_reuses.wrapping_add(1);
+                    cache.cached_checks = cache.cached_checks.wrapping_add(1);
+                    cache.records[index].validated_epoch = epoch;
+                    cache.warm_admissions = cache.warm_admissions.wrapping_add(1);
+                    Selected::Ready(activate::<PROFILE>(&mut cache, index, entry, previous, linked))
+                } else {
+                    Selected::Fetch {
+                        slot: cache.records[index].slot,
+                        owner: Owner { index, id: cache.records[index].job.artifact.key.job },
+                        warm, epoch,
+                    }
+                });
             }
         }
         selected
     };
-    let Some((slot, id, selected_index, warm_fetch, epoch)) = selected else {
-        ir_cache_collect();
+    let Some(selected) = selected else {
+        collect_if_needed();
         return false;
     };
-    // Preserve the dispatcher's actual initial fetch translation and A-bit
-    // updates. A cached fast check above is sufficient only when every source
-    // mapping is already CPU-visible; otherwise the read-only capture fallback
-    // validates without creating A-bit side effects.
-    *gp::previous_ip = *gp::instruction_pointer;
-    let fetch = { let _scope = PROFILE.then(|| Scope::new(Stage::Fetch)); cpu::get_phys_eip() };
-    if fetch.is_err() {
-        if PROFILE { diag::admission(Admission::FetchFault); }
-        ir_admission_barrier();
-        return true;
-    }
-    let admitted = {
-        let mut cache = CACHE.try_lock().unwrap();
-        let index = cache.records.get(selected_index)
-            .filter(|r| r.job.artifact.key.job == id && r.phase == Phase::Published)
-            .map(|_| selected_index);
-        let valid = if let Some(index) = index {
-            // Page tables can themselves alias code: the A-bit update must not
-            // leave a module compiled from the pre-fetch bytes admissible. After
-            // the architectural fetch, admission requires cached mapping identity;
-            // an unavailable secondary mapping remains published for a later hit.
-            let current = if warm_fetch && epoch == admission_epoch() && epoch != u64::MAX {
-                // All translations were already visible: get_phys_eip cannot
-                // walk page tables, write A bits or invoke a device callback.
-                cache.post_fetch_reuses = cache.post_fetch_reuses.wrapping_add(1);
-                CachedMatch::Match
-            } else {
-                cache.full_checks = cache.full_checks.wrapping_add(1);
-                let _scope = PROFILE.then(|| Scope::new(Stage::ByteValidation));
-                cached_current(&cache.records[index].job)
-            };
-            match current {
-                CachedMatch::Match => {
-                    cache.cached_checks = cache.cached_checks.wrapping_add(1);
-                    cache.records[index].validated_epoch = admission_epoch();
-                    true
-                },
-                CachedMatch::Unavailable => { if PROFILE { diag::admission(Admission::UnavailableAfter); } false },
-                CachedMatch::Stale => {
-                    if PROFILE { diag::admission(Admission::StaleAfter); }
-                    cache.records[index].phase = Phase::Retired;
-                    cache.needs_collection = true;
+    let activation = match selected {
+        Selected::Ready(activation) => activation,
+        Selected::Fetch { slot, owner: Owner { index: selected_index, id }, warm: warm_fetch, epoch } => {
+            // Preserve the dispatcher's actual initial fetch translation and A-bit
+            // updates. A cached fast check above is sufficient only when every source
+            // mapping is already CPU-visible; otherwise the read-only capture fallback
+            // validates without creating A-bit side effects.
+            *gp::previous_ip = *gp::instruction_pointer;
+            let fetch = { let _scope = PROFILE.then(|| Scope::new(Stage::Fetch)); cpu::get_phys_eip() };
+            if fetch.is_err() {
+                if PROFILE { diag::admission(Admission::FetchFault); }
+                ir_admission_barrier();
+                return true;
+            }
+            let admitted = {
+                let mut cache = CACHE.try_lock().unwrap();
+                let index = cache.records.get(selected_index)
+                    .filter(|r| r.job.artifact.key.job == id && r.phase == Phase::Published)
+                    .map(|_| selected_index);
+                let valid = if let Some(index) = index {
+                    // Page tables can themselves alias code: the A-bit update must not
+                    // leave a module compiled from the pre-fetch bytes admissible. After
+                    // the architectural fetch, admission requires cached mapping identity;
+                    // an unavailable secondary mapping remains published for a later hit.
+                    let current = if warm_fetch && epoch == admission_epoch() && epoch != u64::MAX {
+                        // All translations were already visible: get_phys_eip cannot
+                        // walk page tables, write A bits or invoke a device callback.
+                        cache.post_fetch_reuses = cache.post_fetch_reuses.wrapping_add(1);
+                        CachedMatch::Match
+                    } else {
+                        cache.full_checks = cache.full_checks.wrapping_add(1);
+                        let _scope = PROFILE.then(|| Scope::new(Stage::ByteValidation));
+                        cached_current(&cache.records[index].job)
+                    };
+                    match current {
+                        CachedMatch::Match => {
+                            cache.cached_checks = cache.cached_checks.wrapping_add(1);
+                            cache.records[index].validated_epoch = admission_epoch();
+                            true
+                        },
+                        CachedMatch::Unavailable => { if PROFILE { diag::admission(Admission::UnavailableAfter); } false },
+                        CachedMatch::Stale => {
+                            if PROFILE { diag::admission(Admission::StaleAfter); }
+                            cache.records[index].phase = Phase::Retired;
+                            cache.needs_collection = true;
+                            false
+                        },
+                    }
+                } else {
+                    if PROFILE { diag::admission(Admission::LostOwner); }
                     false
-                },
-            }
-        } else {
-            if PROFILE { diag::admission(Admission::LostOwner); }
-            false
-        };
-        if valid {
-            if PROFILE { diag::admission(Admission::Accepted); }
-            cache.clock = cache.clock.wrapping_add(1);
-            let stamp = cache.clock;
-            cache.records[index.unwrap()].last_used = stamp;
-            cache.active = true;
-            cache.active_owner = Some(Owner { index: index.unwrap(), id });
-            cache.hits = cache.hits.wrapping_add(1);
-        }
-        if valid {
-            let index = index.unwrap(); let record = &cache.records[index];
-            let needs_heat = record.job.artifact.tier == super::compile::Tier::One
-                || record.fusion_candidate && record.job.artifact.entry == EntryContract::Cpu(entry);
-            let current = Owner { index, id };
-            *owner = Some(current);
-            if let Some(p) = previous {
-                if let Some(r) = cache.records.get_mut(p.index)
-                    .filter(|r| r.phase == Phase::Published && r.job.artifact.key.job == p.id) {
-                    r.successor = Some(Successor { key: index_key(entry), owner: current });
-                }
-            }
-            Some((index, needs_heat))
-        } else { None }
+                };
+                if valid {
+                    Some(activate::<PROFILE>(&mut cache, index.unwrap(), entry, previous, linked))
+                } else { None }
+            };
+            let Some(activation) = admitted else {
+                collect_if_needed();
+                return false;
+            };
+            debug_assert_eq!(activation.slot, slot);
+            activation
+        },
     };
-    let Some((admitted_index, needs_heat)) = admitted else {
-        ir_cache_collect();
-        return false;
-    };
+    let Activation { slot, owner: current, needs_heat } = activation;
+    let Owner { index: admitted_index, id } = current;
+    *owner = Some(current);
     drop(admission_scope);
     let before = *gp::instruction_counter;
     let diagnostic_cr3 = if PROFILE { diag::cr3() } else { 0 };
     super::entry::take_link_request();
     super::schedule::note_cached(entry, linked, needs_heat);
-    if linked {
-        let mut cache = CACHE.try_lock().unwrap();
-        cache.links = cache.links.wrapping_add(1);
-    }
     let sample = if profiler::performance_recording_enabled() {
         Some(profiler::performance_chunk_start(
             true,
@@ -1125,6 +1179,6 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
             cache.needs_collection = true;
         }
     }
-    ir_cache_collect();
+    collect_if_needed();
     true
 }

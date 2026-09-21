@@ -74,6 +74,7 @@ pub unsafe fn translate(linear: u32) -> Result<u32, CaptureError> {
 /// Online execution may skip instruction-byte reads only after the CPU has
 /// established every covered page's visible translation. Do not eagerly walk
 /// secondary/unreachable pages and alter their accessed bits during admission.
+#[inline(always)]
 pub unsafe fn mappings_cached(snapshot: &ImmutableCodeSnapshot) -> bool {
     let mask = cpu::TLB_VALID | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
     snapshot.mappings.iter().all(|mapping| {

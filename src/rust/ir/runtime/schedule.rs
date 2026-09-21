@@ -52,6 +52,8 @@ struct Scheduler {
     pending: Option<Pending>,
     ready: VecDeque<Job>,
     credit: bool,
+    scan_credit: bool,
+    interpreted_probe: bool,
     stats: [u32; 22],
 }
 static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
@@ -76,6 +78,8 @@ static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
     pending: None,
     ready: VecDeque::new(),
     credit: false,
+    scan_credit: false,
+    interpreted_probe: false,
     stats: [0; 22],
 });
 #[link(wasm_import_module = "env")]
@@ -92,6 +96,8 @@ pub fn invalidate() {
     s.pending = None;
     s.ready.clear();
     s.credit = false;
+    s.scan_credit = false;
+    s.interpreted_probe = false;
 }
 pub fn dirty_page(page: u32) {
     let mut s = SCHEDULER.try_lock().unwrap();
@@ -151,7 +157,10 @@ pub fn ir_auto_optimization_stat(field: u32) -> u32 {
     match field { 0 => s.opt_level, 1 => s.passes_disabled, 2 => s.debug.verify as u32, 3 => s.debug.dump as u32, _ => 0 }
 }
 pub fn begin_frame() {
-    SCHEDULER.try_lock().unwrap().credit = true;
+    let mut s = SCHEDULER.try_lock().unwrap();
+    s.credit = true;
+    s.scan_credit = true;
+    s.interpreted_probe = false;
 }
 /// An evicted region must earn fresh heat. Historical visits must not make a
 /// working set larger than the cache continually recompile inactive entries.
@@ -205,6 +214,8 @@ pub unsafe fn ir_auto_config(
         s.cursor = 0;
         s.replacement = 0;
         s.credit = false;
+        s.scan_credit = false;
+        s.interpreted_probe = false;
         s.pending.take()
     };
     if let Some(p) = pending {
@@ -213,11 +224,14 @@ pub unsafe fn ir_auto_config(
     }
     true
 }
-unsafe fn record(entry: CpuEntryKey) {
+unsafe fn record(entry: CpuEntryKey, interpreted: bool) {
     let mut s = SCHEDULER.try_lock().unwrap();
     if !s.config.enabled || *gp::prefixes != 0 || *gp::in_hlt {
         return;
     }
+    // Only new interpreted work can justify another current-entry probe after
+    // the frame's bounded ring scan. Cached Tier-2 activations must stay cheap.
+    s.interpreted_probe |= interpreted;
     // Profile the exact same visits, but bypass tree lookup for stable hot PCs.
     // Replacement/compaction cannot give the hint authority: compare full entry.
     let hint = ((entry.linear.0 >> 1 ^ entry.pc.0 >> 12) & 255) as usize;
@@ -269,9 +283,9 @@ pub unsafe fn note_cached(entry: CpuEntryKey, linked: bool, needs_heat: bool) {
         let mut s = SCHEDULER.try_lock().unwrap();
         if s.config.enabled { s.stats[1] = s.stats[1].wrapping_add(1); }
     }
-    if needs_heat { record(entry); }
+    if needs_heat { record(entry, false); }
 }
-pub unsafe fn note_interpreted() { record(live::entry()); }
+pub unsafe fn note_interpreted() { record(live::entry(), true); }
 pub(super) fn diagnose_missing(entry: CpuEntryKey) {
     let s = SCHEDULER.try_lock().unwrap();
     let reason = if s.pending.as_ref().is_some_and(|p| p.entries.iter().any(|(key, _)| *key == entry))
@@ -303,18 +317,21 @@ fn failed(entry: CpuEntryKey, tier: u32, source: Option<ImmutableCodeSnapshot>) 
         h.failed = tier;
     }
 }
-pub unsafe fn visit() {
+/// True only when this call submitted a new module to the asynchronous host
+/// installer. The CPU may hand off once at this cold point; an existing pending
+/// Promise returns false, so delayed/failed compilation never stalls the guest.
+pub unsafe fn visit() -> bool {
     {
         let mut s = SCHEDULER.try_lock().unwrap();
         if s.config.enabled && *gp::prefixes == 0 && !*gp::in_hlt {
             s.stats[0] = s.stats[0].wrapping_add(1);
         }
         if !s.config.enabled || s.pending.is_some() {
-            return;
+            return false;
         }
     }
     if !cold() {
-        return;
+        return false;
     }
     let ready = {
         let mut s = SCHEDULER.try_lock().unwrap();
@@ -323,17 +340,18 @@ pub unsafe fn visit() {
         s.ready.pop_front()
     };
     if let Some(job) = ready {
-        publish(job);
-        return;
+        return publish(job);
     }
     let selected = {
         let mut s = SCHEDULER.try_lock().unwrap();
-        if !s.config.enabled || !s.credit || s.pending.is_some() {
-            return;
+        if !s.config.enabled || !s.credit || s.pending.is_some()
+            || !s.scan_credit && !s.interpreted_probe {
+            return false;
         }
-        // Bound candidate scanning even when no entry is ready. Heat continues
-        // accumulating during the frame; the next frame can compile it.
-        s.credit = false;
+        s.interpreted_probe = false;
+        // A fruitless scan must not consume the frame's compilation credit.
+        // Bound full-ring scans separately, but still admit the currently
+        // interpreted entry as soon as it actually reaches its heat threshold.
         let config = s.config;
         let current = live::entry();
         let mut selected = s.hot_index.get(current).and_then(|index| {
@@ -341,22 +359,26 @@ pub unsafe fn visit() {
             (hot.hits >= config.threshold && hot.failed == 0 && cache::tier(current) == 0)
                 .then_some((current, 1, config))
         });
-        for _ in 0..s.hot.len() {
-            let index = s.cursor;
-            s.cursor = (s.cursor + 1) % s.hot.len();
-            let h = &s.hot[index];
-            let tier = cache::tier(h.entry);
-            let needed = if tier == 0 { config.threshold } else { config.promote };
-            if selected.is_none() && h.hits >= needed &&
-                (tier < 2 || cache::fusion_ready(h.entry)) {
-                selected = Some((h.entry, (tier + 1).min(2), config));
+        if selected.is_none() && s.scan_credit {
+            s.scan_credit = false;
+            for _ in 0..s.hot.len() {
+                let index = s.cursor;
+                s.cursor = (s.cursor + 1) % s.hot.len();
+                let h = &s.hot[index];
+                let tier = cache::tier(h.entry);
+                let needed = if tier == 0 { config.threshold } else { config.promote };
+                if selected.is_none() && h.hits >= needed &&
+                    (tier < 2 || cache::fusion_ready(h.entry)) {
+                    selected = Some((h.entry, (tier + 1).min(2), config));
+                }
+                if selected.is_some() { break; }
             }
-            if selected.is_some() { break; }
         }
+        if selected.is_some() { s.credit = false; }
         selected
     };
     let Some((entry, tier, config)) = selected else {
-        return;
+        return false;
     };
     let _compile_context = super::diagnostics::CompileContext::new(entry.linear.0, tier);
     let fusion_only = cache::tier(entry) == 2;
@@ -377,18 +399,18 @@ pub unsafe fn visit() {
         same
     };
     if suppressed {
-        return;
+        return false;
     }
     let Some(snapshot) = snapshot else {
         failed(entry, tier, None);
-        return;
+        return false;
     };
     if !cache::can_make_room(entry) {
-        return;
+        return false;
     }
     let Some(key) = live::publication_key() else {
         failed(entry, tier, Some(snapshot));
-        return;
+        return false;
     };
     {
         let mut s = SCHEDULER.try_lock().unwrap();
@@ -474,7 +496,7 @@ pub unsafe fn visit() {
         Ok(fused)
     } else if fusion_only {
         crate::profiler::performance_codegen_finish(started);
-        return; // One failed fusion attempt leaves the working Tier 2 intact.
+        return false; // One failed fusion attempt leaves the working Tier 2 intact.
     } else if entries.len() > 1 {
         match compile_cpu_shared_entries(&request, &snapshot, &entries, &config) {
             Ok(artifact) => Ok(vec![(artifact, snapshot.clone(), 0)]),
@@ -502,7 +524,7 @@ pub unsafe fn visit() {
                 s.stats[field] = s.stats[field].wrapping_add(1);
             }
             failed(entry, tier, Some(snapshot));
-            return;
+            return false;
         },
     };
     {
@@ -532,15 +554,15 @@ pub unsafe fn visit() {
         }
     }
     let job = SCHEDULER.try_lock().unwrap().ready.pop_front().unwrap();
-    publish(job);
+    publish(job)
 }
-unsafe fn publish(job: Job) {
-    let super::entry::EntryContract::Cpu(entry) = job.artifact.entry else { return; };
+unsafe fn publish(job: Job) -> bool {
+    let super::entry::EntryContract::Cpu(entry) = job.artifact.entry else { return false; };
     let tier = if job.artifact.tier == Tier::One { 1 } else { 2 };
     let key = job.artifact.key;
-    if !live::generation_current(key) { return; }
+    if !live::generation_current(key) { return false; }
     if !cache::make_room(entry) {
-        return;
+        return false;
     }
     let members = job.artifact.cpu_entries().collect::<Vec<_>>();
     let ptr = job.artifact.code.bytes.as_ptr() as u32;
@@ -553,7 +575,7 @@ unsafe fn publish(job: Job) {
     let slot = cache::reserve_job(job, true);
     if slot == 0 {
         failed(entry, tier, Some(snapshot));
-        return;
+        return false;
     }
     {
         let mut s = SCHEDULER.try_lock().unwrap();
@@ -571,6 +593,7 @@ unsafe fn publish(job: Job) {
     // later microtask, never recursive compilation/publication in this frame.
     super::entry::ir_admission_barrier();
     ir_codegen_finalize(key.job, slot, ptr, len);
+    true
 }
 #[no_mangle]
 pub fn ir_auto_complete(id: u64, success: u32) {
