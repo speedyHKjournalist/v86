@@ -40,6 +40,10 @@ try {
   [[0x40,0xFF,0xE2],[0x41,0xFF,0xE3],[0x45,0xFF,0xE6],[0x40,0xFF,0xE7]].forEach((code,i)=>mem.set(code,A+i*0x2000));};
  fourReset();four(0);const fourState=state(),fourSteps=(w[664>>2]-100)>>>0;assert(fourSteps>24&&fourSteps<=32,'four-source activation is bounded and crosses the cycle repeatedly');
  fourReset();for(let i=0;i<fourSteps;i++)e.ir_test_step();assert.deepEqual(fourState,state());
+ const interior=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync("build/ir-fusion/four-interior.wasm")),{e:{...e,m:e.memory}}).exports.f;
+ fourReset();cpu.reg32[7]=A+1;interior(0);
+ const interiorState=state(),interiorSteps=(w[664>>2]-100)>>>0;assert(interiorSteps>24&&interiorSteps<=32);
+ fourReset();cpu.reg32[7]=A+1;for(let i=0;i<interiorSteps;i++)e.ir_test_step();assert.deepEqual(interiorState,state());
  let helperComparisons=0;
  for(const mode of [false,true])for(const count of [3,4])for(const simd of [false,true])for(const opt of [false,true])for(const budget of [1,2,3,4,7,32])for(const fault of [false,true]) {
   const configure=()=>{

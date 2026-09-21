@@ -31,7 +31,7 @@ for(const file of process.argv.slice(2)) {
         empty_scope_sampled_us:d.empty_scope_sampled_ms*1000,empty_scope_wall_us:d.empty_scope_wall_ms*1000,
         ir_step_share:t.ir_steps/(t.ir_steps+t.interpreter_steps+t.legacy_steps)||0,
         instructions_per_activation:t.ir_steps/t.ir_activations||0,
-        stages,exits,admission:d.admission,chain_stops:d.chain_stops,compiler:d.compiler,publication:d.publication,
+        stages,exits,admission:d.admission,chain_stops:d.chain_stops,compiler:d.compiler,compiler_breakdown:d.compiler_breakdown,publication:d.publication,
         helper_exits:d.helper_exits,
         control_exits:d.control_exits,discovery_latency:d.discovery_latency,missing_entries:d.missing_entries,
         interpreter_hotspots:d.interpreter_hotspots?.sort((a,b)=>b.inclusive_ms-a.inclusive_ms).slice(0,20),

@@ -54,8 +54,14 @@ The `compiler` object independently measures all automatic pipeline and source
 capture calls and compiler lift/pass/lower/machine/emit phases. Phases also cover
 explicit compilation and retries; do not add the pipeline parent to its children.
 Each compiler phase also reports `max_ms`, `max_pc`, and `max_tier`. PC/tier
-identify the artifact inside `compile_lifted`; outer capture/lift/pipeline scopes
-currently report zero context. Lowering is split into HIR allocation, state plans,
+identify the selected entry in capture/pipeline and each concrete compiler attempt.
+`compiler_breakdown` partitions the same phase samples by tier, artifact kind
+(`ordinary`, `shared`, `fused`), and input HIR shape (`single`, `multi`). Unknown
+kind/shape remain explicit before lifting or on failed attempts; they are not
+silently attributed to single-block Tier 1. Calls and time across buckets conserve
+the original phase total. HIR shape is measured before passes, not after merging.
+The optional buckets are omitted when diagnostics are off or an older core does
+not support them. Lowering is split into HIR allocation, state plans,
 proofs and final verification; machine passes have separate timings. Parent and
 child phases overlap and must not be summed.
 

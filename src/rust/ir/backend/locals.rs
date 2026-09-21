@@ -92,13 +92,33 @@ fn allocate_graph(region: &Region, mut remaining: usize) -> Result<Allocation, &
         Ok(())
     };
     let n = region.blocks.len();
+    // Summarize the backwards transfer once. Fixed-point rounds then visit
+    // block live sets, rather than every instruction and recovery StateMap.
+    // This is the same (out - definitions) union upward-exposed-uses equation;
+    // block parameters remain in inputs for the existing edge substitution.
+    let mut transfers = Vec::with_capacity(n);
+    for block in &region.blocks {
+        let mut uses = BTreeSet::new();
+        let mut definitions = BTreeSet::new();
+        for id in block.instructions.iter().rev() {
+            let inst = &region.instructions[id.index()];
+            for result in &inst.results { uses.remove(result); definitions.insert(*result); }
+            uses.extend(&inst.args);
+            state_uses(region, inst.state, &mut uses);
+            state_uses(region, inst.commit, &mut uses);
+            spend(uses.len() + inst.results.len() + inst.args.len() + 1)?;
+        }
+        state_uses(region, block.entry_state, &mut uses);
+        transfers.push((uses, definitions, term_uses(region, block)));
+    }
     let mut inputs = vec![BTreeSet::<ValueId>::new(); n];
     let mut outputs = inputs.clone();
     loop {
         let mut changed = false;
         for b in (0..n).rev() {
             let block = &region.blocks[b];
-            let mut live = term_uses(region, block);
+            let (uses, definitions, terminal) = &transfers[b];
+            let mut live = terminal.clone();
             for edge in block.terminator.as_ref().unwrap().edges() {
                 spend(inputs[edge.target.index()].len().saturating_mul(region.blocks[edge.target.index()].params.len() + 1))?;
                 live.extend(
@@ -109,17 +129,9 @@ fn allocate_graph(region: &Region, mut remaining: usize) -> Result<Allocation, &
             }
             spend(live.len() + 1)?;
             outputs[b] = live.clone();
-            for id in block.instructions.iter().rev() {
-                let inst = &region.instructions[id.index()];
-                for result in &inst.results {
-                    live.remove(result);
-                }
-                live.extend(&inst.args);
-                state_uses(region, inst.state, &mut live);
-                state_uses(region, inst.commit, &mut live);
-                spend(live.len() + inst.results.len() + inst.args.len() + 1)?;
-            }
-            state_uses(region, block.entry_state, &mut live);
+            spend(live.len() + uses.len() + definitions.len() + 1)?;
+            live.retain(|v| !definitions.contains(v));
+            live.extend(uses);
             if live != inputs[b] {
                 inputs[b] = live;
                 changed = true;

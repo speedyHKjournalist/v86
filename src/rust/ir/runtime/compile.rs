@@ -240,6 +240,7 @@ fn compile_inner(
     cpu: bool,
     cfg: bool,
 ) -> Result<CompiledArtifact, CompileError> {
+    let _context = super::diagnostics::CompileContext::classified(request.linear.0, if request.tier == Tier::One {1} else {2}, 1, 0);
     validate_snapshot(request, snapshot, config)?;
     let lift_clock = CompileScope::new(2);
     let region = if cfg {
@@ -283,6 +284,7 @@ pub fn compile_cpu_fused_regions(
     request: &CompileRequest, primary: &ImmutableCodeSnapshot,
     peers: &[CapturedRegion], predictions: &[PredictedEdge], config: &IrConfig,
 ) -> Result<CompiledArtifact, CompileError> {
+    let _context = super::diagnostics::CompileContext::classified(request.linear.0, 2, 3, 0);
     if peers.is_empty() || peers.len() > 3 || predictions.len() > 4 {
         return Err(CompileError::Budget("fused source count"));
     }
@@ -337,7 +339,9 @@ fn compile_lifted(
     cpu: bool, mut region: crate::ir::hir::Region, fused_sources: Vec<CapturedRegion>,
     alternate_entries: Vec<CpuEntryKey>,
 ) -> Result<CompiledArtifact, CompileError> {
-    let _context = super::diagnostics::CompileContext::new(request.linear.0, if request.tier == Tier::One {1} else {2});
+    let _context = super::diagnostics::CompileContext::classified(request.linear.0, if request.tier == Tier::One {1} else {2},
+        if !fused_sources.is_empty() {3} else if !alternate_entries.is_empty() {2} else {1},
+        if region.blocks.len() == 1 {1} else {2});
     let mut dependencies = snapshot.dependencies.clone();
     for peer in &fused_sources {
         for dependency in &peer.source.dependencies {
@@ -518,6 +522,7 @@ pub fn compile_cpu_shared_entries(
     origin: &CompileRequest, snapshot: &ImmutableCodeSnapshot,
     entries: &[CpuEntryRequest], config: &IrConfig,
 ) -> Result<CompiledArtifact, CompileError> {
+    let _context = super::diagnostics::CompileContext::classified(origin.linear.0, if origin.tier == Tier::One {1} else {2}, 2, 0);
     validate_snapshot(origin, snapshot, config)?;
     if entries.is_empty() || entries.len() > 8 {
         return Err(CompileError::Budget("CPU entry batch"));

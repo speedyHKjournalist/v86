@@ -55,22 +55,28 @@ impl ContinuationContext {
 /// Scalar reloads intentionally avoid requiring Wasm SIMD for integer code.
 /// XMM backing must survive the observer unchanged before those SSA values may
 /// be retained. GPRs and arithmetic FLAGS instead receive new SSA definitions.
-pub(super) struct ScalarObserver {
+struct ScalarSnapshot {
     context: ContinuationContext,
     xmm: [u32; 32],
 }
+pub(super) struct ScalarObserver(Option<ScalarSnapshot>);
 impl ScalarObserver {
     pub(super) unsafe fn capture() -> Self {
-        Self { context: ContinuationContext::capture(),
-            xmm: std::array::from_fn(|i| *(gp::reg_xmm as *const u32).add(i)) }
+        // Declining before the callback is always safe: completion still owns
+        // post-state even if the callback clears the pending request. Avoid
+        // copying state when we already know this activation will return cold.
+        Self(no_pending_irq().then(|| ScalarSnapshot {
+            context: ContinuationContext::capture(),
+            xmm: std::array::from_fn(|i| *(gp::reg_xmm as *const u32).add(i)),
+        }))
     }
     pub(super) unsafe fn finish(self) -> u32 {
         #[cfg(feature = "ir-experimental")]
-        let current = self.context.epoch != u64::MAX
-            && self.context == ContinuationContext::capture()
-            && self.xmm == std::array::from_fn(|i| *(gp::reg_xmm as *const u32).add(i))
-            && no_pending_irq()
-            && super::cache::observer_continuation();
+        let current = self.0.is_some_and(|snapshot| no_pending_irq()
+            && snapshot.context.epoch != u64::MAX
+            && snapshot.context == ContinuationContext::capture()
+            && snapshot.xmm == std::array::from_fn(|i| *(gp::reg_xmm as *const u32).add(i))
+            && super::cache::observer_continuation());
         #[cfg(not(feature = "ir-experimental"))]
         let current = { let _ = self; false };
         if current { Outcome::Normal as u32 } else {
@@ -81,8 +87,9 @@ impl ScalarObserver {
         }
     }
 }
-/// Conservative read-only pending test. Masked or lower-priority requests may
-/// decline continuation unnecessarily; no request is acknowledged here.
+/// No controller can currently acknowledge a request. Do not consult backed
+/// FLAGS here: STI's emitter may still carry IF in SSA. A masked request remains
+/// in IRR; an observer which unmasks it is checked again after completion.
 pub(super) unsafe fn no_pending_irq() -> bool {
     !*gp::in_hlt && !crate::cpu::pic::has_pending_irq()
         && (!*gp::acpi_enabled || !crate::cpu::apic::has_pending_irq())

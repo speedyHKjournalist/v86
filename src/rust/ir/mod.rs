@@ -201,6 +201,10 @@ mod entry_tests;
 mod fusion_tests;
 
 #[cfg(test)]
+#[path = "../../../tests/ir/semantics/compile_replay.rs"]
+mod compile_replay_tests;
+
+#[cfg(test)]
 #[path = "../../../tests/ir/semantics/x87_memory.rs"]
 mod x87_memory_tests;
 

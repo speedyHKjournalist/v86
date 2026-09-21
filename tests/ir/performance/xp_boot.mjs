@@ -53,6 +53,25 @@ try {
     if(process.env.IR_DIAGNOSTICS !== undefined) {
         assert.equal(await vm.configure_ir_diagnostics(Number(process.env.IR_DIAGNOSTICS)), true);
     }
+    // Opt-in immutable input corpus; no guest memory reads, never enabled in timing runs.
+    if(process.env.IR_CAPTURE_FILE) {
+        assert.equal(backend,'ir');assert(e.ir_cache_replay_info);
+        fs.writeFileSync(process.env.IR_CAPTURE_FILE,'');
+        const publish=cpu.ir_auto_publish;
+        cpu.ir_auto_publish=function(id,...args) {
+            const get=(g,i,f)=>e.ir_cache_replay_info(id,g,i,f)>>>0;
+            const header=Array.from({length:5},(_,f)=>get(0,0,f));
+            const sources=Array.from({length:header[0]},(_,i)=>{
+                const bytes=Buffer.from(new Uint8Array(e.memory.buffer,get(1,i,2),get(1,i,3))).toString('hex');
+                const mappings=Array.from({length:get(1,i,4)},(_,m)=>`${get(4,i*65536+m,0)}:${get(4,i*65536+m,1)}`).join(',');
+                return `${get(1,i,0)} ${get(1,i,1)} ${bytes} ${mappings}`;
+            });
+            const entries=Array.from({length:header[1]},(_,i)=>get(2,i,0)).join(',')||'-';
+            const edges=Array.from({length:header[2]},(_,i)=>`${get(3,i,0)}:${get(3,i,1)}`).join(',')||'-';
+            fs.appendFileSync(process.env.IR_CAPTURE_FILE,`${header[3]} ${header[4]} ${entries} ${edges} ${sources.join(' ')}\n`);
+            return publish.call(this,id,...args);
+        };
+    }
     if(recording) e.performance_recording_enable(1);
     started = previous = performance.now();
     count = vm.get_instruction_counter() >>> 0;

@@ -358,6 +358,7 @@ pub unsafe fn visit() {
     let Some((entry, tier, config)) = selected else {
         return;
     };
+    let _compile_context = super::diagnostics::CompileContext::new(entry.linear.0, tier);
     let fusion_only = cache::tier(entry) == 2;
     let snapshot = source(entry, config.window, tier);
     let suppressed = {

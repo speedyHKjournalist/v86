@@ -84,6 +84,13 @@ fn four_hot_sources_remain_bounded_and_preserve_all_dependencies() {
     assert_eq!(artifact.dependencies.len(),4);assert_eq!(artifact.fused_edges.len(),4);
     std::fs::create_dir_all("build/ir-fusion").unwrap();
     std::fs::write("build/ir-fusion/four.wasm",artifact.code.bytes).unwrap();
+    // The fourth edge closes into an interior instruction already captured by
+    // source zero. No fifth source or independently published entry is needed.
+    let mut interior = edges.clone();
+    interior[3].target = GuestEip(addresses[0] + 1);
+    let artifact = compile_cpu_fused_regions(&request,&source(&bytes[0],addresses[0]),&peers,&interior,&config).unwrap();
+    assert_eq!(artifact.dependencies.len(),4);
+    std::fs::write("build/ir-fusion/four-interior.wasm",artifact.code.bytes).unwrap();
     let mut observing=peers.clone();observing[2].source=source(&[0xFB, 0x90],addresses[3]);
     assert!(matches!(compile_cpu_fused_regions(&request,&source(&bytes[0],addresses[0]),&observing,&edges,&config),
         Err(crate::ir::lowering::CompileError::Unsupported("extended fusion observer boundary"))));

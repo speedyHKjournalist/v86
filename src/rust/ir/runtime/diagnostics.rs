@@ -44,7 +44,24 @@ static mut TOTALS: [f64; 10] = [0.0; 10];
 const COMPILE_PHASES: usize = 20;
 // ms, calls, maximum ms, PC and tier associated with that maximum.
 static mut COMPILER: [[f64; 5]; COMPILE_PHASES] = [[0.0; 5]; COMPILE_PHASES];
-static mut COMPILE_CONTEXT: (u32, u32) = (0, 0);
+// tier (unknown/1/2) x kind (unknown/ordinary/shared/fused) x shape
+// (unknown/single/multi). Unknown is explicit for capture and pre-lift failures.
+static mut COMPILER_BUCKETS: [[[f64; 5]; COMPILE_PHASES]; 36] = [[[0.0; 5]; COMPILE_PHASES]; 36];
+static mut COMPILE_CONTEXT: (u32, u32, u32, u32) = (0, 0, 0, 0);
+#[cfg(test)]
+static mut COMPILER_BENCHMARK: bool = false;
+fn compiler_enabled() -> bool {
+    #[cfg(test)]
+    if unsafe { COMPILER_BENCHMARK } { return true; }
+    enabled()
+}
+/// Only the explicitly invoked, single-threaded offline compiler benchmark.
+#[cfg(test)]
+pub fn compiler_benchmark_reset() { unsafe {
+    COMPILER_BENCHMARK = true;
+    COMPILER = [[0.0; 5]; COMPILE_PHASES];
+    COMPILER_BUCKETS = [[[0.0; 5]; COMPILE_PHASES]; 36];
+} }
 static mut PUBLICATION: [f64; 3] = [0.0; 3];
 // Discovery-to-publication latency for retained entries: total ms, count, max.
 static mut DISCOVERY: [[f64; 3]; 2] = [[0.0; 3]; 2];
@@ -125,6 +142,7 @@ pub unsafe fn ir_diagnostic_config(period: u32) -> bool {
     CELLS = Cells { active: 0, reason: 0, helper: 0 }; DEPTH = 0;
     TIMES = [0.0; STAGES]; CALLS = [0; STAGES]; REASONS = [[0; 2]; EXITS];
     ADMISSION = [0; ADMISSIONS]; CHAIN = [0; 6]; TOTALS = [0.0; 10]; COMPILER = [[0.0; 5]; COMPILE_PHASES];
+    COMPILER_BUCKETS = [[[0.0; 5]; COMPILE_PHASES]; 36];
     INTERPRETER_HOT = [[0.0; 6]; 256]; HELPER_EXITS = [[0; 2]; 12];
     CONTROL_EXITS = [[0; 2]; 6];
     PUBLICATION = [0.0; 3]; HOT = [[0.0; 8]; 512]; HOT_REPLACEMENTS = 0;
@@ -136,7 +154,7 @@ pub unsafe fn ir_diagnostic_get(group: u32, index: u32, field: u32) -> f64 {
     let i=index as usize; let f=field as usize;
     match group {
         0 => match index { 0=>PERIOD as f64, 1=>SESSION as f64, 2=>HOT_REPLACEMENTS as f64,
-            3=>DEPTH as f64, 4=>CALIBRATION[0], 5=>CALIBRATION[1], _=>0.0 },
+            3=>DEPTH as f64, 4=>CALIBRATION[0], 5=>CALIBRATION[1], 6=>1.0, _=>0.0 },
         1 => if f==0 { TIMES.get(i).copied().unwrap_or(0.0) } else { CALLS.get(i).copied().unwrap_or(0) as f64 },
         2 => REASONS.get(i).and_then(|r|r.get(f)).copied().unwrap_or(0) as f64,
         3 => ADMISSION.get(i).copied().unwrap_or(0) as f64,
@@ -149,6 +167,8 @@ pub unsafe fn ir_diagnostic_get(group: u32, index: u32, field: u32) -> f64 {
         11 => DISCOVERY.get(i).and_then(|r|r.get(f)).copied().unwrap_or(0.0),
         12 => MISSING.get(i).copied().unwrap_or(0) as f64,
         13 => CONTROL_EXITS.get(i).and_then(|r|r.get(f)).copied().unwrap_or(0) as f64,
+        14 => COMPILER_BUCKETS.get(i / COMPILE_PHASES)
+            .and_then(|b| b[i % COMPILE_PHASES].get(f)).copied().unwrap_or(0.0),
         7 => HOT.get(i).and_then(|r|r.get(f)).copied().unwrap_or(0.0),
         _=>0.0,
     }
@@ -208,15 +228,22 @@ impl Scope {
     pub fn finish(mut self) -> Option<f64> { self.0.take().map(|start| (leave()-start).max(0.0)) }
 }
 impl Drop for Scope { fn drop(&mut self) { if self.0.is_some() { leave(); } } }
-pub struct CompileScope { field: usize, start: Option<f64> }
+pub struct CompileScope { field: usize, start: Option<f64>, context: (u32, u32, u32, u32) }
 impl CompileScope {
-    pub fn new(field: usize) -> Self { Self {field,start:enabled().then(now)} }
+    pub fn new(field: usize) -> Self {
+        let start = compiler_enabled().then(now);
+        Self { field, start, context: if start.is_some() { unsafe { COMPILE_CONTEXT } } else { (0,0,0,0) } }
+    }
 }
 impl Drop for CompileScope { fn drop(&mut self) {
     if let Some(t)=self.start { unsafe {
-        let elapsed=(now()-t).max(0.0); let row=&mut COMPILER[self.field];
-        row[0]+=elapsed; row[1]+=1.0;
-        if elapsed>row[2] { row[2]=elapsed; row[3]=COMPILE_CONTEXT.0 as f64; row[4]=COMPILE_CONTEXT.1 as f64; }
+        let elapsed=(now()-t).max(0.0);
+        let (pc,tier,kind,shape)=self.context;
+        let bucket=((tier.min(2)*4+kind.min(3))*3+shape.min(2)) as usize;
+        for row in [&mut COMPILER[self.field], &mut COMPILER_BUCKETS[bucket][self.field]] {
+            row[0]+=elapsed; row[1]+=1.0;
+            if elapsed>row[2] { row[2]=elapsed; row[3]=pc as f64; row[4]=tier as f64; }
+        }
     } }
 } }
 pub fn activation_start() { unsafe { if enabled() { CELLS.reason=Exit::Unclassified as u32; CELLS.helper=0; } } }
@@ -248,10 +275,11 @@ pub unsafe fn activation_end(pc: u32, cr3: u32, count: u32, duration: Option<f64
 pub fn cr3() -> u32 { unsafe { *gp::cr.add(3) as u32 } }
 
 /// Compiler diagnostics never change the optimizer policy or work budgets.
-pub struct CompileContext((u32, u32));
+pub struct CompileContext(Option<(u32, u32, u32, u32)>);
 impl CompileContext {
-    pub fn new(pc: u32, tier: u32) -> Self { unsafe {
-        Self(std::mem::replace(&mut COMPILE_CONTEXT, (pc, tier)))
+    pub fn new(pc: u32, tier: u32) -> Self { Self::classified(pc, tier, 0, 0) }
+    pub fn classified(pc: u32, tier: u32, kind: u32, shape: u32) -> Self { unsafe {
+        Self(compiler_enabled().then(|| std::mem::replace(&mut COMPILE_CONTEXT, (pc, tier, kind, shape))))
     } }
 }
-impl Drop for CompileContext { fn drop(&mut self) { unsafe { COMPILE_CONTEXT=self.0; } } }
+impl Drop for CompileContext { fn drop(&mut self) { if let Some(previous)=self.0 { unsafe { COMPILE_CONTEXT=previous; } } } }

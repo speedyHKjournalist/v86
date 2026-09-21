@@ -48,6 +48,9 @@ struct Record {
     validated_epoch: u64,
     hot_exit: Option<(PredictedEdge, super::entry::CpuEntryKey, u32)>,
     fusion_attempted: bool,
+    /// Scheduling hint only. Full eligibility and source validation remain at
+    /// cold selection. Refreshed when heat or the published owner set changes.
+    fusion_candidate: bool,
     successor: Option<Successor>,
 }
 struct Cache {
@@ -136,6 +139,38 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
 });
 #[no_mangle]
 pub fn ir_cache_capacity() -> u32 { CACHE.try_lock().unwrap().capacity as u32 }
+/// Offline compiler replay inspection. The publication bridge copies these
+/// immutable inputs synchronously; no pointer may survive a cache mutation.
+/// This API never captures guest memory or grants execution authority.
+#[no_mangle]
+pub fn ir_cache_replay_info(id: u64, group: u32, index: u32, field: u32) -> u32 {
+    let cache = CACHE.try_lock().unwrap();
+    let Some(record) = cache.records.iter().find(|r| r.job.artifact.key.job == id) else { return 0; };
+    let job = &record.job;
+    let EntryContract::Cpu(entry) = job.artifact.entry else { return 0; };
+    let source = |i: usize| if i == 0 { Some((entry, &job.source)) }
+        else { job.artifact.fused_sources.get(i - 1).map(|s| (s.entry, &s.source)) };
+    match group {
+        0 => match field {
+            0 => 1 + job.artifact.fused_sources.len() as u32,
+            1 => job.artifact.alternate_entries.len() as u32,
+            2 => job.artifact.fused_edges.len() as u32,
+            3 => if job.artifact.tier == super::compile::Tier::One {1} else {2},
+            4 => entry.default_32 as u32,
+            _ => 0,
+        },
+        1 => source(index as usize).map_or(0, |(entry, source)| match field {
+            0 => entry.pc.0, 1 => entry.linear.0,
+            2 => source.bytes.as_ptr() as u32, 3 => source.bytes.len() as u32,
+            4 => source.mappings.len() as u32, _ => 0,
+        }),
+        2 => job.artifact.alternate_entries.get(index as usize).map_or(0, |e| e.pc.0.wrapping_sub(entry.pc.0)),
+        3 => job.artifact.fused_edges.get(index as usize).map_or(0, |e| if field == 0 {e.from.0} else {e.target.0}),
+        4 => source((index >> 16) as usize).and_then(|(_, s)| s.mappings.get((index & 65535) as usize))
+            .map_or(0, |m| if field == 0 {m.linear.0} else {m.physical.0}),
+        _ => 0,
+    }
+}
 /// Host policy for bounded working-set experiments; does not grow the table pool.
 #[no_mangle]
 pub unsafe fn ir_cache_set_capacity(capacity: u32) -> bool {
@@ -251,6 +286,13 @@ pub(super) unsafe fn observer_continuation() -> bool {
         cache.records.get(owner.index).is_some_and(|record|
             record.job.artifact.key.job == owner.id && record.phase == Phase::Published
                 && cached_current(&record.job) == CachedMatch::Match));
+    if valid {
+        // The observer just performed the same full source/mapping validation
+        // used by cold admission. Reuse that certificate until the next host,
+        // mapping or code barrier instead of repeating it on a normal exit.
+        let index = cache.active_owner.unwrap().index;
+        cache.records[index].validated_epoch = admission_epoch();
+    }
     if !valid { cache.observer_rejections = cache.observer_rejections.wrapping_add(1); }
     valid
 }
@@ -298,6 +340,16 @@ fn fusion_indices(cache: &Cache, entry: super::entry::CpuEntryKey) -> Option<(us
     if hits < 8 || entry == target && root.job.artifact.fused_sources.is_empty()
         || entry.cs_base() != target.cs_base()
         || entry.default_32 != target.default_32 { return None; }
+    // Closing an edge into already captured bytes needs no additional owner or
+    // source slot. The target may be an interior instruction, not a published
+    // entry. The frontend still verifies the instruction boundary and the
+    // generated dynamic edge still checks the actual target.
+    if !root.job.artifact.fused_sources.is_empty()
+        && (target.pc.0.wrapping_sub(entry.pc.0) < root.job.source.bytes.len() as u32
+            || root.job.artifact.fused_sources.iter().any(|s|
+                target.pc.0.wrapping_sub(s.entry.pc.0) < s.source.bytes.len() as u32)) {
+        return Some((a, a));
+    }
     let b = *cache.published.get(&index_key(target))?;
     let peer = &cache.records[b];
     // The root's witnessed edge is sufficient authority to attempt fusion.
@@ -312,11 +364,23 @@ fn fusion_indices(cache: &Cache, entry: super::entry::CpuEntryKey) -> Option<(us
     if entries.len() > 4 { return None; }
     Some((a,b))
 }
+fn refresh_fusion_candidate(cache: &mut Cache, index: usize) {
+    let candidate = match cache.records[index].job.artifact.entry {
+        EntryContract::Cpu(entry) => fusion_indices(cache, entry)
+            .is_some_and(|(root, _)| root == index),
+        _ => false,
+    };
+    cache.records[index].fusion_candidate = candidate;
+}
+fn refresh_fusion_candidates(cache: &mut Cache) {
+    for index in 0..cache.records.len() { refresh_fusion_candidate(cache, index); }
+}
 pub(super) unsafe fn take_fusion(entry: super::entry::CpuEntryKey)
     -> Option<(super::compile::ImmutableCodeSnapshot, Vec<CapturedRegion>, Vec<PredictedEdge>)> {
     let mut cache = CACHE.try_lock().unwrap();
     let (a,b) = fusion_indices(&cache, entry)?;
     cache.records[a].fusion_attempted = true;
+    cache.records[a].fusion_candidate = false;
     if !unchanged_full(&cache.records[a].job) || !unchanged_full(&cache.records[b].job) { return None; }
     let root = &cache.records[a];
     let mut sources = vec![CapturedRegion { entry, source: root.job.source.clone() }];
@@ -366,6 +430,7 @@ pub unsafe fn ir_cache_set_fusion(enabled: u32) -> bool {
     ir_admission_barrier();
     let mut cache = CACHE.try_lock().unwrap();
     cache.fusion_enabled = enabled != 0;
+    refresh_fusion_candidates(&mut cache);
     if enabled == 0 {
         for r in &mut cache.records {
             if !r.job.artifact.fused_sources.is_empty() { r.phase = Phase::Retired; }
@@ -405,6 +470,7 @@ pub unsafe fn ir_cache_collect() -> u32 {
             .flat_map(|(index, record)| record.entries.iter().map(move |entry| (index_key(*entry), index)))
             .collect();
         cache.needs_collection = false;
+        refresh_fusion_candidates(&mut cache);
         cache.reclaimed = cache.reclaimed.wrapping_add(retired.len() as u32);
         retired
     };
@@ -471,6 +537,7 @@ pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
         validated_epoch: 0,
         hot_exit: None,
         fusion_attempted: false,
+        fusion_candidate: false,
         successor: None,
     });
     slot
@@ -609,6 +676,7 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
     cache.records[index].phase = Phase::Published;
     cache.needs_collection = true;
     for entry in &entries { cache.published.insert(index_key(*entry), index); }
+    refresh_fusion_candidates(&mut cache);
     // Cached predecessor hints must not retain authority over superseded aliases.
     cache.targets.fill(None);
     cache.missing_targets.fill(None);
@@ -954,7 +1022,7 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
         if valid {
             let index = index.unwrap(); let record = &cache.records[index];
             let needs_heat = record.job.artifact.tier == super::compile::Tier::One
-                || fusion_indices(&cache, entry).is_some();
+                || record.fusion_candidate && record.job.artifact.entry == EntryContract::Cpu(entry);
             let current = Owner { index, id };
             *owner = Some(current);
             if let Some(p) = previous {
@@ -1016,6 +1084,7 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
             cache.zero_step_exits = cache.zero_step_exits.wrapping_add(1);
         }
         let profile = cache.fusion_enabled;
+        let mut refresh_fusion = false;
         let fused = cache.records.get(admitted_index).is_some_and(|r|
             r.job.artifact.key.job == id && !r.job.artifact.fused_sources.is_empty());
         if fused {
@@ -1031,17 +1100,20 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
             record.guest_steps = record.guest_steps.wrapping_add(steps);
             record.max_guest_steps = record.max_guest_steps.max(steps);
             if let Some((edge, target)) = observed_exit.filter(|_| profile) {
+                let was_hot = record.hot_exit.is_some_and(|(_, _, hits)| hits >= 8);
                 match &mut record.hot_exit {
                     Some((old, old_target, hits)) if old.from == edge.from && *old_target == target =>
                         *hits = hits.saturating_add(1),
                     Some((_, _, hits)) if *hits > 1 => *hits -= 1,
                     _ => record.hot_exit = Some((edge, target, 1)),
                 }
+                refresh_fusion = was_hot != record.hot_exit.is_some_and(|(_, _, hits)| hits >= 8);
             }
             if steps == 0 {
                 record.zero_step_exits = record.zero_step_exits.wrapping_add(1);
             }
         }
+        if refresh_fusion { refresh_fusion_candidate(&mut cache, admitted_index); }
         // Zero-budget REP and other no-retirement exits must not trap scheduling
         // in a repeatedly admitted entry. The next cycle may interpret instead.
         if steps == 0 {

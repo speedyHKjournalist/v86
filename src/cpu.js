@@ -1097,10 +1097,22 @@ CPU.prototype.get_ir_diagnostics = function()
     const reasons = Object.fromEntries(exits.map((name, i) => [name, {"count":get(2, i, 0), "guest_steps":get(2, i, 1)}]));
     const admission = Object.fromEntries(["attempt", "busy", "missing", "context", "stale_before", "capture",
         "fetch_fault", "lost_owner", "unavailable_after", "stale_after", "accepted"].map((name,i)=>[name,get(3,i,0)]));
-    const compiler = Object.fromEntries(["pipeline", "capture", "lift", "passes", "lower", "machine", "emit",
+    const compile_phases = ["pipeline", "capture", "lift", "passes", "lower", "machine", "emit",
         "hir_allocation", "lower_states", "lower_proofs", "lower_verify", "machine_fold", "machine_stack",
-        "machine_allocation", "machine_state", "machine_helper", "machine_liveness", "machine_loop_ram", "machine_forward", "machine_guards"]
-        .map((name,i)=>[name,{"ms":get(5,i,0),"calls":get(5,i,1),"max_ms":get(5,i,2),"max_pc":get(5,i,3),"max_tier":get(5,i,4)}]));
+        "machine_allocation", "machine_state", "machine_helper", "machine_liveness", "machine_loop_ram", "machine_forward", "machine_guards"];
+    const compile_row = (group, index) => ({"ms":get(group,index,0),"calls":get(group,index,1),
+        "max_ms":get(group,index,2),"max_pc":get(group,index,3),"max_tier":get(group,index,4)});
+    const compiler = Object.fromEntries(compile_phases.map((name,i)=>[name,compile_row(5,i)]));
+    const compiler_breakdown = [];
+    if(period && get(0,6,0)) for(let tier=0;tier<3;tier++) for(let kind=0;kind<4;kind++) for(let shape=0;shape<3;shape++)
+    {
+        const bucket=(tier*4+kind)*3+shape;
+        const phases=Object.fromEntries(compile_phases.map((name,i)=>[name,compile_row(14,bucket*20+i)])
+            .filter(([,row])=>row["calls"]));
+        if(Object.keys(phases).length) compiler_breakdown.push({"tier":tier,
+            "kind":["unknown","ordinary","shared","fused"][kind],
+            "shape":["unknown","single","multi"][shape],"phases":phases});
+    }
     const interpreter_hotspots = [];
     for(let i=0;i<256;i++) if(get(9,i,3)) interpreter_hotspots.push({
         "pc":get(9,i,0),"cr3":get(9,i,1),"physical":get(9,i,2),"samples":get(9,i,3),"guest_steps":get(9,i,4),"inclusive_ms":get(9,i,5)});
@@ -1114,7 +1126,7 @@ CPU.prototype.get_ir_diagnostics = function()
     }
     return {"schema":1, "enabled":!!period, "sample_period":period, "session":get(0,1,0),
         "empty_scope_sampled_ms":get(0,4,0),"empty_scope_wall_ms":get(0,5,0),
-        "totals":totals,"timings":timings,"exits":reasons,"admission":admission,"compiler":compiler,
+        "totals":totals,"timings":timings,"exits":reasons,"admission":admission,"compiler":compiler,"compiler_breakdown":compiler_breakdown,
         "publication":{"wall_ms":get(6,0,0),"calls":get(6,1,0),"succeeded":get(6,2,0)},
         "discovery_latency":Object.fromEntries(["tier1","tier2"].map((name,i)=>[name,{"ms":get(11,i,0),"count":get(11,i,1),"max_ms":get(11,i,2)}])),
         "missing_entries":Object.fromEntries(["unseen","heating","ready","pending","failed"].map((name,i)=>[name,get(12,i,0)])),

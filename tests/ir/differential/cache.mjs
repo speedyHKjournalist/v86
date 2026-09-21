@@ -151,13 +151,40 @@ try {
     }
     clockMutation=null;
     console.log(`PASS: ${wasm}: in-owner scalar port/TSC continuation, exact retirement and raw-code/mapping/context/XMM/IRQ barriers`);
-    for(const depth of [1,2]) {
+    // A pending bit alone must not break an owner. Compare the read-only query
+    // against controller masking/priority, and check re-evaluation after a host
+    // callback unmasks the same request. IF stays clear so the cold tail halts.
+    for(const kind of ["port","clock"]) for(const policy of ["masked","in-service","unmask"]) {
+        const op=kind==="port"?[0xE4,0x93]:[0x0F,0x31];
+        prepare([0x43,...op,0x43,0xF4]);
+        const raw=new Uint8Array(e.memory.buffer),master=e.get_pic_addr_master(),slave=e.get_pic_addr_slave();
+        const saved=raw.slice(master,master+13),savedSlave=raw.slice(slave,slave+13);
+        raw[master]=policy==="in-service"?1:0;raw[master+2]=policy==="in-service"?1:0;
+        raw[master+3]=1;raw[master+12]=0;raw[slave+3]=0;
+        assert.equal(e.ir_sti_no_pending_irq(),1);
+        assert.equal(raw[master+3],1,"query does not acknowledge masked/in-service IRQ");
+        let observations=0;
+        const observe=()=>{observations++;if(policy==="unmask")raw[master]=1;return 0x7A;};
+        cpu.io.register_read(0x93,null,observe);
+        if(kind==="clock")clockMutation=()=>{if(cpu.instruction_pointer[0]===PC+3){clockMutation=null;observe();}};
+        assert(await request(4));const before=count();await run();clockMutation=null;
+        assert.equal(observations,1);assert.equal((count()-before)>>>0,4);assert.equal(cpu.reg32[3],2);
+        assert.equal(e.ir_cache_entry_stat(PC,0,1,3),policy==="unmask"?2:3);
+        assert.equal(raw[master+3],1,"continuation preserves outstanding request");
+        raw.set(saved,master);raw.set(savedSlave,slave);
+    }
+    console.log(`PASS: ${wasm}: masked/in-service IRQ continuation and callback unmask recheck`);
+    for(const depth of [1,2]) for(const masked of [false,true]) {
         const code=[0x43,...Array(depth).fill(0xFB),0x90,0x43,0xF4];prepare(code);
         const raw=new Uint8Array(e.memory.buffer);
-        raw[e.get_pic_addr_master()+3]=0;raw[e.get_pic_addr_slave()+3]=0;
+        const master=e.get_pic_addr_master(),slave=e.get_pic_addr_slave();
+        const saved=raw.slice(master,master+13),savedSlave=raw.slice(slave,slave+13);
+        raw[master]=0;raw[master+3]=+masked;raw[slave+3]=0;
         assert(await request(code.length-1));const before=count();await run();
         assert.equal(cpu.reg32[3],2);assert.equal((count()-before)>>>0,depth+4);
         assert.equal(e.ir_cache_entry_stat(PC,0,1,3),depth+3,"STI shadow retains SSA into its following block");
+        assert.equal(raw[master+3],+masked,"STI leaves masked request pending");
+        raw.set(saved,master);raw.set(savedSlave,slave);
     }
     console.log(`PASS: ${wasm}: no-pending single/nested STI shadow keeps following arithmetic in the same activation`);
     for(const enabled of [false,true]) {

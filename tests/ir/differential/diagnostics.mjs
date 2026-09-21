@@ -46,6 +46,11 @@ try {
   assert(Math.abs(sum-tot.sampled_batch_ms)<0.01,`exclusive timers conserve time: ${sum}/${tot.sampled_batch_ms}`);
   assert.equal(Object.values(d.helper_exits).reduce((n,r)=>n+r.count,0),d.exits.helper_control_or_fault.count+d.exits.helper_yield.count+d.exits.helper_invalidated.count);
   assert.equal(['rdtsc','cpuid','read_cr','write_cr','clts'].reduce((n,k)=>n+d.control_exits[k].count,0),d.helper_exits.cpu_control.count);
+  for(const [phase,total] of Object.entries(d.compiler)) {
+   const rows=d.compiler_breakdown.map(b=>b.phases[phase]).filter(Boolean);
+   assert.equal(rows.reduce((n,r)=>n+r.calls,0),total.calls,`${phase}: classified calls conserve total`);
+   assert(Math.abs(rows.reduce((n,r)=>n+r.ms,0)-total.ms)<0.001,`${phase}: classified time conserves total`);
+  }
   assert.equal(d.exits.unclassified.count,0,'all executed test exits classified');
   return d;
  };
