@@ -1747,12 +1747,21 @@ fn emit_inner(
         }
         e.w.const_i32(0);
         e.accounted = Some(e.w.set_new_local());
-        e.w.call_signature(
-            "ir_tlb_base",
-            crate::ir::helper::imports::signature("ir_tlb_base"),
-        );
-        e.tlb = Some(e.w.set_new_local());
-        if !code_pages.is_empty() {
+        // Imported functions are opaque to the host Wasm optimizer, even when
+        // they only return a pointer. Do not pay two imports on every register-
+        // only region. Derive requirements from the owned, verified machine
+        // plans, including CMPXCHG8B and RMW's separate commit effect.
+        let needs_tlb = mir.memory.iter().any(Option::is_some)
+            || mir.effects.iter().flatten().any(|plan| matches!(plan,
+                EffectPlan::Arithmetic(ArithmeticPlan::CompareExchange(_))));
+        let needs_memory_base = mir.memory.iter().flatten().any(|plan| matches!(
+            plan.native, NativeMemory::ScalarStore { commit: Some(_), .. }))
+            || mir.effects.iter().flatten().any(|plan| matches!(plan, EffectPlan::RmwCommit { .. }));
+        if needs_tlb {
+            e.w.call_signature("ir_tlb_base", crate::ir::helper::imports::signature("ir_tlb_base"));
+            e.tlb = Some(e.w.set_new_local());
+        }
+        if needs_memory_base && !code_pages.is_empty() {
             e.w.call_signature(
                 "ir_memory_base",
                 crate::ir::helper::imports::signature("ir_memory_base"),

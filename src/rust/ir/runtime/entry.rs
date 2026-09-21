@@ -69,6 +69,12 @@ pub unsafe fn take_link_request() -> bool {
 /// This guard does NOT validate code versions or grant permission to call a stale slot.
 #[no_mangle]
 pub unsafe fn ir_entry_matches(linear: u32, cs_base: u32, default_32: u32) -> bool {
+    matches_current(linear, cs_base, default_32)
+}
+// The generated module still calls the guarded ABI above. Internal admission
+// can inline this exact predicate instead of crossing a second Wasm call.
+#[inline(always)]
+pub(super) unsafe fn matches_current(linear: u32, cs_base: u32, default_32: u32) -> bool {
     !cpu::in_jit
         && *gp::prefixes == 0
         && !*gp::in_hlt

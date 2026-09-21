@@ -10,6 +10,9 @@ for(const release of [false,true]){
     const vm=new V86({
         wasm_path:release?"build/v86-ir-test-release.wasm":"build/v86-ir-test.wasm",
         memory_size:32<<20,
+        // This suite asserts exact F80 payloads and all rounding/precision modes,
+        // not the intentionally approximate browser-default binary64 policy.
+        x87_fast_math:false,x87_jit_cache:false,
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
         net_device:{type:"none"},autostart:false,
@@ -112,7 +115,7 @@ for(const release of [false,true]){
             e.ir_test_step();
             return state();
         }
-        function compare(i,configure,expected_count){
+        function compare(i,configure,expected_count,detail=""){
             configure();
             const expected=interpreter(i);
             // ir_test_step() intentionally executes interpreter semantics without
@@ -123,7 +126,7 @@ for(const release of [false,true]){
                 configure();
                 instances[i][opt].exports.f(0);
                 assert.equal(linear32[664>>2],expected_count);
-                assert.deepEqual(state(),expected,`x87 case ${i}/${opt}`);
+                assert.deepEqual(state(),expected,`x87 case ${i}/${opt} ${detail}`);
             }
             return expected;
         }
@@ -132,10 +135,31 @@ for(const release of [false,true]){
         for(let i=0;i<cases.length;i++) {
             if(!cases[i][4])continue;
             for(let sample=0;sample<12;sample++) for(const precision of [0,1,2,3]) for(let rounding=0;rounding<4;rounding++) {
-                compare(i,()=>{reset(i);e.ir_test_x87_pattern(sample,0x3F|precision<<8|rounding<<10);},102);special++;
+                compare(i,()=>{reset(i);e.ir_test_x87_pattern(sample,0x3F|precision<<8|rounding<<10);},102,`sample=${sample} precision=${precision} rounding=${rounding}`);special++;
             }
         }
         console.log(`PASS (${release?"release":"debug"}): ${special} exact F80 zero/subnormal/infinity/qNaN/sNaN/tie cases across rounding and precision modes`);
+        // FYL2XP1 used to pass NaNs through the host ln implementation. Node
+        // 24's Wasm tiers may canonicalize that payload differently. Check an
+        // explicit F80 oracle, not merely two calls that could share the bug.
+        const logarithmCase=cases.findIndex(c=>c[1]===0xD9&&c[2]===7&&c[3]===1&&c[4]);
+        assert(logarithmCase>=0);
+        for(const [mantissa,exponent,expectedMantissa,expectedExponent] of [
+            [0xC000000000012345n,0x7FFF,0xC000000000012000n,0x7FFF],
+            [0x8000000000054321n,0xFFFF,0xC000000000054000n,0xFFFF],
+            [0xA000000000000000n,0xC000,0xC000000000000000n,0xFFFF], // ln(-2.5+1)
+        ]) {
+            const configure=()=>{
+                reset(logarithmCase);
+                const v=new DataView(e.memory.buffer);
+                v.setBigUint64(1152,mantissa,true);v.setUint16(1160,exponent,true);
+                v.setBigUint64(1168,0x8000000000000000n,true);v.setUint16(1176,0x3FFF,true); // ST1=1
+            };
+            const expected=compare(logarithmCase,configure,102,"deterministic logarithm");
+            assert.equal(expected.fpu.st.readBigUInt64LE(16),expectedMantissa);
+            assert.equal(expected.fpu.st.readUInt16LE(24),expectedExponent);
+        }
+        console.log(`PASS (${release?"release":"debug"}): deterministic FYL2XP1 qNaN/sNaN payloads and negative-domain indefinite`);
         let ordinary=0;
         for(let i=0;i<cases.length;i++){
             const valid=cases[i][4];

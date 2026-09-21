@@ -301,7 +301,22 @@ impl F80 {
     pub fn atan2(self, other: F80) -> F80 { F80::of_f64x(self.to_f64x().atan2(other.to_f64x())) }
 
     pub fn log2(self) -> F80 { F80::of_f64x(self.to_f64x().log2()) }
-    pub fn ln(self) -> F80 { F80::of_f64x(self.to_f64x().ln()) }
+    pub fn ln(self) -> F80 {
+        // Transcendentals currently round through binary64. Keep that conversion
+        // (and its SoftFloat exception flags), but never pass a NaN to the host
+        // logarithm: Wasm arithmetic may change its sign/payload between tiers.
+        let bits = self.to_f64();
+        let magnitude = bits & 0x7FFFFFFFFFFFFFFF;
+        if magnitude > 0x7FF0000000000000 { return F80::of_f64(bits); }
+        if magnitude == 0 { return F80::NEG_INFINITY; }
+        if bits >> 63 != 0 {
+            // Same default indefinite encoding as the bundled SoftFloat. The
+            // old host logarithm did not set SoftFloat's invalid-operation flag.
+            return F80 { mantissa: 0xC000000000000000, sign_exponent: 0xFFFF };
+        }
+        if magnitude == 0x7FF0000000000000 { return F80::POS_INFINITY; }
+        F80::of_f64x(f64::from_bits(bits).ln())
+    }
 
     pub fn abs(self) -> F80 {
         F80 {

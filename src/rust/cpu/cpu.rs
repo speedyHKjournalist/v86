@@ -3074,17 +3074,21 @@ pub unsafe fn run_instruction(opcode: i32) { gen::interpreter::run(opcode as u32
 pub unsafe fn run_instruction0f_16(opcode: i32) { gen::interpreter0f::run(opcode as u32) }
 pub unsafe fn run_instruction0f_32(opcode: i32) { gen::interpreter0f::run(opcode as u32 | 0x100) }
 
-pub unsafe fn cycle_internal() {
+pub unsafe fn cycle_internal() -> bool {
     profiler::stat_increment(stat::CYCLE_INTERNAL);
     #[cfg(feature = "ir-experimental")]
     {
-        {
+        let submitted = {
             if crate::ir::runtime::diagnostics::enabled() {
                 let _scope = crate::ir::runtime::diagnostics::Scope::new(crate::ir::runtime::diagnostics::Stage::Scheduler);
-                crate::ir::runtime::schedule::visit();
-            } else { crate::ir::runtime::schedule::visit(); }
-        }
-        if crate::ir::runtime::cache::execute() { return; }
+                crate::ir::runtime::schedule::visit()
+            } else { crate::ir::runtime::schedule::visit() }
+        };
+        // Installation runs in a host Promise continuation, never on this CPU
+        // stack. Avoid interpreting a full batch before that continuation can
+        // run. This is an edge (new submission), not the level "pending != 0".
+        if submitted { return true; }
+        if crate::ir::runtime::cache::execute() { return false; }
         crate::ir::runtime::schedule::note_interpreted();
         // The interpreter/legacy path can call devices and mutate raw RAM.
         crate::ir::runtime::entry::ir_admission_barrier();
@@ -3207,7 +3211,7 @@ pub unsafe fn cycle_internal() {
     }
     else {
         *previous_ip = initial_eip;
-        let phys_addr = return_on_pagefault!(get_phys_eip());
+        let phys_addr = return_on_pagefault!(get_phys_eip(), false);
 
         match tlb_code[(initial_eip as u32 >> 12) as usize] {
             None => {},
@@ -3218,7 +3222,7 @@ pub unsafe fn cycle_internal() {
                     && c.state_table[initial_eip as usize & 0xFFF] != u16::MAX
                 {
                     profiler::stat_increment(stat::RUN_INTERPRETED_PAGE_HAS_ENTRY_AFTER_PAGE_WALK);
-                    return;
+                    return false;
                 }
             },
         }
@@ -3265,6 +3269,7 @@ pub unsafe fn cycle_internal() {
             "Instruction counter didn't change"
         );
     };
+    false
 }
 
 // Keep recording-only state and bookkeeping out of the normal JIT call path.
@@ -3419,7 +3424,7 @@ pub unsafe fn main_loop() -> f64 {
 
     loop {
         let performance_start = profiler::performance_batch_start();
-        do_many_cycles_native();
+        let publication_yield = do_many_cycles_native();
         profiler::performance_timer_finish(performance_start, 0);
 
         let now = js::microtick();
@@ -3431,7 +3436,10 @@ pub unsafe fn main_loop() -> f64 {
             return profiler::performance_main_loop_exit(t, true);
         }
 
-        if now - start > TIME_PER_FRAME {
+        // Give the host a chance to install a newly submitted IR module. All
+        // guest state is committed and the normal timer/IRQ work above is kept.
+        // Only a new submission requests this; a held Promise cannot spin here.
+        if publication_yield || now - start > TIME_PER_FRAME {
             break;
         }
     }
@@ -3506,7 +3514,8 @@ pub unsafe fn jit_link_once() {
     jit_link_active = false;
 }
 
-pub unsafe fn do_many_cycles_native() {
+pub unsafe fn do_many_cycles_native() -> bool {
+    let mut publication_yield = false;
     #[cfg(feature = "ir-experimental")]
     let diagnostic_start = crate::ir::runtime::diagnostics::batch_start();
     profiler::stat_increment(stat::DO_MANY_CYCLES);
@@ -3518,11 +3527,15 @@ pub unsafe fn do_many_cycles_native() {
     while (*instruction_counter).wrapping_sub(initial_instruction_counter) < LOOP_COUNTER as u32
         && !*in_hlt
     {
-        cycle_internal();
+        if cycle_internal() {
+            publication_yield = true;
+            break;
+        }
     }
     jit_link_batch = false;
     #[cfg(feature = "ir-experimental")]
     crate::ir::runtime::diagnostics::batch_end(diagnostic_start);
+    publication_yield
 }
 
 #[cold]

@@ -867,6 +867,9 @@ ir-auto-tests: ir-generated-check build/v86-ir-cache-test.wasm build/v86-ir-cach
 	node tests/ir/differential/auto.mjs build/v86-ir-cache-test.wasm
 	node tests/ir/differential/auto.mjs build/v86-ir-cache-test-release.wasm
 	node tests/ir/differential/auto.mjs build/v86-ir-runtime.wasm
+	node tests/ir/differential/publication_yield.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/publication_yield.mjs build/v86-ir-cache-test-release.wasm
+	node tests/ir/differential/publication_yield.mjs build/v86-ir-runtime.wasm
 
 .PHONY: ir-backend-integration-tests ir-backend-browser-tests
 ir-backend-integration-tests: build/v86-ir-cache-test.wasm build/v86-ir-runtime.wasm build/v86.wasm build/libv86.mjs build/cpu-worker-test.bin

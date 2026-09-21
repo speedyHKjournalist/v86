@@ -223,13 +223,15 @@ try {
             assert(await request(3));cpu.instruction_pointer[0]=other;assert(await request(7));
             assert.equal(e.ir_cache_set_fast_validation(fast),1);e.performance_recording_enable(recording);
             const full=e.ir_cache_stat(19),reuse=e.ir_cache_stat(18),post=e.ir_cache_stat(20),targets=e.ir_cache_stat(21),start=count();
-            const successors=e.ir_cache_stat(29);
+            const successors=e.ir_cache_stat(29),warmAdmissions=e.ir_cache_stat(34);
             await run();
             assert.equal(cpu.reg32[3],iterations);assert.equal(cpu.reg32[2],0);
             assert.equal((count()-start)>>>0,iterations*4+1);
             checks.push(e.ir_cache_stat(19)-full);
             assert.equal(e.ir_cache_stat(18)>reuse,!!fast);
             assert.equal(e.ir_cache_stat(20)>post,!!fast);
+            assert.equal(e.ir_cache_stat(34)>warmAdmissions,!!fast,
+                "single-guard admission is used only when actual fetch translations are warm");
             assert(e.ir_cache_stat(21)>targets,"warm targets hit the bounded entry cache");
             assert(e.ir_cache_stat(29)>successors,"repeated normal edges reuse an owner-checked successor");
         }
