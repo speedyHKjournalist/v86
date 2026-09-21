@@ -53,6 +53,7 @@ struct Scheduler {
     ready: VecDeque<Job>,
     credit: bool,
     scan_credit: bool,
+    interpreted_probe: bool,
     stats: [u32; 22],
 }
 static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
@@ -78,6 +79,7 @@ static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
     ready: VecDeque::new(),
     credit: false,
     scan_credit: false,
+    interpreted_probe: false,
     stats: [0; 22],
 });
 #[link(wasm_import_module = "env")]
@@ -95,6 +97,7 @@ pub fn invalidate() {
     s.ready.clear();
     s.credit = false;
     s.scan_credit = false;
+    s.interpreted_probe = false;
 }
 pub fn dirty_page(page: u32) {
     let mut s = SCHEDULER.try_lock().unwrap();
@@ -157,6 +160,7 @@ pub fn begin_frame() {
     let mut s = SCHEDULER.try_lock().unwrap();
     s.credit = true;
     s.scan_credit = true;
+    s.interpreted_probe = false;
 }
 /// An evicted region must earn fresh heat. Historical visits must not make a
 /// working set larger than the cache continually recompile inactive entries.
@@ -211,6 +215,7 @@ pub unsafe fn ir_auto_config(
         s.replacement = 0;
         s.credit = false;
         s.scan_credit = false;
+        s.interpreted_probe = false;
         s.pending.take()
     };
     if let Some(p) = pending {
@@ -219,11 +224,14 @@ pub unsafe fn ir_auto_config(
     }
     true
 }
-unsafe fn record(entry: CpuEntryKey) {
+unsafe fn record(entry: CpuEntryKey, interpreted: bool) {
     let mut s = SCHEDULER.try_lock().unwrap();
     if !s.config.enabled || *gp::prefixes != 0 || *gp::in_hlt {
         return;
     }
+    // Only new interpreted work can justify another current-entry probe after
+    // the frame's bounded ring scan. Cached Tier-2 activations must stay cheap.
+    s.interpreted_probe |= interpreted;
     // Profile the exact same visits, but bypass tree lookup for stable hot PCs.
     // Replacement/compaction cannot give the hint authority: compare full entry.
     let hint = ((entry.linear.0 >> 1 ^ entry.pc.0 >> 12) & 255) as usize;
@@ -275,9 +283,9 @@ pub unsafe fn note_cached(entry: CpuEntryKey, linked: bool, needs_heat: bool) {
         let mut s = SCHEDULER.try_lock().unwrap();
         if s.config.enabled { s.stats[1] = s.stats[1].wrapping_add(1); }
     }
-    if needs_heat { record(entry); }
+    if needs_heat { record(entry, false); }
 }
-pub unsafe fn note_interpreted() { record(live::entry()); }
+pub unsafe fn note_interpreted() { record(live::entry(), true); }
 pub(super) fn diagnose_missing(entry: CpuEntryKey) {
     let s = SCHEDULER.try_lock().unwrap();
     let reason = if s.pending.as_ref().is_some_and(|p| p.entries.iter().any(|(key, _)| *key == entry))
@@ -336,9 +344,11 @@ pub unsafe fn visit() -> bool {
     }
     let selected = {
         let mut s = SCHEDULER.try_lock().unwrap();
-        if !s.config.enabled || !s.credit || s.pending.is_some() {
+        if !s.config.enabled || !s.credit || s.pending.is_some()
+            || !s.scan_credit && !s.interpreted_probe {
             return false;
         }
+        s.interpreted_probe = false;
         // A fruitless scan must not consume the frame's compilation credit.
         // Bound full-ring scans separately, but still admit the currently
         // interpreted entry as soon as it actually reaches its heat threshold.
