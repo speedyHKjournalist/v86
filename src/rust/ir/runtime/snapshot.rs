@@ -102,6 +102,22 @@ pub unsafe fn cached_match(
     if !mappings_cached(snapshot) {
         return CachedMatch::Unavailable;
     }
+    // Most captures fit one page. Keep mapping admission first, then compare
+    // that page directly without the generic chunk loop or per-owner metadata.
+    if let [mapping] = snapshot.mappings.as_slice() {
+        let page_offset = linear & 4095;
+        if snapshot.bytes.is_empty() || snapshot.bytes.len() > (4096 - page_offset) as usize
+            || mapping.linear.0 != linear & !4095 {
+            return CachedMatch::Stale;
+        }
+        let Some(physical) = mapping.physical.0.checked_add(page_offset) else {
+            return CachedMatch::Stale;
+        };
+        return match ram(physical, snapshot.bytes.len()) {
+            Ok(current) if current == snapshot.bytes.as_slice() => CachedMatch::Match,
+            _ => CachedMatch::Stale,
+        };
+    }
     let mut offset = 0usize;
     for mapping in &snapshot.mappings {
         if offset >= snapshot.bytes.len() {

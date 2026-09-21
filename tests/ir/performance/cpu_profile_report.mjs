@@ -13,8 +13,11 @@ for(let i=0;i<profile.samples.length;i++) {
  const names=stack.map(f=>f.functionName).join(' ');
  const group=names.includes('(idle)')?'idle':
   /compile_lifted|compile_cpu|lower_draft|ir.*passes/.test(names)?'IR compiler':
+  /jit_generate_module|jit_analyze_and_generate/.test(names)?'legacy compiler':
   stack.some(f=>f.url.startsWith('wasm:')&&!f.url.includes('v86.wasm'))?'generated code and called helpers':
-  /jit_run_interpreted/.test(names)?'interpreter':
+  // The uninstrumented IR dispatch inlines jit_run_interpreted into main_loop.
+  // Keep its generated interpreter frame and descendants in the same group.
+  /jit_run_interpreted|gen.*interpreter.*run/.test(names)?'interpreter':
   /ir.*runtime.*schedule/.test(names)?'IR scheduler':
   /ir.*runtime.*cache/.test(names)?'IR admission and dispatch':
   /wasm/.test(stack[0].url)?'other core':
@@ -24,4 +27,4 @@ for(let i=0;i<profile.samples.length;i++) {
 }
 const rank=rows=>[...rows].map(([name,ms])=>({name,ms,pct:ms/total*100})).sort((a,b)=>b.ms-a.ms);
 console.log(JSON.stringify({sampled_ms:total,groups:rank(groups),leaf_functions:rank(own).slice(0,30),
- caveat:'Sample intervals and stack-name grouping, including idle; not OS CPU accounting. Profiling perturbs execution. Use profiling-off paired medians for acceptance.'},null,2));
+ caveat:'Sample intervals and stack-name grouping, including idle; not OS CPU accounting. Inlined code without a recognizable frame remains in other core. Profiling perturbs execution. Use profiling-off paired medians for acceptance.'},null,2));

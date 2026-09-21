@@ -95,7 +95,7 @@ pub fn verify(region: &Region) -> Result<()> {
     };
     let state = |id: StateId, b: usize, p: usize| -> Result<()> {
         let map = region.states.get(id.index()).ok_or("missing state map")?;
-        for value in map.values() {
+        for value in map.values_iter() {
             available(value, b, p)?;
         }
         if let Some(base) = map.count_base {
@@ -181,18 +181,21 @@ pub fn verify(region: &Region) -> Result<()> {
     for helper in &region.helpers {
         helper.validate().map_err(VerifyError::from)?;
     }
+    // Signature checks visit every instruction on every verification pass.
+    // Reuse their scratch storage without changing type/error validation order.
+    let mut args = Vec::new();
+    let mut results = Vec::new();
     for (b, block) in region.blocks.iter().enumerate() {
         if let Some(id) = block.entry_state {
             state(id, b, 0)?;
         }
-        let effects: Vec<_> = block
+        let mut effects = block
             .params
             .iter()
             .copied()
-            .filter(|&v| ty(v) == Ok(Type::Effect))
-            .collect();
-        require(effects.len() <= 1, "multiple effect roots")?;
-        let mut effect = effects.first().copied();
+            .filter(|&v| ty(v) == Ok(Type::Effect));
+        let mut effect = effects.next();
+        require(effects.next().is_none(), "multiple effect roots")?;
         let mut rmw = None;
         let mut partial = None;
         for (p, &id) in block.instructions.iter().enumerate() {
@@ -236,8 +239,10 @@ pub fn verify(region: &Region) -> Result<()> {
             for &arg in &inst.args {
                 available(arg, b, p)?;
             }
-            let mut args: Vec<_> = inst.args.iter().map(|&v| ty(v)).collect::<Result<_>>()?;
-            let mut results: Vec<_> = inst.results.iter().map(|&v| ty(v)).collect::<Result<_>>()?;
+            args.clear();
+            results.clear();
+            for &value in &inst.args { args.push(ty(value)?); }
+            for &value in &inst.results { results.push(ty(value)?); }
             require(
                 !args.contains(&Type::RmwTicket) || matches!(inst.op, Op::RmwStore { .. }),
                 "RMW ticket escapes to another operation",
@@ -501,13 +506,13 @@ pub fn verify(region: &Region) -> Result<()> {
                     require(
                         *register < 8
                             && matches!(bytes, 4 | 8 | 16)
-                            && args
+                            && args.as_slice()
                                 == if store {
-                                    vec![Type::LinearAddress, Type::V128]
+                                    &[Type::LinearAddress, Type::V128][..]
                                 } else {
-                                    vec![Type::LinearAddress]
+                                    &[Type::LinearAddress][..]
                                 }
-                            && results == if store { vec![] } else { vec![Type::V128] },
+                            && results.as_slice() == if store { &[][..] } else { &[Type::V128][..] },
                         "XMM memory signature",
                     )?;
                     let map = &region.states[inst.state.unwrap().index()];

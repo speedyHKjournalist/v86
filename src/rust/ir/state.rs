@@ -48,25 +48,65 @@ pub struct StateMap {
     pub rep_progress: Option<[ValueId; 3]>, // ECX, ESI, EDI
 }
 impl StateMap {
+    /// Recovery operands in the same order as `values`, without allocating a
+    /// temporary vector for read-only visitors such as the HIR verifier.
+    pub fn values_iter(&self) -> impl Iterator<Item = ValueId> + '_ {
+        self.gpr.iter().chain(&self.flags.arithmetic).copied()
+            .chain(std::iter::once(self.flags.system))
+            .chain([
+                self.flags.last_op1,
+                self.flags.raw_zero,
+                self.flags.zero_is_lazy,
+                self.flags.raw_flags,
+                self.flags.lazy_mask,
+                self.flags.last_result,
+                self.flags.last_op_size,
+                self.flags.backing_valid,
+            ].into_iter().flatten())
+            .chain(self.xmm.iter().chain(&self.x87).copied())
+            .chain(self.next_value)
+            .chain(self.count_base)
+            .chain(self.rep_progress.into_iter().flatten())
+    }
     pub fn values(&self) -> Vec<ValueId> {
-        let mut values = self.gpr.to_vec();
-        values.extend(self.flags.arithmetic);
-        values.push(self.flags.system);
-        values.extend(self.flags.last_op1);
-        values.extend(self.flags.raw_zero);
-        values.extend(self.flags.zero_is_lazy);
-        values.extend(self.flags.raw_flags);
-        values.extend(self.flags.lazy_mask);
-        values.extend(self.flags.last_result);
-        values.extend(self.flags.last_op_size);
-        values.extend(self.flags.backing_valid);
-        values.extend(&self.xmm);
-        values.extend(&self.x87);
-        values.extend(self.next_value);
-        values.extend(self.count_base);
-        if let Some(rep) = self.rep_progress {
-            values.extend(rep);
-        }
-        values
+        self.values_iter().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_values_preserve_all_optional_operands_and_order() {
+        let mut state = StateMap {
+            instruction_pc: GuestEip(0), next_pc: GuestEip(1),
+            next_value: Some(ValueId(39)), resume: ResumeKind::RepProgress,
+            gpr: std::array::from_fn(|n| ValueId(n as u32)),
+            flags: FlagState {
+                arithmetic: std::array::from_fn(|n| ValueId(n as u32 + 8)),
+                system: ValueId(14), last_op1: Some(ValueId(15)),
+                raw_zero: Some(ValueId(16)), zero_is_lazy: Some(ValueId(17)),
+                raw_flags: Some(ValueId(18)), lazy_mask: Some(ValueId(19)),
+                last_result: Some(ValueId(20)), last_op_size: Some(ValueId(21)),
+                backing_valid: Some(ValueId(22)),
+            },
+            xmm: (23..31).map(ValueId).collect(),
+            x87: (31..39).map(ValueId).collect(), committed_instructions: 1,
+            count_base: Some(ValueId(40)), rep_progress: Some([ValueId(41), ValueId(42), ValueId(43)]),
+        };
+        let expected: Vec<_> = (0..44).map(ValueId).collect();
+        assert_eq!(state.values_iter().collect::<Vec<_>>(), expected);
+        assert_eq!(state.values(), expected);
+
+        state.flags.last_op1 = None;
+        state.flags.zero_is_lazy = None;
+        state.flags.lazy_mask = None;
+        state.flags.last_op_size = None;
+        state.xmm.clear(); state.x87.clear();
+        state.next_value = None; state.count_base = None; state.rep_progress = None;
+        let expected: Vec<_> = (0..15).chain([16, 18, 20, 22]).map(ValueId).collect();
+        assert_eq!(state.values_iter().collect::<Vec<_>>(), expected);
+        assert_eq!(state.values(), expected);
     }
 }
