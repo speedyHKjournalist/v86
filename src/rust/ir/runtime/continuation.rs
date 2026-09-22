@@ -50,6 +50,41 @@ impl ContinuationContext {
             }),
         }
     }
+    /// Compare authoritative backing directly. Building a second full context
+    /// first copies every segment/control array and introduces generic memcmp
+    /// calls on each port or clock observer, although no second snapshot lives
+    /// beyond this check. Keep exactly the same field set and FLAGS mask.
+    pub(super) unsafe fn matches_current(&self) -> bool {
+        self.epoch == super::live::continuation_epoch()
+            && self.pc == *gp::instruction_pointer
+            && self.previous_pc == *gp::previous_ip
+            && self.count == *gp::instruction_counter
+            && self
+                .controls
+                .iter()
+                .enumerate()
+                .all(|(i, value)| *value == *gp::cr.add(i))
+            && self.mode[0] == *gp::protected_mode as u32
+            && self.mode[1] == *gp::is_32 as u32
+            && self.mode[2] == *gp::stack_size_32 as u32
+            && self.mode[3] == *gp::cpl as u32
+            && self.mode[4] == *gp::in_hlt as u32
+            && self.mode[5] == *gp::prefixes as u32
+            && self.mode[6] == (*gp::state_flags).to_u32()
+            && self.mode[7] == (*gp::flags as u32) & !0x8D5
+            && self.descriptors[0] == *gp::gdtr_offset
+            && self.descriptors[1] == *gp::gdtr_size
+            && self.descriptors[2] == *gp::idtr_offset
+            && self.descriptors[3] == *gp::idtr_size
+            && self.descriptors[4] == *gp::tss_size_32 as i32
+            && self.segments.iter().enumerate().all(|(i, segment)| {
+                segment.0 == *gp::sreg.add(i)
+                    && segment.1 == *gp::segment_offsets.add(i)
+                    && segment.2 == *gp::segment_limits.add(i)
+                    && segment.3 == *gp::segment_access_bytes.add(i)
+                    && segment.4 == *gp::segment_is_null.add(i)
+            })
+    }
 }
 
 /// Scalar reloads intentionally avoid requiring Wasm SIMD for integer code.
@@ -75,8 +110,11 @@ impl ScalarObserver {
         let current = self.0.is_some_and(|snapshot| {
             no_pending_irq()
                 && snapshot.context.epoch != u64::MAX
-                && snapshot.context == ContinuationContext::capture()
-                && snapshot.xmm == std::array::from_fn(|i| *(gp::reg_xmm as *const u32).add(i))
+                && snapshot.context.matches_current()
+                && super::snapshot::same_bytes(
+                    std::slice::from_raw_parts(snapshot.xmm.as_ptr().cast(), 128),
+                    std::slice::from_raw_parts(gp::reg_xmm.cast(), 128),
+                )
                 && super::cache::observer_continuation()
         });
         #[cfg(not(feature = "ir-experimental"))]

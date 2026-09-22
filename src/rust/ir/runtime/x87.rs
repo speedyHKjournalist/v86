@@ -1,4 +1,4 @@
-//! Audited terminal x87 register helper.
+//! Audited x87 register helper with scalar CPU state continuation.
 //!
 //! Register-only D8-DF forms have no guest-memory access. The helper first
 //! applies the architectural CR0.EM/TS guard, then synchronizes/discards the
@@ -53,7 +53,7 @@ fn valid(opcode: u32, group: u32, r: u32) -> bool {
 }
 
 #[no_mangle]
-pub unsafe fn ir_x87_reg(opcode: u32, group: u32, r: u32, operand_size: u32) -> u32 {
+pub unsafe fn ir_x87_reg_continue(opcode: u32, group: u32, r: u32, operand_size: u32) -> u32 {
     assert!(!cpu::in_jit);
     assert!((0xD8..=0xDF).contains(&opcode));
     assert!(group < 8 && r < 8 && matches!(operand_size, 16 | 32));
@@ -142,7 +142,21 @@ pub unsafe fn ir_x87_reg(opcode: u32, group: u32, r: u32, operand_size: u32) -> 
         _ => unreachable!("validated x87 register dispatch"),
     }
 
-    commit()
+    // Register semantics cannot observe host/guest memory or change execution
+    // context. F80 remains CPU-owned; CpuReload makes FNSTSW AX and FCOMI's
+    // architectural outputs available to following SSA without retiring here.
+    Outcome::Normal as u32
+}
+
+#[no_mangle]
+pub unsafe fn ir_x87_reg(opcode: u32, group: u32, r: u32, operand_size: u32) -> u32 {
+    let outcome = ir_x87_reg_continue(opcode, group, r, operand_size);
+    if outcome == Outcome::Normal as u32 {
+        commit()
+    }
+    else {
+        outcome
+    }
 }
 
 #[cfg(feature = "ir-test-hooks")]

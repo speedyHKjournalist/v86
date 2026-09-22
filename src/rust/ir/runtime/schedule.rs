@@ -15,6 +15,10 @@ use crate::{
     jit,
 };
 use std::{collections::VecDeque, sync::Mutex};
+// Larger heat sets remain an explicit experiment: they retain more recurrent
+// PCs but regressed XP by increasing compilation/cache pressure.
+const MAX_HOT_CAPACITY: usize = 512;
+const MAX_FRAME_SCAN: usize = 128;
 #[derive(Clone, Copy)]
 struct Config {
     enabled: bool,
@@ -43,6 +47,7 @@ struct Scheduler {
     passes_disabled: u32,
     config: Config,
     hot: Vec<Hot>,
+    hot_capacity: usize,
     hot_index: HotIndex,
     hot_hints: [u16; 256],
     hot_filter: bool,
@@ -65,13 +70,14 @@ static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
     passes_disabled: 0,
     config: Config {
         enabled: false,
-        threshold: 16,
-        promote: 64,
+        threshold: 64,
+        promote: 256,
         window: 192,
         budget: 256,
         rep: 64,
     },
     hot: Vec::new(),
+    hot_capacity: 128,
     hot_index: HotIndex::new(),
     hot_hints: [u16::MAX; 256],
     hot_filter: false,
@@ -125,6 +131,26 @@ fn rebuild_hot_index(s: &mut Scheduler) {
     s.replacement = 0;
 }
 pub fn enabled() -> bool { SCHEDULER.try_lock().unwrap().config.enabled }
+/// Startup-only bounded working-set experiment. Reset/restore keep the chosen
+/// policy; changing it requires a disabled, empty scheduler and no IR artifacts.
+#[no_mangle]
+pub unsafe fn ir_auto_set_hot_capacity(entries: u32) -> bool {
+    if !(128..=MAX_HOT_CAPACITY as u32).contains(&entries)
+        || !cold()
+        || cache::ir_cache_stat(1) != 0
+    {
+        return false;
+    }
+    let mut s = SCHEDULER.try_lock().unwrap();
+    if s.config.enabled || !s.hot.is_empty() || s.pending.is_some() || !s.ready.is_empty() {
+        return false;
+    }
+    s.hot_capacity = entries as usize;
+    s.probation.fill(None);
+    s.cursor = 0;
+    s.replacement = 0;
+    true
+}
 /// Startup-only experiment: admission filtering can save bookkeeping while
 /// increasing compilation of marginally hot PCs. Keep it opt-in after XP A/B.
 #[no_mangle]
@@ -296,9 +322,9 @@ unsafe fn record(entry: CpuEntryKey, interpreted: bool) {
                 .and_then(|(_, start)| start)
                 .or_else(super::diagnostics::discovery_start),
         };
-        let index = if s.hot.len() == 128 {
+        let index = if s.hot.len() == s.hot_capacity {
             let index = s.replacement;
-            s.replacement = (index + 1) % 128;
+            s.replacement = if index + 1 == s.hot_capacity { 0 } else { index + 1 };
             let old = std::mem::replace(&mut s.hot[index], new);
             s.hot_index.remove(old.entry);
             s.stats[18] = s.stats[18].wrapping_add(1);
@@ -425,7 +451,7 @@ pub unsafe fn visit() -> bool {
         });
         if selected.is_none() && s.scan_credit {
             s.scan_credit = false;
-            for _ in 0..s.hot.len() {
+            for _ in 0..s.hot.len().min(MAX_FRAME_SCAN) {
                 let index = s.cursor;
                 s.cursor = (s.cursor + 1) % s.hot.len();
                 let h = &s.hot[index];
@@ -757,6 +783,7 @@ pub fn ir_auto_stat(field: u32) -> u32 {
         26 => s.stats[21], // additional entries supplied by shared functions
         27 => s.stats[22], // idle visits rejected before cache/jit quiescence checks
         28 => s.stats[23], // visits requiring the original cold-work path
+        29 => s.hot_capacity as u32,
         _ => 0,
     }
 }

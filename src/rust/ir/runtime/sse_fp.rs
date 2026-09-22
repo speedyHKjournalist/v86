@@ -21,6 +21,13 @@ pub unsafe fn ir_sse_fp_reg_continue(
     immediate: i32,
 ) -> u32 {
     assert!(!cpu::in_jit && (0..8).contains(&source) && (0..8).contains(&destination));
+    // The debug OSFXSR warning calls the host before the task guard succeeds.
+    // Its callback can replace code or CPU state, so successful semantics must
+    // return committed CPU-owned post-state rather than retain selective SSA.
+    let observes = cfg!(debug_assertions) && *gp::cr.add(4) & cpu::CR4_OSFXSR == 0;
+    if observes {
+        super::entry::ir_admission_barrier();
+    }
     if !cpu::task_switch_test_mmx() {
         return finish(false);
     }
@@ -233,7 +240,7 @@ pub unsafe fn ir_sse_fp_reg_continue(
         },
         _ => unreachable!("unregistered SSE FP semantic operation"),
     }
-    finish(true)
+    if observes { terminal(Outcome::Normal as u32) } else { finish(true) }
 }
 unsafe fn memory(
     op: u32,
@@ -470,6 +477,10 @@ pub unsafe fn ir_sse_fp_mem_continue(
     immediate: i32,
 ) -> u32 {
     assert!(!cpu::in_jit && segment < 6 && (0..8).contains(&destination));
+    let observes = cfg!(debug_assertions) && *gp::cr.add(4) & cpu::CR4_OSFXSR == 0;
+    if observes {
+        super::entry::ir_admission_barrier();
+    }
     if !cpu::task_switch_test_mmx() {
         return finish(false);
     }
@@ -477,7 +488,7 @@ pub unsafe fn ir_sse_fp_mem_continue(
     if memory(op, offset, segment, destination, immediate).is_err() {
         return finish(false);
     }
-    if before.epoch != u64::MAX && before == ContinuationContext::capture() {
+    if !observes && before.epoch != u64::MAX && before.matches_current() {
         Outcome::Normal as u32
     }
     else {

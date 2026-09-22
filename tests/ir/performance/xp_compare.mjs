@@ -8,13 +8,22 @@ assert(disk);
 const runs = Number(process.env.IR_COMPARE_RUNS || 3);
 assert(Number.isInteger(runs) && runs >= 3 && runs <= 10);
 const rows=[];
-const variants=process.env.IR_BASELINE_WASM?["ir","legacy","baseline_ir"]:["ir","legacy"];
+const variants=["ir","legacy"];
+if(process.env.IR_BASELINE_WASM) variants.push("baseline_ir");
+if(process.env.IR_REFERENCE_WASM) variants.push("reference_ir");
 for(let round=0;round<runs;round++) for(const variant of round%2?[...variants].reverse():variants) {
-    const backend=variant==="baseline_ir"?"ir":variant;
-    const wasm=variant==="baseline_ir"?process.env.IR_BASELINE_WASM:"build/v86-ir-runtime.wasm";
+    const backend=variant==="legacy"?"legacy":"ir";
+    const wasm=variant==="baseline_ir"?process.env.IR_BASELINE_WASM
+        :variant==="reference_ir"?process.env.IR_REFERENCE_WASM:"build/v86-ir-runtime.wasm";
+    // Keep historical policy explicit when comparing cores across a default
+    // tuning change. Log each arm's effective settings in the result as well.
+    const policy={};
+    if(variant==="baseline_ir") for(const option of ["HOT_THRESHOLD","PROMOTION_THRESHOLD"]) {
+        if(process.env[`IR_BASELINE_${option}`]!==undefined) policy[`IR_${option}`]=process.env[`IR_BASELINE_${option}`];
+    }
     const file=`${prefix}-${round}-${variant}.jsonl`, fd=fs.openSync(file,"w");
     const child=spawnSync(process.execPath,["tests/ir/performance/xp_boot.mjs",disk,backend,wasm],{
-        env:{...process.env,IR_BOOT_MS:process.env.IR_BOOT_MS||"180000",IR_BOOT_TARGET:"desktop",IR_DIAGNOSTICS:"0",IR_BENCH_RECORD:"0"},
+        env:{...process.env,...policy,IR_BOOT_MS:process.env.IR_BOOT_MS||"180000",IR_BOOT_TARGET:"desktop",IR_DIAGNOSTICS:"0",IR_BENCH_RECORD:"0"},
         stdio:["ignore",fd,fd],timeout:300000,
     });
     fs.closeSync(fd);
@@ -24,7 +33,7 @@ for(let round=0;round<runs;round++) for(const variant of round%2?[...variants].r
     assert(result?.completed&&result.milestone,`milestone not reached: ${file}`);
     const ir=result.jit?.ir;
     const work=result.ir_work||{guest_steps:ir?.cache_guest_steps,activations:ir?.cache_hits,full_checks:ir?.cache_full_checks,observer_checks:0};
-    const row={round,backend:variant,file,wasm,...result.milestone,mips:result.milestone.instructions/result.milestone.ms/1000,
+    const row={round,backend:variant,file,wasm,region_budget:result.jit.ir_region_budget,...result.milestone,mips:result.milestone.instructions/result.milestone.ms/1000,
         // These counters are sampled at stop, slightly after the display event.
         stop_metrics:ir?{instructions:result.instructions,ir_coverage:work.guest_steps/result.instructions,
             instructions_per_activation:work.guest_steps/work.activations||0,
@@ -49,6 +58,8 @@ const result={milestone:"first 800x600x32 mode (not desktop idle)",runs,rows,med
     time_ratio:medians.ir.ms/medians.legacy.ms,throughput_ratio:medians.ir.mips/medians.legacy.mips,
     baseline_time_ratio:medians.baseline_ir?medians.ir.ms/medians.baseline_ir.ms:null,
     baseline_throughput_ratio:medians.baseline_ir?medians.ir.mips/medians.baseline_ir.mips:null,
+    reference_time_ratio:medians.reference_ir?medians.ir.ms/medians.reference_ir.ms:null,
+    reference_throughput_ratio:medians.reference_ir?medians.ir.mips/medians.reference_ir.mips:null,
     pass:medians.ir.ms<=medians.legacy.ms&&medians.ir.mips>=medians.legacy.mips};
 fs.writeFileSync(`${prefix}-summary.json`,JSON.stringify(result,null,2)+"\n");
 console.log(JSON.stringify(result));

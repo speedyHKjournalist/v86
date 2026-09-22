@@ -68,5 +68,75 @@ try {
     prepare(); const misses = e.ir_cache_stat(37); run(-N);
     assert(e.ir_cache_stat(37) > misses);
     assert.equal(e.ir_cache_stat(38), 1);
-    console.log(`PASS: ${wasm}: exact missing-key A/B, wrapped retirement, publication, mode/CS separation, reset and raw rewritten interpreter bytes`);
+    // Cross-page edges force a real dispatch at all eight headers. Consecutive
+    // pages occupy distinct hints; 64-page strides deliberately collide. Keep
+    // the interpreter and compilation heat policy identical in the A/B arms.
+    const iterations = 512, blocks = 8;
+    const displacement = value => Array.from({length: 4}, (_, i) => value >>> (8 * i) & 255);
+    let multi = 0;
+    for(const kind of ["distinct", "collision", "diagnostics"]) {
+        const pages = Array.from({length: blocks}, (_, i) =>
+            (kind === "collision" ? 0x200000 : 0x100000) + i * (kind === "collision" ? 0x40000 : 4096));
+        const chunks = pages.map((pc, i) => i + 1 === blocks
+            ? [0x43, 0x49, 0x0F, 0x85, ...displacement(pages[0] - pc - 8), 0xF4]
+            : [0x43, 0xE9, ...displacement(pages[i + 1] - pc - 6)]);
+        const prepare_multi = () => {
+            prepare(); cpu.reg32[1] = iterations; cpu.instruction_pointer[0] = pages[0];
+        };
+        const run_multi = (expected = blocks * iterations) => {
+            const end = performance.now() + 10000;
+            while(!cpu.in_hlt[0]) { assert(performance.now() < end, kind); e.main_loop(); }
+            assert.equal(count(), (initial + iterations * (2 * blocks + 1) + 1) >>> 0, kind);
+            assert.equal(cpu.reg32[3], expected, kind); assert.equal(cpu.reg32[1], 0, kind);
+            assert.equal(cpu.instruction_pointer[0], pages.at(-1) + 9, kind);
+            return {regs: Array.from(cpu.reg32), flags: e.get_eflags(), count: count(), ip: cpu.instruction_pointer[0]};
+        };
+        const pairs = [];
+        for(const enabled of [0, 1]) {
+            assert.equal(await vm.configure_ir_diagnostics(kind === "diagnostics" ? 1 : 0), true);
+            cpu.jit_clear_cache(); e.ir_cache_collect();
+            assert.equal(e.ir_auto_config(1, 1000000, 1000000, 192, 256, 64), 1);
+            assert.equal(e.ir_cache_set_missing_hint(enabled), 1);
+            for(let i = 0; i < blocks; i++) vm.write_memory(Uint8Array.from(chunks[i]), pages[i]);
+            prepare_multi();
+            const misses = e.ir_cache_stat(37), hits = e.ir_cache_stat(2);
+            pairs.push(run_multi());
+            assert.equal(e.ir_cache_stat(2), hits, `${kind}: no unpublished execution`);
+            if(enabled && kind === "distinct") {
+                assert(e.ir_cache_stat(37) - misses >= (iterations - 2) * blocks,
+                    "all recurrent headers bypass admission, not only the last key");
+            }
+            else {
+                assert.equal(e.ir_cache_stat(37), misses,
+                    `${kind}: disabled, colliding or instrumented hints cannot report a hit`);
+            }
+        }
+        assert.deepEqual(pairs[1], pairs[0], `${kind}: exact multi-PC A/B state`);
+        multi++;
+        if(kind === "diagnostics") continue;
+        // Publish a formerly absent middle header, then demand a hit on every
+        // visit, including its first visit after publication. A colliding hint
+        // from another header must never hide the published exact key either.
+        const chosen = 3, target = pages[chosen];
+        prepare_multi(); cpu.instruction_pointer[0] = target;
+        assert(await cpu.ir_compile_cached(chunks[chosen].length, 2, 1, 1, 256, 64));
+        prepare_multi(); let hits = e.ir_cache_stat(2); run_multi();
+        assert.equal(e.ir_cache_stat(2) - hits, iterations, `${kind}: immediate publication visibility`);
+        vm.write_memory(Uint8Array.of(0x4B), target);
+        prepare_multi(); hits = e.ir_cache_stat(2); run_multi((blocks - 2) * iterations);
+        assert.equal(e.ir_cache_stat(2), hits, `${kind}: notified invalidation cannot retain an owner`);
+        // Repeated absence observes raw new bytes; publishing the same key
+        // again must clear every previously learned negative witness.
+        cpu.mem8[target] = 0x43;
+        prepare_multi(); run_multi();
+        prepare_multi(); cpu.instruction_pointer[0] = target;
+        assert(await cpu.ir_compile_cached(chunks[chosen].length, 2, 1, 1, 256, 64));
+        prepare_multi(); hits = e.ir_cache_stat(2); run_multi();
+        assert.equal(e.ir_cache_stat(2) - hits, iterations, `${kind}: replacement publication clears absence`);
+        cpu.jit_clear_cache(); e.ir_cache_collect();
+        prepare_multi(); hits = e.ir_cache_stat(2); run_multi();
+        assert.equal(e.ir_cache_stat(2), hits, `${kind}: reset executes only current interpreter bytes`);
+    }
+    assert.equal(await vm.configure_ir_diagnostics(0), true);
+    console.log(`PASS: ${wasm}: single-key and ${multi} multi-PC A/B cases; 64-slot collisions, diagnostics bypass, wrapped retirement, immediate publication, mode/CS, reset and raw/notified code`);
 } finally { await vm.destroy(); }

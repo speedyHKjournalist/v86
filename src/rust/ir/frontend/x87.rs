@@ -1,12 +1,12 @@
-//! Terminal x87 register/memory lowering with CPU-owned F80 stack/status.
+//! Continuing x87 registers and terminal memory with CPU-owned F80 stack/status.
 //! Memory helpers resolve segments after the #NM guard and own precise faults.
 use super::{
-    adapters::call,
+    adapters::{call, call_abi},
     decode::DecodedInstruction,
     integer::IntegerBuilder,
     lift::{effective_offset, snapshot},
 };
-use crate::ir::{state::ResumeKind, types::Type};
+use crate::ir::{helper::HelperAbi, state::ResumeKind, types::Type};
 
 pub fn supports(i: &DecodedInstruction) -> bool { (0xD8..=0xDF).contains(&i.encoding.opcode) }
 
@@ -41,5 +41,5 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     .into_iter()
     .map(|value| b.constant(value, Type::I32))
     .collect();
-    call(b, "ir_x87_reg", args, state, true);
+    call_abi(b, "ir_x87_reg_continue", args, state, HelperAbi::CpuReload);
 }

@@ -1,11 +1,11 @@
-//! Terminal MMX operations use canonical aliased F80 state and checked memory.
+//! MMX registers continue through CPU reloads; memory retains checked exits.
 use super::{
-    adapters::call,
+    adapters::{call, call_abi},
     decode::DecodedInstruction,
     integer::IntegerBuilder,
     lift::{effective_offset, snapshot},
 };
-use crate::ir::{hir::Op, state::ResumeKind, types::Type};
+use crate::ir::{helper::HelperAbi, hir::Op, state::ResumeKind, types::Type};
 // Semantic key, memory width, legal operands (register=1, memory=2, implicit=4).
 pub const OPERATIONS: &[(u32, u32, u8)] = &[
     (0xF60, 4, 3),
@@ -97,6 +97,10 @@ fn key(i: &DecodedInstruction) -> u32 {
 pub fn supports(i: &DecodedInstruction) -> bool {
     OPERATIONS.iter().any(|&(op, _, _)| op == key(i))
 }
+pub fn terminal(i: &DecodedInstruction) -> bool {
+    // MASKMOVQ has a register ModRM but performs implicit guest-memory writes.
+    i.ea.is_some() || i.encoding.opcode == 0x0FF7
+}
 pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     let state = snapshot(b, i.instruction_pc, i.next_pc, count - 1);
     b.region.states[state.index()].resume = ResumeKind::BeforeInstruction;
@@ -134,12 +138,17 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         );
     }
     else {
-        call(
+        call_abi(
             b,
-            "ir_mmx_reg",
+            if matches!(i.encoding.opcode, 0xF20FD6 | 0xF30FD6) {
+                "ir_mmx_xmm_continue"
+            }
+            else {
+                "ir_mmx_reg_continue"
+            },
             vec![op, source, destination, immediate],
             state,
-            true,
+            HelperAbi::CpuReload,
         );
     }
 }

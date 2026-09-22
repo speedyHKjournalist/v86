@@ -1035,7 +1035,7 @@ CPU.prototype.configure_jit_backend = function(settings)
     if(requested !== undefined && (backend !== "ir" || !requested || typeof requested !== "object" || Array.isArray(requested)))
         throw new Error("ir_region_budget requires jit_backend ir and an object");
     const limits = {
-        "hot_threshold": [16, 1, 1000000], "promotion_threshold": [64, 1, 1000000],
+        "hot_threshold": [64, 1, 1000000], "promotion_threshold": [256, 1, 1000000],
         "max_source_bytes": [192, 15, 960], "execution_budget": [256, 1, 4096],
         "rep_iterations": [64, 1, 4096],
     };

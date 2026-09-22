@@ -10,9 +10,15 @@ unsafe fn finish(success: bool) -> u32 {
         Outcome::ControlTransferred as u32
     }
 }
-#[no_mangle]
-pub unsafe fn ir_mmx_reg(op: u32, source: i32, destination: i32, immediate: i32) -> u32 {
+unsafe fn register(op: u32, source: i32, destination: i32, immediate: i32) -> u32 {
     assert!(!cpu::in_jit && (0..8).contains(&source) && (0..8).contains(&destination));
+    // The baseline debug guard logs through a host import when OSFXSR is off.
+    // That observer may change code, context or XMMs. Revoke certificates before
+    // it runs and retain CPU-owned post-state via a terminal success below.
+    let observes = cfg!(debug_assertions) && *gp::cr.add(4) & cpu::CR4_OSFXSR == 0;
+    if observes {
+        super::entry::ir_admission_barrier();
+    }
     if !cpu::task_switch_test_mmx() {
         return finish(false);
     }
@@ -100,7 +106,36 @@ pub unsafe fn ir_mmx_reg(op: u32, source: i32, destination: i32, immediate: i32)
         0xF30FD6 => sem::instr_F30FD6_reg(source, destination),
         _ => unreachable!("unregistered MMX operation"),
     }
-    finish(true)
+    // All register semantics preserve the execution context. Retirement stays
+    // with the generated continuation, and canonical F80 holds MMX/x87 aliases.
+    if observes {
+        finish(true)
+    }
+    else {
+        Outcome::Normal as u32
+    }
+}
+#[no_mangle]
+pub unsafe fn ir_mmx_reg_continue(op: u32, source: i32, destination: i32, immediate: i32) -> u32 {
+    // A scalar reload must never conceal an XMM write. Cross-register-file
+    // transfers have a separate full-state reload ABI even for XMM reads.
+    assert!(!matches!(op, 0xF20FD6 | 0xF30FD6));
+    register(op, source, destination, immediate)
+}
+#[no_mangle]
+pub unsafe fn ir_mmx_xmm_continue(op: u32, source: i32, destination: i32, immediate: i32) -> u32 {
+    assert!(matches!(op, 0xF20FD6 | 0xF30FD6));
+    register(op, source, destination, immediate)
+}
+#[no_mangle]
+pub unsafe fn ir_mmx_reg(op: u32, source: i32, destination: i32, immediate: i32) -> u32 {
+    let outcome = register(op, source, destination, immediate);
+    if outcome == Outcome::Normal as u32 {
+        finish(true)
+    }
+    else {
+        outcome
+    }
 }
 unsafe fn memory(
     op: u32,

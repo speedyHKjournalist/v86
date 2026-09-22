@@ -2,8 +2,9 @@
 //! entered only when all of its original poll credits are available. Exceptions,
 //! helper outcomes, memory guards and StateMaps execute unchanged; unused credits
 //! on an early exit are local to that activation and are not guest instructions.
-//! Mixed bodies retain epoch checks at every original poll. Only an independently
-//! proved observer-free body may omit those checks as well.
+//! Mixed bodies retain polls after every possible observer. The backend may
+//! elide later redundant epoch tests along observer-free straight-line spans;
+//! recovery after an observer remains at its original instruction boundary.
 use super::{
     value::{Reading, Step},
     MirData,

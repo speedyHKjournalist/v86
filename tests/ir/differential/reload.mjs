@@ -94,7 +94,7 @@ for(const release of [false,true]){
             active_case=i;context_mutation=change_context;
             const [bytes,mode,opcode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
-            cpu.cr[4]=cr4;
+            cpu.cr[4]=cr4|512; // Exercise normal SSE reload; debug observers have a dedicated matrix.
             cpu.cr[2]=0xBADF000;
             cpu.segment_offsets.fill(0);
             cpu.segment_limits.fill(0xFFFFFFFF,0,6);

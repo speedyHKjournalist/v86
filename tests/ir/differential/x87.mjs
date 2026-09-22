@@ -4,6 +4,8 @@ import {V86} from "../../../build/libv86.mjs";
 
 const cases=JSON.parse(fs.readFileSync("build/ir-x87/cases.json"));
 const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-x87/${i}-${opt}.wasm`))));
+const continuationCases=JSON.parse(fs.readFileSync("build/ir-x87-continuation/cases.json"));
+const continuationModules=continuationCases.map((_,i)=>new WebAssembly.Module(fs.readFileSync(`build/ir-x87-continuation/${i}.wasm`)));
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 for(const release of [false,true]){
@@ -35,6 +37,7 @@ for(const release of [false,true]){
         const cr0=cpu.cr[0],cr4=cpu.cr[4];
         const imports={...e,m:e.memory};
         const instances=modules.map(pair=>pair.map(module=>new WebAssembly.Instance(module,{e:imports})));
+        const continuationInstances=continuationModules.map(module=>new WebAssembly.Instance(module,{e:imports}));
 
         function desc(n,base,access){
             set32(0x3000+n*8,(base<<16)|0xFFFF);
@@ -65,13 +68,14 @@ for(const release of [false,true]){
                 previous:linear32[560>>2]>>>0,
                 cr2:cpu.cr[2]>>>0,
                 fpu:fpu_state(),
+                xmm:Array.from(cpu.reg_xmm32s),
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
         function reset(i,{task=0,empty=0,top=0,flags=0x8D7}={}){
             const [bytes]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
-            cpu.cr[4]=cr4;
+            cpu.cr[4]=cr4|512; // Mixed SIMD prefixes exercise ordinary continuation.
             cpu.cr[2]=0xBADF000;
             cpu.segment_offsets.fill(0,0,6);
             cpu.segment_limits.fill(0xFFFFFFFF,0,6);
@@ -82,6 +86,7 @@ for(const release of [false,true]){
             cpu.stack_size_32[0]=1;
             linear32[612>>2]=0;
             cpu.reg32.set([0x12345678,0xFEDCBA98,0x89ABCDEF,0x7FFFFFFF,STACK,0x55555555,0x10203040,0xAABBCCDD]);
+            cpu.reg_xmm32s.set(Array.from({length:32},(_,n)=>0x10203040+n*0x10203));
             cpu.flags[0]=flags;
             cpu.flags_changed[0]=0;
             linear32[104>>2]=0x76543210;
@@ -196,6 +201,45 @@ for(const release of [false,true]){
             task++;
         }
         console.log(`PASS (${release?"release":"debug"}): ${task} CR0.EM/TS priority cases`);
+
+        let continuations=0;
+        const variants=new Map();
+        for(let i=0;i<continuationCases.length;i++) {
+            const [name,bytes,mode,cfg,opt,budget]=continuationCases[i];
+            for(const task of [0,4,8,12]) for(const initial of [100,0xFFFFFFFC])
+            for(const flags of [2,0x8D7]) for(const sample of [0,5,9]) {
+                const configure=()=>{
+                    reset(0,{task,flags});
+                    cpu.mem8.set(bytes,PC);
+                    cpu.is_32[0]=+mode;
+                    cpu.reg32[1]=3;
+                    linear32[664>>2]=initial;
+                    e.ir_test_x87_pattern(sample,0x33F);
+                    e.update_state_flags();
+                };
+                configure();
+                continuationInstances[i].exports.f(0);
+                const actual=state(),retired=(linear32[664>>2]-initial)>>>0;
+                assert(retired<=budget,`x87 continuation exceeds budget ${i}`);
+                assert(retired<=12,"loop must terminate");
+                configure();
+                for(let n=0;n<retired;n++)e.ir_test_step();
+                if(actual.ip===UD||actual.ip===NM)e.ir_test_step();
+                const expected=state();
+                // Poll recovery may legally place previous_ip at the next
+                // instruction; every architectural field and raw FP payload
+                // must still match the interpreter's exact retired prefix.
+                const {previous:actualPrevious,...actualState}=actual;
+                const {previous:expectedPrevious,...expectedState}=expected;
+                assert(Number.isInteger(actualPrevious)&&Number.isInteger(expectedPrevious));
+                assert.deepEqual(actualState,expectedState,`x87 continuation ${i}/${name}/${mode}/${cfg}/${opt}/${budget}/${task}/${initial}/${flags}/${sample}`);
+                const key=[name,mode,cfg,budget,task,initial,flags,sample].join("/");
+                if(opt)assert.deepEqual({actual,retired},variants.get(key),`x87 continuation optimization ${key}`);
+                else variants.set(key,{actual,retired});
+                continuations++;
+            }
+        }
+        console.log(`PASS (${release?"release":"debug"}): ${continuations} x87 successor/loop/exact-budget comparisons, scalar and XMM state, 16/32-bit, late #UD, #NM and count wrap`);
     } finally {
         await vm.destroy();
     }

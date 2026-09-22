@@ -51,7 +51,7 @@ fn x87_register_fixtures() {
         for &prefix in operand_prefixes {
             for group in 0u32..8 {
                 for r in 0u32..8 {
-                    // Dirty one GPR before the terminal helper so the fixture
+                    // Dirty one GPR before the helper so the fixture
                     // also proves pre-call StateMap materialization and exact
                     // instruction retirement.
                     let mut bytes = vec![0x46];
@@ -62,8 +62,8 @@ fn x87_register_fixtures() {
                     let mut region =
                         lift_cpu(&bytes, GuestEip(0x8000), LinearAddress(0x8000), true).unwrap();
                     assert_eq!(region.helpers.len(), 1);
-                    assert_eq!(region.helpers[0].name, "ir_x87_reg");
-                    assert!(matches!(region.helpers[0].abi, HelperAbi::CpuExit));
+                    assert_eq!(region.helpers[0].name, "ir_x87_reg_continue");
+                    assert!(matches!(region.helpers[0].abi, HelperAbi::CpuReload));
 
                     for opt in 0..2 {
                         if opt != 0 {
@@ -92,17 +92,31 @@ fn x87_register_fixtures() {
 }
 
 #[test]
-fn x87_register_terminal_contract() {
+fn x87_register_continuation_contract() {
     for opcode in 0xD8u8..=0xDF {
         let bytes = [opcode, 0xC0];
         assert!(lift(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
-        assert!(lift_cpu(&[opcode, 0xC0, 0x90], GuestEip(0), LinearAddress(0), true).is_err());
+        assert!(lift_cpu(&[opcode, 0xC0, 0x90], GuestEip(0), LinearAddress(0), true).is_ok());
         assert!(lift_cpu(&[0xF0, opcode, 0xC0], GuestEip(0), LinearAddress(0), true).is_err());
 
         let region = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).unwrap();
         assert_eq!(region.helpers.len(), 1);
-        assert_eq!(region.helpers[0].name, "ir_x87_reg");
-        assert!(matches!(region.helpers[0].abi, HelperAbi::CpuExit));
+        assert_eq!(region.helpers[0].name, "ir_x87_reg_continue");
+        assert!(matches!(region.helpers[0].abi, HelperAbi::CpuReload));
+        assert_eq!(
+            region.helpers[0].results,
+            vec![crate::ir::types::Type::I32; 14]
+        );
+        assert!(region
+            .values
+            .iter()
+            .all(|v| v.ty != crate::ir::types::Type::V128));
+        let mut descriptor = region.helpers[0].clone();
+        descriptor.abi = HelperAbi::CpuExit;
+        assert!(
+            descriptor.validate().is_err(),
+            "continuation must reload scalar outputs"
+        );
     }
 
     // Address-size override is semantically inert for mod=3, but must remain
@@ -117,4 +131,82 @@ fn x87_register_terminal_contract() {
     )
     .unwrap();
     assert_eq!(memory.helpers[0].name, "ir_x87_mem");
+    assert!(matches!(memory.helpers[0].abi, HelperAbi::CpuExit));
+    assert!(lift_cpu(&[0xD9, 0x00, 0x90], GuestEip(0), LinearAddress(0), true).is_err());
+}
+
+#[test]
+fn x87_continuation_fixtures() {
+    use crate::ir::frontend::region::lift_cpu_cfg;
+    let programs: &[(&str, &[u8])] = &[
+        // FCOMI -> integer carry -> FCMOV -> FNSTSW AX -> integer use.
+        (
+            "flags",
+            &[
+                0x46, 0xDB, 0xF1, 0x83, 0xD0, 0, 0xDA, 0xC1, 0xDF, 0xE0, 0x40,
+            ],
+        ),
+        // Consecutive helpers retain the exact canonical F80 stack.
+        ("stack", &[0x46, 0xD9, 0xE8, 0xDE, 0xC1, 0xDF, 0xE0, 0x40]),
+        (
+            "loop",
+            &[0x46, 0xD9, 0xE0, 0x49, 0x75, 0xFB, 0xDF, 0xE0, 0x40],
+        ),
+        // A late invalid nested opcode must not replay the successful helpers.
+        ("invalid", &[0x46, 0xD9, 0xE8, 0xDB, 0xF1, 0xD9, 0xD1, 0x40]),
+        // XMM locals that were dirtied before x87 must survive scalar reload.
+        (
+            "xmm",
+            &[
+                0x66, 0x0F, 0xEF, 0xC0, 0xD9, 0xE0, 0x66, 0x0F, 0xEB, 0xC8, 0x40,
+            ],
+        ),
+    ];
+    let dir = "build/ir-x87-continuation";
+    std::fs::create_dir_all(dir).unwrap();
+    let mut cases = Vec::new();
+    for &(name, bytes) in programs {
+        for mode in [false, true] {
+            for cfg in [false, true] {
+                if !cfg && name == "loop" {
+                    continue;
+                }
+                let mut region = if cfg {
+                    lift_cpu_cfg(bytes, GuestEip(0x8000), LinearAddress(0x8000), mode, 64)
+                }
+                else {
+                    lift_cpu(bytes, GuestEip(0x8000), LinearAddress(0x8000), mode)
+                }
+                .unwrap();
+                if name != "xmm" {
+                    assert!(region
+                        .values
+                        .iter()
+                        .all(|v| v.ty != crate::ir::types::Type::V128));
+                }
+                for opt in [false, true] {
+                    if opt {
+                        run(&mut region, PassConfig::default()).unwrap();
+                    }
+                    let mir = lower(&region).unwrap();
+                    for budget in if cfg { vec![1, 2, 3, 4, 5, 6, 7, 8, 12, 16] } else { vec![100] }
+                    {
+                        std::fs::write(
+                            format!("{dir}/{}.wasm", cases.len()),
+                            emit_cpu(&mir, budget).unwrap().bytes,
+                        )
+                        .unwrap();
+                        cases.push(format!(
+                            "[\"{name}\",{bytes:?},{mode},{cfg},{opt},{budget}]"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    std::fs::write(
+        format!("{dir}/cases.json"),
+        format!("[{}]", cases.join(",")),
+    )
+    .unwrap();
 }

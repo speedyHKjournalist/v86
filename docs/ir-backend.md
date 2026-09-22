@@ -29,8 +29,8 @@ const emulator = new V86({
     ir_opt_level: 2,
     ir_passes_disabled: [],
     ir_region_budget: {
-        hot_threshold: 16,
-        promotion_threshold: 64,
+        hot_threshold: 64,
+        promotion_threshold: 256,
         max_source_bytes: 192,
         execution_budget: 256,
         rep_iterations: 64,

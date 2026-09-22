@@ -128,8 +128,8 @@ static mut CONTROL_EXITS: [[u64; 2]; 6] = [[0; 2]; 6];
 pub fn helper_category(name: &str) -> u32 {
     match name {
         "ir_load_segment" | "ir_pop_segment" | "ir_mov_segment_continue" => 1,
-        "ir_in" | "ir_in_continue" | "ir_ins" => 2,
-        "ir_out" | "ir_out_continue" | "ir_outs" => 3,
+        "ir_in" | "ir_in_continue" | "ir_ins" | "ir_ins_once" => 2,
+        "ir_out" | "ir_out_continue" | "ir_outs" | "ir_outs_once" => 3,
         n if n.starts_with("ir_rep_") => 4,
         n if n.starts_with("ir_far_") || n == "ir_iret" || n == "ir_software_interrupt" => 5,
         "ir_pop_flags" | "ir_cli" | "ir_cli_check" | "ir_sti_finish_continue" => 6,

@@ -117,5 +117,5 @@ fn simd_shuffle_contracts() {
         assert!(lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).is_err());
     }
     let mmx = lift_cpu(&[0x0F, 0x70, 0xC0, 0], GuestEip(0), LinearAddress(0), true).unwrap();
-    assert!(mmx.helpers.iter().any(|h| h.name == "ir_mmx_reg"));
+    assert!(mmx.helpers.iter().any(|h| h.name == "ir_mmx_reg_continue"));
 }

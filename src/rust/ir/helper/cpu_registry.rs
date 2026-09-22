@@ -65,15 +65,18 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_write_dr" => 2,
         "ir_invalid_form" | "ir_arpl_mem" | "ir_movnti" | "ir_far_jump_mem" | "ir_lar_mem"
         | "ir_lar_reg" | "ir_lsl_mem" | "ir_lsl_reg" | "ir_out" | "ir_out_continue"
-        | "ir_pop_segment" => 3,
+        | "ir_pop_segment" | "ir_ins_once" | "ir_outs_once" => 3,
         "ir_reserved_form"
         | "ir_mmx_mask"
         | "ir_mmx_reg"
+        | "ir_mmx_reg_continue"
+        | "ir_mmx_xmm_continue"
         | "ir_sse_fp_reg_continue"
         | "ir_sse_fp_reg"
         | "ir_far_jump"
         | "ir_ins"
         | "ir_outs"
+        | "ir_x87_reg_continue"
         | "ir_x87_reg" => 4,
         "ir_mmx_mem"
         | "ir_sse_fp_mem_continue"
@@ -91,8 +94,11 @@ pub fn arity(name: &str) -> Option<usize> {
     })
 }
 fn abi(name: &str) -> HelperAbi {
-    if checked_scalar_continuation(name)
-        || matches!(name, "ir_sse_fp_reg_continue" | "ir_sse_fp_mem_continue")
+    if scalar_reload(name)
+        || matches!(
+            name,
+            "ir_mmx_xmm_continue" | "ir_sse_fp_reg_continue" | "ir_sse_fp_mem_continue"
+        )
     {
         HelperAbi::CpuReload
     }
@@ -278,7 +284,15 @@ pub fn xmm_register_operands(
 pub fn preserves_code_on_success(name: &str) -> bool {
     matches!(
         name,
-        "ir_cli" | "ir_cli_check" | "ir_clts" | "ir_cpuid" | "ir_read_cr" | "ir_read_dr"
+        "ir_cli"
+            | "ir_cli_check"
+            | "ir_clts"
+            | "ir_cpuid"
+            | "ir_read_cr"
+            | "ir_read_dr"
+            | "ir_mmx_reg_continue"
+            | "ir_mmx_xmm_continue"
+            | "ir_x87_reg_continue"
     )
 }
 
@@ -291,10 +305,18 @@ pub fn checked_scalar_continuation(name: &str) -> bool {
     )
 }
 pub fn reload_types(name: &str) -> Vec<Type> {
-    if checked_scalar_continuation(name) {
+    if scalar_reload(name) {
         vec![Type::I32; 14]
     }
     else {
         super::cpu_reload_types()
     }
+}
+
+/// x87/MMX register helpers preserve XMMs without observers or memory access.
+/// Keep this separate from checked observers: only those must refresh the
+/// admission epoch after revalidating an active code owner.
+fn scalar_reload(name: &str) -> bool {
+    checked_scalar_continuation(name)
+        || matches!(name, "ir_x87_reg_continue" | "ir_mmx_reg_continue")
 }

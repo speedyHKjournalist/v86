@@ -11,10 +11,14 @@ assert(Number.isFinite(duration) && duration >= 1000);
 const recording = process.env.IR_BENCH_RECORD === "1";
 const target = process.env.IR_BOOT_TARGET || "time";
 assert(["time", "desktop"].includes(target));
+const region_budget = {};
+if(process.env.IR_HOT_THRESHOLD !== undefined) region_budget.hot_threshold = Number(process.env.IR_HOT_THRESHOLD);
+if(process.env.IR_PROMOTION_THRESHOLD !== undefined) region_budget.promotion_threshold = Number(process.env.IR_PROMOTION_THRESHOLD);
 let milestone = null;
 let phase = "bios";
 const vm = new V86({
     wasm_path: wasm, jit_backend: backend,
+    ...(backend === "ir" ? {ir_region_budget: region_budget} : {}),
     memory_size: 2048 * 1024 * 1024, vga_memory_size: 16 * 1024 * 1024,
     bios: { url: "bios/seabios.bin" }, vga_bios: { url: "bios/vgabios.bin" },
     hda: { url: disk, size: fs.statSync(disk).size, async: true },
@@ -40,6 +44,20 @@ try {
         vm.add_listener("emulator-error", reject);
     });
     const cpu = vm.v86.cpu, e = cpu.wm.exports;
+    if(process.env.IR_HOT_CAPACITY !== undefined) {
+        assert.equal(backend, "ir", "IR_HOT_CAPACITY requires the IR backend");
+        const capacity = Number(process.env.IR_HOT_CAPACITY);
+        assert(Number.isInteger(capacity) && capacity >= 128 && capacity <= 512,
+            "IR_HOT_CAPACITY must be an integer from 128 through 512");
+        assert.equal(typeof e.ir_auto_set_hot_capacity, "function", "core does not support IR_HOT_CAPACITY");
+        const budget = vm.get_jit_info().ir_region_budget;
+        const args = [budget.hot_threshold, budget.promotion_threshold, budget.max_source_bytes,
+            budget.execution_budget, budget.rep_iterations];
+        const enabled = e.ir_auto_stat(11);
+        assert.equal(e.ir_auto_config(0, ...args), 1);
+        assert.equal(e.ir_auto_set_hot_capacity(capacity), 1);
+        assert.equal(e.ir_auto_config(enabled, ...args), 1);
+    }
     if(process.env.IR_HOT_FILTER !== undefined) assert.equal(e.ir_auto_set_hot_filter(Number(process.env.IR_HOT_FILTER)),1);
     if(process.env.IR_CACHE_CAPACITY !== undefined) assert.equal(e.ir_cache_set_capacity(Number(process.env.IR_CACHE_CAPACITY)),1);
     if(process.env.IR_FAST_VALIDATION !== undefined) {
@@ -50,7 +68,7 @@ try {
         assert(["0", "1"].includes(process.env.IR_FUSION));
         assert.equal(e.ir_cache_set_fusion(Number(process.env.IR_FUSION)),1);
     }
-    for(const [option, setter] of [["IR_WARM_CHAINING", "ir_cache_set_warm_chaining"], ["IR_MISSING_HINT", "ir_cache_set_missing_hint"]]) {
+    for(const [option, setter] of [["IR_WARM_CHAINING", "ir_cache_set_warm_chaining"], ["IR_MISSING_HINT", "ir_cache_set_missing_hint"], ["IR_MERGED_VALIDATION", "ir_cache_set_merged_validation"]]) {
         if(process.env[option] !== undefined) {
             assert(["0", "1"].includes(process.env[option]), option);
             assert.equal(typeof e[setter], "function", `${option} is unsupported by this core`);
@@ -120,6 +138,7 @@ try {
         ir_work:{guest_steps:total_ir[0],activations:total_ir[1],full_checks:total_ir[2],observer_checks:total_ir[3],
             warm_handoffs:total_ir[4],missing_hint_hits:total_ir[5]},
         boundary_counters:{warm_handoff_supported:typeof e.ir_cache_set_warm_chaining === "function",
+            hot_capacity:typeof e.ir_auto_set_hot_capacity === "function" ? e.ir_auto_stat(29) : 128,
             missing_hint_supported:typeof e.ir_cache_set_missing_hint === "function",entry_aliases:e.ir_cache_stat(30)>>>0,shared_publications:e.ir_cache_stat(31)>>>0,
             observer_rejections:e.ir_cache_stat(33)>>>0,shared_compilations:e.ir_auto_stat(25)>>>0,
             shared_extra_entries:e.ir_auto_stat(26)>>>0}}));

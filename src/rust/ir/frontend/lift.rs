@@ -220,13 +220,20 @@ fn lift_inner(
             return Ok(b.region);
         }
         if super::mmx::supports(&i) {
-            if !cpu || offset != bytes.len() {
+            if !cpu || super::mmx::terminal(&i) && offset != bytes.len() {
                 return Err(CompileError::Unsupported(
-                    "MMX requires terminal CPU region",
+                    "MMX memory requires terminal CPU region",
                 ));
             }
             super::mmx::lift(&mut b, &i, count);
-            return Ok(b.region);
+            if super::mmx::terminal(&i) {
+                return Ok(b.region);
+            }
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+            }
+            continue;
         }
         if super::sse_fp::supports(&i) {
             if !cpu {
@@ -241,13 +248,20 @@ fn lift_inner(
             continue;
         }
         if super::x87::supports(&i) {
-            if !cpu || offset != bytes.len() {
+            if !cpu || i.ea.is_some() && offset != bytes.len() {
                 return Err(CompileError::Unsupported(
-                    "x87 requires terminal CPU region",
+                    "x87 memory requires terminal CPU region",
                 ));
             }
             super::x87::lift(&mut b, &i, count);
-            return Ok(b.region);
+            if i.ea.is_some() {
+                return Ok(b.region);
+            }
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+            }
+            continue;
         }
         if super::misc::supports(&i) {
             if !cpu && super::misc::needs_cpu(&i) {

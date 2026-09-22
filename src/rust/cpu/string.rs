@@ -953,6 +953,32 @@ pub unsafe fn insd_no_rep(is_asize_32: bool) {
     string_instruction(is_asize_32, 0, Instruction::Ins, Size::D, Rep::None)
 }
 
+/// Execute one non-REP port string instruction with the interpreter's complete
+/// observation order, including permission MMIO and address16 register writes.
+/// The caller owns decoded PC preparation and instruction retirement.
+pub unsafe fn execute_io_once(
+    input: bool,
+    bytes: u32,
+    asize32: bool,
+    segment: i32,
+) -> StringExecution {
+    assert!(segment >= 0 && segment < 6);
+    let size = match bytes {
+        1 => Size::B,
+        2 => Size::W,
+        4 => Size::D,
+        _ => panic!("I/O width"),
+    };
+    string_instruction_bounded(
+        asize32,
+        if input { 0 } else { segment },
+        if input { Instruction::Ins } else { Instruction::Outs },
+        size,
+        Rep::None,
+        1,
+    )
+}
+
 /// Execute a recognized REP family with an explicit element budget. The caller
 /// owns decoded PC preparation and scheduling; this function does not count CPU
 /// instructions or deliver exceptions a second time.

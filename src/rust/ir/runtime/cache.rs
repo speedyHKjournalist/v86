@@ -8,7 +8,7 @@ use super::{
         admission_epoch, ir_admission_barrier, matches_current as ir_entry_matches, EntryContract,
     },
     live::{self, Job},
-    snapshot::{cached_match, capture, mappings_cached, CachedMatch},
+    snapshot::{cached_match, capture, mappings_cached, CachedMatch, MergedValidation},
 };
 use crate::ir::frontend::{decode::GuestEip, region::PredictedEdge};
 use crate::{
@@ -20,21 +20,30 @@ use crate::{
 use std::{collections::BTreeMap, sync::Mutex};
 type EntryIndexKey = (u32, u32, bool);
 // A missing entry is not an execution certificate: it only says to use the
-// ordinary interpreter/legacy path. Keep the last exact key outside admission
-// so a pending compiler does not repeatedly lock, collect and probe the same
-// absent loop header. This CPU owns non-shared Wasm memory; no reference to
+// ordinary interpreter/legacy path. Keep a bounded set of exact keys outside
+// admission so multi-block interpreted loops do not repeatedly lock, collect
+// and probe the same absent headers. Collisions only replace an absence hint.
+// This CPU owns non-shared Wasm memory; no reference to
 // these cells survives a host call. Publication and pending cache maintenance
-// always clear the hint; code/mapping changes cannot create a published key.
-static mut MISSING_ENTRY: Option<super::entry::CpuEntryKey> = None;
+// always clear the hints; code/mapping changes cannot create a published key.
+const MISSING_HINT_CAPACITY: usize = 64;
+static mut MISSING_ENTRIES: [Option<super::entry::CpuEntryKey>; MISSING_HINT_CAPACITY] =
+    [None; MISSING_HINT_CAPACITY];
 static mut MISSING_HINT_ENABLED: bool = true;
 static mut MISSING_HINT_HITS: u32 = 0;
 // Single-CPU, quiescent-only A/B policy. Poll exits do not grant chaining.
 static mut POLL_REUSE_ENABLED: bool = true;
+static mut MERGED_VALIDATION_ENABLED: bool = true;
 #[inline(always)]
 fn clear_missing_hint() {
     unsafe {
-        MISSING_ENTRY = None;
+        MISSING_ENTRIES = [None; MISSING_HINT_CAPACITY];
     }
+}
+#[inline(always)]
+fn missing_hint_slot(entry: super::entry::CpuEntryKey) -> usize {
+    ((entry.linear.0 >> 1 ^ entry.linear.0 >> 12 ^ entry.pc.0) as usize)
+        & (MISSING_HINT_CAPACITY - 1)
 }
 fn index_key(entry: super::entry::CpuEntryKey) -> EntryIndexKey {
     (entry.linear.0, entry.pc.0, entry.default_32)
@@ -56,11 +65,36 @@ struct Successor {
     key: EntryIndexKey,
     owner: Owner,
 }
+/// Keep both sides of a conditional edge warm. One last-target hint thrashes on
+/// alternating branches even when both owners have current admission proofs.
+/// These remain lookup hints: every use checks the full key and owner identity.
+#[derive(Default)]
+struct Successors {
+    recent: Option<Successor>,
+    other: Option<Successor>,
+}
+impl Successors {
+    #[inline(always)]
+    fn get(&self, key: EntryIndexKey) -> Option<Successor> {
+        self.recent
+            .filter(|s| s.key == key)
+            .or_else(|| self.other.filter(|s| s.key == key))
+    }
+    #[inline(always)]
+    fn remember(&mut self, successor: Successor) {
+        if self.recent.is_some_and(|s| s.key != successor.key) {
+            self.other = self.recent;
+        }
+        self.recent = Some(successor);
+    }
+}
 struct Record {
     /// Active index aliases. A replacement may supersede one entry without
     /// destroying a shared owner still serving its other entries.
     entries: Vec<super::entry::CpuEntryKey>,
     job: Job,
+    /// Allocated only when overlapping fused windows save byte comparisons.
+    validation: Option<Box<MergedValidation>>,
     slot: u32,
     phase: Phase,
     automatic: bool,
@@ -76,7 +110,7 @@ struct Record {
     /// Scheduling hint only. Full eligibility and source validation remain at
     /// cold selection. Refreshed when heat or the published owner set changes.
     fusion_candidate: bool,
-    successor: Option<Successor>,
+    successors: Successors,
 }
 struct Cache {
     records: Vec<Record>,
@@ -328,6 +362,17 @@ pub unsafe fn ir_cache_set_poll_reuse(enabled: u32) -> bool {
     POLL_REUSE_ENABLED = enabled != 0;
     true
 }
+/// Exact-overlap comparison A/B policy. Certificates still require every byte
+/// and mapping; switching at a cold point invalidates the current reuse epoch.
+#[no_mangle]
+pub unsafe fn ir_cache_set_merged_validation(enabled: u32) -> bool {
+    if enabled > 1 || !cold() {
+        return false;
+    }
+    ir_admission_barrier();
+    MERGED_VALIDATION_ENABLED = enabled != 0;
+    true
+}
 /// Startup/cold-point A/B control; absence hints never authorize guest code.
 #[no_mangle]
 pub unsafe fn ir_cache_set_missing_hint(enabled: u32) -> bool {
@@ -382,9 +427,9 @@ fn successor_target(
             .records
             .get(p.index)
             .filter(|r| r.phase == Phase::Published && r.job.artifact.key.job == p.id)
-            .and_then(|r| r.successor)
+            .and_then(|r| r.successors.get(key))
     });
-    if let Some(s) = successor.filter(|s| s.key == key) {
+    if let Some(s) = successor {
         if cache.records.get(s.owner.index).is_some_and(|r| {
             r.phase == Phase::Published
                 && r.job.artifact.key.job == s.owner.id
@@ -396,7 +441,8 @@ fn successor_target(
     }
     target(cache, key)
 }
-unsafe fn cached_current(job: &Job) -> CachedMatch {
+unsafe fn cached_current(record: &Record) -> CachedMatch {
+    let job = &record.job;
     if !live::generation_current(job.artifact.key) {
         return CachedMatch::Stale;
     }
@@ -404,6 +450,14 @@ unsafe fn cached_current(job: &Job) -> CachedMatch {
     else {
         return CachedMatch::Stale;
     };
+    if MERGED_VALIDATION_ENABLED
+        && record
+            .validation
+            .as_ref()
+            .is_some_and(|validation| validation.matches())
+    {
+        return CachedMatch::Match;
+    }
     let first = cached_match(entry.linear.0, &job.source);
     if first != CachedMatch::Match {
         return first;
@@ -427,7 +481,7 @@ pub(super) unsafe fn observer_continuation() -> bool {
             cache.records.get(owner.index).is_some_and(|record| {
                 record.job.artifact.key.job == owner.id
                     && record.phase == Phase::Published
-                    && cached_current(&record.job) == CachedMatch::Match
+                    && cached_current(record) == CachedMatch::Match
             })
         });
     if valid {
@@ -779,6 +833,25 @@ pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
     // IDs never repeat in this Wasm instance, including reset. They also identify
     // this reservation generation; a reused slot must have a different owner.
     job.artifact.key.slot_generation = id;
+    let validation = if let EntryContract::Cpu(entry) = job.artifact.entry {
+        if job.artifact.fused_sources.is_empty() {
+            None
+        }
+        else {
+            MergedValidation::build(
+                std::iter::once((entry.linear.0, &job.source)).chain(
+                    job.artifact
+                        .fused_sources
+                        .iter()
+                        .map(|peer| (peer.entry.linear.0, &peer.source)),
+                ),
+            )
+            .map(Box::new)
+        }
+    }
+    else {
+        None
+    };
     let mut cache = CACHE.try_lock().unwrap();
     cache.clock = cache.clock.wrapping_add(1);
     let last_used = cache.clock;
@@ -786,6 +859,7 @@ pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
     cache.records.push(Record {
         entries,
         job,
+        validation,
         slot,
         phase: Phase::Pending,
         automatic,
@@ -798,7 +872,7 @@ pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
         hot_exit: None,
         fusion_attempted: false,
         fusion_candidate: false,
-        successor: None,
+        successors: Successors::default(),
     });
     slot
 }
@@ -1098,6 +1172,10 @@ pub fn ir_cache_entry_stat(linear: u32, cs_base: u32, default_32: u32, field: u3
         11 => record.entries.len() as u32,
         12 => record.slot,
         13 => record.job.artifact.code.budget_batch_blocks,
+        14 => record
+            .validation
+            .as_ref()
+            .map_or(0, |validation| validation.saved_bytes),
         _ => 0,
     }
 }
@@ -1182,10 +1260,13 @@ pub unsafe fn execute() -> bool {
     if diag::enabled() {
         return execute_mode::<true>();
     }
-    if MISSING_HINT_ENABLED && MISSING_ENTRY.is_some_and(|entry| entry == live::entry()) {
-        super::entry::take_link_request();
-        MISSING_HINT_HITS = MISSING_HINT_HITS.wrapping_add(1);
-        return false;
+    if MISSING_HINT_ENABLED {
+        let entry = live::entry();
+        if MISSING_ENTRIES[missing_hint_slot(entry)] == Some(entry) {
+            super::entry::take_link_request();
+            MISSING_HINT_HITS = MISSING_HINT_HITS.wrapping_add(1);
+            return false;
+        }
     }
     execute_mode::<false>()
 }
@@ -1316,7 +1397,7 @@ fn activate<const PROFILE: bool>(
             .get_mut(p.index)
             .filter(|r| r.phase == Phase::Published && r.job.artifact.key.job == p.id)
         {
-            r.successor = Some(Successor {
+            r.successors.remember(Successor {
                 key: index_key(entry),
                 owner,
             });
@@ -1351,8 +1432,8 @@ unsafe fn admit_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>) 
         let mut selected = None;
         let index = successor_target(&mut cache, index_key(entry), previous);
         if index.is_none() {
-            if !PROFILE && !cache.needs_collection {
-                MISSING_ENTRY = Some(entry);
+            if !PROFILE && MISSING_HINT_ENABLED && !cache.needs_collection {
+                MISSING_ENTRIES[missing_hint_slot(entry)] = Some(entry);
             }
             if PROFILE {
                 diag::admission(Admission::Missing);
@@ -1382,7 +1463,7 @@ unsafe fn admit_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>) 
             else {
                 cache.full_checks = cache.full_checks.wrapping_add(1);
                 let _scope = PROFILE.then(|| Scope::new(Stage::ByteValidation));
-                cached_current(&cache.records[index].job)
+                cached_current(&cache.records[index])
             };
             let valid = match cached {
                 CachedMatch::Match => {
@@ -1497,7 +1578,7 @@ unsafe fn admit_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>) 
                     else {
                         cache.full_checks = cache.full_checks.wrapping_add(1);
                         let _scope = PROFILE.then(|| Scope::new(Stage::ByteValidation));
-                        cached_current(&cache.records[index].job)
+                        cached_current(&cache.records[index])
                     };
                     match current {
                         CachedMatch::Match => {
@@ -1579,10 +1660,7 @@ unsafe fn warm_handoff(cache: &mut Cache, previous: Owner) -> Option<Activation>
     if predecessor.phase != Phase::Published || predecessor.job.artifact.key.job != previous.id {
         return None;
     }
-    let successor = predecessor.successor?;
-    if successor.key != index_key(entry) {
-        return None;
-    }
+    let successor = predecessor.successors.get(index_key(entry))?;
     let target = cache.records.get(successor.owner.index)?;
     if target.phase != Phase::Published
         || target.job.artifact.key.job != successor.owner.id

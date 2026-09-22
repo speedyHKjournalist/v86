@@ -8,8 +8,11 @@ const repetitions=Number(process.env.IR_COMPARE_RUNS||3);
 assert(Number.isInteger(repetitions)&&repetitions>=3);
 const PC=0x100000,PEER=0x102000,DATA=0x110000;
 const suite=process.env.IR_FIXED_SUITE||"core";
-assert(["core","vector"].includes(suite),"IR_FIXED_SUITE must be core or vector");
-const workloads=suite==="vector"?[
+assert(["core","vector","fp_helpers"].includes(suite),"IR_FIXED_SUITE must be core, vector or fp_helpers");
+const workloads=suite==="fp_helpers"?[
+ {name:"x87_register",code:[0xDB,0xE3,0xD9,0xE8,0xDD,0xD8,0x49,0x75,0xF7,0xF4],iterations:1000000,per:5},
+ {name:"mmx_register",code:[0x0F,0x6E,0xC0,0x0F,0x73,0xF0,0x01,0x0F,0x7E,0xC0,0x40,0x0F,0x77,0x49,0x75,0xF0,0xF4],iterations:1000000,per:7},
+]:suite==="vector"?[
  {name:"sse_packed_double",code:[0x66,0x0F,0x58,0xC1,0x49,0x75,0xF9,0xF4],iterations:2000000,per:3,source:[0,0x3FF00000,0,0x3FF00000]},
  {name:"sse_scalar_single",code:[0xF3,0x0F,0x58,0xC1,0x49,0x75,0xF9,0xF4],iterations:2000000,per:3,destination:[0,0x7F812345,0xDEADBEEF,0x81234567]},
  {name:"sse_scalar_double",code:[0xF2,0x0F,0x58,0xC1,0x49,0x75,0xF9,0xF4],iterations:2000000,per:3,source:[0,0x3FF00000,0x7FF12345,0xDEADBEEF],destination:[0,0,0x7FF12345,0xDEADBEEF]},
@@ -49,13 +52,28 @@ for(const work of workloads) for(let round=0;round<repetitions;round++) for(cons
    if(work.source)cpu.reg_xmm32s.set(work.source,4);
    if(work.destination)cpu.reg_xmm32s.set(work.destination);
    cpu.flags[0]=2;cpu.flags_changed[0]=0;cpu.in_hlt[0]=0;cpu.instruction_pointer[0]=PC;
+   if(suite==="fp_helpers") {
+    e.fpu_discard_cache();cpu.fpu_st.fill(0);
+    cpu.fpu_stack_empty[0]=255;cpu.fpu_stack_ptr[0]=0;
+    cpu.fpu_control_word[0]=0x37F;cpu.fpu_status_word[0]=0;cpu.mxcsr[0]=0x1F80;
+    for(const field of ["fpu_opcode","fpu_ip","fpu_ip_selector","fpu_dp","fpu_dp_selector"])cpu[field][0]=0;
+   }
    data().setUint32(DATA,0,true);new Uint32Array(e.memory.buffer)[664>>2]=0;e.update_state_flags();
   };
   const run=async n=>{prepare(n);const start=performance.now();vm.run();const until=start+30000;
    while(!cpu.in_hlt[0]){assert(performance.now()<until,`${work.name}/${backend} timeout`);await sleep(1);}
    const timing=await finish_halted_timing(vm,start),ms=timing.ms,steps=counter();
    assert.equal(steps,n*work.per+(work.peer?0:1),"identical exact retired guest work");
-   return {...timing,steps,mips:steps/ms/1000,state:{gpr:Array.from(cpu.reg32),flags:e.get_eflags(),xmm:Array.from(cpu.reg_xmm32s),data:data().getUint32(DATA,true),data16:Array.from(cpu.mem8.slice(DATA,DATA+16)),pc:cpu.instruction_pointer[0]}};
+   const state={gpr:Array.from(cpu.reg32),flags:e.get_eflags(),xmm:Array.from(cpu.reg_xmm32s),data:data().getUint32(DATA,true),data16:Array.from(cpu.mem8.slice(DATA,DATA+16)),pc:cpu.instruction_pointer[0]};
+   if(suite==="fp_helpers") {
+    // Synchronize cached legacy values only after timing has stopped. Compare
+    // all physical F80 registers, including empty slots, excluding ABI padding.
+    e.fpu_sync_all();
+    const bytes=new Uint8Array(cpu.fpu_st.buffer,cpu.fpu_st.byteOffset,cpu.fpu_st.byteLength);
+    state.fpu={st:Array.from({length:8},(_,i)=>Array.from(bytes.slice(i*16,i*16+10)))};
+    for(const field of ["fpu_stack_empty","fpu_stack_ptr","fpu_control_word","fpu_status_word","fpu_opcode","fpu_ip","fpu_ip_selector","fpu_dp","fpu_dp_selector","mxcsr"])state.fpu[field]=cpu[field][0];
+   }
+   return {...timing,steps,mips:steps/ms/1000,state};
   };
   // Yield between bounded warm runs so asynchronous publications can finish.
   for(let n=0;n<20;n++){await run(20000);await sleep(1);}

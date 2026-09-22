@@ -858,12 +858,23 @@ build/v86-ir-runtime.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Ca
 
 .PHONY: ir-cache-tests
 ir-cache-tests: ir-generated-check build/v86-ir-cache-test.wasm build/v86-ir-cache-test-release.wasm build/v86-ir-runtime.wasm build/libv86.mjs build/jit-capacity.bin
+	node tests/ir/differential/fp_debug_deferral.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/fp_debug_deferral.mjs build/v86-ir-cache-test-release.wasm --release
 	node tests/ir/differential/cache.mjs build/v86-ir-cache-test.wasm
 	node tests/ir/differential/cache.mjs build/v86-ir-cache-test-release.wasm
 	node tests/ir/differential/cache.mjs build/v86-ir-runtime.wasm
+	node tests/ir/differential/io_permission_observer.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/io_permission_observer.mjs build/v86-ir-cache-test-release.wasm
+	node tests/ir/differential/io_permission_observer.mjs build/v86-ir-runtime.wasm
 	node tests/ir/differential/warm_chain.mjs build/v86-ir-cache-test.wasm
 	node tests/ir/differential/warm_chain.mjs build/v86-ir-cache-test-release.wasm
 	node tests/ir/differential/warm_chain.mjs build/v86-ir-runtime.wasm
+	node tests/ir/differential/polymorphic_chain.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/polymorphic_chain.mjs build/v86-ir-cache-test-release.wasm
+	node tests/ir/differential/polymorphic_chain.mjs build/v86-ir-runtime.wasm
+	node tests/ir/differential/overlap_validation.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/overlap_validation.mjs build/v86-ir-cache-test-release.wasm
+	node tests/ir/differential/overlap_validation.mjs build/v86-ir-runtime.wasm
 	node tests/ir/differential/missing_hint.mjs build/v86-ir-cache-test.wasm
 	node tests/ir/differential/missing_hint.mjs build/v86-ir-cache-test-release.wasm
 	node tests/ir/differential/missing_hint.mjs build/v86-ir-runtime.wasm
@@ -877,6 +888,9 @@ ir-auto-tests: ir-generated-check build/v86-ir-cache-test.wasm build/v86-ir-cach
 	node tests/ir/differential/auto.mjs build/v86-ir-cache-test.wasm
 	node tests/ir/differential/auto.mjs build/v86-ir-cache-test-release.wasm
 	node tests/ir/differential/auto.mjs build/v86-ir-runtime.wasm
+	node tests/ir/differential/hot_working_set.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/hot_working_set.mjs build/v86-ir-cache-test-release.wasm
+	node tests/ir/differential/hot_working_set.mjs build/v86-ir-runtime.wasm
 	node tests/ir/differential/publication_yield.mjs build/v86-ir-cache-test.wasm
 	node tests/ir/differential/publication_yield.mjs build/v86-ir-cache-test-release.wasm
 	node tests/ir/differential/publication_yield.mjs build/v86-ir-runtime.wasm

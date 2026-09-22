@@ -50,20 +50,25 @@ pub unsafe fn ir_in(port: u32, bytes: u32) -> u32 {
     commit()
 }
 #[no_mangle]
-pub unsafe fn ir_out(port: u32, bytes: u32, value: u32) -> u32 {
+pub unsafe fn ir_out(port: u32, bytes: u32, _value: u32) -> u32 {
     if ir_io_check(port, bytes) != 0 {
         return Outcome::ControlTransferred as u32;
     }
-    write(port, bytes, value);
+    // CPU OUT reads the accumulator after permission checks, whose TSS/bitmap
+    // accesses can call the host. Keep the existing call ABI, but use the
+    // authoritative (already materialized) accumulator after those callbacks.
+    write(port, bytes, cpu::read_reg32(0) as u32);
     commit()
 }
 /// One device observation; never repeat it after a failed continuation check.
 #[no_mangle]
 pub unsafe fn ir_in_continue(port: u32, bytes: u32) -> u32 {
+    // Permission checks may read a TSS/I/O bitmap through MMIO. Include those
+    // observers in the certificate, not only the eventual port callback.
+    let observer = super::continuation::ScalarObserver::capture();
     if ir_io_check(port, bytes) != 0 {
         return Outcome::ControlTransferred as u32;
     }
-    let observer = super::continuation::ScalarObserver::capture();
     let value = read(port, bytes);
     match bytes {
         1 => cpu::write_reg8(0, value),
@@ -74,13 +79,37 @@ pub unsafe fn ir_in_continue(port: u32, bytes: u32) -> u32 {
     observer.finish()
 }
 #[no_mangle]
-pub unsafe fn ir_out_continue(port: u32, bytes: u32, value: u32) -> u32 {
+pub unsafe fn ir_out_continue(port: u32, bytes: u32, _value: u32) -> u32 {
+    let observer = super::continuation::ScalarObserver::capture();
     if ir_io_check(port, bytes) != 0 {
         return Outcome::ControlTransferred as u32;
     }
-    let observer = super::continuation::ScalarObserver::capture();
-    write(port, bytes, value);
+    write(port, bytes, cpu::read_reg32(0) as u32);
     observer.finish()
+}
+/// Keep every observation of a single string I/O instruction inside the CPU
+/// implementation. No intermediate permission or memory callback returns to
+/// SSA state, and a completed device operation is never replayed.
+unsafe fn io_once(input: bool, bytes: u32, asize32: u32, segment: u32) -> u32 {
+    use crate::cpu::string::{execute_io_once, StringOutcome};
+    assert!(!cpu::in_jit && asize32 <= 1 && segment < 6);
+    let result = execute_io_once(input, bytes, asize32 != 0, segment as i32);
+    match result.outcome {
+        StringOutcome::Complete => {
+            debug_assert_eq!(result.iterations, 1);
+            commit()
+        },
+        StringOutcome::Fault => Outcome::ControlTransferred as u32,
+        StringOutcome::Repeat => unreachable!("non-REP I/O cannot repeat"),
+    }
+}
+#[no_mangle]
+pub unsafe fn ir_ins_once(bytes: u32, asize32: u32, segment: u32) -> u32 {
+    io_once(true, bytes, asize32, segment)
+}
+#[no_mangle]
+pub unsafe fn ir_outs_once(bytes: u32, asize32: u32, segment: u32) -> u32 {
+    io_once(false, bytes, asize32, segment)
 }
 /// Frontend has already checked permission before its ordered source GuestLoad.
 #[no_mangle]

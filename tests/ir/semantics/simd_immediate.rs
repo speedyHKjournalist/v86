@@ -119,7 +119,7 @@ fn simd_immediate_contracts() {
         }
     }
     let mmx = lift_cpu(&[0x0F, 0x71, 0xD0, 1], GuestEip(0), LinearAddress(0), true).unwrap();
-    assert!(mmx.helpers.iter().any(|h| h.name == "ir_mmx_reg"));
+    assert!(mmx.helpers.iter().any(|h| h.name == "ir_mmx_reg_continue"));
     let mut r = lift_cpu(
         &[0x66, 0x0F, 0xFC, 0x06],
         GuestEip(0),

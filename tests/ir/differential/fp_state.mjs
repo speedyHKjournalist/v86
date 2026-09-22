@@ -6,9 +6,16 @@ const cases=JSON.parse(fs.readFileSync("build/ir-fp-state/cases.json"));
 const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-fp-state/${i}-${opt}.wasm`))));
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
-for(const release of [false,true]){
+for(const release of process.env.IR_FP_BAD_MXCSR_ONLY?[false]:[false,true]){
+    let logObserver=null;
+    const wasmPath=process.argv[2]?.endsWith(".wasm")?process.argv[2]
+        :(process.argv[2]||"build/v86-ir-test")+(release?"-release":"")+".wasm";
     const vm=new V86({
-        wasm_path:(process.argv[2] || "build/v86-ir-test")+(release?"-release":"")+".wasm",
+        wasm_fn:async imports=>{
+            const original=imports.env.log_from_wasm;
+            imports.env.log_from_wasm=(...args)=>logObserver?logObserver(...args):original(...args);
+            return (await WebAssembly.instantiate(fs.readFileSync(wasmPath),imports)).instance.exports;
+        },
         memory_size:32<<20,
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
@@ -78,7 +85,7 @@ for(const release of [false,true]){
         function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,badMxcsr: bad_mxcsr=false}={}){
             const [bytes,mode,group]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
-            cpu.cr[4]=cr4;
+            cpu.cr[4]=cr4|512; // Ordinary helper execution; debug warnings have their own dispatcher regression.
             cpu.cr[2]=0xBADF000;
             cpu.segment_offsets.fill(0,0,6);
             cpu.segment_limits.fill(0xFFFFFFFF,0,6);
@@ -157,7 +164,7 @@ for(const release of [false,true]){
         }
 
         let comparisons=0;
-        for(let i=0;i<cases.length;i++) {
+        for(let i=0;!process.env.IR_FP_BAD_MXCSR_ONLY&&i<cases.length;i++) {
             const [,mode,group,dirty]=cases[i], before=dirty?102:101;
             for(const mmio of [false,true]) for(const delta of [0,0xF00]) {
                 const expected=compare(i,()=>reset(i,{mmio,delta}),before+1);
@@ -175,7 +182,52 @@ for(const release of [false,true]){
             }
         }
         console.log(`PASS (${release?"release":"debug"}): ${comparisons} FP state transfers, dirty XMM recovery, MXCSR validation, MMIO, cross-page #PF and #NM/#UD priority cases`);
+        if(!release) {
+            let observers=0;
+            for(let i=0;i<cases.length;i++) {
+                const [bytes,,group,dirty]=cases[i];
+                if(group!==2)continue;
+                for(const wrap of [false,true]) {
+                    const prefix=dirty?2:1,start=0xFFFFFFFE,retired=(start+prefix)>>>0;
+                    let calls=0;
+                    const configure=()=>{
+                        logObserver=null;reset(i,{badMxcsr:true});linear32[664>>2]=start;calls=0;
+                        logObserver=(pointer,length)=>{
+                            const message=new TextDecoder().decode(new Uint8Array(e.memory.buffer,pointer,length));
+                            if(!message.startsWith("Invalid mxcsr bits:"))return;
+                            calls++;
+                            assert.equal(cpu.instruction_pointer[0],PC+bytes.length,"invalid MXCSR observes the decoded next PC");
+                            assert.equal(cpu.reg32[6],0x10203041,"the preceding integer instruction is materialized");
+                            assert.equal(cpu.reg_xmm32s[4],dirty?0:0x76543210,"dirty vector state reaches the observer");
+                            assert.equal(linear32[664>>2],retired,"the faulting instruction has not retired");
+                            cpu.reg32[0]=0x12345678;cpu.reg32[3]=0x13579BDF;
+                            cpu.reg_xmm32s[28]=0x2468ACE0;cpu.flags[0]=0x8D7;cpu.flags_changed[0]=0;
+                            // The invalid value was already read; changing RAM
+                            // cannot undo its #GP or replay the memory access.
+                            set32(DATA,0x1F80);
+                            if(wrap)linear32[664>>2]=0xFFFFFFFF;
+                        };
+                    };
+                    configure();
+                    for(let n=0;n<prefix;n++){e.ir_test_step();linear32[664>>2]++;}
+                    e.ir_test_step();
+                    assert.equal(calls,1,"baseline invalid-MXCSR logger runs exactly once");
+                    const expected=state(),expectedCount=wrap?0xFFFFFFFF:retired;
+                    assert.equal(expected.ip,GP);assert.equal(linear32[664>>2],expectedCount);
+                    for(const opt of [0,1]) {
+                        configure();instances[i][opt].exports.f(0);
+                        assert.equal(calls,1,"IR invalid-MXCSR logger must match the interpreter");
+                        assert.equal(linear32[664>>2],expectedCount,"#GP must not retire or overwrite callback accounting");
+                        assert.deepEqual(state(),expected,`invalid MXCSR observer ${i}/${opt}/${wrap}`);
+                        observers++;
+                    }
+                    logObserver=null;
+                }
+            }
+            console.log(`PASS (debug): ${observers} invalid-MXCSR logger callbacks preserve dirty GPR/XMM/FLAGS, fault state and exact counter wrap`);
+        }
     } finally {
+        logObserver=null;
         await vm.destroy();
     }
 }

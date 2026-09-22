@@ -243,6 +243,59 @@ mod tests {
     }
 
     #[test]
+    fn x87_register_continuations_keep_the_automatic_candidate_suffix() {
+        for default_32 in [false, true] {
+            for opcode in 0xD8..=0xDF {
+                for modrm in 0xC0..=0xFF {
+                    let bytes = [opcode, modrm, 0x40];
+                    assert_eq!(selected_length(&bytes, default_32), bytes.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mmx_register_continuations_keep_the_automatic_candidate_suffix() {
+        use crate::ir::frontend::mmx::OPERATIONS;
+        for default_32 in [false, true] {
+            for &(key, _, forms) in OPERATIONS {
+                let opcode = key & 0xFFFFFF;
+                if forms & 5 == 0 || opcode == 0x0FF7 {
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                if opcode > 0xFFFF {
+                    bytes.push((opcode >> 16) as u8);
+                }
+                bytes.extend_from_slice(&[0x0F, opcode as u8]);
+                if forms != 4 {
+                    let group = if key >> 24 != 0 { key >> 24 } else { 1 };
+                    bytes.push((group << 3) as u8 | 0xC0);
+                }
+                if key >> 24 != 0 || matches!(opcode, 0x0F70 | 0x0FC4 | 0x0FC5) {
+                    bytes.push(0);
+                }
+                bytes.push(0x40);
+                assert_eq!(
+                    selected_length(&bytes, default_32),
+                    bytes.len(),
+                    "opcode {opcode:X}, default_32={default_32}"
+                );
+            }
+        }
+    }
+
+    fn selected_length(bytes: &[u8], default_32: bool) -> usize {
+        reachable_length(
+            bytes,
+            GuestEip(0x1000),
+            LinearAddress(0x2000),
+            default_32,
+            Policy { max_bytes: bytes.len(), max_instructions: 32 },
+        )
+    }
+
+    #[test]
     fn keeps_external_targets_as_region_exits() {
         let bytes = [0xEB, 0x7F, 0x40, 0x40];
         assert_eq!(

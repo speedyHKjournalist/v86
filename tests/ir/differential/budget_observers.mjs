@@ -4,7 +4,8 @@ import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 const PC = 0x100000, DATA = 0x310040, OTHER = 0x320040, SHADOW = 0x330000;
 const STACK = 0x90000, HANDLER = 0x180000, INITIAL = 0xFFFFFFFE;
-const cases = JSON.parse(fs.readFileSync("build/ir-budget-observers/cases.json"));
+const fixture_dir = process.env.IR_OBSERVER_FIXTURES || "build/ir-budget-observers";
+const cases = JSON.parse(fs.readFileSync(`${fixture_dir}/cases.json`));
 const wasm = process.argv[2] || "build/v86-ir-test.wasm";
 const vm = new V86({wasm_path: wasm, memory_size: 32 << 20,
     bios: {buffer: Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
@@ -35,11 +36,11 @@ try {
     cpu.io.mmap_register(0xA0000, 0x20000, a => observe(a, undefined, 1),
         (a, n) => observe(a, n, 1), a => observe(a, undefined, 4), (a, n) => observe(a, n, 4));
     const instances = cases.map((_, i) => new WebAssembly.Instance(new WebAssembly.Module(
-        fs.readFileSync(`build/ir-budget-observers/${i}.wasm`)), {e: {...e, m: e.memory}}));
+        fs.readFileSync(`${fixture_dir}/${i}.wasm`)), {e: {...e, m: e.memory}}));
     const reference = new Map();
     let comparisons = 0, faults = 0, callbacks = 0, epoch_exits = 0;
     for(let i = 0; i < cases.length; i++) {
-        const [name, bytes, batch, fused, budget] = cases[i];
+        const [name, bytes, batch, fused, budget, elide_epoch = false] = cases[i];
         const scenarios = ["hot", "cold"];
         if(!["sse", "divide"].includes(name)) scenarios.push("missing", "cross_page", "second_page_fault", "mmio", "callback", "null_segment");
         if(["store", "rmw", "xmm"].includes(name)) scenarios.push("readonly", "code_alias");
@@ -92,7 +93,7 @@ try {
             const actual = snapshot(), retired = (actual.count - INITIAL) >>> 0;
             assert(retired <= budget, `${name}/${scenario}/${budget}: retirement bound`);
             const key = [name, fused, budget, scenario].join("/");
-            if(batch) assert.deepEqual(actual, reference.get(key), `original poll boundary ${key}`);
+            if(batch || elide_epoch) assert.deepEqual(actual, reference.get(key), `original poll boundary ${key}`);
             else reference.set(key, actual);
             const fault = actual.ip === HANDLER;
             reset(); for(let step = 0; step < retired + Number(fault); step++) e.ir_test_step();

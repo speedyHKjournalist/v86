@@ -44,6 +44,7 @@ pub unsafe fn ir_ldmxcsr(offset: u32, segment: u32) -> u32 {
         return finish(false);
     };
     if value & !cpu::MXCSR_MASK != 0 {
+        dbg_log!("Invalid mxcsr bits: {:x}", value & !cpu::MXCSR_MASK);
         cpu::trigger_gp(0);
         return finish(false);
     }

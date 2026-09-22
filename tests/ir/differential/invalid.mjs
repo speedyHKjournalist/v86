@@ -25,7 +25,7 @@ try {
     function reset(i, {real = false, csBase: cs_base = 0, ss32 = true, overflow = false, nullSegment: null_segment = false, taskFlags: task_flags = 0, targetAccess: target_access = 0x9B, gateAccess: gate_access = 0xEE, pageFault: page_fault = 0} = {}) {
         const [bytes, mode] = cases[i]; const width = mode ? 32 : 16;
         e.ir_test_set_cr0(real ? initial_cr0 & ~0x80000001 : (initial_cr0 | 0x10001) & ~12 | task_flags);
-        cpu.cr[4] = initial_cr4; cpu.cr[2] = 0xBADF000;
+        cpu.cr[4] = initial_cr4 | 512; cpu.cr[2] = 0xBADF000;
         cpu.segment_offsets.fill(0, 0, 6); cpu.segment_offsets[1] = cs_base;
         cpu.segment_limits.fill(0xFFFFFFFF, 0, 6); cpu.segment_is_null.fill(0, 0, 6);
         cpu.sreg.set([16, 8, 16, 16, 16, 16]); cpu.segment_access_bytes.set([0x93, 0x9B, 0x93, 0x93, 0x93, 0x93]);

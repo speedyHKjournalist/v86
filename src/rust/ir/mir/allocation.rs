@@ -2,7 +2,7 @@
 //! Recovery uses are conservative for both CPU and standalone ABIs.
 use super::{control, value::Step, MirData};
 use crate::ir::{
-    backend::locals::{Allocation, Interference},
+    backend::locals::{Allocation, Interference, LiveBits, LiveValues},
     hir,
     ids::*,
     lowering::CompileError,
@@ -107,18 +107,19 @@ fn spend(left: &mut usize, n: usize) -> Result<(), CompileError> {
     Ok(())
 }
 pub(super) fn expression(steps: &[Step]) -> Vec<ValueId> {
-    steps
-        .iter()
-        .flat_map(|s| match s {
-            Step::Value(v) => vec![*v],
+    let mut values = Vec::new();
+    for step in steps {
+        match step {
+            Step::Value(v) => values.push(*v),
             Step::Packed {
                 destination,
                 source,
                 ..
-            } => vec![*destination, *source],
-            _ => vec![],
-        })
-        .collect()
+            } => values.extend([*destination, *source]),
+            _ => (),
+        }
+    }
+    values
 }
 fn uses(data: &MirData, id: InstId) -> Vec<ValueId> {
     if data.stack_elided[id.index()] {
@@ -170,13 +171,24 @@ pub(super) fn blocks(data: &MirData) -> Vec<Vec<InstId>> {
         .collect()
 }
 pub fn reallocate(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
+    reallocate_with::<LiveBits>(data, work_limit)
+}
+fn reallocate_with<S: LiveValues>(
+    data: &mut MirData,
+    work_limit: usize,
+) -> Result<usize, CompileError> {
     let graph = &data.allocation_graph;
     let mut left = work_limit;
     spend(
         &mut left,
         data.value_types.len() + graph.instructions.len() + graph.blocks.len(),
     )?;
-    let mut inputs = vec![BTreeSet::new(); graph.blocks.len()];
+    let empty = S::new(data.value_types.len());
+    spend(
+        &mut left,
+        empty.scan_words().saturating_mul(2 * graph.blocks.len() + 1),
+    )?;
+    let mut inputs = vec![empty; graph.blocks.len()];
     let mut outputs = inputs.clone();
     let dependencies: Vec<_> = (0..graph.instructions.len())
         .map(|n| uses(data, InstId(n as u32)))
@@ -184,12 +196,17 @@ pub fn reallocate(data: &mut MirData, work_limit: usize) -> Result<usize, Compil
     loop {
         let mut changed = false;
         for (n, b) in graph.blocks.iter().enumerate().rev() {
-            let mut live: BTreeSet<_> = term_uses(b).into_iter().collect();
+            let mut live = S::new(data.value_types.len());
+            // Initialize live, clone output and compare the final input. Dense
+            // sets scan their empty words too, including sparse high SSA IDs.
+            spend(&mut left, live.scan_words().saturating_mul(3))?;
+            live.extend(term_uses(b));
             for edge in edges(&b.terminator) {
                 let target = &graph.blocks[edge.target.index()];
+                spend(&mut left, inputs[edge.target.index()].scan_words())?;
                 live.extend(
                     inputs[edge.target.index()]
-                        .iter()
+                        .values()
                         .filter(|v| !target.params.contains(v)),
                 );
             }
@@ -202,10 +219,10 @@ pub fn reallocate(data: &mut MirData, work_limit: usize) -> Result<usize, Compil
                 for v in &graph.instructions[id.index()].definitions {
                     live.remove(v);
                 }
-                live.extend(&dependencies[id.index()]);
+                live.extend(dependencies[id.index()].iter().copied());
                 spend(&mut left, live.len() + 1)?;
             }
-            live.extend(&b.recovery);
+            live.extend(b.recovery.iter().copied());
             if inputs[n] != live {
                 inputs[n] = live;
                 changed = true;
@@ -216,41 +233,48 @@ pub fn reallocate(data: &mut MirData, work_limit: usize) -> Result<usize, Compil
         }
     }
     let mut interference = Interference::new(data.value_types.len());
-    let mut connect = |live: &BTreeSet<ValueId>| -> Result<(), CompileError> {
-        spend(&mut left, interference.connection_work(live))?;
-        interference.connect(live, |v| data.value_types[v.index()]);
+    let mut connect = |live: &S, left: &mut usize| -> Result<(), CompileError> {
+        spend(
+            left,
+            interference.connection_work_iter(live.values(), live.len(), live.scan_words()),
+        )?;
+        interference.connect_iter(live.values(), |v| data.value_types[v.index()]);
         Ok(())
     };
-    let mut active: BTreeSet<ValueId> = BTreeSet::new();
+    let mut active = S::new(data.value_types.len());
+    spend(&mut left, active.scan_words().saturating_mul(2))?;
     for (n, b) in graph.blocks.iter().enumerate() {
+        spend(&mut left, outputs[n].scan_words().saturating_mul(2))?;
         let mut live = outputs[n].clone();
-        connect(&live)?;
-        active.extend(&live);
+        connect(&live, &mut left)?;
+        active.extend(live.values());
         for &id in b.instructions.iter().rev() {
             if data.stack_elided[id.index()] {
                 continue;
             }
             let defs = &graph.instructions[id.index()].definitions;
-            live.extend(defs);
-            active.extend(defs);
-            connect(&live)?;
+            live.extend(defs.iter().copied());
+            active.extend(defs.iter().copied());
+            connect(&live, &mut left)?;
             for v in defs {
                 live.remove(v);
             }
-            live.extend(&dependencies[id.index()]);
-            active.extend(&live);
-            connect(&live)?;
+            live.extend(dependencies[id.index()].iter().copied());
+            spend(&mut left, live.scan_words())?;
+            active.extend(live.values());
+            connect(&live, &mut left)?;
         }
-        live.extend(&b.recovery);
-        live.extend(&b.params);
-        active.extend(&live);
-        connect(&live)?;
+        live.extend(b.recovery.iter().copied());
+        live.extend(b.params.iter().copied());
+        spend(&mut left, live.scan_words())?;
+        active.extend(live.values());
+        connect(&live, &mut left)?;
     }
     let mut allocation = Allocation {
         value_local: vec![None; data.value_types.len()],
         local_types: vec![],
     };
-    for v in active {
+    for v in active.values() {
         let ty = data.value_types[v.index()];
         if ty == Type::Effect {
             continue;
@@ -892,6 +916,10 @@ fn plan_references(data: &MirData, id: InstId) -> (Vec<ValueId>, Vec<ValueId>, V
     }
     (uses, defs, states)
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/ir/semantics/mir_allocation.rs"]
+mod allocator_tests;
 
 #[cfg(test)]
 mod verifier_tests {

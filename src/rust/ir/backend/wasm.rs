@@ -51,6 +51,68 @@ fn control_edge_count(mir: &MirRegion) -> u32 {
         })
         .sum()
 }
+/// Within a block, only an observing instruction can invalidate a code epoch
+/// already checked by its entry/previous poll. Wasm executes synchronously on
+/// one agent; plain SSA operations and backing-state loads cannot run a host
+/// callback. Keep the first poll after *every* memory/effect/helper operation,
+/// including operations whose native path happens not to observe anything.
+/// Block entries remain unconditional, so no assumption crosses a CFG edge.
+fn required_epoch_polls(mir: &MirRegion) -> Vec<bool> {
+    let mut required = vec![true; mir.control.polls.len()];
+    for block in &mir.control.blocks {
+        // A block with no recovery cannot have established an epoch check.
+        let mut observed = block.recovery.is_none();
+        for &id in &block.instructions {
+            let i = id.index();
+            if mir.control.polls[i].is_some() {
+                required[i] = observed;
+                observed = false;
+            }
+            else if mir.memory[i].is_some() || mir.effects[i].is_some() || mir.calls[i].is_some() {
+                observed = true;
+            }
+            else {
+                observed |= mir.values[i].as_ref().is_none_or(|value| {
+                    value.steps.iter().any(|step| {
+                        matches!(
+                            step,
+                            Step::Read {
+                                cpu: Reading::Call { .. },
+                                ..
+                            }
+                        )
+                    })
+                });
+            }
+        }
+    }
+    required
+}
+/// CPU adapters whose task guard can log before the interpreter finishes
+/// decoding operands. Constant non-SSE invalid/reserved forms do not observe
+/// this warning; unknown hand-built arguments conservatively retain the guard.
+fn debug_sse_call(mir: &MirRegion, plan: &CallPlan) -> bool {
+    let name = mir.helpers[plan.helper.index()].as_ref().unwrap().name.as_str();
+    if name.starts_with("ir_sse_fp_") || name.starts_with("ir_mmx_")
+        || matches!(name, "ir_ldmxcsr" | "ir_stmxcsr")
+    {
+        return true;
+    }
+    let argument = match name {
+        "ir_invalid_form" => 0,
+        "ir_reserved_form" => 1,
+        _ => return false,
+    };
+    mir.values.iter().flatten().find(|value| value.result == plan.args[argument])
+        .and_then(|value| match value.steps.as_slice() {
+            [Step::I32(n)] => Some(if argument == 0 { *n == 2 } else { *n != 0 }),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+fn debug_sse_effect(plan: &EffectPlan) -> bool {
+    matches!(plan, EffectPlan::Check { call, .. } if call.name == "ir_sse_guard")
+}
 enum Local {
     I32(WasmLocal),
     I64(WasmLocalI64),
@@ -78,11 +140,16 @@ struct Emitter<'a> {
     memory_base: Option<WasmLocal>,
     interrupt_shadow: Option<WasmLocal>,
     fused_epoch: Option<(WasmLocal, WasmLocalI64)>,
+    epoch_polls: Vec<bool>,
     diagnostic: Option<(WasmLocal, WasmLocal)>,
+    debug_sse_observer: bool,
     batch_polls: bool,
     budget_batch_blocks: u32,
 }
 impl Emitter<'_> {
+    fn instruction_epoch_check(&self, id: InstId) -> bool {
+        self.epoch_polls.get(id.index()).copied().unwrap_or(true)
+    }
     fn diagnostic_begin(&mut self, stage: DiagnosticStage) {
         if let Some((_, active)) = &self.diagnostic {
             self.w.get_local(active);
@@ -359,8 +426,9 @@ impl Emitter<'_> {
             }
             let cost = batch.cost;
             // Reserve dispatcher work, not guest retirement. Every StateMap and
-            // fault/observer path is unchanged. Mixed bodies keep the original
-            // epoch checks, so a callback cannot execute stale subsequent code.
+            // fault/observer path is unchanged. Mixed bodies keep the first
+            // original epoch check after each possible observer, so a callback
+            // cannot execute stale subsequent code.
             self.w.get_local(remaining);
             self.w.const_i32(cost as i32);
             self.w.geu_i32();
@@ -372,7 +440,11 @@ impl Emitter<'_> {
             for &id in &block.instructions[batch.start..] {
                 if let Some(poll) = &self.mir.control.polls[id.index()] {
                     if !batch.pure {
-                        self.check_poll(Some(poll.recovery), None);
+                        self.check_poll(
+                            Some(poll.recovery),
+                            None,
+                            self.instruction_epoch_check(id),
+                        );
                     }
                 }
                 else {
@@ -437,11 +509,11 @@ impl Emitter<'_> {
         for slot in self.mir.ram_loop_resets(id).to_vec() {
             self.cache_clear(MemoryCache::Loop(slot));
         }
-        self.check_poll(block.recovery, None);
+        self.check_poll(block.recovery, None, true);
         for &inst in &block.instructions {
             if let Some(poll) = &self.mir.control.polls[inst.index()] {
                 if !pure {
-                    self.check_poll(Some(poll.recovery), None);
+                    self.check_poll(Some(poll.recovery), None, self.instruction_epoch_check(inst));
                 }
             }
             else {
@@ -487,7 +559,7 @@ impl Emitter<'_> {
     /// Keep the residual-budget body outside the hot backedge. Duplicating both
     /// arms *inside* a loop increases host phi/register pressure even when the
     /// residual arm is rarely taken. The original body is still the exact oracle
-    /// for every small budget, and every observer/epoch/fault check is retained.
+    /// for every small budget, and observer/fault boundaries are retained.
     fn emit_prepaid_loop(
         &mut self,
         id: BlockId,
@@ -1300,6 +1372,9 @@ impl Emitter<'_> {
                 success,
                 fault,
             } => {
+                if cfg!(debug_assertions) && self.cpu && debug_sse_effect(plan) {
+                    self.defer_debug_sse(*before);
+                }
                 if let Some(guard) = guard {
                     self.w.load_fixed_i32(guard.address);
                     self.w.const_i32(guard.mask);
@@ -1367,7 +1442,52 @@ impl Emitter<'_> {
             },
         }
     }
+    /// Nonzero when SSE task checking can fault or observe the host. A debug
+    /// OSFXSR warning is an observer even when CR0 permits the instruction.
+    fn sse_task_observation(&mut self) {
+        self.w.load_fixed_i32(gp::cr as u32);
+        self.w.const_i32(12);
+        self.w.and_i32();
+        if cfg!(debug_assertions) {
+            self.w.load_fixed_i32(gp::cr as u32 + 4 * 4);
+            self.w.const_i32(crate::cpu::cpu::CR4_OSFXSR);
+            self.w.and_i32();
+            self.w.eqz_i32();
+            self.w.or_i32();
+        }
+    }
+    fn defer_debug_sse(&mut self, state: StateId) {
+        if cfg!(debug_assertions) && self.cpu {
+            // Commit only the completed prefix and return at the opcode. No
+            // observer or retirement may precede the interpreter's own decode.
+            // The pre-STI guard and diagnostic entry rejection keep this from
+            // unwinding an already-active indivisible interrupt shadow.
+            self.w.load_fixed_i32(gp::cr as u32 + 4 * 4);
+            self.w.const_i32(crate::cpu::cpu::CR4_OSFXSR);
+            self.w.and_i32();
+            self.w.eqz_i32();
+            if let Some(depth) = &self.interrupt_shadow {
+                self.w.get_local(depth);
+                self.w.eqz_i32();
+                self.w.and_i32();
+            }
+            self.w.if_void();
+            self.state(state);
+            self.admission_barrier();
+            self.diagnostic_exit(DiagnosticExit::HelperYield);
+            self.return_to_cpu();
+            self.w.block_end();
+        }
+    }
     fn planned_call(&mut self, id: InstId, plan: &CallPlan) {
+        if cfg!(debug_assertions) && self.cpu {
+            let call = self.mir.helpers[plan.helper.index()].as_ref().unwrap();
+            if debug_sse_call(self.mir, plan)
+                || call.starts_interrupt_shadow && self.debug_sse_observer
+            {
+                self.defer_debug_sse(plan.state);
+            }
+        }
         if self.cpu
             && self.mir.helpers[plan.helper.index()].as_ref().unwrap().name
                 == "ir_sti_finish_continue"
@@ -1414,11 +1534,9 @@ impl Emitter<'_> {
             // Test the result once: result != result detects every NaN lane,
             // including invalid operations with non-NaN operands. Signed zero,
             // subnormals, infinities and overflow remain exact, not fast-math.
-            // These baseline arithmetic forms do not update MXCSR. Keep the CR0
-            // task-fault and scalar-NaN paths, before any architectural write.
-            self.w.load_fixed_i32(gp::cr as u32);
-            self.w.const_i32(12);
-            self.w.and_i32();
+            // These baseline arithmetic forms do not update MXCSR. Keep task
+            // faults, debug observers and scalar NaNs before architectural writes.
+            self.sse_task_observation();
             self.w.get_local_v128(&result);
             self.w.get_local_v128(&result);
             self.w.simd(if fp.double { 0x48 } else { 0x42 }); // f64x2.ne / f32x4.ne
@@ -1507,12 +1625,9 @@ impl Emitter<'_> {
             self.w.block_end();
         }
         else if let Some((source, destination)) = selective {
-            // A failing task guard can deliver an exception and must see the
-            // entire precise state. The successful register-only path has no
-            // observer: synchronize operands and reload only its destination.
-            self.w.load_fixed_i32(gp::cr as u32);
-            self.w.const_i32(12);
-            self.w.and_i32();
+            // Faults and debug OSFXSR logging must see the entire precise
+            // state. The ordinary register path synchronizes only operands.
+            self.sse_task_observation();
             self.w.if_void();
             self.admission_barrier();
             self.prepare_memory_call(plan.state);
@@ -1591,7 +1706,10 @@ impl Emitter<'_> {
             self.w.eq_i32();
             self.w.if_void();
             if code_preserved {
-                if exit == 4 && self.linkable_entry {
+                // CpuExit's Invalidated is its normal committed success. For
+                // CpuReload it means continuation failed (e.g. an observer),
+                // so CPU-owned post-state must leave this execution chain.
+                if exit == 4 && call.cpu_exit && self.linkable_entry {
                     if let Some(depth) = &self.interrupt_shadow {
                         self.w.get_local(depth);
                         self.w.eqz_i32();
@@ -1759,15 +1877,26 @@ impl Emitter<'_> {
         self.value_steps(&plan.steps);
         self.set(plan.result);
     }
-    /// A prepaid body skips only the local budget test. Epoch invalidation is
-    /// still checked at exactly the original instruction boundary.
-    fn check_poll(&mut self, state: Option<StateId>, remaining: Option<&WasmLocal>) {
-        if let Some(state) = state.filter(|_| remaining.is_some() || self.fused_epoch.is_some()) {
+    /// Epoch invalidation after an observer is still checked at the original
+    /// instruction boundary, including bodies with prepaid dispatcher credits.
+    fn check_poll(
+        &mut self,
+        state: Option<StateId>,
+        remaining: Option<&WasmLocal>,
+        check_epoch: bool,
+    ) {
+        // Diagnostic callbacks and deferred interrupt-shadow checks are kept
+        // conservative. Their observation/deferral is not part of the local
+        // straight-line proof above.
+        let check_epoch =
+            check_epoch || self.diagnostic.is_some() || self.interrupt_shadow.is_some();
+        let epoch = self.fused_epoch.as_ref().filter(|_| check_epoch);
+        if let Some(state) = state.filter(|_| remaining.is_some() || epoch.is_some()) {
             if let Some(remaining) = remaining {
                 self.w.get_local(remaining);
                 self.w.eqz_i32();
             }
-            if let Some((address, epoch)) = &self.fused_epoch {
+            if let Some((address, epoch)) = epoch {
                 self.w.get_local(address);
                 self.w.load_unaligned_i64(0);
                 self.w.get_local_i64(epoch);
@@ -1812,7 +1941,16 @@ impl Emitter<'_> {
         }
     }
     fn poll(&mut self, state: Option<StateId>, cost: u32, remaining: &WasmLocal) {
-        self.check_poll(state, Some(remaining));
+        self.poll_with_epoch(state, cost, remaining, true);
+    }
+    fn poll_with_epoch(
+        &mut self,
+        state: Option<StateId>,
+        cost: u32,
+        remaining: &WasmLocal,
+        check_epoch: bool,
+    ) {
+        self.check_poll(state, Some(remaining), check_epoch);
         self.w.get_local(remaining);
         self.w.const_i32(cost as i32);
         self.w.sub_i32();
@@ -1824,7 +1962,12 @@ impl Emitter<'_> {
         }
         let mir = self.mir;
         if let Some(plan) = &mir.control.polls[id.index()] {
-            self.poll(Some(plan.recovery), plan.cost, remaining);
+            self.poll_with_epoch(
+                Some(plan.recovery),
+                plan.cost,
+                remaining,
+                self.instruction_epoch_check(id),
+            );
         }
         else if let Some(plan) = &mir.memory[id.index()] {
             self.memory_with_forwarding(
@@ -1965,7 +2108,7 @@ fn emit_inner(
     aliases: &[CpuEntryKey],
 ) -> Result<Artifact, CompileError> {
     emit_inner_with_batches(
-        mir, layout, budget, cpu, entry, code_pages, fused, aliases, true,
+        mir, layout, budget, cpu, entry, code_pages, fused, aliases, true, true,
     )
 }
 fn emit_inner_with_batches(
@@ -1978,6 +2121,7 @@ fn emit_inner_with_batches(
     fused: bool,
     aliases: &[CpuEntryKey],
     batch_polls: bool,
+    elide_epoch_polls: bool,
 ) -> Result<Artifact, CompileError> {
     #[cfg(test)]
     mir.verify()?;
@@ -2090,10 +2234,39 @@ fn emit_inner_with_batches(
         memory_base: None,
         interrupt_shadow: None,
         fused_epoch: None,
+        epoch_polls: if fused && elide_epoch_polls {
+            required_epoch_polls(mir)
+        }
+        else {
+            Vec::new()
+        },
         diagnostic: None,
+        debug_sse_observer: cfg!(debug_assertions) && cpu
+            && (mir.effects.iter().flatten().any(debug_sse_effect)
+                || mir.calls.iter().flatten().any(|plan| debug_sse_call(mir, plan))),
         batch_polls,
         budget_batch_blocks: 0,
     };
+    if e.debug_sse_observer {
+        // Debug OSFXSR warnings are host observers before operand/immediate
+        // decoding. Decline before ir_enter, state materialization or STI.
+        // Diagnostic imports could clear OSFXSR after a later guard, even
+        // inside an indivisible shadow, so that debug combination always
+        // defers before invoking its first diagnostic observer. The existing
+        // zero-step cache rule retires the owner and permits interpretation.
+        if diag::enabled() {
+            e.w.const_i32(1);
+        }
+        else {
+            e.w.load_fixed_i32(gp::cr as u32 + 4 * 4);
+            e.w.const_i32(crate::cpu::cpu::CR4_OSFXSR);
+            e.w.and_i32();
+            e.w.eqz_i32();
+        }
+        e.w.if_void();
+        e.w.return_();
+        e.w.block_end();
+    }
     // Diagnostic policy is fixed at compilation; changing it invalidates all
     // artifacts. Ordinary builds emit no diagnostic instructions/imports.
     if entry.is_some() && diag::enabled() {
@@ -2380,6 +2553,7 @@ fn emit_inner_with_batches(
         if e.budget_batch_blocks != 0 {
             return emit_inner_with_batches(
                 mir, layout, budget, cpu, entry, code_pages, fused, aliases, false,
+                elide_epoch_polls,
             );
         }
         return Err(CompileError::Budget("Wasm bytes"));
@@ -2407,6 +2581,10 @@ pub(crate) fn require_features(mir: &MirRegion, simd128: bool) -> Result<(), Com
     }
     Ok(())
 }
+#[cfg(test)]
+#[path = "../../../../tests/ir/semantics/epoch_poll.rs"]
+mod epoch_poll_tests;
+
 #[cfg(test)]
 mod feature_tests {
     use super::*;

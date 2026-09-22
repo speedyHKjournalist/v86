@@ -1,5 +1,6 @@
 //! Conservative typed interference allocation, including cold-exit StateMap references.
 use crate::ir::{hir::*, ids::*, types::Type};
+#[cfg(test)]
 use std::collections::BTreeSet;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Allocation {
@@ -26,12 +27,19 @@ impl Interference {
     }
     /// Charge the incremental algorithm actually executed by connect, rather
     /// than repeatedly charging old edges in otherwise identical live sets.
-    pub(crate) fn connection_work(&self, live: &BTreeSet<ValueId>) -> usize {
+    pub(crate) fn connection_work_iter(
+        &self,
+        live: impl Iterator<Item = ValueId>,
+        len: usize,
+        scan_words: usize,
+    ) -> usize {
         let added = live
-            .iter()
             .filter(|v| self.last[v.index()] != self.generation)
             .count();
-        live.len().saturating_mul(added + 1)
+        // Dense sets also scan empty words. Include the accounting scan, outer
+        // connection scan, each new-value inner scan and generation update.
+        len.saturating_mul(added + 1)
+            .saturating_add(scan_words.saturating_mul(added + 3))
     }
     fn insert(&mut self, a: usize, b: usize) {
         if self.rows[a].is_empty() {
@@ -39,12 +47,20 @@ impl Interference {
         }
         self.rows[a][b / 64] |= 1u64 << (b % 64);
     }
-    pub(crate) fn connect(&mut self, live: &BTreeSet<ValueId>, ty: impl Fn(ValueId) -> Type) {
-        for &a in live {
+    #[cfg(test)]
+    fn connect(&mut self, live: &BTreeSet<ValueId>, ty: impl Fn(ValueId) -> Type) {
+        self.connect_iter(live.iter().copied(), ty);
+    }
+    pub(crate) fn connect_iter(
+        &mut self,
+        live: impl Iterator<Item = ValueId> + Clone,
+        ty: impl Fn(ValueId) -> Type,
+    ) {
+        for a in live.clone() {
             if self.last[a.index()] == self.generation {
                 continue;
             }
-            for &b in live {
+            for b in live.clone() {
                 if a != b && ty(a) == ty(b) {
                     self.insert(a.index(), b.index());
                     self.insert(b.index(), a.index());
@@ -71,13 +87,133 @@ impl Interference {
         occupied
     }
 }
-fn state_uses(region: &Region, state: Option<StateId>, live: &mut BTreeSet<ValueId>) {
+
+/// SSA IDs are dense and bounded by the region. Avoid a tree allocation for
+/// every live value at every recovery point in the cold compiler. Iteration
+/// remains ascending, preserving the existing deterministic graph coloring.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct LiveBits {
+    words: Vec<u64>,
+    len: usize,
+}
+#[derive(Clone)]
+struct LiveBitIter<'a> {
+    words: &'a [u64],
+    word: usize,
+    bits: u64,
+}
+impl Iterator for LiveBitIter<'_> {
+    type Item = ValueId;
+    fn next(&mut self) -> Option<ValueId> {
+        loop {
+            if self.bits != 0 {
+                let bit = self.bits.trailing_zeros();
+                self.bits &= self.bits - 1;
+                return Some(ValueId(((self.word - 1) * 64) as u32 + bit));
+            }
+            self.bits = *self.words.get(self.word)?;
+            self.word += 1;
+        }
+    }
+}
+pub(crate) trait LiveValues: Clone + PartialEq + Extend<ValueId> {
+    fn new(values: usize) -> Self;
+    fn len(&self) -> usize;
+    fn values(&self) -> impl Iterator<Item = ValueId> + Clone;
+    /// Additional empty-word scans beyond the charged value cardinality.
+    fn scan_words(&self) -> usize { 0 }
+    fn insert(&mut self, value: ValueId);
+    fn remove(&mut self, value: &ValueId);
+    fn contains(&self, value: &ValueId) -> bool;
+    fn retain(&mut self, keep: impl FnMut(&ValueId) -> bool);
+}
+impl Extend<ValueId> for LiveBits {
+    fn extend<I: IntoIterator<Item = ValueId>>(&mut self, values: I) {
+        for value in values {
+            self.insert(value);
+        }
+    }
+}
+impl LiveValues for LiveBits {
+    fn new(values: usize) -> Self {
+        Self {
+            words: vec![0; values.div_ceil(64)],
+            len: 0,
+        }
+    }
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn values(&self) -> impl Iterator<Item = ValueId> + Clone {
+        LiveBitIter {
+            words: &self.words,
+            word: 0,
+            bits: 0,
+        }
+    }
+    fn scan_words(&self) -> usize { self.words.len() }
+    fn insert(&mut self, value: ValueId) {
+        let word = &mut self.words[value.index() / 64];
+        let bit = 1u64 << (value.index() % 64);
+        self.len += usize::from(*word & bit == 0);
+        *word |= bit;
+    }
+    fn remove(&mut self, value: &ValueId) {
+        let word = &mut self.words[value.index() / 64];
+        let bit = 1u64 << (value.index() % 64);
+        self.len -= usize::from(*word & bit != 0);
+        *word &= !bit;
+    }
+    fn contains(&self, value: &ValueId) -> bool {
+        self.words[value.index() / 64] & (1u64 << (value.index() % 64)) != 0
+    }
+    fn retain(&mut self, mut keep: impl FnMut(&ValueId) -> bool) {
+        for (index, word) in self.words.iter_mut().enumerate() {
+            let mut bits = *word;
+            while bits != 0 {
+                let bit = bits.trailing_zeros();
+                bits &= bits - 1;
+                if !keep(&ValueId((index * 64) as u32 + bit)) {
+                    *word &= !(1u64 << bit);
+                    self.len -= 1;
+                }
+            }
+        }
+    }
+}
+// Keep the previous data structure as a test oracle for the identical solver,
+// including loops, phi edges, cold StateMaps and deterministic slot assignment.
+#[cfg(test)]
+impl LiveValues for BTreeSet<ValueId> {
+    fn new(_: usize) -> Self {
+        Self::new()
+    }
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn values(&self) -> impl Iterator<Item = ValueId> + Clone {
+        self.iter().copied()
+    }
+    fn insert(&mut self, value: ValueId) {
+        self.insert(value);
+    }
+    fn remove(&mut self, value: &ValueId) {
+        self.remove(value);
+    }
+    fn contains(&self, value: &ValueId) -> bool {
+        self.contains(value)
+    }
+    fn retain(&mut self, keep: impl FnMut(&ValueId) -> bool) {
+        self.retain(keep);
+    }
+}
+fn state_uses(region: &Region, state: Option<StateId>, live: &mut impl Extend<ValueId>) {
     if let Some(id) = state {
         live.extend(region.states[id.index()].values());
     }
 }
-fn term_uses(region: &Region, block: &Block) -> BTreeSet<ValueId> {
-    let mut uses = BTreeSet::new();
+fn term_uses<S: LiveValues>(region: &Region, block: &Block) -> S {
+    let mut uses = S::new(region.values.len());
     match block.terminator.as_ref().unwrap() {
         Terminator::Exit(id) => state_uses(region, Some(*id), &mut uses),
         Terminator::CondBranch { condition, .. } => {
@@ -86,7 +222,7 @@ fn term_uses(region: &Region, block: &Block) -> BTreeSet<ValueId> {
         _ => (),
     }
     for edge in block.terminator.as_ref().unwrap().edges() {
-        uses.extend(&edge.args);
+        uses.extend(edge.args.iter().copied());
     }
     uses
 }
@@ -102,7 +238,13 @@ fn allocate_bounded(region: &Region, remaining: usize) -> Result<Allocation, &'s
     }
     allocate_graph(region, remaining)
 }
-fn allocate_graph(region: &Region, mut remaining: usize) -> Result<Allocation, &'static str> {
+fn allocate_graph(region: &Region, remaining: usize) -> Result<Allocation, &'static str> {
+    allocate_graph_with::<LiveBits>(region, remaining)
+}
+fn allocate_graph_with<S: LiveValues>(
+    region: &Region,
+    mut remaining: usize,
+) -> Result<Allocation, &'static str> {
     let mut spend = |amount: usize| -> Result<(), &'static str> {
         remaining = remaining
             .checked_sub(amount)
@@ -116,39 +258,45 @@ fn allocate_graph(region: &Region, mut remaining: usize) -> Result<Allocation, &
     // block parameters remain in inputs for the existing edge substitution.
     let mut transfers = Vec::with_capacity(n);
     for block in &region.blocks {
-        let mut uses = BTreeSet::new();
-        let mut definitions = BTreeSet::new();
+        let mut uses = S::new(region.values.len());
+        let mut definitions = S::new(region.values.len());
+        spend(uses.scan_words().saturating_mul(3))?;
         for id in block.instructions.iter().rev() {
             let inst = &region.instructions[id.index()];
             for result in &inst.results {
                 uses.remove(result);
                 definitions.insert(*result);
             }
-            uses.extend(&inst.args);
+            uses.extend(inst.args.iter().copied());
             state_uses(region, inst.state, &mut uses);
             state_uses(region, inst.commit, &mut uses);
             spend(uses.len() + inst.results.len() + inst.args.len() + 1)?;
         }
         state_uses(region, block.entry_state, &mut uses);
-        transfers.push((uses, definitions, term_uses(region, block)));
+        transfers.push((uses, definitions, term_uses::<S>(region, block)));
     }
-    let mut inputs = vec![BTreeSet::<ValueId>::new(); n];
+    let empty = S::new(region.values.len());
+    spend(empty.scan_words().saturating_mul(2 * n + 1))?;
+    let mut inputs = vec![empty; n];
     let mut outputs = inputs.clone();
     loop {
         let mut changed = false;
         for b in (0..n).rev() {
             let block = &region.blocks[b];
             let (uses, definitions, terminal) = &transfers[b];
+            // Clone terminal/output, retain, compare input, and iterate uses.
+            spend(terminal.scan_words().saturating_mul(4) + uses.scan_words())?;
             let mut live = terminal.clone();
             for edge in block.terminator.as_ref().unwrap().edges() {
                 spend(
                     inputs[edge.target.index()]
                         .len()
-                        .saturating_mul(region.blocks[edge.target.index()].params.len() + 1),
+                        .saturating_mul(region.blocks[edge.target.index()].params.len() + 1)
+                        .saturating_add(inputs[edge.target.index()].scan_words()),
                 )?;
                 live.extend(
                     inputs[edge.target.index()]
-                        .iter()
+                        .values()
                         .filter(|v| !region.blocks[edge.target.index()].params.contains(v)),
                 );
             }
@@ -156,7 +304,7 @@ fn allocate_graph(region: &Region, mut remaining: usize) -> Result<Allocation, &
             outputs[b] = live.clone();
             spend(live.len() + uses.len() + definitions.len() + 1)?;
             live.retain(|v| !definitions.contains(v));
-            live.extend(uses);
+            live.extend(uses.values());
             if live != inputs[b] {
                 inputs[b] = live;
                 changed = true;
@@ -168,31 +316,36 @@ fn allocate_graph(region: &Region, mut remaining: usize) -> Result<Allocation, &
     }
     let mut interference = Interference::new(region.values.len());
     let mut work = 0usize;
-    let mut connect = |live: &BTreeSet<ValueId>| -> Result<(), &'static str> {
-        work = work.saturating_add(interference.connection_work(live));
+    let mut connect = |live: &S| -> Result<(), &'static str> {
+        work = work.saturating_add(interference.connection_work_iter(
+            live.values(),
+            live.len(),
+            live.scan_words(),
+        ));
         if live.len() > 512 || work > 2_000_000 {
             return Err("local allocation work budget");
         }
-        interference.connect(live, |v| region.values[v.index()].ty);
+        interference.connect_iter(live.values(), |v| region.values[v.index()].ty);
         Ok(())
     };
     for (b, block) in region.blocks.iter().enumerate() {
+        spend(outputs[b].scan_words())?;
         let mut live = outputs[b].clone();
         connect(&live)?;
         for id in block.instructions.iter().rev() {
             let inst = &region.instructions[id.index()];
-            live.extend(&inst.results);
+            live.extend(inst.results.iter().copied());
             connect(&live)?;
             for result in &inst.results {
                 live.remove(result);
             }
-            live.extend(&inst.args);
+            live.extend(inst.args.iter().copied());
             state_uses(region, inst.state, &mut live);
             state_uses(region, inst.commit, &mut live);
             connect(&live)?;
         }
         state_uses(region, block.entry_state, &mut live);
-        live.extend(&block.params);
+        live.extend(block.params.iter().copied());
         connect(&live)?;
     }
     let mut allocation = Allocation {
@@ -280,8 +433,7 @@ fn allocate_linear(region: &Region, mut remaining: usize) -> Result<Allocation, 
             }
         }
     }
-    let Terminator::Exit(state) = block.terminator.as_ref().unwrap()
-    else {
+    let Terminator::Exit(state) = block.terminator.as_ref().unwrap() else {
         unreachable!()
     };
     for value in region.states[state.index()].values() {
@@ -345,6 +497,132 @@ fn allocate_linear(region: &Region, mut remaining: usize) -> Result<Allocation, 
 mod tests {
     use super::*;
     #[test]
+    fn sparse_dense_sets_charge_empty_word_scans() {
+        let mut bits = LiveBits::new(16_384);
+        let graph = Interference::new(16_384);
+        assert_eq!(bits.scan_words(), 256);
+        assert_eq!(
+            graph.connection_work_iter(bits.values(), bits.len(), bits.scan_words()),
+            3 * 256,
+        );
+        bits.insert(ValueId(16_383));
+        assert_eq!(bits.values().collect::<Vec<_>>(), [ValueId(16_383)]);
+        assert_eq!(
+            graph.connection_work_iter(bits.values(), bits.len(), bits.scan_words()),
+            2 + 4 * 256,
+        );
+    }
+    #[test]
+    fn dense_liveness_matches_tree_sets_and_coloring() {
+        let mut bits = LiveBits::new(1031);
+        let mut tree = BTreeSet::new();
+        let mut seed = 47u32;
+        for step in 0..4096 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let value = ValueId(seed % 1031);
+            if step % 3 == 0 {
+                bits.remove(&value);
+                tree.remove(&value);
+            } else {
+                bits.insert(value);
+                tree.insert(value);
+            }
+            if step % 97 == 0 {
+                bits.retain(|v| v.0 % 7 != 0);
+                tree.retain(|v| v.0 % 7 != 0);
+            }
+            assert_eq!(bits.len(), tree.len());
+            assert_eq!(bits.contains(&value), tree.contains(&value));
+            assert!(bits.values().eq(tree.iter().copied()));
+        }
+        use crate::ir::frontend::{
+            decode::{GuestEip, LinearAddress},
+            region::lift_cpu_cfg,
+        };
+        // Loops, diamonds, irreducible edges, lazy flags, RMW recovery, vector
+        // values and observer reloads exercise cross-block and cold liveness.
+        let programs: &[&[u8]] = &[
+            &[0x40, 0x49, 0x75, 0xFC],
+            &[0x03, 0x06, 0x49, 0x75, 0xFB],
+            &[0x66, 0x0F, 0xEF, 0xC1, 0xE2, 0xFA],
+            &[0x74, 0x02, 0x75, 0x02, 0x40, 0x90, 0x48, 0x90],
+            &[0x74, 0x02, 0xEB, 0x02, 0xEB, 0xFC, 0xEB, 0xFC],
+            &[0x11, 0xD8, 0x19, 0xD1, 0x40, 0x49, 0x75, 0xF8],
+            &[0xFF, 0x06, 0x8B, 0x06, 0x49, 0x75, 0xF9],
+            &[0xEC, 0x43, 0x49, 0x75, 0xFB],
+            &[0x0F, 0x31, 0x43, 0x49, 0x75, 0xFA],
+        ];
+        for (index, bytes) in programs.iter().enumerate() {
+            for mode in [false, true] {
+                // These encodings use [ESI], while 16-bit ModRM 06 consumes a
+                // displacement and would make the deliberately short loop invalid.
+                if !mode && matches!(index, 1 | 6) { continue; }
+                let original =
+                    lift_cpu_cfg(bytes, GuestEip(0x1000), LinearAddress(0x201000), mode, 8)
+                        .unwrap();
+                for pass in [
+                    None,
+                    Some(crate::ir::passes::PassConfig::tier1()),
+                    Some(crate::ir::passes::PassConfig::default()),
+                ] {
+                    let mut region = original.clone();
+                    if let Some(pass) = pass {
+                        crate::ir::passes::run(&mut region, pass).unwrap();
+                    }
+                    let dense = allocate_graph_with::<LiveBits>(&region, 4_000_000);
+                    let reference = allocate_graph_with::<BTreeSet<ValueId>>(&region, 4_000_000);
+                    assert_eq!(dense, reference, "mode={mode}, bytes={bytes:x?}");
+                    assert_eq!(
+                        allocate_graph_with::<LiveBits>(&region, 1),
+                        allocate_graph_with::<BTreeSet<ValueId>>(&region, 1)
+                    );
+                    crate::ir::lowering::lower(&region)
+                        .unwrap()
+                        .verify()
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "allocator timing only, not an XP performance gate"]
+    fn graph_allocation_paired_benchmark() {
+        use crate::ir::frontend::{
+            decode::{GuestEip, LinearAddress},
+            region::lift_cpu_cfg,
+        };
+        for size in [8, 32, 64] {
+            let mut bytes = vec![0x40; size];
+            bytes.extend([0x49, 0x75, (-(size as i32 + 3)) as u8]);
+            let region = lift_cpu_cfg(&bytes, GuestEip(0), LinearAddress(0), true, 8).unwrap();
+            let mut samples = [vec![], vec![]];
+            for round in 0..7 {
+                for which in [round % 2, 1 - round % 2] {
+                    let start = std::time::Instant::now();
+                    for _ in 0..20 {
+                        let result = if which == 0 {
+                            allocate_graph_with::<BTreeSet<ValueId>>(&region, 4_000_000)
+                        } else {
+                            allocate_graph_with::<LiveBits>(&region, 4_000_000)
+                        };
+                        std::hint::black_box(result.unwrap());
+                    }
+                    samples[which].push(start.elapsed().as_secs_f64() * 1e6 / 20.0);
+                }
+            }
+            for sample in &mut samples {
+                sample.sort_by(f64::total_cmp);
+            }
+            println!(
+                "{size} instructions: tree {:.1} us, dense {:.1} us",
+                samples[0][3], samples[1][3]
+            );
+        }
+    }
+    #[test]
     fn liveness_has_a_bounded_failure_path() {
         use crate::ir::frontend::{
             decode::{GuestEip, LinearAddress},
@@ -407,8 +685,7 @@ mod tests {
                     for _ in 0..40 {
                         let allocation = if index == 0 {
                             allocate_graph(&region, 4_000_000)
-                        }
-                        else {
+                        } else {
                             allocate_linear(&region, 4_000_000)
                         }
                         .unwrap();
@@ -430,14 +707,7 @@ mod tests {
         let mut graph = Interference::new(n);
         let mut reference = vec![BTreeSet::new(); n];
         let types: Vec<_> = (0..n)
-            .map(|i| {
-                if i % 3 == 0 {
-                    Type::I64
-                }
-                else {
-                    Type::I32
-                }
-            })
+            .map(|i| if i % 3 == 0 { Type::I64 } else { Type::I32 })
             .collect();
         let mut rng = 17u32;
         let mut live = BTreeSet::new();
@@ -451,8 +721,7 @@ mod tests {
             }
             if step % 3 == 0 {
                 live.remove(&value);
-            }
-            else {
+            } else {
                 live.insert(value);
             }
             graph.connect(&live, |v| types[v.index()]);

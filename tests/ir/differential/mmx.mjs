@@ -4,11 +4,19 @@ import {V86} from "../../../build/libv86.mjs";
 
 const cases=JSON.parse(fs.readFileSync("build/ir-mmx/cases.json"));
 const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFileSync(`build/ir-mmx/${i}-${opt}.wasm`))));
+const continuationCases=JSON.parse(fs.readFileSync("build/ir-mmx-continuation/cases.json"));
+const continuationModules=continuationCases.map((_,i)=>new WebAssembly.Module(fs.readFileSync(`build/ir-mmx-continuation/${i}.wasm`)));
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 for(const release of [false,true]){
+    let logObserver=null;
+    const wasmPath=(process.argv[2] || "build/v86-ir-test")+(release?"-release":"")+".wasm";
     const vm=new V86({
-        wasm_path:(process.argv[2] || "build/v86-ir-test")+(release?"-release":"")+".wasm",
+        wasm_fn:async imports=>{
+            const original=imports.env.log_from_wasm;
+            imports.env.log_from_wasm=(...args)=>logObserver?logObserver():original(...args);
+            return (await WebAssembly.instantiate(fs.readFileSync(wasmPath),imports)).instance.exports;
+        },
         memory_size:32<<20,
         bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
         disable_keyboard:true,disable_mouse:true,disable_speaker:true,
@@ -40,6 +48,7 @@ for(const release of [false,true]){
             (a,x)=>{observe("write32",a,x);set32(physical(a),x);});
         const imports={...e,m:e.memory};
         const instances=modules.map(pair=>pair.map(module=>new WebAssembly.Instance(module,{e:imports})));
+        const continuationInstances=continuationModules.map(module=>new WebAssembly.Instance(module,{e:imports}));
 
         function desc(n,base,access){
             set32(0x3000+n*8,(base<<16)|0xFFFF);
@@ -78,7 +87,7 @@ for(const release of [false,true]){
         function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0}={}){
             const [bytes,mode,opcode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
-            cpu.cr[4]=cr4;
+            cpu.cr[4]=cr4|512; // Ordinary continuation excludes the debug OSFXSR observer.
             cpu.cr[2]=0xBADF000;
             cpu.segment_offsets.fill(0,0,6);
             cpu.segment_limits.fill(0xFFFFFFFF,0,6);
@@ -192,6 +201,88 @@ for(const release of [false,true]){
             }
         }
         console.log(`PASS (${release?"release":"debug"}): ${comparisons} MMX arithmetic/shift/transfer, x87 alias/TOP/tags, dirty XMM, masked stores, MMIO and page faults and #NM/#UD priority cases`);
+
+        let continuations=0;
+        const variants=new Map();
+        for(let i=0;i<continuationCases.length;i++) {
+            const [name,bytes,mode,cfg,opt,budget]=continuationCases[i];
+            for(const task of [0,4,8,12]) for(const initial of [100,0xFFFFFFFC])
+            for(const top of [0,3]) for(const sample of [0,2,7]) {
+                const configure=()=>{
+                    reset(0,{task,sample,top,empty:top?0xA5:0,pageFault:name==="fault"});
+                    cpu.mem8.set(bytes,PC);
+                    cpu.is_32[0]=+mode;
+                    cpu.reg32[1]=3;
+                    linear32[664>>2]=initial;
+                    e.update_state_flags();
+                };
+                configure();
+                continuationInstances[i].exports.f(0);
+                const actual=state(),retired=(linear32[664>>2]-initial)>>>0;
+                assert(retired<=budget,`MMX continuation exceeds budget ${i}`);
+                assert(retired<=12,"loop must terminate");
+                configure();
+                for(let n=0;n<retired;n++)e.ir_test_step();
+                if([UD,NM,PF,GP].includes(actual.ip))e.ir_test_step();
+                const expected=state();
+                // Previous-IP differs legitimately between a before-instruction
+                // poll and an interpreter prefix. Exact optimized/unoptimized
+                // comparison below still checks the recovery slot as well.
+                const {previous:actualPrevious,...actualState}=actual;
+                const {previous:expectedPrevious,...expectedState}=expected;
+                assert(Number.isInteger(actualPrevious)&&Number.isInteger(expectedPrevious));
+                assert.deepEqual(actualState,expectedState,`MMX continuation ${i}/${name}/${mode}/${cfg}/${opt}/${budget}/${task}/${initial}/${top}/${sample}`);
+                const key=[name,mode,cfg,budget,task,initial,top,sample].join("/");
+                if(opt)assert.deepEqual({actual,retired},variants.get(key),`MMX continuation optimization ${key}`);
+                else variants.set(key,{actual,retired});
+                continuations++;
+            }
+        }
+        console.log(`PASS (${release?"release":"debug"}): ${continuations} MMX successor/loop/exact-budget comparisons, GPR/XMM/F80 alias and EMMS, 16/32-bit, late #UD/#PF, #NM and count wrap`);
+
+        if(!release) {
+            let observers=0;
+            for(let i=0;i<continuationCases.length;i++) {
+                const [name,bytes,mode,cfg,opt]=continuationCases[i];
+                if(!["gpr","xmm"].includes(name)||!mode||cfg)continue;
+                const after=name==="gpr"?4:8;
+                let calls=0;
+                const configure=()=>{
+                    reset(0);cpu.mem8.set(bytes,PC);cpu.is_32[0]=1;cpu.cr[4]|=512;
+                    e.update_state_flags();calls=0;
+                    logObserver=()=>{
+                        calls++;
+                        if(name==="xmm")assert.equal(cpu.reg_xmm32s[4],0,"dirty XMM must be materialized before the observer");
+                        cpu.reg_xmm32s[4]=0x13579BDF;
+                        cpu.reg32[3]=0x12345678;
+                        cpu.segment_offsets[3]=123;
+                        cpu.mem8[PC+after]=0x90;
+                    };
+                };
+                configure();e.ir_test_step();cpu.cr[4]&=~512;e.ir_test_step();
+                const expected=state();assert.equal(calls,1);
+                let links=0;
+                const wrapped={...imports,ir_request_link:()=>{links++;}};
+                for(const helper of ["ir_mmx_reg_continue","ir_mmx_xmm_continue"]) {
+                    wrapped[helper]=(...args)=>{cpu.cr[4]&=~512;return e[helper](...args);};
+                }
+                const entryModule=new WebAssembly.Module(fs.readFileSync(`build/ir-mmx-continuation/${i}-entry.wasm`));
+                const instance=new WebAssembly.Instance(entryModule,{e:wrapped});
+                configure();
+                const epochAddress=e.ir_admission_epoch_address();
+                const epoch=new DataView(e.memory.buffer).getBigUint64(epochAddress,true);
+                instance.exports.f(0);
+                assert.equal(calls,1,`debug MMX observer ${name}/${opt} runs once`);
+                assert.equal(links,0,"CpuReload invalidation cannot request normal chaining");
+                assert.equal(linear32[664>>2],102,"completed prefix retires once");
+                assert.equal(cpu.instruction_pointer[0],PC+after,"observer prevents suffix execution");
+                assert.equal(cpu.segment_offsets[3],123);
+                assert(new DataView(e.memory.buffer).getBigUint64(epochAddress,true)>epoch,"observer revokes code admission before the callback");
+                assert.deepEqual(state(),expected,`debug MMX observer ${name}/${opt} preserves CPU-owned post-state`);
+                logObserver=null;observers++;
+            }
+            console.log(`PASS (debug): ${observers} OSFXSR logging observers preserve dirty XMM/GPR/context, code revocation and exact partial retirement`);
+        }
 
     } finally {
         await vm.destroy();

@@ -122,5 +122,14 @@ fn io_contract_boundaries() {
             _ => "other",
         })
         .collect::<Vec<_>>();
-    assert_eq!(ordered, vec!["segment", "ir_io_check", "load", "ir_outs"]);
+    assert_eq!(ordered, vec!["ir_outs_once"]);
+    assert!(matches!(r.helpers[0].abi, crate::ir::helper::HelperAbi::CpuExit));
+    for op in 0x6C..=0x6F {
+        let r = lift_cpu(&[0x67, op], GuestEip(0), LinearAddress(0), true).unwrap();
+        assert_eq!(r.helpers.len(), 1);
+        assert_eq!(r.helpers[0].name, if op & 2 == 0 { "ir_ins_once" } else { "ir_outs_once" });
+        assert!(matches!(r.helpers[0].abi, crate::ir::helper::HelperAbi::CpuExit));
+        assert!(r.helpers[0].results.is_empty());
+        lower(&r).unwrap().verify().unwrap();
+    }
 }
