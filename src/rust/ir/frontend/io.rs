@@ -28,7 +28,8 @@ pub fn lift(
     let bytes = b.constant((width / 8) as u32, Type::I32);
     let port = if matches!(op, 0xE4..=0xE7) {
         b.constant(i.immediate.unwrap(), Type::I32)
-    } else {
+    }
+    else {
         let p = b.read(2, 16);
         b.node(Op::Extend { signed: false }, vec![p], Type::I32)
     };
@@ -37,15 +38,29 @@ pub fn lift(
     if !string {
         let input = op & 2 == 0;
         if input {
-            super::adapters::call_abi(b, "ir_in_continue", vec![port, bytes], map, crate::ir::helper::HelperAbi::CpuReload);
-        } else {
+            super::adapters::call_abi(
+                b,
+                "ir_in_continue",
+                vec![port, bytes],
+                map,
+                crate::ir::helper::HelperAbi::CpuReload,
+            );
+        }
+        else {
             let value = b.read(0, width);
             let value = if width < 32 {
                 b.node(Op::Extend { signed: false }, vec![value], Type::I32)
-            } else {
+            }
+            else {
                 value
             };
-            super::adapters::call_abi(b, "ir_out_continue", vec![port, bytes, value], map, crate::ir::helper::HelperAbi::CpuReload);
+            super::adapters::call_abi(
+                b,
+                "ir_out_continue",
+                vec![port, bytes, value],
+                map,
+                crate::ir::helper::HelperAbi::CpuReload,
+            );
         }
         return Ok(());
     }
@@ -55,7 +70,8 @@ pub fn lift(
     let ty = b.ty(old);
     let off = if i.address_size == 16 {
         b.node(Op::Extend { signed: false }, vec![old], Type::I32)
-    } else {
+    }
+    else {
         old
     };
     let address = segmented(
@@ -75,17 +91,20 @@ pub fn lift(
             vec![b.gpr[reg as usize], next],
             Type::I32,
         )
-    } else {
+    }
+    else {
         next
     };
     if input {
         call(b, "ir_ins", vec![port, bytes, address, next], map, true);
-    } else {
+    }
+    else {
         call(b, "ir_io_check", vec![port, bytes], map, false);
         let value = memory_read(b, address, width, map, false).0;
         let value = if width < 32 {
             b.node(Op::Extend { signed: false }, vec![value], Type::I32)
-        } else {
+        }
+        else {
             value
         };
         call(b, "ir_outs", vec![port, bytes, value, next], map, true);

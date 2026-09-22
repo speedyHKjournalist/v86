@@ -5,14 +5,10 @@ use crate::cpu::{
 };
 use crate::ir::helper::Outcome;
 static mut LAST_RESULT: u64 = 0;
-pub(super) unsafe fn reset_result() {
-    LAST_RESULT = 0;
-}
+pub(super) unsafe fn reset_result() { LAST_RESULT = 0; }
 /// High word: completed elements. Low word: Outcome (zero means no REP this entry).
 #[no_mangle]
-pub unsafe fn ir_rep_result() -> u64 {
-    LAST_RESULT
-}
+pub unsafe fn ir_rep_result() -> u64 { LAST_RESULT }
 unsafe fn batch(kind: u32, bytes: u32, asize32: u32, segment: u32, repne: u32, limit: u32) -> u32 {
     assert!(!cpu::in_jit && asize32 <= 1 && repne <= 1 && segment < 6 && limit <= 4096);
     LAST_RESULT = 0;

@@ -35,13 +35,16 @@ fn shift_fixtures() {
                                 0x0F,
                                 (if group == 8 { 0xA4 } else { 0xAC }) + (count == -1) as u8,
                             ]);
-                        } else {
+                        }
+                        else {
                             bytes.push(
                                 (if count == -2 {
                                     0xD0
-                                } else if count == -1 {
+                                }
+                                else if count == -1 {
                                     0xD2
-                                } else {
+                                }
+                                else {
                                     0xC0
                                 }) + (width != 8) as u8,
                             );
@@ -50,9 +53,11 @@ fn shift_fixtures() {
                         bytes.push(
                             (if dst < 8 {
                                 0xC0 | dst
-                            } else if dst == 8 {
+                            }
+                            else if dst == 8 {
                                 6
-                            } else {
+                            }
+                            else {
                                 4
                             }) | field << 3,
                         );

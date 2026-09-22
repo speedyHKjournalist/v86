@@ -36,9 +36,9 @@ try {
         regs:Array.from(cpu.reg32),flags:e.get_eflags(),segments:Array.from(cpu.segment_offsets),
         frame:Buffer.from(mem.slice(SP-64,SP))};}
     let comparisons=0;
-    for(const size of [16,32])for(let m=0;m<192;m++) {
+    for(const size of [16,32]) for(let m=0;m<192;m++) {
         const sibs=size===32&&(m&7)===4?256:1;
-        for(let sib=0;sib<sibs;sib++)for(const prefix of [0,1,2,3,4,5,6,7]) {
+        for(let sib=0;sib<sibs;sib++) for(const prefix of [0,1,2,3,4,5,6,7]) {
             const bytes=size===32&&(m&7)===4?[sib,0x80,0xFE,0xFF,0x12]:[0x80,0xFE,0xFF,0x12];
             reset(size,prefix,bytes);const old=state(e.ir_test_resolve_modrm(m,size,1));
             reset(size,prefix,bytes);assert.deepEqual(state(e.ir_test_resolve_modrm(m,size,0)),old,`EA ${size}/${m}/${sib}/${prefix}`);
@@ -47,8 +47,8 @@ try {
     }
     // With SIB, a null segment precedes a trailing displacement fetch; without
     // SIB, that fetch precedes the null-segment check. Keep the baseline priority.
-    for(const size of [16,32])for(const m of [0x05,0x06,0x40,0x44,0x45,0x84,0x85]) {
-        for(const prefix of [0,1,4,5,7])for(const nulls of [false,true])for(const cut of [0,1,2,3]){
+    for(const size of [16,32]) for(const m of [0x05,0x06,0x40,0x44,0x45,0x84,0x85]) {
+        for(const prefix of [0,1,4,5,7]) for(const nulls of [false,true]) for(const cut of [0,1,2,3]){
             const bytes=[0,0x80,0xFF,0xFF,0xFF];const ip=0x9000-cut;
             reset(size,prefix,bytes,ip,true,nulls);const old=state(e.ir_test_resolve_modrm(m,size,1));
             reset(size,prefix,bytes,ip,true,nulls);assert.deepEqual(state(e.ir_test_resolve_modrm(m,size,0)),old,`fetch ordering ${size}/${m}/${prefix}/${nulls}/${cut}`);

@@ -5,41 +5,69 @@ use super::MirData;
 use crate::ir::{hir::Region, ids::InstId, lowering::CompileError};
 pub const DEFAULT_WORK_LIMIT: usize = 262_144;
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Plan { live: Vec<bool>, enabled: bool }
+pub struct Plan {
+    live: Vec<bool>,
+    enabled: bool,
+}
 impl Plan {
-    pub(crate) fn disabled(instructions: usize) -> Self { Self {live: vec![true; instructions], enabled: false} }
+    pub(crate) fn disabled(instructions: usize) -> Self {
+        Self {
+            live: vec![true; instructions],
+            enabled: false,
+        }
+    }
 }
 pub(super) fn verify(region: &Region, data: &MirData) -> Result<(), CompileError> {
     if data.cpu_liveness != Plan::disabled(region.instructions.len()) {
-        return Err(CompileError::InvalidIr("invalid initial CPU liveness plan".into()));
+        return Err(CompileError::InvalidIr(
+            "invalid initial CPU liveness plan".into(),
+        ));
     }
     Ok(())
 }
 pub(super) fn verify_owned(data: &MirData) -> Result<(), CompileError> {
     if data.cpu_liveness.live.len() != data.values.len() {
-        return Err(CompileError::InvalidIr("invalid CPU liveness length".into()));
+        return Err(CompileError::InvalidIr(
+            "invalid CPU liveness length".into(),
+        ));
     }
     if data.cpu_liveness.enabled && data.cpu_liveness.live.iter().any(|&live| !live) {
         let required = super::allocation::cpu_demand(data, DEFAULT_WORK_LIMIT)?;
-        if required.iter().zip(&data.cpu_liveness.live).any(|(&need, &live)| need && !live) {
-            return Err(CompileError::InvalidIr("CPU liveness drops a required machine value".into()));
+        if required
+            .iter()
+            .zip(&data.cpu_liveness.live)
+            .any(|(&need, &live)| need && !live)
+        {
+            return Err(CompileError::InvalidIr(
+                "CPU liveness drops a required machine value".into(),
+            ));
         }
     }
     Ok(())
 }
 pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
-    if data.values.len() > work_limit { return Err(CompileError::Budget("CPU liveness work")); }
+    if data.values.len() > work_limit {
+        return Err(CompileError::Budget("CPU liveness work"));
+    }
     let live = match super::allocation::cpu_demand(data, work_limit) {
         Ok(live) => live,
         Err(CompileError::Budget(_)) => vec![true; data.values.len()],
         Err(error) => return Err(error),
     };
-    let count = live.iter().enumerate().filter(|(i, live)| !**live && data.values[*i].is_some()).count();
-    data.cpu_liveness = Plan { live, enabled: true };
+    let count = live
+        .iter()
+        .enumerate()
+        .filter(|(i, live)| !**live && data.values[*i].is_some())
+        .count();
+    data.cpu_liveness = Plan {
+        live,
+        enabled: true,
+    };
     Ok(count)
 }
 pub(super) fn instruction_live(data: &MirData, id: InstId) -> bool {
-    !data.cpu_liveness.enabled || data.cpu_liveness.live[id.index()]
+    !data.cpu_liveness.enabled
+        || data.cpu_liveness.live[id.index()]
         || data.values[id.index()].is_none()
 }
 
@@ -79,11 +107,22 @@ mod tests {
         let mut full = lower(&hir).unwrap();
         let full_dead = full.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
         let mut trimmed = lower(&hir).unwrap();
-        trimmed.elide_redundant_cpu_state_writes(super::super::state_elision::DEFAULT_WORK_LIMIT).unwrap();
+        trimmed
+            .elide_redundant_cpu_state_writes(super::super::state_elision::DEFAULT_WORK_LIMIT)
+            .unwrap();
         let trimmed_dead = trimmed.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
-        assert!(trimmed_dead > full_dead, "entry-equivalent stores no longer keep unused GPR reads live");
+        assert!(
+            trimmed_dead > full_dead,
+            "entry-equivalent stores no longer keep unused GPR reads live"
+        );
         trimmed.verify().unwrap();
-        let required = trimmed.values.iter().enumerate().find(|(i, p)| p.is_some() && trimmed.cpu_liveness.live[*i]).unwrap().0;
+        let required = trimmed
+            .values
+            .iter()
+            .enumerate()
+            .find(|(i, p)| p.is_some() && trimmed.cpu_liveness.live[*i])
+            .unwrap()
+            .0;
         trimmed.data.cpu_liveness.live[required] = false;
         assert!(trimmed.verify().is_err());
     }
@@ -92,17 +131,25 @@ mod tests {
     fn selective_sse_operands_survive_redundant_snapshot_trimming() {
         let hir = region(&[0x46, 0xF3, 0x0F, 0x58, 0xC1, 0x66, 0x0F, 0xEF, 0xC8]);
         let mut mir = lower(&hir).unwrap();
-        mir.elide_redundant_cpu_state_writes(DEFAULT_WORK_LIMIT).unwrap();
+        mir.elide_redundant_cpu_state_writes(DEFAULT_WORK_LIMIT)
+            .unwrap();
         mir.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
         let mut checked = 0;
         for call in mir.calls.iter().flatten() {
             if let Some((source, destination)) = call.xmm_observation {
                 for write in &mir.states[call.state.index()].cpu.writes {
-                    if [source, destination].iter().any(|&reg| write.address == super::super::value::Address::Absolute(
-                        crate::cpu::global_pointers::get_reg_xmm_offset(reg as u32))) {
+                    if [source, destination].iter().any(|&reg| {
+                        write.address
+                            == super::super::value::Address::Absolute(
+                                crate::cpu::global_pointers::get_reg_xmm_offset(reg as u32),
+                            )
+                    }) {
                         for v in super::super::allocation::expression(&write.expression) {
                             if let Some(id) = mir.value_definitions[v.index()] {
-                                assert!(instruction_live(&mir, id), "selective operand must remain live");
+                                assert!(
+                                    instruction_live(&mir, id),
+                                    "selective operand must remain live"
+                                );
                                 checked += 1;
                             }
                         }
@@ -125,10 +172,11 @@ mod tests {
         let baseline_standalone = emit(&baseline, layout(), 100).unwrap().bytes;
 
         let mut optimized = lower(&region).unwrap();
-        let count = optimized
-            .elide_dead_cpu_values(DEFAULT_WORK_LIMIT)
-            .unwrap();
-        assert!(count > 0, "scalar ALU should expose CPU-only dead flag values");
+        let count = optimized.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
+        assert!(
+            count > 0,
+            "scalar ALU should expose CPU-only dead flag values"
+        );
         let optimized_cpu = emit_cpu(&optimized, 100).unwrap().bytes;
         let optimized_standalone = emit(&optimized, layout(), 100).unwrap().bytes;
 
@@ -145,14 +193,14 @@ mod tests {
     #[test]
     fn extended_integer_flag_families_keep_exact_recovery() {
         let region = region(&[
-            0xD1, 0xE0,             // SHL EAX, 1
-            0xD1, 0xC9,             // ROR ECX, 1
-            0x0F, 0xA3, 0xC8,       // BT EAX, ECX
+            0xD1, 0xE0, // SHL EAX, 1
+            0xD1, 0xC9, // ROR ECX, 1
+            0x0F, 0xA3, 0xC8, // BT EAX, ECX
             0xF3, 0x0F, 0xB8, 0xD8, // POPCNT EBX, EAX
-            0x0F, 0xAF, 0xC3,       // IMUL EAX, EBX
-            0xF8,                   // CLC
-            0xFC,                   // CLD
-            0x75, 0x00,             // JNZ
+            0x0F, 0xAF, 0xC3, // IMUL EAX, EBX
+            0xF8, // CLC
+            0xFC, // CLD
+            0x75, 0x00, // JNZ
             0x90,
         ]);
         let mir = lower(&region).unwrap();
@@ -169,8 +217,8 @@ mod tests {
         let region = region(&[
             0x11, 0xD8, // ADC EAX, EBX
             0x19, 0xD1, // SBB ECX, EDX
-            0x40,       // INC EAX
-            0x49,       // DEC ECX
+            0x40, // INC EAX
+            0x49, // DEC ECX
             0x75, 0x00, // JNZ
             0x90,
         ]);

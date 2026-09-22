@@ -93,12 +93,27 @@ pub struct NativeFp {
 impl NativeFp {
     fn from_guest(opcode: u64) -> Option<Self> {
         let (double, scalar) = match opcode >> 16 {
-            0 => (false, false), 0x66 => (true, false),
-            0xF3 => (false, true), 0xF2 => (true, true), _ => return None,
+            0 => (false, false),
+            0x66 => (true, false),
+            0xF3 => (false, true),
+            0xF2 => (true, true),
+            _ => return None,
         };
-        if opcode & 0xFF00 != 0x0F00 { return None; }
-        let operation = match opcode & 255 { 0x58 => 0, 0x5C => 1, 0x59 => 2, 0x5E => 3, _ => return None };
-        Some(Self { opcode: if double { 0xF0 } else { 0xE4 } + operation, double, scalar })
+        if opcode & 0xFF00 != 0x0F00 {
+            return None;
+        }
+        let operation = match opcode & 255 {
+            0x58 => 0,
+            0x5C => 1,
+            0x59 => 2,
+            0x5E => 3,
+            _ => return None,
+        };
+        Some(Self {
+            opcode: if double { 0xF0 } else { 0xE4 } + operation,
+            double,
+            scalar,
+        })
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,7 +138,8 @@ pub fn lower(
     inst: &Instruction,
     helpers: &[Option<HelperCall>],
 ) -> Option<CallPlan> {
-    let Op::CallHelper(helper) = inst.op else {
+    let Op::CallHelper(helper) = inst.op
+    else {
         return None;
     };
     let call = helpers[helper.index()].as_ref()?;
@@ -140,15 +156,24 @@ pub fn lower(
                     t.edges().iter().any(|e| e.args.iter().any(|v| other.contains(v)))
                     || matches!(b.terminator, Some(crate::ir::hir::Terminator::CondBranch { condition, .. }) if other.contains(&condition))))
         })
-    } else { None };
+    }
+    else {
+        None
+    };
     let native_fp = xmm_observation.and_then(|_| {
-        let crate::ir::hir::Definition::Instruction(id, 0) = region.values[inst.args[0].index()].definition else { return None; };
+        let crate::ir::hir::Definition::Instruction(id, 0) =
+            region.values[inst.args[0].index()].definition
+        else {
+            return None;
+        };
         match region.instructions[id.index()].op {
-            Op::Const(opcode) => NativeFp::from_guest(opcode), _ => None,
+            Op::Const(opcode) => NativeFp::from_guest(opcode),
+            _ => None,
         }
     });
     Some(CallPlan {
-        xmm_observation, native_fp,
+        xmm_observation,
+        native_fp,
         helper,
         state,
         cpu_observation: if matches!(
@@ -156,7 +181,8 @@ pub fn lower(
             ResumeKind::BeforeInstruction | ResumeKind::RepProgress
         ) {
             Observation::DecodedNextPc
-        } else {
+        }
+        else {
             Observation::CapturedState
         },
         standalone_observation: Observation::CapturedState,
@@ -175,9 +201,12 @@ pub fn lower(
                 .iter()
                 .copied()
                 .zip(reload_readings())
-                .enumerate().filter(|(n, _)| xmm_observation.is_none_or(|(_, d)| *n == 14 + d as usize))
-                .map(|(_, pair)| pair).collect()
-        } else {
+                .enumerate()
+                .filter(|(n, _)| xmm_observation.is_none_or(|(_, d)| *n == 14 + d as usize))
+                .map(|(_, pair)| pair)
+                .collect()
+        }
+        else {
             vec![]
         },
         delivery: call.fault_delivery.as_ref().map(|name| Delivery {

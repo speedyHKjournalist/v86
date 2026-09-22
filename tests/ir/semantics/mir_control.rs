@@ -147,7 +147,8 @@ fn lowered_graphs_preserve_entries_edges_and_budget_recovery() {
     assert_eq!(mir.control.blocks.len(), 4);
     mir.control.check_target(false).unwrap();
     assert!(emit_cpu(&mir, 100).is_err());
-    let MirTerminator::Branch { not_taken, .. } = &mir.control.blocks[2].terminator else {
+    let MirTerminator::Branch { not_taken, .. } = &mir.control.blocks[2].terminator
+    else {
         panic!()
     };
     assert_eq!(not_taken.target, BlockId(2));

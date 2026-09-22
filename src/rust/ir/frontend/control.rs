@@ -33,21 +33,25 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             width as i32 / 8 + i.immediate.unwrap_or(0) as i32,
         );
         value
-    } else if op == 0xE8 {
+    }
+    else if op == 0xE8 {
         b.constant(
             i.next_pc.0.wrapping_add(i.immediate.unwrap()),
             width_type(width),
         )
-    } else if let Some(ea) = i.ea {
+    }
+    else if let Some(ea) = i.ea {
         let offset = effective_offset(b, &ea);
         let source = segmented(b, offset, ea.segment, fault);
         memory_read(b, source, width, fault, false).0
-    } else {
+    }
+    else {
         b.read(i.modrm.unwrap() & 7, width)
     };
     let target = if width == 16 {
         b.node(Op::Extend { signed: false }, vec![target], Type::I32)
-    } else {
+    }
+    else {
         target
     };
     let commit = if call {
@@ -64,7 +68,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             .last()
             .unwrap();
         b.region.instructions[store.index()].commit.unwrap()
-    } else {
+    }
+    else {
         snapshot(b, i.instruction_pc, i.next_pc, count)
     };
     b.region.states[commit.index()].next_value = Some(target);

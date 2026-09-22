@@ -44,7 +44,7 @@ try {
     };
     cpu.io.mmap_register(0xA0000, 0x20000, () => 0,
         (a, n) => observe(a, n, 1), () => 0, (a, n) => observe(a, n, 4));
-    let comparisons = 0, fast = 0, aliases = 0, faults = 0, callbackCases = 0;
+    let comparisons = 0, fast = 0, aliases = 0, faults = 0, callback_cases = 0;
     for(const [name, width, lane] of cases) {
         const code = Uint8Array.from(JSON.parse(fs.readFileSync(`build/ir-vector-store/${name}.json`)));
         const instances = Array.from({ length: 6 }, (_, n) => new WebAssembly.Instance(
@@ -95,27 +95,27 @@ try {
                     : continued ? 5 : 3;
                 const executed = retired + Number(failure && (scenario !== "later_fault" || continued));
                 reset();
-                const expectedBytes = Array.from(mem.slice(physical, physical + 20));
-                const source = new Uint8Array(16), sourceWords = new Uint32Array(source.buffer);
-                for(let i = 0; i < 4; i++) sourceWords[i] = xmm[i] ^ xmm[8 + i];
+                const expected_bytes = Array.from(mem.slice(physical, physical + 20));
+                const source = new Uint8Array(16), source_words = new Uint32Array(source.buffer);
+                for(let i = 0; i < 4; i++) source_words[i] = xmm[i] ^ xmm[8 + i];
                 const mask = new Uint8Array(xmm.buffer, xmm.byteOffset + 16, 16);
                 if(!failure || scenario === "later_fault") for(let i = 0; i < width; i++)
-                    if(name !== "maskmovdqu" || mask[i] & 0x80) expectedBytes[i] = source[lane + i];
+                    if(name !== "maskmovdqu" || mask[i] & 0x80) expected_bytes[i] = source[lane + i];
                 instances[variant].exports.f(0);
                 assert.equal((words[664 >> 2] - 0xFFFFFFFE) >>> 0, retired, `${name}/${scenario}/${variant}: exact wrapped retirement`);
                 assert.equal(slow, native || scenario.endsWith("alias") ? 0 : 1, `${name}/${scenario}/${variant}: store path`);
-                const actual = state(physical), actualEvents = events;
-                if(scenario !== "callback") assert.deepEqual(actual.bytes, expectedBytes, `${name}/${scenario}: independent byte/lane/mask result`);
+                const actual = state(physical), actual_events = events;
+                if(scenario !== "callback") assert.deepEqual(actual.bytes, expected_bytes, `${name}/${scenario}: independent byte/lane/mask result`);
                 reset(); for(let i = 0; i < executed; i++) e.ir_test_step();
                 assert.deepEqual(actual, state(physical), `${name}/${scenario}/${variant}: architectural state`);
-                assert.deepEqual(actualEvents, events, `${name}/${scenario}/${variant}: callback order/state`);
+                assert.deepEqual(actual_events, events, `${name}/${scenario}/${variant}: callback order/state`);
                 if(continued) fast++;
                 if(scenario.endsWith("alias")) { assert.equal(actual.ip, PC + code.length - 3); aliases++; }
                 if(failure && executed > retired) { assert.equal(actual.ip, PF); faults++; }
-                if(actualEvents.length) callbackCases++;
+                if(actual_events.length) callback_cases++;
                 comparisons++;
             }
         }
     }
-    console.log(`PASS: ${wasm}: ${comparisons} vector-store CPU comparisons; ${fast} native continuations, ${aliases} physical-code-alias exits, ${faults} precise faults, ${callbackCases} MMIO/callback cases`);
+    console.log(`PASS: ${wasm}: ${comparisons} vector-store CPU comparisons; ${fast} native continuations, ${aliases} physical-code-alias exits, ${faults} precise faults, ${callback_cases} MMIO/callback cases`);
 } finally { await vm.destroy(); }

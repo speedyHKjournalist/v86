@@ -67,11 +67,18 @@ fn cpu_system_terminal_contract() {
         assert!(lift_cpu(&locked, GuestEip(0), LinearAddress(0), true).is_err());
         let mut suffix = bytes.clone();
         suffix.push(0x90);
-        assert_eq!(lift_cpu(&suffix, GuestEip(0), LinearAddress(0), true).is_ok(), bytes == [0xFA]);
+        assert_eq!(
+            lift_cpu(&suffix, GuestEip(0), LinearAddress(0), true).is_ok(),
+            bytes == [0xFA]
+        );
         let r = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).unwrap();
         assert_eq!(r.helpers.len(), 1);
-        if bytes == [0xFA] { assert!(matches!(r.helpers[0].abi, HelperAbi::Outcome { .. })); }
-        else { assert!(matches!(r.helpers[0].abi, HelperAbi::CpuExit)); }
+        if bytes == [0xFA] {
+            assert!(matches!(r.helpers[0].abi, HelperAbi::Outcome { .. }));
+        }
+        else {
+            assert!(matches!(r.helpers[0].abi, HelperAbi::CpuExit));
+        }
         assert!(r.helpers[0].results.is_empty());
     }
 }
@@ -79,11 +86,23 @@ fn cpu_system_terminal_contract() {
 #[test]
 fn cli_continuation_fixtures() {
     std::fs::create_dir_all("build/ir-cpu-system").unwrap();
-    for mode in [false,true] {
-        let mut region=lift_cpu(&[0x46,0xFA,0x43],GuestEip(0x8000),LinearAddress(0x8000),mode).unwrap();
+    for mode in [false, true] {
+        let mut region = lift_cpu(
+            &[0x46, 0xFA, 0x43],
+            GuestEip(0x8000),
+            LinearAddress(0x8000),
+            mode,
+        )
+        .unwrap();
         for opt in 0..2 {
-            if opt==1 { run(&mut region,PassConfig::default()).unwrap(); }
-            std::fs::write(format!("build/ir-cpu-system/cli-{mode}-{opt}.wasm"),emit_cpu(&lower(&region).unwrap(),100).unwrap().bytes).unwrap();
+            if opt == 1 {
+                run(&mut region, PassConfig::default()).unwrap();
+            }
+            std::fs::write(
+                format!("build/ir-cpu-system/cli-{mode}-{opt}.wasm"),
+                emit_cpu(&lower(&region).unwrap(), 100).unwrap().bytes,
+            )
+            .unwrap();
         }
     }
 }

@@ -16,7 +16,7 @@ function standalone(name, seed, opt) {
     return Array.from(words.slice(0, 12));
 }
 
-let standaloneComparisons = 0;
+let standalone_comparisons = 0;
 for(const name of ["copy","dce","gvn","cfg"]) {
     for(const seed of [
         [0,1,2,3,4,5,6,7],
@@ -28,10 +28,10 @@ for(const name of ["copy","dce","gvn","cfg"]) {
             standalone(name, seed, 0),
             `IR-10 ${name} pass changed standalone semantics`
         );
-        standaloneComparisons++;
+        standalone_comparisons++;
     }
 }
-console.log(`PASS: ${standaloneComparisons} standalone IR-10 copy/DCE/GVN/CFG per-pass comparisons`);
+console.log(`PASS: ${standalone_comparisons} standalone IR-10 copy/DCE/GVN/CFG per-pass comparisons`);
 
 const vm = new V86({
     wasm_path:"build/v86-ir-test.wasm",
@@ -102,28 +102,28 @@ try {
         count:words[664>>2] >>> 0,
     });
 
-    let cpuComparisons = 0;
+    let cpu_comparisons = 0;
     for(const lazy of [false,true]) for(const seed of [
         [1,2,3,4,0x90000,6,7,8],
         [0x7FFFFFFF,0x80000000,0xFFFFFFFF,1,0x90000,0x12345678,9,10],
     ]) {
         reset(0x100000, 0x1000, seed, lazy);
         flags[0](0);
-        const baselineFlags = state();
+        const baseline_flags = state();
         reset(0x100000, 0x1000, seed, lazy);
         flags[1](0);
-        assert.deepEqual(state(), baselineFlags, "IR-10 FLAGS liveness changed CPU semantics");
-        cpuComparisons++;
+        assert.deepEqual(state(), baseline_flags, "IR-10 FLAGS liveness changed CPU semantics");
+        cpu_comparisons++;
 
         reset(0x110000, 0x1400, seed, lazy);
         helper[0](0);
-        const baselineHelper = state();
+        const baseline_helper = state();
         reset(0x110000, 0x1400, seed, lazy);
         helper[1](0);
-        assert.deepEqual(state(), baselineHelper, "IR-10 helper-state trim changed CPU semantics");
-        cpuComparisons++;
+        assert.deepEqual(state(), baseline_helper, "IR-10 helper-state trim changed CPU semantics");
+        cpu_comparisons++;
     }
-    console.log(`PASS: ${cpuComparisons} CPU IR-10 FLAGS/helper-state per-pass comparisons`);
+    console.log(`PASS: ${cpu_comparisons} CPU IR-10 FLAGS/helper-state per-pass comparisons`);
 } finally {
     await vm.destroy();
 }

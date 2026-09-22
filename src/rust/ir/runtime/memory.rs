@@ -3,17 +3,13 @@
 use crate::cpu::{cpu, global_pointers as gp};
 use crate::ir::helper::Outcome;
 #[no_mangle]
-pub unsafe fn ir_tlb_base() -> u32 {
-    core::ptr::addr_of!(cpu::tlb_data) as u32
-}
+pub unsafe fn ir_tlb_base() -> u32 { core::ptr::addr_of!(cpu::tlb_data) as u32 }
 /// Base of guest physical RAM in the shared Wasm linear memory. Native TLB
 /// pointers are `mem8 + guest_physical`; immutable code dependencies store only
 /// guest-physical page addresses, so guarded store continuation needs this base
 /// to compare the two address spaces without trusting the virtual TLB alias.
 #[no_mangle]
-pub unsafe fn ir_memory_base() -> u32 {
-    crate::cpu::memory::mem8 as u32
-}
+pub unsafe fn ir_memory_base() -> u32 { crate::cpu::memory::mem8 as u32 }
 #[no_mangle]
 pub unsafe fn ir_segment_address(offset: u32, segment: u32) -> u64 {
     assert!(!cpu::in_jit && segment < 6);
@@ -67,7 +63,9 @@ pub unsafe fn ir_enter() {
 /// mappings remain the caller's admission obligation, just as for ir_enter.
 #[no_mangle]
 pub unsafe fn ir_enter_checked(linear: u32, cs_base: u32, default_32: u32) -> bool {
-    if !super::entry::matches_current(linear, cs_base, default_32) { return false; }
+    if !super::entry::matches_current(linear, cs_base, default_32) {
+        return false;
+    }
     ir_enter();
     true
 }
@@ -93,9 +91,7 @@ pub unsafe fn ir_test_step() {
 }
 #[cfg(feature = "ir-test-hooks")]
 #[no_mangle]
-pub unsafe fn ir_test_set_cr0(value: i32) {
-    cpu::set_cr0(value);
-}
+pub unsafe fn ir_test_set_cr0(value: i32) { cpu::set_cr0(value); }
 
 // Slow-ticket tag bits use otherwise-zero bits of the cross-page ending offset
 // (0..2 for widths <=4). High word 0 denotes a native host pointer in low word.
@@ -106,7 +102,8 @@ static mut RMW_VALUE: i32 = 0;
 pub unsafe fn ir_rmw_read(address: u32, bytes: u32) -> u64 {
     use crate::cpu::memory;
     assert!(!cpu::in_jit && matches!(bytes, 1 | 2 | 4));
-    let Ok(low) = cpu::translate_address_write(address as i32) else {
+    let Ok(low) = cpu::translate_address_write(address as i32)
+    else {
         return u64::MAX;
     };
     let cross = address & 4095 > 4096 - bytes;
@@ -115,11 +112,13 @@ pub unsafe fn ir_rmw_read(address: u32, bytes: u32) -> u64 {
         // safe_read_write32 translates the aligned word on the second page;
         // preserving that address is observable in CR2 on a fault.
         let lookup = if bytes == 4 { last & !3 } else { last };
-        let Ok(high) = cpu::translate_address_write(lookup as i32) else {
+        let Ok(high) = cpu::translate_address_write(lookup as i32)
+        else {
             return u64::MAX;
         };
         high | (last & (bytes - 1))
-    } else {
+    }
+    else {
         0
     };
     // Both write translations precede any device read, exactly as safe_read_write*.
@@ -135,9 +134,7 @@ pub unsafe fn ir_rmw_read(address: u32, bytes: u32) -> u64 {
     ((high | RMW_SLOW | if cross { RMW_CROSS } else { 0 }) as u64) << 32 | low as u64
 }
 #[no_mangle]
-pub unsafe fn ir_rmw_value() -> i32 {
-    RMW_VALUE
-}
+pub unsafe fn ir_rmw_value() -> i32 { RMW_VALUE }
 #[no_mangle]
 pub unsafe fn ir_rmw_write(ticket: u64, value: i32, bytes: u32) {
     use crate::cpu::memory;
@@ -152,7 +149,8 @@ pub unsafe fn ir_rmw_write(ticket: u64, value: i32, bytes: u32) {
             4 => cpu::virt_boundary_write32(low, high, value),
             _ => unreachable!(),
         }
-    } else {
+    }
+    else {
         match bytes {
             1 => memory::write8(low, value),
             2 => memory::write16(low, value),
@@ -183,7 +181,8 @@ pub unsafe fn ir_memory_check(address: u32, bytes: u32, write: u32) -> u32 {
     assert!(!cpu::in_jit && bytes > 0 && bytes < 4096 && write <= 1);
     let result = if write != 0 {
         cpu::writable_or_pagefault(address as i32, bytes as i32)
-    } else {
+    }
+    else {
         cpu::readable_or_pagefault(address as i32, bytes as i32)
     };
     match result {
@@ -228,7 +227,8 @@ pub unsafe fn ir_cmpxchg8b(address: u32) -> u32 {
         let replacement =
             cpu::read_reg32(3) as u32 as u64 | (cpu::read_reg32(1) as u32 as u64) << 32;
         cpu::safe_write64(address as i32, replacement).unwrap();
-    } else {
+    }
+    else {
         *gp::flags &= !cpu::FLAG_ZERO;
         cpu::write_reg32(0, value as i32);
         cpu::write_reg32(2, (value >> 32) as i32);

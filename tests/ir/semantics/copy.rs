@@ -38,7 +38,8 @@ fn copy_propagates_identity_chains_into_state_maps() {
 
     let stats = copy::run(&mut region, copy::DEFAULT_WORK_LIMIT).unwrap();
     assert_eq!(stats.propagated, 2);
-    let Terminator::Exit(state) = region.blocks[0].terminator.as_ref().unwrap() else {
+    let Terminator::Exit(state) = region.blocks[0].terminator.as_ref().unwrap()
+    else {
         panic!()
     };
     assert_eq!(region.states[state.index()].gpr[0], input);
@@ -48,8 +49,8 @@ fn copy_propagates_identity_chains_into_state_maps() {
     let stats = run(
         &mut region,
         PassConfig {
-        debug: Default::default(),
-        disabled: 0,
+            debug: Default::default(),
+            disabled: 0,
             copy: false,
             fold: false,
             gvn: false,

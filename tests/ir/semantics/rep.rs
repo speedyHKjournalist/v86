@@ -94,7 +94,8 @@ fn rep_contract_and_progress_maps() {
             .iter()
             .find(|i| matches!(i.op, Op::CallHelper(_)))
             .unwrap();
-        let Op::CallHelper(id) = call.op else {
+        let Op::CallHelper(id) = call.op
+        else {
             unreachable!()
         };
         let helper = &r.helpers[id.index()];

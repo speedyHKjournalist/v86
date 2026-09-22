@@ -22,7 +22,8 @@ pub(crate) fn literal_fixture(programs: &[(Vec<crate::ir::mir::value::Step>, boo
         }
         if *wide {
             w.store_aligned_i64(0);
-        } else {
+        }
+        else {
             w.store_aligned_i32(0);
         }
     }

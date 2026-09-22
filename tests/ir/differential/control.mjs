@@ -19,8 +19,8 @@ try {
     const cpu=vm.v86.cpu,e=cpu.wm.exports,mem=cpu.mem8,words=new Uint32Array(e.memory.buffer);
     const v=new DataView(mem.buffer,mem.byteOffset),set32=(a,x)=>v.setUint32(a,x,true),get32=a=>v.getUint32(a,true);
     vm.run();const deadline=performance.now()+10000;
-    while(v.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);}await vm.stop();
-    const initialCr0=cpu.cr[0],oldGdt=[cpu.gdtr_offset[0],cpu.gdtr_size[0]],BASE=0x310000,SP=0x4000,DEST=0x320040,HANDLER=0x180000;
+    while(v.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);} await vm.stop();
+    const initial_cr0=cpu.cr[0],old_gdt=[cpu.gdtr_offset[0],cpu.gdtr_size[0]],BASE=0x310000,SP=0x4000,DEST=0x320040,HANDLER=0x180000;
     let slow=0;
     const imports={...e,m:e.memory,ir_memory_read:(...a)=>{slow++;return e.ir_memory_read(...a);},
         ir_memory_write:(...a)=>{slow++;return e.ir_memory_write(...a);}};
@@ -28,7 +28,7 @@ try {
     const find=(name,mode32=true,width=32)=>cases.findIndex(c=>c[3]===name&&c[1]===mode32&&c[2]===width);
     function reset(i,ss32,cs=0,hot=false) {
         const [bytes,mode32,width,name,pc]=cases[i];
-        e.ir_test_set_cr0(initialCr0|0x10000);cpu.gdtr_offset[0]=oldGdt[0];cpu.gdtr_size[0]=oldGdt[1];
+        e.ir_test_set_cr0(initial_cr0|0x10000);cpu.gdtr_offset[0]=old_gdt[0];cpu.gdtr_size[0]=old_gdt[1];
         cpu.sreg.set([16,8,16,16,16,16]);cpu.segment_access_bytes.set([0x93,0x9B,0x93,0x93,0x93,0x93]);
         cpu.segment_offsets.fill(0,0,6);cpu.segment_offsets[1]=cs;cpu.segment_offsets[2]=BASE;
         cpu.segment_limits.fill(0xFFFFFFFF,0,6);cpu.segment_is_null.fill(0,0,6);
@@ -45,7 +45,7 @@ try {
         if(name==="call_overlap")set32(BASE+SP-width/8,0x9000);
         mem.set(bytes,pc+cs);
         e.full_clear_tlb();e.update_state_flags();
-        if(hot)for(const a of [BASE+SP,BASE+SP-4,DEST])e.ir_memory_write(a,mem[a],1);
+        if(hot) for(const a of [BASE+SP,BASE+SP-4,DEST])e.ir_memory_write(a,mem[a],1);
         slow=0;
     }
     function state(){return {regs:Array.from(cpu.reg32,x=>x>>>0),flags:e.get_eflags()>>>0,ip:cpu.instruction_pointer[0]>>>0,
@@ -53,7 +53,7 @@ try {
         cpl:new Uint8Array(e.memory.buffer,612,1)[0],stack:Array.from(mem.slice(BASE+SP-64,BASE+SP+64)),
         kernel:Array.from(mem.slice(0x8FFC0,0x90020))};}
     let normal=0,warm=0;
-    for(let i=0;i<cases.length;i++)for(const ss32 of [false,true])for(const cs of [0,0x10000])for(const hot of [false,true])for(const opt of [0,1]) {
+    for(let i=0;i<cases.length;i++) for(const ss32 of [false,true]) for(const cs of [0,0x10000]) for(const hot of [false,true]) for(const opt of [0,1]) {
         reset(i,ss32,cs,hot);instances[i][opt].exports.f(0);const actual=state();
         assert.equal(words[664>>2],102,"control transfer commits once");
         if(hot){assert.equal(slow,0,"warm control transfer needs no slow memory call");warm++;}
@@ -66,8 +66,8 @@ try {
         assert.deepEqual(actual,state(),`near ${name}, mode=${cases[i][1]}, width=${width}, ss32=${ss32}, cs=${cs}, opt=${opt}`);normal++;
     }
     let edges=0;
-    for(const name of ["ret","ret_imm","call_mem","jmp_mem"])for(const width of [16,32])
-        for(const target of [0x80000000,0xFFFFFFFF,0x1234FFFF])for(const opt of [0,1]) {
+    for(const name of ["ret","ret_imm","call_mem","jmp_mem"]) for(const width of [16,32])
+        for(const target of [0x80000000,0xFFFFFFFF,0x1234FFFF]) for(const opt of [0,1]) {
             const i=find(name,true,width),configure=()=>{reset(i,false,0x10000);set32(name.startsWith("ret")?BASE+SP:DEST,target);};
             configure();instances[i][opt].exports.f(0);const actual=state();
             assert.equal(actual.ip,((width===16?target&65535:target)+0x10000)>>>0);
@@ -77,7 +77,7 @@ try {
     let faults=0;
     for(const [name,fault] of [["call_mem","source"],["jmp_mem","source"],["call_mem","segment"],
         ["jmp_mem","segment"],["ret","stack"],["ret_imm","stack"]])
-        for(const mode32 of [false,true])for(const width of [16,32])for(const ss32 of [false,true])for(const cs of [0,0x10000])for(const opt of [0,1]) {
+        for(const mode32 of [false,true]) for(const width of [16,32]) for(const ss32 of [false,true]) for(const cs of [0,0x10000]) for(const opt of [0,1]) {
             const i=find(name,mode32,width),configure=()=>{
                 reset(i,ss32,cs);
                 if(fault==="source")set32(0x13000+0x320*4,0);
@@ -90,7 +90,7 @@ try {
             configure();e.ir_test_step();e.ir_test_step();
             assert.deepEqual(actual,state(),`${name} ${fault} width=${width} ss32=${ss32} cs=${cs}`);faults++;
         }
-    for(const name of ["call_r4","call_overlap"])for(const width of [16,32])for(const opt of [0,1]) {
+    for(const name of ["call_r4","call_overlap"]) for(const width of [16,32]) for(const opt of [0,1]) {
         const i=find(name,true,width),configure=()=>{
             reset(i,true);
             for(const [index,low,high] of [[0,0,0],[1,0xFFFF,0x00CF9A00],[2,0xFFFF,0x00CF9200],
@@ -111,16 +111,16 @@ try {
         assert.equal(words[664>>2],101);
         configure();e.ir_test_step();e.ir_test_step();assert.deepEqual(actual,state(),"CALL ring3 stack write fault");faults++;
     }
-    let fetchFaults=0;
-    for(const name of ["call_r2","jmp_r2","ret"])for(const opt of [0,1]) {
+    let fetch_faults=0;
+    for(const name of ["call_r2","jmp_r2","ret"]) for(const opt of [0,1]) {
         const i=find(name),configure=()=>{reset(i,true);cpu.reg32[2]=0x330000;set32(BASE+SP,0x330000);set32(0x13000+0x330*4,0);e.full_clear_tlb();};
         configure();instances[i][opt].exports.f(0);
         assert.equal(cpu.instruction_pointer[0],0x330000,"control transfer completes before target fetch");
         assert.equal(words[664>>2],102);e.ir_test_step();const actual=state();
         assert.equal(actual.ip,HANDLER);assert.equal(actual.cr2,0x330000);
-        configure();e.ir_test_step();e.ir_test_step();e.ir_test_step();assert.deepEqual(actual,state(),"next target fetch owns its fault");fetchFaults++;
+        configure();e.ir_test_step();e.ir_test_step();e.ir_test_step();assert.deepEqual(actual,state(),"next target fetch owns its fault");fetch_faults++;
     }
-    console.log(`PASS: ${faults} near-control faults (including ring3 CALL write failure), ${fetchFaults} faults on the subsequent target fetch`);
+    console.log(`PASS: ${faults} near-control faults (including ring3 CALL write failure), ${fetch_faults} faults on the subsequent target fetch`);
     let events=[];
     const observe=(kind,a,value)=>events.push({kind,a,value,esp:cpu.reg32[4]>>>0,ip:cpu.instruction_pointer[0]>>>0,flags:e.get_eflags()>>>0});
     cpu.io.mmap_register(0xA0000,0x20000,
@@ -128,7 +128,7 @@ try {
         a=>{observe("r32",a);return 0x9000;},(a,x)=>observe("w32",a,x>>>0));
     let devices=0;
     for(const name of ["call_mem","jmp_mem","call_r4","call_overlap","ret","ret_imm"])
-        for(const mode32 of [false,true])for(const width of [16,32])for(const ss32 of [false,true])for(const cs of [0,0x10000])for(const opt of [0,1]) {
+        for(const mode32 of [false,true]) for(const width of [16,32]) for(const ss32 of [false,true]) for(const cs of [0,0x10000]) for(const opt of [0,1]) {
             const i=find(name,mode32,width),configure=()=>{
                 reset(i,ss32,cs);const page=name==="call_mem"||name==="jmp_mem"?0x320:name.startsWith("ret")?0x314:0x313;
                 set32(0x13000+page*4,0xA0003);e.full_clear_tlb();events=[];
@@ -141,4 +141,4 @@ try {
     console.log(`PASS: ${devices} near-control MMIO comparisons, including sequential-IP/old-ESP callback observation`);
 
 
-}finally{await vm.destroy();}
+} finally {await vm.destroy();}

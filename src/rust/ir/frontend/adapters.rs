@@ -20,7 +20,8 @@ pub(super) fn call(
         state,
         if terminal {
             HelperAbi::CpuExit
-        } else {
+        }
+        else {
             HelperAbi::Outcome {
                 fault_delivery: None,
                 normal_preserves_state: true,
@@ -35,7 +36,9 @@ pub(super) fn call_abi(
     state: StateId,
     abi: HelperAbi,
 ) {
-    let selective = (name == "ir_sse_fp_reg_continue").then(|| cpu_registry::xmm_register_operands(&b.region, &args)).flatten();
+    let selective = (name == "ir_sse_fp_reg_continue")
+        .then(|| cpu_registry::xmm_register_operands(&b.region, &args))
+        .flatten();
     let terminal = matches!(abi, HelperAbi::CpuExit | HelperAbi::CpuRep);
     let reload = matches!(abi, HelperAbi::CpuReload);
     let mut descriptor = cpu_registry::descriptor(name, args.iter().map(|&a| b.ty(a)).collect())
@@ -61,7 +64,10 @@ pub(super) fn call_abi(
     if reload {
         if let Some((_, destination)) = selective {
             b.xmm[destination as usize] = values[14 + destination as usize];
-        } else { b.reload_cpu_state(&values[..values.len() - 1]); }
+        }
+        else {
+            b.reload_cpu_state(&values[..values.len() - 1]);
+        }
     }
     if terminal {
         b.region.terminate(b.block, Terminator::Exit(state));

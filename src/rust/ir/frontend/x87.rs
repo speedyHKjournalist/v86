@@ -8,9 +8,7 @@ use super::{
 };
 use crate::ir::{state::ResumeKind, types::Type};
 
-pub fn supports(i: &DecodedInstruction) -> bool {
-    (0xD8..=0xDF).contains(&i.encoding.opcode)
-}
+pub fn supports(i: &DecodedInstruction) -> bool { (0xD8..=0xDF).contains(&i.encoding.opcode) }
 
 pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     debug_assert!(supports(i));

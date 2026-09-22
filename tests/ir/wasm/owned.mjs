@@ -66,8 +66,8 @@ for(const program of [0, 1, 2]) for(const optimized of [0, 1]) {
 }
 console.log(`PASS: ${cases.length * 2} independent BigInt/Wasm literal executions and ${executions} HIR-free MIR rewrite executions; literal modules ${sizes[0]} -> ${sizes[1]} bytes`);
 
-const stackCount=JSON.parse(fs.readFileSync(`${directory}/stack.json`));
-for(let program=0;program<stackCount;program++) {
+const stack_count=JSON.parse(fs.readFileSync(`${directory}/stack.json`));
+for(let program=0;program<stack_count;program++) {
     const modules=[0,1,2].map(v=>new WebAssembly.Module(fs.readFileSync(`${directory}/stack-${program}-${v}.wasm`)));
     for(let seed=0;seed<64;seed++) {
         let expected;
@@ -82,4 +82,4 @@ for(let program=0;program<stackCount;program++) {
         }
     }
 }
-console.log(`PASS: ${stackCount*64*3} stack scheduling/reallocation executions, including typed phi-copy cycles`);
+console.log(`PASS: ${stack_count*64*3} stack scheduling/reallocation executions, including typed phi-copy cycles`);

@@ -677,16 +677,20 @@ mod continuation_tests {
                     // Apic contains only integer and floating-point fields.
                     let mut apic: Apic = unsafe { std::mem::zeroed() };
                     register_set_bit(&mut apic.irr, vector);
-                    if let Some(service) = service { register_set_bit(&mut apic.isr, service); }
+                    if let Some(service) = service {
+                        register_set_bit(&mut apic.isr, service);
+                    }
                     apic.tpr = tpr;
                     let before = (apic.irr, apic.isr, apic.tpr);
                     let pending = pending_irq(&apic);
                     assert_eq!((apic.irr, apic.isr, apic.tpr), before);
-                    let expected = service.is_none_or(|s| s < vector)
-                        && (vector & 0xF0) > (tpr as u8 & 0xF0);
+                    let expected =
+                        service.is_none_or(|s| s < vector) && (vector & 0xF0) > (tpr as u8 & 0xF0);
                     assert_eq!(pending, expected.then_some(vector));
                     assert_eq!(acknowledge_irq_internal(&mut apic), pending);
-                    if !expected { assert_eq!((apic.irr, apic.isr, apic.tpr), before); }
+                    if !expected {
+                        assert_eq!((apic.irr, apic.isr, apic.tpr), before);
+                    }
                 }
             }
         }

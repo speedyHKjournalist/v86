@@ -18,11 +18,11 @@ for(const opt of [0, 1]) for(const budget of [1, 2, 3, 4, 5, 9, 16, 100]) {
     const bytes = fs.readFileSync(`build/ir-dynamic-count/${opt}-${budget}.wasm`);
     assert(WebAssembly.validate(bytes));
     const m = new WebAssembly.Memory({initial: 64}), w = new Uint32Array(m.buffer);
-    let startX, startN, startCount, cs, delta, outcome, at, completed, calls, deliveries;
-    const count = () => (startCount + completed * (1 + delta)) >>> 0;
+    let start_x, start_n, start_count, cs, delta, outcome, at, completed, calls, deliveries;
+    const count = () => (start_count + completed * (1 + delta)) >>> 0;
     const before = (decoded) => {
-        assert.equal(w[16], (startX + completed) >>> 0, "snapshot accumulator");
-        assert.equal(w[17], (startN - completed) >>> 0, "snapshot remaining work");
+        assert.equal(w[16], (start_x + completed) >>> 0, "snapshot accumulator");
+        assert.equal(w[17], (start_n - completed) >>> 0, "snapshot remaining work");
         assert.equal(w[166], count(), "only completed iterations counted, callback counter changes retained");
         assert.equal(w[140], (cs + 0x8000) >>> 0, "fault PC");
         assert.equal(w[139], (cs + (decoded ? 0x8001 : 0x8000)) >>> 0, "observer/recovery PC");
@@ -32,7 +32,7 @@ for(const opt of [0, 1]) for(const budget of [1, 2, 3, 4, 5, 9, 16, 100]) {
         m, ir_enter: () => {}, ir_tlb_base: () => 0, get_eflags: () => 0x8D7,
         audit_count: x => {
             before(true); observations++; calls++;
-            assert.equal(x >>> 0, (startX + completed) >>> 0);
+            assert.equal(x >>> 0, (start_x + completed) >>> 0);
             if(outcome && completed === at) {
                 w[16] = 0xABCDEF01; w[139] = 0xDEADBEEF; w[30] = 0x202;
                 if(outcome !== 1) w[166] = (count() + 777) >>> 0;
@@ -51,11 +51,11 @@ for(const opt of [0, 1]) for(const budget of [1, 2, 3, 4, 5, 9, 16, 100]) {
             return 0;
         },
     }}).exports.f;
-    function execute(x, n, initialCount, base, adjustment, result, stop) {
-        startX = x; startN = n; startCount = initialCount; cs = base;
+    function execute(x, n, initial_count, base, adjustment, result, stop) {
+        start_x = x; start_n = n; start_count = initial_count; cs = base;
         delta = adjustment; outcome = result; at = stop; completed = calls = deliveries = 0;
         const input = [x, n, 2, 3, 4, 5, 6, 7];
-        w.set(input, 16); w[166] = initialCount; w[185] = base;
+        w.set(input, 16); w[166] = initial_count; w[185] = base;
         w[30] = 0x8D7; w[25] = 0; w[26] = 0x76543210;
         f(0);
         const expected = reference(n, budget, result, stop);
@@ -74,8 +74,8 @@ for(const opt of [0, 1]) for(const budget of [1, 2, 3, 4, 5, 9, 16, 100]) {
         return expected;
     }
     for(const n of [0, 1, 2, 7, 0xFFFFFFFF]) for(const x of [0, 0xFFFFFFF0]) {
-        for(const initialCount of [0, 0xFFFFFFFC]) for(const base of [0, 0xFFFFFF00]) {
-            for(const adjustment of [0, 11]) for(const [result, stop] of scenarios) execute(x, n, initialCount, base, adjustment, result, stop);
+        for(const initial_count_local of [0, 0xFFFFFFFC]) for(const base of [0, 0xFFFFFF00]) {
+            for(const adjustment of [0, 11]) for(const [result, stop] of scenarios) execute(x, n, initial_count_local, base, adjustment, result, stop);
         }
     }
     if([3, 5, 9].includes(budget)) for(const n of [1, 7, 19]) {

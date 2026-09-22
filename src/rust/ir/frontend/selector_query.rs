@@ -21,7 +21,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
                 segmented(b, offset, ea.segment, map),
                 if write { "ir_verw_mem" } else { "ir_verr_mem" },
             )
-        } else {
+        }
+        else {
             (
                 b.constant((i.modrm.unwrap() & 7) as u32, Type::I32),
                 if write { "ir_verw_reg" } else { "ir_verr_reg" },
@@ -42,7 +43,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             map,
             true,
         );
-    } else {
+    }
+    else {
         let source = b.constant((i.modrm.unwrap() & 7) as u32, Type::I32);
         call(
             b,

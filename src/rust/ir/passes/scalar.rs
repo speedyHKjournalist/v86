@@ -25,7 +25,10 @@ pub struct Stats {
 struct Work(usize);
 impl Work {
     fn spend(&mut self, n: usize) -> Result<(), String> {
-        self.0 = self.0.checked_sub(n).ok_or("scalar simplification work budget exceeded")?;
+        self.0 = self
+            .0
+            .checked_sub(n)
+            .ok_or("scalar simplification work budget exceeded")?;
         Ok(())
     }
 }
@@ -191,7 +194,12 @@ pub fn run_mode(r: &mut Region, work_limit: usize, mode: Mode) -> Result<Stats, 
     let mut work = Work(work_limit);
     // Charge the arena/CFG sizes before asking the existing verifier to inspect
     // them. The verifier has its own contract; this is a pass work budget.
-    for n in [r.values.len(), r.instructions.len(), r.blocks.len(), r.states.len()] {
+    for n in [
+        r.values.len(),
+        r.instructions.len(),
+        r.blocks.len(),
+        r.states.len(),
+    ] {
         work.spend(n)?;
     }
     verify(r).map_err(|e| e.0)?;

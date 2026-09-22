@@ -8,21 +8,21 @@ unsafe fn commit() -> u32 {
     *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);
     Outcome::Invalidated as u32
 }
-fn fault() -> u32 {
-    Outcome::ControlTransferred as u32
-}
+fn fault() -> u32 { Outcome::ControlTransferred as u32 }
 unsafe fn ring0() -> bool {
     if *gp::cpl != 0 {
         cpu::trigger_gp(0);
         false
-    } else {
+    }
+    else {
         true
     }
 }
 fn mask(width: u32) -> i32 {
     if width == 16 {
         0xFFFFFF
-    } else {
+    }
+    else {
         -1
     }
 }
@@ -46,10 +46,12 @@ unsafe fn load_table(address: u32, width: u32, size: *mut i32, base: *mut i32) -
         return fault();
     }
     let address = address as i32;
-    let Ok(new_size) = cpu::safe_read16(address) else {
+    let Ok(new_size) = cpu::safe_read16(address)
+    else {
         return fault();
     };
-    let Ok(new_base) = cpu::safe_read32s(address.wrapping_add(2)) else {
+    let Ok(new_base) = cpu::safe_read32s(address.wrapping_add(2))
+    else {
         return fault();
     };
     *size = new_size;
@@ -78,7 +80,8 @@ pub unsafe fn ir_smsw_reg(reg: u32, width: u32) -> u32 {
     assert!(reg < 8);
     if width == 16 {
         cpu::write_reg16(reg as i32, *gp::cr);
-    } else {
+    }
+    else {
         cpu::write_reg32(reg as i32, *gp::cr);
     }
     commit()
@@ -107,7 +110,8 @@ pub unsafe fn ir_lmsw_mem(address: u32, width: u32) -> u32 {
     if !ring0() {
         return fault();
     }
-    let Ok(value) = cpu::safe_read16(address as i32) else {
+    let Ok(value) = cpu::safe_read16(address as i32)
+    else {
         return fault();
     };
     instructions_0f::lmsw(value);

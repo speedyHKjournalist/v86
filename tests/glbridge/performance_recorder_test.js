@@ -185,7 +185,7 @@ const assert = require("node:assert/strict");
     let x87Enabled = false, x87Counts = new Map(), precision = 80, rounding = 0;
     cpu.wm.exports.performance_recording_x87_enable = value => {
         x87Enabled = !!value;
-        if(value) x87Counts = new Map();
+        if (value) x87Counts = new Map();
     };
     cpu.wm.exports.performance_recording_x87_get = (...key) => x87Counts.get(key.join(":")) || 0;
     cpu.wm.exports.performance_recording_x87_state = index => index ? rounding : precision;

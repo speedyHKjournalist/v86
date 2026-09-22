@@ -10,7 +10,7 @@ try {
     const cpu=vm.v86.cpu,e=cpu.wm.exports,w=new Uint32Array(e.memory.buffer),raw=new Uint8Array(e.memory.buffer);
     const v=new DataView(cpu.mem8.buffer,cpu.mem8.byteOffset),put=(a,x)=>v.setUint32(a,x,true);
     vm.run();const end=performance.now()+10000;
-    while(v.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<end);await new Promise(r=>setTimeout(r,1));}await vm.stop();
+    while(v.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<end);await new Promise(r=>setTimeout(r,1));} await vm.stop();
     const instances=modules.map(pair=>pair.map(m=>new WebAssembly.Instance(m,{e:{...e,m:e.memory}})));
     function reset(offset) {
         cpu.segment_offsets.fill(0,0,6);cpu.segment_is_null.fill(0,0,6);cpu.is_32[0]=cpu.stack_size_32[0]=1;

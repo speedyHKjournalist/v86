@@ -18,7 +18,7 @@ export function packed(op, destination, source) {
     }
     if([0x63,0x67,0x6B].includes(op)){
         const bits=op===0x6B?16:8,lo=op===0x67?0n:-(1n<<BigInt(bits-1)),hi=op===0x67?255n:-lo-1n;
-        for(let half=0;half<2;half++)for(let i=0;i<64/bits;i++){
+        for(let half=0;half<2;half++) for(let i=0;i<64/bits;i++){
             const n=signed(half?b:a,bits*2,i);write(n<lo?lo:n>hi?hi:n,bits,half*64/bits+i);
         }
         return result();
@@ -80,7 +80,7 @@ export function packed(op, destination, source) {
     const v=new DataView(out.buffer);return Array.from({length:4},(_,i)=>v.getUint32(i*4,true));
 }
 
-export function packedImmediate(op, group, count, destination) {
+function packed_immediate(op, group, count, destination) {
     if(op===0x660F73&&[3,7].includes(group)){
         let value=destination.reduce((n,x,i)=>n|BigInt(x)<<BigInt(32*i),0n);
         const shift=BigInt(Math.min(count,16)*8);
@@ -91,3 +91,4 @@ export function packedImmediate(op, group, count, destination) {
     const operation={2:0xD1,4:0xE1,6:0xF1}[group]+(op&255)-0x71;
     return packed(0x660F00|operation,destination,[count,0,0,0]);
 }
+export { packed_immediate as packedImmediate };

@@ -8,9 +8,9 @@ const modules = cases.map((_, i) => [false, true].map(forward => {
     assert(WebAssembly.validate(bytes));
     return new WebAssembly.Module(bytes);
 }));
-const loopCorpus = JSON.parse(fs.readFileSync("build/ir-forwarding/loops.json"));
-const loopModules = loopCorpus.cases.map((_, caseIndex) => new Map(
-    loopCorpus.budgets.map(budget => [budget, [false, true].map(cached => {
+const loop_corpus = JSON.parse(fs.readFileSync("build/ir-forwarding/loops.json"));
+const loop_modules = loop_corpus.cases.map((_, caseIndex) => new Map(
+    loop_corpus.budgets.map(budget => [budget, [false, true].map(cached => {
         const bytes = fs.readFileSync(
             `build/ir-forwarding/loop-${caseIndex}-${budget}-${cached}.wasm`);
         assert(WebAssembly.validate(bytes));
@@ -35,23 +35,23 @@ try {
     }
     await vm.stop();
     const PC = 0x100000, STACK = 0x90000, HANDLER = 0x180000;
-    const initialCr0 = cpu.cr[0];
+    const initial_cr0 = cpu.cr[0];
     const put = (address, value) => view.setUint32(address, value, true);
     const get = address => view.getUint32(address, true);
-    let slowReads = 0, events = [], mode = "ordinary", callbacks = 0;
+    let slow_reads = 0, events = [], mode = "ordinary", callbacks = 0;
     const imports = {...e, m: e.memory, ir_memory_read: (...args) => {
-        slowReads++;
+        slow_reads++;
         return e.ir_memory_read(...args);
     }};
     const instances = modules.map(pair => pair.map(module => new WebAssembly.Instance(module, {e: imports})));
-    const loopInstances = loopModules.map(byBudget => new Map(
+    const loop_instances = loop_modules.map(byBudget => new Map(
         [...byBudget].map(([budget, pair]) => [
             budget,
             pair.map(module => new WebAssembly.Instance(module, {e: imports})),
         ])
     ));
     function reset(index, address, hot, fault = "none") {
-        e.ir_test_set_cr0(initialCr0 | 0x10000);
+        e.ir_test_set_cr0(initial_cr0 | 0x10000);
         cpu.segment_offsets.fill(0, 0, 6);
         cpu.segment_is_null.fill(0, 0, 6);
         cpu.reg32.set([0x12345678, 0x87654321, 0xABCDEF01, 0xFEDCBA98, STACK, 0x76543210, address, 0x11223344]);
@@ -78,7 +78,7 @@ try {
         if(fault === "cross") put(0x13000 + (page + 1) * 4, 0);
         if(fault === "segment") cpu.segment_is_null[3] = 1;
         if(fault !== "none") e.full_clear_tlb();
-        slowReads = 0;
+        slow_reads = 0;
     }
     function snapshot(address) {
         return {gpr: Array.from(cpu.reg32, value => value >>> 0), flags: e.get_eflags() >>> 0,
@@ -95,7 +95,7 @@ try {
             words[664 >> 2]++;
         }
     }
-    let ram = 0, faultCases = 0, mmio = 0;
+    let ram = 0, fault_cases = 0, mmio = 0;
     for(let index = 0; index < cases.length; index++) {
         for(const address of [0x310040, 0x310FFC, 0x310FFD, 0x310FFF]) {
             for(const hot of [false, true]) for(const opt of [0, 1]) {
@@ -104,7 +104,7 @@ try {
                 const actual = snapshot(address);
                 assert.equal(actual.ip, PC + cases[index].length);
                 assert.equal(actual.committed, 103);
-                if(hot && address === 0x310040) assert.equal(slowReads, 0);
+                if(hot && address === 0x310040) assert.equal(slow_reads, 0);
                 reset(index, address, hot);
                 interpret(3);
                 assert.deepEqual(actual, snapshot(address), `RAM width=${1 << index} hot=${hot} address=${address} opt=${opt}`);
@@ -123,11 +123,11 @@ try {
                 reset(index, address, false, fault);
                 interpret(1);
                 assert.deepEqual(actual, snapshot(address));
-                faultCases++;
+                fault_cases++;
             }
         }
     }
-    let budgetExits = 0;
+    let budget_exits = 0;
     for(let index = 0; index < cases.length; index++) for(const budget of [1, 2, 3, 4, 8]) {
         const pair = [false, true].map(forward => {
             const module = new WebAssembly.Module(fs.readFileSync(
@@ -147,7 +147,7 @@ try {
                 reset(index, 0x310040, hot);
                 interpret(completed);
                 assert.deepEqual(actual, snapshot(0x310040));
-                budgetExits++;
+                budget_exits++;
             }
         }
     }
@@ -168,25 +168,25 @@ try {
     cpu.io.mmap_register(0xA0000, 0x20000,
         address => observe("r8", address) & 255, () => assert.fail("unexpected write"),
         address => observe("r32", address), () => assert.fail("unexpected write"));
-    for(let index = 0; index < cases.length; index++) for(const callbackMode of ["ordinary", "remap", "unmap"]) {
+    for(let index = 0; index < cases.length; index++) for(const callback_mode of ["ordinary", "remap", "unmap"]) {
         for(const opt of [0, 1]) {
-            const configure = () => { reset(index, 0xA0040, false); mode = callbackMode; };
+            const configure = () => { reset(index, 0xA0040, false); mode = callback_mode; };
             configure();
             instances[index][opt].exports.f(0);
             const actual = snapshot(0xA0040), observed = events.slice();
-            assert(slowReads > 0, "MMIO must use observing slow reads");
-            if(callbackMode === "ordinary") assert(callbacks >= 3, "every device read must occur");
-            if(callbackMode === "unmap") {
+            assert(slow_reads > 0, "MMIO must use observing slow reads");
+            if(callback_mode === "ordinary") assert(callbacks >= 3, "every device read must occur");
+            if(callback_mode === "unmap") {
                 assert.equal(actual.ip, HANDLER, "second read sees callback-induced unmapping");
                 assert.equal(actual.committed, 101);
                 assert.equal(get(STACK - 12), PC + [2, 3, 2, 2][index]);
-                faultCases++;
+                fault_cases++;
             } else {
                 assert.equal(actual.committed, 103);
             }
             configure();
-            interpret(callbackMode === "unmap" ? 2 : 3);
-            assert.deepEqual(actual, snapshot(0xA0040), `MMIO ${callbackMode} width=${1 << index} opt=${opt}`);
+            interpret(callback_mode === "unmap" ? 2 : 3);
+            assert.deepEqual(actual, snapshot(0xA0040), `MMIO ${callback_mode} width=${1 << index} opt=${opt}`);
             assert.deepEqual(observed, events, "preserve callback order and observed architectural state");
             mmio++;
         }
@@ -196,60 +196,60 @@ try {
     // iterations. Compare cache-disabled/cache-enabled modules against the
     // independent instruction-step interpreter across RAM, faults, callbacks
     // and exact budget exits.
-    function resetLoop(caseIndex, count, hot = false, fault = "none") {
-        const spec = loopCorpus.cases[caseIndex];
+    function reset_loop(case_index, count, hot = false, fault = "none") {
+        const spec = loop_corpus.cases[case_index];
         reset(2, spec.address, hot, fault);
         mem.set(spec.bytes, PC);
         cpu.reg32[1] = count;
-        slowReads = 0;
+        slow_reads = 0;
         callbacks = 0;
         events = [];
     }
-    let loopRam = 0, loopFaults = 0, loopMmio = 0, loopBudgets = 0;
-    const fullBudgetPair = loopInstances[0].get(64);
+    let loop_ram = 0, loop_faults = 0, loop_mmio = 0, loop_budgets = 0;
+    const full_budget_pair = loop_instances[0].get(64);
     for(const count of [1, 2, 4]) for(const hot of [false, true]) {
         let expected;
-        for(const instance of fullBudgetPair) {
-            resetLoop(0, count, hot);
+        for(const instance of full_budget_pair) {
+            reset_loop(0, count, hot);
             instance.exports.f(0);
-            const actual = snapshot(loopCorpus.cases[0].address);
-            assert.equal(actual.ip, PC + loopCorpus.cases[0].bytes.length);
+            const actual = snapshot(loop_corpus.cases[0].address);
+            assert.equal(actual.ip, PC + loop_corpus.cases[0].bytes.length);
             assert.equal(actual.committed, 100 + 1 + 3 * count);
             if(expected) assert.deepEqual(actual, expected, "loop cache preserves RAM execution");
             else expected = actual;
-            resetLoop(0, count, hot);
+            reset_loop(0, count, hot);
             interpret(1 + 3 * count);
-            assert.deepEqual(actual, snapshot(loopCorpus.cases[0].address));
-            loopRam++;
+            assert.deepEqual(actual, snapshot(loop_corpus.cases[0].address));
+            loop_ram++;
         }
     }
-    for(const instance of fullBudgetPair) {
-        resetLoop(0, 3, false, "missing");
+    for(const instance of full_budget_pair) {
+        reset_loop(0, 3, false, "missing");
         instance.exports.f(0);
-        const actual = snapshot(loopCorpus.cases[0].address);
+        const actual = snapshot(loop_corpus.cases[0].address);
         assert.equal(actual.ip, HANDLER);
         assert.equal(actual.committed, 101, "NOP retires before the first faulting loop load");
         assert.equal(get(STACK - 12), PC + 1, "loop cache must not advance the first fault point");
-        resetLoop(0, 3, false, "missing");
+        reset_loop(0, 3, false, "missing");
         interpret(2);
-        assert.deepEqual(actual, snapshot(loopCorpus.cases[0].address));
-        loopFaults++;
+        assert.deepEqual(actual, snapshot(loop_corpus.cases[0].address));
+        loop_faults++;
     }
-    const mmioPair = loopInstances[1].get(64);
-    for(const callbackMode of ["ordinary", "remap", "unmap"]) {
-        for(const instance of mmioPair) {
+    const mmio_pair = loop_instances[1].get(64);
+    for(const callback_mode_local of ["ordinary", "remap", "unmap"]) {
+        for(const instance of mmio_pair) {
             const configure = () => {
-                resetLoop(1, 3, false);
-                mode = callbackMode;
+                reset_loop(1, 3, false);
+                mode = callback_mode_local;
             };
             configure();
             instance.exports.f(0);
-            const actual = snapshot(loopCorpus.cases[1].address);
+            const actual = snapshot(loop_corpus.cases[1].address);
             const observed = events.slice();
-            if(callbackMode === "ordinary") {
+            if(callback_mode_local === "ordinary") {
                 assert.equal(callbacks, 3, "MMIO loop loads may never become cache-valid");
                 assert.equal(actual.committed, 110);
-            } else if(callbackMode === "remap") {
+            } else if(callback_mode_local === "remap") {
                 assert.equal(callbacks, 1, "only the first MMIO load precedes remapping to RAM");
                 assert.equal(actual.committed, 110);
             } else {
@@ -257,33 +257,33 @@ try {
                 assert.equal(actual.ip, HANDLER, "second loop load sees callback-induced unmapping");
                 assert.equal(actual.committed, 104);
                 assert.equal(get(STACK - 12), PC + 1);
-                loopFaults++;
+                loop_faults++;
             }
             configure();
-            interpret(callbackMode === "unmap" ? 5 : 10);
-            assert.deepEqual(actual, snapshot(loopCorpus.cases[1].address),
-                `loop MMIO ${callbackMode} cache differential`);
+            interpret(callback_mode_local === "unmap" ? 5 : 10);
+            assert.deepEqual(actual, snapshot(loop_corpus.cases[1].address),
+                `loop MMIO ${callback_mode_local} cache differential`);
             assert.deepEqual(observed, events, "loop cache preserves MMIO callback order/state");
-            loopMmio++;
+            loop_mmio++;
         }
     }
-    for(const budget of loopCorpus.budgets) {
-        const pair = loopInstances[0].get(budget);
+    for(const budget of loop_corpus.budgets) {
+        const pair = loop_instances[0].get(budget);
         let expected;
         for(const instance of pair) {
-            resetLoop(0, 3, false);
+            reset_loop(0, 3, false);
             instance.exports.f(0);
-            const actual = snapshot(loopCorpus.cases[0].address);
+            const actual = snapshot(loop_corpus.cases[0].address);
             const completed = actual.committed - 100;
             assert(completed >= 0 && completed <= 10);
             if(budget === 64) assert.equal(completed, 10);
             if(expected) assert.deepEqual(actual, expected,
                 `loop cache preserves exact budget exit at budget=${budget}`);
             else expected = actual;
-            resetLoop(0, 3, false);
+            reset_loop(0, 3, false);
             interpret(completed);
-            assert.deepEqual(actual, snapshot(loopCorpus.cases[0].address));
-            loopBudgets++;
+            assert.deepEqual(actual, snapshot(loop_corpus.cases[0].address));
+            loop_budgets++;
         }
     }
 
@@ -300,7 +300,7 @@ try {
         try { assert.throws(() => guarded.exports.f(0), error => error === stop); }
         finally { cpl[0] = 0; }
     }
-    console.log(`PASS: ${ram} guarded-read RAM differentials, ${faultCases} real fault cases, ${mmio} MMIO/callback-remapping differentials, ${budgetExits} exact merged-block budget exits; loop cache ${loopRam} RAM, ${loopFaults} fault, ${loopMmio} MMIO/remap and ${loopBudgets} budget differentials; CPL guards passed`);
+    console.log(`PASS: ${ram} guarded-read RAM differentials, ${fault_cases} real fault cases, ${mmio} MMIO/callback-remapping differentials, ${budget_exits} exact merged-block budget exits; loop cache ${loop_ram} RAM, ${loop_faults} fault, ${loop_mmio} MMIO/remap and ${loop_budgets} budget differentials; CPL guards passed`);
 } finally {
     await vm.destroy();
 }

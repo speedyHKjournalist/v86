@@ -18,15 +18,18 @@ fn segment_fixtures() {
             for op in [0x8Cu32, 0x8E, 0xC4, 0xC5, 0x0FB2, 0x0FB4, 0x0FB5] {
                 let regs: Vec<u8> = if op == 0x8C {
                     (0..6).collect()
-                } else if op == 0x8E {
+                }
+                else if op == 0x8E {
                     vec![0, 2, 3, 4, 5]
-                } else {
+                }
+                else {
                     (0..8).collect()
                 };
                 for reg in regs {
                     for operand in if matches!(op, 0x8C | 0x8E) {
                         (0u8..12).collect::<Vec<_>>()
-                    } else {
+                    }
+                    else {
                         (8u8..12).collect()
                     } {
                         let mut bytes = vec![0x40];
@@ -47,7 +50,8 @@ fn segment_fixtures() {
                             reg << 3
                                 | if operand < 8 {
                                     0xC0 | operand
-                                } else {
+                                }
+                                else {
                                     match operand {
                                         8 | 11 => 6,
                                         9 => 4,
@@ -102,7 +106,14 @@ fn segment_access_and_invalid_forms() {
     let widths: Vec<_> = r
         .instructions
         .iter()
-        .filter_map(|i| if let Op::GuestLoad { bytes } = i.op { Some(bytes) } else { None })
+        .filter_map(|i| {
+            if let Op::GuestLoad { bytes } = i.op {
+                Some(bytes)
+            }
+            else {
+                None
+            }
+        })
         .collect();
     assert_eq!(widths, vec![4, 2]);
     assert_eq!(
@@ -140,11 +151,29 @@ fn real_segment_continuation_fixtures() {
     for segment in [0u8, 2, 3, 4, 5] {
         // Dirty ECX; MOV segment,AX; MOV EBX,segment:[400h]; INC EBX.
         let prefix = [0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65][segment as usize];
-        let bytes = [0x41, 0x8E, 0xC0 | segment << 3, prefix, 0x8B, 0x1D, 0, 4, 0, 0, 0x43];
+        let bytes = [
+            0x41,
+            0x8E,
+            0xC0 | segment << 3,
+            prefix,
+            0x8B,
+            0x1D,
+            0,
+            4,
+            0,
+            0,
+            0x43,
+        ];
         let mut r = lift_cpu(&bytes, GuestEip(0x8000), LinearAddress(0x8000), true).unwrap();
         for opt in 0..2 {
-            if opt == 1 { run(&mut r, PassConfig::default()).unwrap(); }
-            std::fs::write(format!("build/ir-segments/continue-{segment}-{opt}.wasm"), emit_cpu(&lower(&r).unwrap(), 100).unwrap().bytes).unwrap();
+            if opt == 1 {
+                run(&mut r, PassConfig::default()).unwrap();
+            }
+            std::fs::write(
+                format!("build/ir-segments/continue-{segment}-{opt}.wasm"),
+                emit_cpu(&lower(&r).unwrap(), 100).unwrap().bytes,
+            )
+            .unwrap();
         }
     }
 }

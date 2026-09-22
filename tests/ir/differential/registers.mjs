@@ -22,9 +22,9 @@ function reference(bytes, regs, flags) {
     const raw = group === 1 ? a | b : group === 4 ? a & b : group === 6 ? a ^ b : sub ? a - b - carry : a + b + carry;
     const result = raw & mask, sign = 1n << BigInt(width - 1);
     const signed = n => n & sign ? n - mask - 1n : n;
-    const signedRaw = sub ? signed(a) - signed(b) - carry : signed(a) + signed(b) + carry;
+    const signed_raw = sub ? signed(a) - signed(b) - carry : signed(a) + signed(b) + carry;
     const cf = logical ? false : raw < 0 || raw > mask;
-    const of = !logical && (signedRaw < -sign || signedRaw >= sign);
+    const of = !logical && (signed_raw < -sign || signed_raw >= sign);
     const af = !logical && ((a ^ b ^ result) & 16n) !== 0n;
     let parity = 0; for(let bit = 0n; bit < 8n; bit++) parity ^= Number(result >> bit & 1n);
     const bits = Number(cf) | Number(!parity) << 2 | Number(af) << 4 | Number(result === 0n) << 6 | Number(!!(result & sign)) << 7 | Number(of) << 11;

@@ -4,24 +4,24 @@ import {V86} from "../../build/libv86.mjs";
 const wasm=process.argv[2]||"build/v86-jit-test.wasm";
 const vm=new V86({wasm_path:wasm,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const nativeInstantiate=WebAssembly.instantiate;
-let table,oldSet;
+const native_instantiate=WebAssembly.instantiate;
+let table,old_set;
 try {
     await new Promise(r=>vm.add_listener("emulator-loaded",r));
     const cpu=vm.v86.cpu,e=cpu.wm.exports,mem=cpu.mem8;
     const view=new DataView(mem.buffer,mem.byteOffset),word=a=>view.getUint32(a,true);
     vm.run(); const deadline=performance.now()+10000;
-    while(view.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);}await vm.stop();await sleep(20);cpu.jit_clear_cache();
+    while(view.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);} await vm.stop();await sleep(20);cpu.jit_clear_cache();
     e.performance_recording_enable(1);
-    table=cpu.wm.wasm_table;oldSet=table.set;
-    const requests=[],writes=[];let failInstall=false,corruptNext=false,throwNext=false;
-    table.set=function(slot,fn){writes.push([slot,fn]);if(fn && failInstall){failInstall=false;throw new Error("injected table installation failure");}return oldSet.call(this,slot,fn);};
+    table=cpu.wm.wasm_table;old_set=table.set;
+    const requests=[],writes=[];let fail_install=false,corrupt_next=false,throw_next=false;
+    table.set=function(slot,fn){writes.push([slot,fn]);if(fn && fail_install){fail_install=false;throw new Error("injected table installation failure");} return old_set.call(this,slot,fn);};
     WebAssembly.instantiate=(bytes,imports)=>{
         let resolve,reject;
         const promise=new Promise((a,b)=>{resolve=a;reject=b;});
-        const native=nativeInstantiate(corruptNext?Uint8Array.of(0):bytes,imports);corruptNext=false;native.catch(()=>{});
+        const native=native_instantiate(corrupt_next?Uint8Array.of(0):bytes,imports);corrupt_next=false;native.catch(()=>{});
         requests.push({bytes:Uint8Array.from(bytes),buffer:bytes,native,resolve,reject});
-        if(throwNext){throwNext=false;throw new TypeError("injected synchronous browser failure");}
+        if(throw_next){throw_next=false;throw new TypeError("injected synchronous browser failure");}
         return promise;
     };
     const finalize=cpu.codegen_finalize;
@@ -34,19 +34,19 @@ try {
     const fn=r=>table.get(OFFSET+r.args[0]);
     const complete=async r=>{r.resolve(await r.native);return await r.done;};
     const reject=async r=>{r.reject(new Error("injected browser compilation failure"));assert.equal(await r.done,false);};
-    const assertNoInstall=(begin)=>assert.equal(writes.slice(begin).filter(([,fn])=>fn).length,0);
-    const execute=async(address,value,compiled=false)=>{const count=e.performance_recording_get(1);view.setUint32(0x600,0,true);cpu.instruction_pointer[0]=address;cpu.in_hlt[0]=0;vm.run();const until=performance.now()+10000;while(!cpu.in_hlt[0]){assert(performance.now()<until,"publication guest execution timeout");await sleep(1);}await vm.stop();assert.equal(word(0x600),value);if(compiled)assert(e.performance_recording_get(1)>count,"retained module still executes through JIT");};
+    const assert_no_install=(begin)=>assert.equal(writes.slice(begin).filter(([,fn])=>fn).length,0);
+    const execute=async(address,value,compiled=false)=>{const count=e.performance_recording_get(1);view.setUint32(0x600,0,true);cpu.instruction_pointer[0]=address;cpu.in_hlt[0]=0;vm.run();const until=performance.now()+10000;while(!cpu.in_hlt[0]){assert(performance.now()<until,"publication guest execution timeout");await sleep(1);} await vm.stop();assert.equal(word(0x600),value);if(compiled)assert(e.performance_recording_get(1)>count,"retained module still executes through JIT");};
 
     put(BASE,1);let r=force(BASE),begin=writes.length;
-    put(BASE,2);assert.equal(await complete(r),false);assert.equal(fn(r),null);assertNoInstall(begin);
+    put(BASE,2);assert.equal(await complete(r),false);assert.equal(fn(r),null);assert_no_install(begin);
     r=force(BASE);assert.equal(await complete(r),true);await execute(BASE,2);
     cpu.jit_clear_cache();put(BASE,3);r=force(BASE);begin=writes.length;cpu.jit_clear_cache();
-    assert.equal(await complete(r),false);assertNoInstall(begin);
+    assert.equal(await complete(r),false);assert_no_install(begin);
 
     put(BASE,30);const cancelled=force(BASE);cpu.jit_clear_cache();put(BASE,31);const replacement=force(BASE);
     assert.equal(cancelled.args[0],replacement.args[0]);assert.deepEqual(key(cancelled).slice(0,3),key(replacement).slice(0,3));
-    assert.equal(await complete(replacement),true);const replacementFn=fn(replacement);begin=writes.length;
-    assert.equal(await complete(cancelled),false);assert.equal(fn(replacement),replacementFn);assert.equal(writes.length,begin);
+    assert.equal(await complete(replacement),true);const replacement_fn=fn(replacement);begin=writes.length;
+    assert.equal(await complete(cancelled),false);assert.equal(fn(replacement),replacement_fn);assert.equal(writes.length,begin);
     cpu.jit_clear_cache();
 
     put(BASE,4);r=force(BASE);const before=e.jit_publication_stat(0);await reject(r);
@@ -70,7 +70,7 @@ try {
     for(const [field,extra] of [[0,65536],[2,256]]){const bad=key(r);bad[field]+=extra;assert.equal(e.codegen_finalize_validate(...bad),0);assert.equal(e.codegen_finalize_failed(...bad),0);e.codegen_finalize_finished(...bad);}
     e.codegen_finalize_finished(...key(r));assert.equal(fn(r),null,"finish without validation cannot publish");
     assert.equal(await complete(r),true);const stable=fn(r);e.codegen_finalize_finished(...key(r));assert.equal(fn(r),stable);
-    cpu.jit_clear_cache();put(BASE,9);r=force(BASE);failInstall=true;assert.equal(await complete(r),false);assert.equal(fn(r),null);
+    cpu.jit_clear_cache();put(BASE,9);r=force(BASE);fail_install=true;assert.equal(await complete(r),false);assert.equal(fn(r),null);
     assert.equal(e.jit_force_generate_unsafe(BASE),0);cpu.jit_clear_cache();r=force(BASE);assert.equal(await complete(r),true);
 
     cpu.jit_clear_cache();put(BASE,42);r=force(BASE);put(BASE,43);await reject(r);
@@ -78,35 +78,35 @@ try {
 
     cpu.jit_clear_cache();put(BASE,40);r=force(BASE);r.resolve({instance:{exports:{}}});
     assert.equal(await r.done,false);assert.equal(fn(r),null);
-    cpu.jit_clear_cache();put(BASE,41);corruptNext=true;r=force(BASE);
-    const invalidModule=await r.native.catch(error=>error);assert(invalidModule instanceof WebAssembly.CompileError);
-    r.reject(invalidModule);assert.equal(await r.done,false);assert.equal(fn(r),null);
+    cpu.jit_clear_cache();put(BASE,41);corrupt_next=true;r=force(BASE);
+    const invalid_module=await r.native.catch(error=>error);assert(invalid_module instanceof WebAssembly.CompileError);
+    r.reject(invalid_module);assert.equal(await r.done,false);assert.equal(fn(r),null);
 
-    cpu.jit_clear_cache();put(BASE,44);throwNext=true;const syncFailures=e.jit_publication_stat(0);r=force(BASE);
-    assert.equal(e.jit_publication_stat(0),syncFailures,"synchronous browser error must not reenter the locked generator");
-    assert.equal(await r.done,false);assert.equal(e.jit_publication_stat(0),syncFailures+1);assert.equal(fn(r),null);
+    cpu.jit_clear_cache();put(BASE,44);throw_next=true;const sync_failures=e.jit_publication_stat(0);r=force(BASE);
+    assert.equal(e.jit_publication_stat(0),sync_failures,"synchronous browser error must not reenter the locked generator");
+    assert.equal(await r.done,false);assert.equal(e.jit_publication_stat(0),sync_failures+1);assert.equal(fn(r),null);
     assert.equal(e.jit_force_generate_unsafe(BASE),0);put(BASE,45);r=force(BASE);
     assert.equal(await complete(r),true);await execute(BASE,45);
 
     cpu.jit_clear_cache();put(BASE,46);put(BASE+64,47);const retained=force(BASE);
-    assert.equal(await complete(retained),true);const retainedFn=fn(retained);r=force(BASE+64);
+    assert.equal(await complete(retained),true);const retained_fn=fn(retained);r=force(BASE+64);
     assert.notEqual(r.args[0],retained.args[0]);await reject(r);
-    assert.equal(fn(r),null);assert.equal(fn(retained),retainedFn,"failed replacement preserves the published module");
+    assert.equal(fn(r),null);assert.equal(fn(retained),retained_fn,"failed replacement preserves the published module");
     await execute(BASE,46,true);
 
     cpu.jit_clear_cache();e.set_jit_config(7,0);vm.write_memory(Uint8Array.from([0xE9,0xFB,0x0F,0,0]),BASE);put(OTHER,10);await execute(OTHER,10);
-    r=force(BASE);begin=writes.length;put(OTHER,11);assert.equal(await complete(r),false);assertNoInstall(begin);
+    r=force(BASE);begin=writes.length;put(OTHER,11);assert.equal(await complete(r),false);assert_no_install(begin);
     await execute(OTHER,11);r=force(BASE);await reject(r);assert.equal(e.jit_force_generate_unsafe(BASE),0);
     put(OTHER,12);r=force(BASE);assert.equal(await complete(r),true,"write to secondary dependency permits retry");await execute(BASE,12);
 
     cpu.jit_clear_cache();put(BASE,13);const saved=await vm.save_state();r=force(BASE);begin=writes.length;
-    await vm.restore_state(saved);assert.equal(await complete(r),false);assertNoInstall(begin);
+    await vm.restore_state(saved);assert.equal(await complete(r),false);assert_no_install(begin);
     r=force(BASE);assert.equal(await complete(r),true);
 
     cpu.jit_clear_cache();put(BASE,14);r=force(BASE);begin=writes.length;
-    const originalWasm=cpu.wm;cpu.wm={...originalWasm};
-    try { assert.equal(await complete(r),false);assertNoInstall(begin); }
-    finally { cpu.wm=originalWasm; }
+    const original_wasm=cpu.wm;cpu.wm={...original_wasm};
+    try { assert.equal(await complete(r),false);assert_no_install(begin); }
+    finally { cpu.wm=original_wasm; }
     assert(e.codegen_finalize_failed(...key(r)));cpu.jit_clear_cache();
 
     cpu.jit_clear_cache();
@@ -120,6 +120,6 @@ try {
     assert(e.jit_test_publication_serial(0xFFFFFFFF,0xFFFFFFFF));put(BASE,99);assert.equal(e.jit_force_generate_unsafe(BASE),0,"ticket exhaustion stops compilation instead of wrapping");
     console.log(`PASS: ${wasm} transactional JIT publication: no stale installation, slot ABA/duplicate rejection, browser/table failures, retry suppression, dependent-page writes, restore and u64 ticket boundaries (${requests.length} controlled instantiations)`);
 } finally {
-    WebAssembly.instantiate=nativeInstantiate;if(table && oldSet)table.set=oldSet;
+    WebAssembly.instantiate=native_instantiate;if(table && old_set)table.set=old_set;
     await vm.destroy();
 }

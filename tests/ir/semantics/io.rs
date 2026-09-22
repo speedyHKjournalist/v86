@@ -48,7 +48,16 @@ fn io_fixtures() {
                                     format!("build/ir-io/{}-{opt}.wasm", cases.len()),
                                     {
                                         let mut mir = lower(&r).unwrap();
-                                        if opt != 0 { mir.elide_redundant_cpu_state_writes(crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT).unwrap(); mir.elide_dead_cpu_values(crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT).unwrap(); }
+                                        if opt != 0 {
+                                            mir.elide_redundant_cpu_state_writes(
+                                                crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
+                                            )
+                                            .unwrap();
+                                            mir.elide_dead_cpu_values(
+                                                crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT,
+                                            )
+                                            .unwrap();
+                                        }
                                         emit_cpu(&mir, 100).unwrap().bytes
                                     },
                                 )
@@ -72,11 +81,20 @@ fn io_contract_boundaries() {
         assert!(lift(bytes, GuestEip(0), LinearAddress(0), true).is_err());
         let mut suffix = bytes.to_vec();
         suffix.push(0x90);
-        assert_eq!(lift_cpu(&suffix, GuestEip(0), LinearAddress(0), true).is_ok(), bytes[0] >= 0xE4);
+        assert_eq!(
+            lift_cpu(&suffix, GuestEip(0), LinearAddress(0), true).is_ok(),
+            bytes[0] >= 0xE4
+        );
         if bytes[0] >= 0xE4 {
             let region = lift_cpu(&suffix, GuestEip(0), LinearAddress(0), true).unwrap();
-            assert!(matches!(region.helpers[0].abi, crate::ir::helper::HelperAbi::CpuReload));
-            assert_eq!(region.helpers[0].results, vec![crate::ir::types::Type::I32; 14]);
+            assert!(matches!(
+                region.helpers[0].abi,
+                crate::ir::helper::HelperAbi::CpuReload
+            ));
+            assert_eq!(
+                region.helpers[0].results,
+                vec![crate::ir::types::Type::I32; 14]
+            );
             lower(&region).unwrap().verify().unwrap();
         }
         let mut lock = vec![0xF0];

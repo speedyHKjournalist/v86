@@ -33,13 +33,15 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         let offset = effective_offset(b, &ea);
         let address = segmented(b, offset, ea.segment, map);
         memory_read(b, address, width, map, false).0
-    } else {
+    }
+    else {
         b.read(i.modrm.unwrap() & 7, width)
     };
     if divides(i) {
         let dividend = if width == 8 {
             b.read(0, 16)
-        } else {
+        }
+        else {
             let low = b.read(0, width);
             let high = b.read(2, width);
             let double = if width == 16 { Type::I32 } else { Type::I64 };
@@ -66,9 +68,11 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     }
     let other = if implicit {
         b.read(0, width)
-    } else if let Some(imm) = i.immediate {
+    }
+    else if let Some(imm) = i.immediate {
         b.constant(imm, ty)
-    } else {
+    }
+    else {
         b.read(group, width)
     };
     let a = extend(b, source, signed);
@@ -87,12 +91,14 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         if width == 8 {
             let ax = b.node(Op::Truncate, vec![product], Type::I16);
             b.write(0, 16, ax);
-        } else {
+        }
+        else {
             let high = b.extract(product, width, ty);
             b.write(0, width, low);
             b.write(2, width, high);
         }
-    } else {
+    }
+    else {
         b.write(group, width, low);
     }
 }

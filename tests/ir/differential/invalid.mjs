@@ -16,35 +16,35 @@ try {
         assert(performance.now() < deadline); await new Promise(r => setTimeout(r, 1));
     }
     await vm.stop();
-    const initialCr0 = cpu.cr[0], initialCr4 = cpu.cr[4], PC = 0x8000, SP = 0x9000, HANDLER = 0x180000;
+    const initial_cr0 = cpu.cr[0], initial_cr4 = cpu.cr[4], PC = 0x8000, SP = 0x9000, HANDLER = 0x180000;
     const instances = modules.map(pair => pair.map(m => new WebAssembly.Instance(m, {e: {...e, m: e.memory}})));
     function desc(n, base, access, size32) {
         put32(0x3000 + n * 8, 0xFFFF | base << 16);
         put32(0x3004 + n * 8, base & 0xFF000000 | (base >>> 16 & 255) | access << 8 | 0xF0000 | (size32 ? 12 : 8) << 20);
     }
-    function reset(i, {real = false, csBase = 0, ss32 = true, overflow = false, nullSegment = false, taskFlags = 0, targetAccess = 0x9B, gateAccess = 0xEE, pageFault = 0} = {}) {
+    function reset(i, {real = false, csBase: cs_base = 0, ss32 = true, overflow = false, nullSegment: null_segment = false, taskFlags: task_flags = 0, targetAccess: target_access = 0x9B, gateAccess: gate_access = 0xEE, pageFault: page_fault = 0} = {}) {
         const [bytes, mode] = cases[i]; const width = mode ? 32 : 16;
-        e.ir_test_set_cr0(real ? initialCr0 & ~0x80000001 : (initialCr0 | 0x10001) & ~12 | taskFlags);
-        cpu.cr[4] = initialCr4; cpu.cr[2] = 0xBADF000;
-        cpu.segment_offsets.fill(0, 0, 6); cpu.segment_offsets[1] = csBase;
+        e.ir_test_set_cr0(real ? initial_cr0 & ~0x80000001 : (initial_cr0 | 0x10001) & ~12 | task_flags);
+        cpu.cr[4] = initial_cr4; cpu.cr[2] = 0xBADF000;
+        cpu.segment_offsets.fill(0, 0, 6); cpu.segment_offsets[1] = cs_base;
         cpu.segment_limits.fill(0xFFFFFFFF, 0, 6); cpu.segment_is_null.fill(0, 0, 6);
         cpu.sreg.set([16, 8, 16, 16, 16, 16]); cpu.segment_access_bytes.set([0x93, 0x9B, 0x93, 0x93, 0x93, 0x93]);
-        cpu.segment_is_null[3] = +nullSegment;
+        cpu.segment_is_null[3] = +null_segment;
         cpu.is_32[0] = +mode; cpu.stack_size_32[0] = +ss32; w[612 >> 2] = 0;
         cpu.reg32.set([0x12345678, 0x87654321, 0x3456789A, 0x76543210, SP, 0x11223344, overflow ? 0x7FFFFFFF : 0, 0xAABBCCDD]);
         // INC ESI determines OF for INTO; choose the corresponding 16-bit input.
         if(overflow && !mode) cpu.reg32[6] = 0x7FFF;
         cpu.flags[0] = 2; cpu.flags_changed[0] = 0; w[104 >> 2] = 0x12345678;
-        cpu.instruction_pointer[0] = csBase + PC; cpu.in_hlt[0] = 0; w[664 >> 2] = 100;
+        cpu.instruction_pointer[0] = cs_base + PC; cpu.in_hlt[0] = 0; w[664 >> 2] = 100;
         cpu.gdtr_offset[0] = 0x3000; cpu.gdtr_size[0] = 47;
-        desc(1, 0, 0x9B, true); desc(2, 0, 0x93, true); desc(3, 0x10000, targetAccess, mode);
+        desc(1, 0, 0x9B, true); desc(2, 0, 0x93, true); desc(3, 0x10000, target_access, mode);
         desc(4, 0, 0xF3, true); desc(5, 0x4000, 0x89, false);
         cpu.segment_offsets[6] = 0x4000; cpu.segment_limits[6] = 0x67; cpu.sreg[6] = 0x28; cpu.tss_size_32[0] = 1;
         put32(0x4004, 0x92000); put32(0x4008, 16);
         cpu.idtr_offset[0] = 0x2000; cpu.idtr_size[0] = 0x7FF;
         for(const vector of [3, 4, 6, 7, 11, 12, 13, 14, 0x30]) {
             put32(0x2000 + vector * 8, 8 << 16 | HANDLER & 65535);
-            put32(0x2004 + vector * 8, HANDLER & 0xFFFF0000 | ([3, 4, 0x30].includes(vector) ? gateAccess : 0x8E) << 8);
+            put32(0x2004 + vector * 8, HANDLER & 0xFFFF0000 | ([3, 4, 0x30].includes(vector) ? gate_access : 0x8E) << 8);
             if(real) { put16(vector * 4, 0x1800); put16(vector * 4 + 2, 0); }
         }
         put32(0x12000, 0x13007);
@@ -53,14 +53,14 @@ try {
         const put = width === 16 ? put16 : put32;
         put(SP, 0xA000); put(SP + width / 8, 0x18); put(SP + width / 4, 2);
         put(0x7000, 0xA000); put16(0x7000 + width / 8, 0x18);
-        mem.set(bytes, csBase + PC);
-        if(pageFault === 4) {
+        mem.set(bytes, cs_base + PC);
+        if(page_fault === 4) {
             // Only the target descriptor faults. Exception CS/SS descriptors
             // remain on page 3, so fault delivery cannot recursively fault.
             mem.set(mem.slice(0x3000, 0x3030), 0x3FE8);
             cpu.gdtr_offset[0] = 0x3FE8;
         }
-        if(pageFault) put32(0x13000 + pageFault * 4, 0);
+        if(page_fault) put32(0x13000 + page_fault * 4, 0);
         e.full_clear_tlb(); e.update_state_flags();
     }
     function state() {
@@ -83,8 +83,8 @@ try {
         return expected;
     }
     for(let i = 0; i < cases.length; i++) {
-        for(const taskFlags of [0,4,8,12]) for(const nullSegment of [false,true]) {
-            const actual=compare(i,{taskFlags,nullSegment,pageFault:7},1);
+        for(const task_flags_local of [0,4,8,12]) for(const null_segment_local of [false,true]) {
+            const actual=compare(i,{taskFlags: task_flags_local,nullSegment: null_segment_local,pageFault:7},1);
             assert.equal(actual.ip,HANDLER);
             assert.equal(actual.cr[2],0xBADF000,"invalid forms must not read operand memory");
         }

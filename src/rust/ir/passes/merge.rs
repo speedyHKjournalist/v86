@@ -15,7 +15,8 @@ pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), Stri
             }
         }
         let candidate = region.blocks.iter().enumerate().find_map(|(a, block)| {
-            let Terminator::Branch(edge) = block.terminator.as_ref()? else {
+            let Terminator::Branch(edge) = block.terminator.as_ref()?
+            else {
                 return None;
             };
             let b = edge.target.index();
@@ -30,7 +31,8 @@ pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), Stri
                 .position(|v| region.values[v.index()].ty == Type::Effect)?;
             Some((a, b, edge.args.clone(), effect_index, recovery))
         });
-        let Some((a, b, args, effect_index, recovery)) = candidate else {
+        let Some((a, b, args, effect_index, recovery)) = candidate
+        else {
             break;
         };
         if region.instructions.len() >= 8192 || region.values.len() >= 16384 {
@@ -55,7 +57,9 @@ pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), Stri
             aliases[param.index()] = Some(if p == effect_index { effect } else { arg });
         }
         rewrite_values(region, |value| {
-            if let Some(new) = aliases[value.index()] { *value = new; }
+            if let Some(new) = aliases[value.index()] {
+                *value = new;
+            }
         });
         let instructions = std::mem::take(&mut region.blocks[b].instructions);
         region.blocks[a].instructions.extend(instructions);

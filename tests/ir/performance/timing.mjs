@@ -7,5 +7,5 @@ export async function finish_halted_timing(vm, started, clock = () => performanc
     await vm.stop();
     const stopped = clock();
     return { ms: halted - started, stop_wait_ms: stopped - halted,
-        timing_scope: 'start-to-observed-halt' };
+        timing_scope: "start-to-observed-halt" };
 }

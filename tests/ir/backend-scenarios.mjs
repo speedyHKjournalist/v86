@@ -121,16 +121,16 @@ export async function backend_scenarios(V86, options, log = console.log)
         log("PASS: public dump/verify, each stage, bounded copied Wasm, clear, restore, verified Tier 1/2");
 
         for(const level of [0, 1, 2]) {
-            const disabledPasses = level === 2 ? ["licm", "mir_fold", "allocation", "ram_forward", "budget_batch"] : [];
-            await create({jit_backend:"ir", ir_region_budget:budget, ir_opt_level:level, ir_passes_disabled:disabledPasses});
+            const disabled_passes = level === 2 ? ["licm", "mir_fold", "allocation", "ram_forward", "budget_batch"] : [];
+            await create({jit_backend:"ir", ir_region_budget:budget, ir_opt_level:level, ir_passes_disabled:disabled_passes});
             const policy = await info();
-            check(policy.ir_opt_level === level && JSON.stringify(policy.ir_passes_disabled) === JSON.stringify(disabledPasses), "optimization policy reached CPU");
+            check(policy.ir_opt_level === level && JSON.stringify(policy.ir_passes_disabled) === JSON.stringify(disabled_passes), "optimization policy reached CPU");
             policy.ir_passes_disabled.push("gvn");
-            check((await info()).ir_passes_disabled.length === disabledPasses.length, "pass list is copied");
+            check((await info()).ir_passes_disabled.length === disabled_passes.length, "pass list is copied");
             await vm.configure_ir_diagnostics(1); await boot();
             await vm.write_memory(Uint8Array.of(0x40,0xEB,0xFD),pc);
-            const beforePolicy = await info(); await vm.write_memory(bytes(pc),0x600);
-            await until(async () => (await info()).ir.tier2_published > beforePolicy.ir.tier2_published, "configured optimizer publishes Tier 2");
+            const before_policy = await info(); await vm.write_memory(bytes(pc),0x600);
+            await until(async () => (await info()).ir.tier2_published > before_policy.ir.tier2_published, "configured optimizer publishes Tier 2");
             await vm.stop();
             const compiled = await info(), phases = compiled.ir.diagnostics.compiler;
             check(phases.lower.calls > 0 && compiled.ir.cache_hits > 0 && !compiled.legacy_compile_requests, "configured pipeline executed IR");
@@ -138,7 +138,7 @@ export async function backend_scenarios(V86, options, log = console.log)
                 check(phases[phase].calls === 0, "disabled optimization was not invoked: " + phase);
             if(level === 2) check(phases.machine_stack.calls > 0, "independent enabled pass still runs");
             const snapshot = await vm.save_state(); await vm.restore_state(snapshot); await vm.restart();
-            check((await info()).ir_opt_level === level && JSON.stringify((await info()).ir_passes_disabled) === JSON.stringify(disabledPasses), "restore/restart preserve destination optimizer policy");
+            check((await info()).ir_opt_level === level && JSON.stringify((await info()).ir_passes_disabled) === JSON.stringify(disabled_passes), "restore/restart preserve destination optimizer policy");
             await destroy();
         }
         log("PASS: optimization levels 0/1/2 and individual pass controls execute, copy and survive restore/restart");

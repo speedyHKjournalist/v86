@@ -173,7 +173,8 @@ fn count_bases_are_checked_for_type_dominance_and_commit_phase() {
         }
         if mutation == 3 {
             assert!(emit_cpu(&lower(&r).unwrap(), 100).is_err());
-        } else {
+        }
+        else {
             assert!(verify(&r).is_err());
         }
     }

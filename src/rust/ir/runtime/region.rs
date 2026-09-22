@@ -68,7 +68,8 @@ pub fn reachable_length(
             GuestEip(pc.0.wrapping_add(at as u32)),
             LinearAddress(linear.0.wrapping_add(at as u32)),
             default_32,
-        ) else {
+        )
+        else {
             continue;
         };
         let end = at + instruction.length as usize;
@@ -82,7 +83,9 @@ pub fn reachable_length(
             // stop decision, so keep the fallthrough available unless the
             // shared decoder already identifies a baseline #UD form.
             Flow::Next | Flow::Boundary
-                if !instruction.baseline_ud && (!instruction.encoding.block_boundary || matches!(instruction.encoding.opcode, 0x8E | 0xFA | 0x0F31 | 0xE4..=0xE7 | 0xEC..=0xEF)) =>
+                if !instruction.baseline_ud
+                    && (!instruction.encoding.block_boundary
+                        || matches!(instruction.encoding.opcode, 0x8E | 0xFA | 0x0F31 | 0xE4..=0xE7 | 0xEC..=0xEF)) =>
             {
                 if end < bytes.len() {
                     pending.insert(end);
@@ -112,7 +115,9 @@ pub fn reachable_length(
                     default_32,
                 ) {
                     max_end = max_end.max(at + span);
-                    if at + span < bytes.len() { pending.insert(at + span); }
+                    if at + span < bytes.len() {
+                        pending.insert(at + span);
+                    }
                 }
             },
             Flow::Next | Flow::Boundary | Flow::Stop => {},

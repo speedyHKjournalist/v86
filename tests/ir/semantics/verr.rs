@@ -8,9 +8,7 @@ use crate::ir::{
     lowering::lower,
     passes::{run, PassConfig},
 };
-fn emit(bytes: &[u8], mode: bool, name: &str) {
-    emit_at(bytes, mode, name, 0x8000);
-}
+fn emit(bytes: &[u8], mode: bool, name: &str) { emit_at(bytes, mode, name, 0x8000); }
 fn emit_at(bytes: &[u8], mode: bool, name: &str, pc: u32) {
     let mut r = lift_cpu(bytes, GuestEip(pc), LinearAddress(pc), mode).unwrap();
     for opt in 0..2 {
@@ -54,9 +52,11 @@ fn verr_fixtures() {
                                 group << 3
                                     | if operand < 8 {
                                         0xC0 | operand as u8
-                                    } else if asize == 32 {
+                                    }
+                                    else if asize == 32 {
                                         6
-                                    } else {
+                                    }
+                                    else {
                                         7
                                     },
                             ]);

@@ -47,17 +47,20 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             let sum = b.binary(Binary::Add, b.gpr[3], al);
             if i.address_size == 16 {
                 c(b, Binary::And, sum, 65535)
-            } else {
+            }
+            else {
                 sum
             }
-        } else {
+        }
+        else {
             b.constant(i.immediate.unwrap(), Type::I32)
         };
         let address = segmented(b, offset, i.prefixes.segment.unwrap_or(3), map);
         if matches!(op, 0xA2 | 0xA3) {
             let value = b.read(0, width);
             memory_store(b, address, value, width, map, i, count, false);
-        } else {
+        }
+        else {
             let value = memory_read(b, address, width, map, false).0;
             b.write(0, width, value);
         }
@@ -159,7 +162,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
                 let borrow = b.binary(Binary::Ult, al, six);
                 let borrow = b.binary(Binary::And, low_adjust, borrow);
                 b.binary(Binary::Or, high_adjust, borrow)
-            } else {
+            }
+            else {
                 high_adjust
             };
             b.write(0, 8, result);

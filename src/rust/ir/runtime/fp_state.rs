@@ -12,30 +12,35 @@ unsafe fn finish(success: bool) -> u32 {
     if success {
         *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);
         Outcome::Invalidated as u32
-    } else {
+    }
+    else {
         Outcome::ControlTransferred as u32
     }
 }
 #[no_mangle]
 pub unsafe fn ir_fxsave(offset: u32, segment: u32) -> u32 {
-    let Ok(addr) = address(offset, segment, false) else {
+    let Ok(addr) = address(offset, segment, false)
+    else {
         return finish(false);
     };
     finish(misc_instr::fxsave_checked(addr))
 }
 #[no_mangle]
 pub unsafe fn ir_fxrstor(offset: u32, segment: u32) -> u32 {
-    let Ok(addr) = address(offset, segment, false) else {
+    let Ok(addr) = address(offset, segment, false)
+    else {
         return finish(false);
     };
     finish(misc_instr::fxrstor_checked(addr))
 }
 #[no_mangle]
 pub unsafe fn ir_ldmxcsr(offset: u32, segment: u32) -> u32 {
-    let Ok(addr) = address(offset, segment, true) else {
+    let Ok(addr) = address(offset, segment, true)
+    else {
         return finish(false);
     };
-    let Ok(value) = cpu::safe_read32s(addr) else {
+    let Ok(value) = cpu::safe_read32s(addr)
+    else {
         return finish(false);
     };
     if value & !cpu::MXCSR_MASK != 0 {
@@ -47,7 +52,8 @@ pub unsafe fn ir_ldmxcsr(offset: u32, segment: u32) -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_stmxcsr(offset: u32, segment: u32) -> u32 {
-    let Ok(addr) = address(offset, segment, true) else {
+    let Ok(addr) = address(offset, segment, true)
+    else {
         return finish(false);
     };
     finish(cpu::safe_write32(addr, *gp::mxcsr).is_ok())

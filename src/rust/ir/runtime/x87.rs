@@ -175,7 +175,8 @@ pub unsafe fn ir_x87_mem(opcode: u32, group: u32, offset: u32, segment: u32, wid
     if !cpu::task_switch_test() {
         return Outcome::ControlTransferred as u32;
     }
-    let Ok(base) = cpu::get_seg(segment as i32) else {
+    let Ok(base) = cpu::get_seg(segment as i32)
+    else {
         return Outcome::ControlTransferred as u32;
     };
     let address = offset.wrapping_add(base as u32) as i32;
@@ -191,7 +192,8 @@ pub unsafe fn ir_x87_mem(opcode: u32, group: u32, offset: u32, segment: u32, wid
     }
     if memory_semantics(opcode, group, address, width).is_err() {
         Outcome::ControlTransferred as u32
-    } else {
+    }
+    else {
         commit()
     }
 }
@@ -265,7 +267,8 @@ unsafe fn memory_semantics(opcode: u32, group: u32, address: i32, width: u32) ->
                 2 => {
                     let v = if group == 1 {
                         fpu_truncate_to_i16(value)
-                    } else {
+                    }
+                    else {
                         fpu_convert_to_i16(value)
                     };
                     cpu::safe_write16(address, v as i32 & 65535).unwrap();
@@ -273,7 +276,8 @@ unsafe fn memory_semantics(opcode: u32, group: u32, address: i32, width: u32) ->
                 4 => {
                     let v = if group == 1 {
                         fpu_truncate_to_i32(value)
-                    } else {
+                    }
+                    else {
                         fpu_convert_to_i32(value)
                     };
                     cpu::safe_write32(address, v).unwrap();
@@ -281,7 +285,8 @@ unsafe fn memory_semantics(opcode: u32, group: u32, address: i32, width: u32) ->
                 8 => {
                     let v = if group == 1 {
                         fpu_truncate_to_i64(value)
-                    } else {
+                    }
+                    else {
                         fpu_convert_to_i64(value)
                     };
                     cpu::safe_write64(address, v as u64).unwrap();
@@ -296,7 +301,8 @@ unsafe fn memory_semantics(opcode: u32, group: u32, address: i32, width: u32) ->
             cpu::readable_or_pagefault(address, if width == 16 { 14 } else { 28 })?;
             if width == 16 {
                 fpu_fldenv16(address);
-            } else {
+            }
+            else {
                 fpu_fldenv32(address);
             }
         },
@@ -305,7 +311,8 @@ unsafe fn memory_semantics(opcode: u32, group: u32, address: i32, width: u32) ->
             cpu::writable_or_pagefault(address, if width == 16 { 14 } else { 28 })?;
             if width == 16 {
                 fpu_fstenv16(address);
-            } else {
+            }
+            else {
                 fpu_fstenv32(address);
             }
         },

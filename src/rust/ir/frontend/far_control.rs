@@ -29,7 +29,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
                 let address = segmented(b, offset, ea.segment, state);
                 let is_call = b.constant((i.encoding.group == 3) as u32, Type::I32);
                 ("ir_far_jump_mem", vec![address, is_call, width])
-            } else {
+            }
+            else {
                 ("ir_far_control_ud", vec![])
             }
         },

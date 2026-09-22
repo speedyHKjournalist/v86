@@ -78,7 +78,8 @@ fn constant_bool(region: &Region, value: crate::ir::ids::ValueId, expected: bool
         if !seen.insert(value) {
             continue;
         }
-        let Some(left) = work.checked_sub(1) else {
+        let Some(left) = work.checked_sub(1)
+        else {
             return false;
         };
         work = left;
@@ -97,7 +98,8 @@ fn constant_bool(region: &Region, value: crate::ir::ids::ValueId, expected: bool
                 }
                 let mut incoming = false;
                 for source in &region.blocks {
-                    let Some(left) = work.checked_sub(1) else {
+                    let Some(left) = work.checked_sub(1)
+                    else {
                         return false;
                     };
                     work = left;
@@ -240,7 +242,8 @@ fn target(state: &StateMap, cpu: bool, lazy_flags: bool, dynamic_backing: bool) 
             Address::Absolute(gp::flags_changed as u32),
             vec![Value(state.flags.lazy_mask.unwrap())],
         ));
-    } else {
+    }
+    else {
         let mut flags = vec![
             Value(state.flags.system),
             I32(!0x8D5),
@@ -272,7 +275,8 @@ fn target(state: &StateMap, cpu: bool, lazy_flags: bool, dynamic_backing: bool) 
             }
             let lazy = if let Some(value) = state.flags.zero_is_lazy {
                 vec![Value(value), I32(6), Step::Scalar(Scalar::I32Shl)]
-            } else {
+            }
+            else {
                 vec![I32(0)]
             };
             writes.push(write(Address::Absolute(gp::flags_changed as u32), lazy));
@@ -302,7 +306,8 @@ fn target(state: &StateMap, cpu: bool, lazy_flags: bool, dynamic_backing: bool) 
                     write
                         .expression
                         .extend([Value(valid), Step::Scalar(Scalar::Select)]);
-                } else {
+                }
+                else {
                     // Generic maps need not carry raw-ZF compatibility fields.
                     // Restore valid backing, retaining the old unused slot on
                     // the invalid path.
@@ -338,10 +343,12 @@ fn target(state: &StateMap, cpu: bool, lazy_flags: bool, dynamic_backing: bool) 
     }
     let mut eip = vec![if let Some(value) = state.next_value {
         Value(value)
-    } else {
+    }
+    else {
         I32(if state.resume == ResumeKind::AfterInstruction {
             state.next_pc.0
-        } else {
+        }
+        else {
             state.instruction_pc.0
         } as i32)
     }];

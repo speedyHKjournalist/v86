@@ -81,7 +81,17 @@ pub fn supports(i: &DecodedInstruction) -> bool {
 }
 pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     if b.xmm.is_empty() {
-        b.xmm = (0..8).map(|r| b.region.append(b.block, crate::ir::hir::Op::ReadXmm(r), vec![], &[Type::V128], None)[0]).collect();
+        b.xmm = (0..8)
+            .map(|r| {
+                b.region.append(
+                    b.block,
+                    crate::ir::hir::Op::ReadXmm(r),
+                    vec![],
+                    &[Type::V128],
+                    None,
+                )[0]
+            })
+            .collect();
     }
     let state = snapshot(b, i.instruction_pc, i.next_pc, count - 1);
     b.region.states[state.index()].resume = ResumeKind::BeforeInstruction;
@@ -99,7 +109,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             state,
             HelperAbi::CpuReload,
         );
-    } else {
+    }
+    else {
         let source = b.constant((modrm & 7) as u32, Type::I32);
         call_abi(
             b,

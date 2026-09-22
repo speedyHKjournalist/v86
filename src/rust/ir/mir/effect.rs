@@ -66,7 +66,8 @@ pub fn lower(inst: &Instruction) -> Option<EffectPlan> {
             let name = if let Op::PopAddress { bytes, .. } = inst.op {
                 args.push(I32(bytes as i32));
                 "ir_pop_address"
-            } else {
+            }
+            else {
                 "ir_segment_address"
             };
             EffectPlan::Address {

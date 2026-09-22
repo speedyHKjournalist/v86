@@ -12,7 +12,14 @@ pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), Stri
                 taken,
                 not_taken,
             } => constant(region, *condition)
-                .map(|v| if v != 0 { taken.clone() } else { not_taken.clone() })
+                .map(|v| {
+                    if v != 0 {
+                        taken.clone()
+                    }
+                    else {
+                        not_taken.clone()
+                    }
+                })
                 .or_else(|| {
                     (taken.target == not_taken.target && taken.args == not_taken.args)
                         .then(|| taken.clone())
@@ -72,7 +79,8 @@ pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), Stri
                     let id = n;
                     n += 1;
                     Some(id)
-                } else {
+                }
+                else {
                     None
                 }
             })

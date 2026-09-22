@@ -92,7 +92,8 @@ fn actual_lifted_polls_memory_fault_maps_and_commit_maps_are_not_moved() {
         let stats = licm::run(&mut region, licm::DEFAULT_WORK_LIMIT).unwrap();
         if bytes == REGISTER_LOOP {
             assert!(stats.hoisted > 0);
-        } else {
+        }
+        else {
             assert!(region
                 .instructions
                 .iter()

@@ -41,18 +41,21 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         let offset = effective_offset(b, &ea);
         let address = segmented(b, offset, ea.segment, map);
         memory_read(b, address, width, map, true)
-    } else {
+    }
+    else {
         (b.read(rm, width), None)
     };
     let result = if matches!(op, 0x86 | 0x87) {
         b.write(reg, width, destination);
         source
-    } else if matches!(op, 0x0FC0 | 0x0FC1) {
+    }
+    else if matches!(op, 0x0FC0 | 0x0FC1) {
         let sum = b.arithmetic(0, destination, source);
         // This write precedes the destination write, including identical aliases.
         b.write(reg, width, destination);
         sum
-    } else {
+    }
+    else {
         let accumulator = b.read(0, width);
         b.arithmetic(7, accumulator, destination);
         let equal = b.flags.arithmetic[3];
@@ -63,7 +66,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     };
     if let Some(ticket) = ticket {
         memory_store(b, ticket, result, width, map, i, count, true);
-    } else {
+    }
+    else {
         b.write(rm, width, result);
     }
 }

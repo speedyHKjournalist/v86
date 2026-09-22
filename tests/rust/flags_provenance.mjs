@@ -60,7 +60,7 @@ let cases = 0, programs = 0;
 
 // Independent integer reference for CMP conditions, including signed overflow
 // and parity. This also checks the interpreter rather than trusting it alone.
-function cmpConditions(producer, a, b) {
+function cmp_conditions(producer, a, b) {
     if(!producer.startsWith("cmp")) return null;
     let width = 32;
     if(producer === "cmp32-zero") b = 0;
@@ -162,7 +162,7 @@ try {
             assert.equal(mismatch, -1, `${producer}/${name}/${consumer} byte=${mismatch}: ` +
                 `JIT=${actual[mismatch]}, interpreter=${reference[mismatch]}`);
             if(!name.endsWith("barrier")) for(const [index, [a, b]] of inputs.entries()) {
-                const expected = cmpConditions(producer, a, b);
+                const expected = cmp_conditions(producer, a, b);
                 if(expected) for(let cc = 0; cc < 16; cc++) {
                     assert.equal(actual[(index * 16 + cc) * 8], expected[cc],
                         `${producer}/${name}/${consumer} independent condition ${cc}, input ${index}`);

@@ -22,9 +22,9 @@ for(const [index, [mode, xmm, backing]] of cases.entries()) for(const opt of [0,
             for(const count of [0, 0xFFFFFFFE]) for(const lazy of [0, 1]) for(const raw of [0, 1]) {
                 for(const value of lazy ? [0, 1] : [raw]) for(let repeat = 0; repeat < 2; repeat++) {
                     computed = value;
-                    const rawFlags = 0x897 | raw << 6;
-                    const computedFlags = 0x897 | computed << 6;
-                    words.set(input, gpr); words[flags] = rawFlags;
+                    const raw_flags = 0x897 | raw << 6;
+                    const computed_flags = 0x897 | computed << 6;
+                    words.set(input, gpr); words[flags] = raw_flags;
                     words[counter] = cpu ? (count + 7 * repeat) >>> 0 : count;
                     words[operand] = 0x55667788;
                     words[25] = lazy << 6; words[28] = 0x1234; words[24] = 17; words[185] = cs;
@@ -32,7 +32,7 @@ for(const [index, [mode, xmm, backing]] of cases.entries()) for(const opt of [0,
                     for(let r = 0; r < 8; r++) data.set(vectors[r], 832 + r * 16);
                     f(0);
                     assert.deepEqual(Array.from(words.slice(gpr, gpr + 8)), input.slice().reverse());
-                    assert.equal(words[flags], cpu && !backing ? computedFlags : rawFlags);
+                    assert.equal(words[flags], cpu && !backing ? computed_flags : raw_flags);
                     assert.equal(words[operand], backing ? input[0] : 0x55667788);
                     const logical = mode === 3 ? input[2] : mode === 1 ? 0x1004 : 0x1000;
                     assert.equal(words[eip], (logical + (cpu ? cs : 0)) >>> 0);

@@ -6,7 +6,8 @@ unsafe fn finish(completed: bool) -> u32 {
     if completed {
         *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);
         Outcome::Invalidated as u32
-    } else {
+    }
+    else {
         Outcome::ControlTransferred as u32
     }
 }
@@ -30,11 +31,16 @@ pub unsafe fn ir_far_jump_mem(address: u32, is_call: u32, width: u32) -> u32 {
     assert!(!cpu::in_jit && is_call <= 1 && matches!(width, 16 | 32));
     let ip = if width == 16 {
         cpu::safe_read16(address as i32)
-    } else {
+    }
+    else {
         cpu::safe_read32s(address as i32)
     };
-    let Ok(ip) = ip else { return finish(false) };
-    let Ok(cs) = cpu::safe_read16(address.wrapping_add(width / 8) as i32) else {
+    let Ok(ip) = ip
+    else {
+        return finish(false);
+    };
+    let Ok(cs) = cpu::safe_read16(address.wrapping_add(width / 8) as i32)
+    else {
         return finish(false);
     };
     if width == 32 && (!*gp::protected_mode || cpu::vm86_mode()) {
@@ -48,11 +54,17 @@ pub unsafe fn ir_far_return(adjust: u32, width: u32) -> u32 {
     assert!(!cpu::in_jit && adjust <= 65535 && matches!(width, 16 | 32));
     let address = misc_instr::get_stack_pointer(0);
     let ip = if width == 16 { cpu::safe_read16(address) } else { cpu::safe_read32s(address) };
-    let Ok(ip) = ip else { return finish(false) };
+    let Ok(ip) = ip
+    else {
+        return finish(false);
+    };
     // RETF32 reads a full dword for the selector, unlike IRET32 and m16:32.
     let address = misc_instr::get_stack_pointer((width / 8) as i32);
     let cs = if width == 16 { cpu::safe_read16(address) } else { cpu::safe_read32s(address) };
-    let Ok(cs) = cs else { return finish(false) };
+    let Ok(cs) = cs
+    else {
+        return finish(false);
+    };
     finish(cpu::far_return_checked(
         ip,
         cs & 65535,

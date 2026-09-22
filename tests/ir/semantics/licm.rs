@@ -97,7 +97,8 @@ fn counted_loop() -> (Region, ValueId, ValueId, ValueId) {
 }
 
 fn owner(region: &Region, value: ValueId) -> BlockId {
-    let Definition::Instruction(id, _) = region.values[value.index()].definition else {
+    let Definition::Instruction(id, _) = region.values[value.index()].definition
+    else {
         panic!("expected instruction result")
     };
     region.instructions[id.index()].block
@@ -210,7 +211,8 @@ fn handles_self_loops_multiple_latches_and_nested_loops() {
 #[test]
 fn whitelist_rejects_observations_faults_and_metadata() {
     let (r, invariant, _, _) = counted_loop();
-    let Definition::Instruction(id, _) = r.values[invariant.index()].definition else {
+    let Definition::Instruction(id, _) = r.values[invariant.index()].definition
+    else {
         panic!()
     };
     let pure = &r.instructions[id.index()];
@@ -289,7 +291,8 @@ fn emits_optimized_and_unoptimized_budgeted_loops() {
 #[test]
 fn recovery_bearing_pure_value_and_dependents_stay_in_loop() {
     let (mut r, invariant, dependent, _) = counted_loop();
-    let Definition::Instruction(id, _) = r.values[invariant.index()].definition else {
+    let Definition::Instruction(id, _) = r.values[invariant.index()].definition
+    else {
         panic!()
     };
     r.instructions[id.index()].state = r.blocks[3].entry_state;
@@ -353,7 +356,8 @@ fn actual_cpu_compiler_only_moves_code_in_optimized_tier_two() {
             let artifact = compile_cpu_cfg_region(&request, &snapshot, &config).unwrap();
             if tier == Tier::One {
                 assert_eq!(artifact.passes.loop_hoisted, 0);
-            } else {
+            }
+            else {
                 assert!(artifact.passes.loop_hoisted > 0);
             }
             std::fs::write(

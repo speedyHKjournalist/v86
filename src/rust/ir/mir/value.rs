@@ -156,7 +156,8 @@ pub fn lower(region: &Region, inst: &Instruction) -> Option<ValuePlan> {
     match inst.op {
         Op::Const(n) => steps.push(if ty(inst.results[0]) == Type::I64 {
             Step::I64(n as i64)
-        } else {
+        }
+        else {
             Step::I32(n as i32)
         }),
         Op::ReadSegment(segment) => read(
@@ -252,7 +253,8 @@ pub fn lower(region: &Region, inst: &Instruction) -> Option<ValuePlan> {
             if ty(inst.results[0]) == Type::I64 {
                 steps.push(Step::Scalar(if sign {
                     Scalar::I64ExtendSignedI32
-                } else {
+                }
+                else {
                     Scalar::I64ExtendUnsignedI32
                 }));
             }
@@ -270,7 +272,8 @@ pub fn lower(region: &Region, inst: &Instruction) -> Option<ValuePlan> {
                 if ty(inst.results[0]) != Type::I64 {
                     steps.push(Step::Scalar(Scalar::I32WrapI64));
                 }
-            } else {
+            }
+            else {
                 steps.extend([Step::I32(lsb as i32), Step::Scalar(Scalar::I32Shr)]);
             }
         },
@@ -292,7 +295,8 @@ pub fn lower(region: &Region, inst: &Instruction) -> Option<ValuePlan> {
                     Step::Scalar(Scalar::I64Shl),
                     Step::Scalar(Scalar::I64Or),
                 ]);
-            } else {
+            }
+            else {
                 steps.extend([
                     Step::I32(!mask as i32),
                     Step::Scalar(Scalar::I32And),
@@ -419,9 +423,7 @@ impl Scalar {
         })
     }
 }
-fn invalid() -> CompileError {
-    CompileError::InvalidIr("invalid value program stack".into())
-}
+fn invalid() -> CompileError { CompileError::InvalidIr("invalid value program stack".into()) }
 fn machine_type(ty: Type) -> Result<WasmType, CompileError> {
     match ty {
         Type::I1 | Type::I8 | Type::I16 | Type::I32 | Type::LinearAddress => Ok(WasmType::I32),
@@ -439,7 +441,8 @@ fn reading_type(reading: &Reading) -> Result<WasmType, CompileError> {
         Reading::Call { signature, .. } => {
             if signature.params.is_empty() && signature.results.len() == 1 {
                 Ok(signature.results[0])
-            } else {
+            }
+            else {
                 Err(invalid())
             }
         },
@@ -485,8 +488,16 @@ pub fn verify_program_types(types: &[Type], plan: &ValuePlan) -> Result<(), Comp
     let ty = |value: ValueId| machine_type(*types.get(value.index()).ok_or_else(invalid)?);
     verify_expression_with(ty, &plan.steps, ty(plan.result)?)
 }
-pub(super) fn verify_expression_types(types: &[Type], steps: &[Step], result: WasmType) -> Result<(), CompileError> {
-    verify_expression_with(|v| machine_type(*types.get(v.index()).ok_or_else(invalid)?), steps, result)
+pub(super) fn verify_expression_types(
+    types: &[Type],
+    steps: &[Step],
+    result: WasmType,
+) -> Result<(), CompileError> {
+    verify_expression_with(
+        |v| machine_type(*types.get(v.index()).ok_or_else(invalid)?),
+        steps,
+        result,
+    )
 }
 fn verify_expression_with(
     ty: impl Fn(ValueId) -> Result<WasmType, CompileError>,
@@ -542,7 +553,8 @@ fn verify_expression_with(
                 }
                 if replace {
                     apply(&mut stack, &[V128, scalar], V128)?;
-                } else {
+                }
+                else {
                     apply(&mut stack, &[V128], scalar)?;
                 }
             },

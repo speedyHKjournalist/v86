@@ -49,10 +49,12 @@ fn coverage_fixtures() {
                                         | if memory {
                                             if address32 {
                                                 5
-                                            } else {
+                                            }
+                                            else {
                                                 6
                                             }
-                                        } else {
+                                        }
+                                        else {
                                             0xC0
                                         },
                                 );
@@ -91,7 +93,8 @@ fn coverage_fixtures() {
                             }
                             let kind = if [0x63, 0x9B, 0x0FC3, 0x0FC7].contains(&enc.opcode) {
                                 5
-                            } else {
+                            }
+                            else {
                                 behavior(enc.opcode, enc.group, memory)
                             };
                             cases.push(format!(

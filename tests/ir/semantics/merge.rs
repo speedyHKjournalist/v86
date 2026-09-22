@@ -115,7 +115,8 @@ fn poll_plans_reject_stale_states_and_costs() {
     assert!(verify(&bad).is_err());
     // A poll snapshot must dominate its check, even when the referenced value is
     // only needed on the early exit and the block's final state is valid.
-    let Terminator::Exit(exit) = r.blocks[0].terminator.clone().unwrap() else {
+    let Terminator::Exit(exit) = r.blocks[0].terminator.clone().unwrap()
+    else {
         panic!()
     };
     r.instructions[poll.index()].state = Some(exit);

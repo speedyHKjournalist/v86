@@ -8,7 +8,8 @@ pub unsafe fn ir_sse_guard() -> u32 {
     assert!(!cpu::in_jit);
     if cpu::task_switch_test_mmx() {
         Outcome::Normal as u32
-    } else {
+    }
+    else {
         Outcome::ControlTransferred as u32
     }
 }
@@ -17,19 +18,22 @@ pub unsafe fn ir_xmm_load(address: u32, register: u32, bytes: u32) -> u32 {
     assert!(!cpu::in_jit && register < 8);
     match bytes {
         4 => {
-            let Ok(value) = cpu::safe_read32s(address as i32) else {
+            let Ok(value) = cpu::safe_read32s(address as i32)
+            else {
                 return Outcome::ControlTransferred as u32;
             };
             cpu::write_xmm128(register as i32, value, 0, 0, 0);
         },
         8 => {
-            let Ok(value) = cpu::safe_read64s(address as i32) else {
+            let Ok(value) = cpu::safe_read64s(address as i32)
+            else {
                 return Outcome::ControlTransferred as u32;
             };
             cpu::write_xmm128_2(register as i32, value, 0);
         },
         16 => {
-            let Ok(value) = cpu::safe_read128s(address as i32) else {
+            let Ok(value) = cpu::safe_read128s(address as i32)
+            else {
                 return Outcome::ControlTransferred as u32;
             };
             cpu::write_xmm_reg128(register as i32, value);
@@ -49,13 +53,15 @@ pub unsafe fn ir_xmm_binary(address: u32, register: u32, operation: u32, bytes: 
                 operation,
                 crate::ir::simd::PackedOp::UnpackLow32 | crate::ir::simd::PackedOp::UnpackLow64
             ));
-            let Ok(value) = cpu::safe_read64s(address as i32) else {
+            let Ok(value) = cpu::safe_read64s(address as i32)
+            else {
                 return Outcome::ControlTransferred as u32;
             };
             cpu::reg128 { u64: [value, 0] }
         },
         16 => {
-            let Ok(value) = cpu::safe_read128s(address as i32) else {
+            let Ok(value) = cpu::safe_read128s(address as i32)
+            else {
                 return Outcome::ControlTransferred as u32;
             };
             value
@@ -90,7 +96,8 @@ pub unsafe fn ir_xmm_store(address: u32, register: u32, bytes: u32, lane: u32) -
 pub unsafe fn ir_xmm_shuffle(address: u32, register: u32, operation: u32, immediate: u32) -> u32 {
     assert!(!cpu::in_jit && register < 8 && immediate < 256);
     let operation = crate::ir::simd::ShuffleOp::from_id(operation).unwrap();
-    let Ok(source) = cpu::safe_read128s(address as i32) else {
+    let Ok(source) = cpu::safe_read128s(address as i32)
+    else {
         return Outcome::ControlTransferred as u32;
     };
     let destination = cpu::read_xmm128s(register as i32);
@@ -109,12 +116,15 @@ pub unsafe fn ir_xmm_transfer_load(address: u32, register: u32, operation: u32) 
     assert!(!cpu::in_jit && register < 8);
     let operation = crate::ir::simd::TransferOp::from_id(operation).unwrap();
     let source = if operation.bytes() == 8 {
-        let Ok(value) = cpu::safe_read64s(address as i32) else {
+        let Ok(value) = cpu::safe_read64s(address as i32)
+        else {
             return Outcome::ControlTransferred as u32;
         };
         cpu::reg128 { u64: [value, 0] }
-    } else {
-        let Ok(value) = cpu::safe_read128s(address as i32) else {
+    }
+    else {
+        let Ok(value) = cpu::safe_read128s(address as i32)
+        else {
             return Outcome::ControlTransferred as u32;
         };
         value
@@ -133,7 +143,8 @@ pub unsafe fn ir_xmm_transfer_load(address: u32, register: u32, operation: u32) 
 #[no_mangle]
 pub unsafe fn ir_xmm_insert_word(address: u32, register: u32, lane: u32) -> u32 {
     assert!(!cpu::in_jit && register < 8 && lane < 8);
-    let Ok(source) = cpu::safe_read16(address as i32) else {
+    let Ok(source) = cpu::safe_read16(address as i32)
+    else {
         return Outcome::ControlTransferred as u32;
     };
     let mut destination = cpu::read_xmm128s(register as i32);

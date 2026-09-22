@@ -42,11 +42,15 @@ fn reachable_cfg_fixtures() {
             0xF0,
         ],
         // Exact lazy backing: ADD; SUB; AND; CMP; JNZ; NOP.
-        vec![0x01, 0xD8, 0x29, 0xD1, 0x83, 0xE0, 0x7F, 0x83, 0xF9, 0, 0x75, 0, 0x90],
+        vec![
+            0x01, 0xD8, 0x29, 0xD1, 0x83, 0xE0, 0x7F, 0x83, 0xF9, 0, 0x75, 0, 0x90,
+        ],
         // Mixed eager/lazy backing: ADC; SBB; INC; DEC; JNZ; NOP.
         vec![0x11, 0xD8, 0x19, 0xD1, 0x40, 0x49, 0x75, 0, 0x90],
         // Same mixed backing in the byte-width forms.
-        vec![0x10, 0xD8, 0x18, 0xD1, 0xFE, 0xC0, 0xFE, 0xC9, 0x75, 0, 0x90],
+        vec![
+            0x10, 0xD8, 0x18, 0xD1, 0xFE, 0xC0, 0xFE, 0xC9, 0x75, 0, 0x90,
+        ],
         // Carry/direction control must update raw backing without canonicalizing.
         vec![0xF8, 0xF9, 0xF5, 0xFC, 0xFD, 0x90],
         // Conditional loop with an in-region epilogue after the loop exit.
@@ -104,16 +108,15 @@ fn reachable_cfg_fixtures() {
                             .sum();
                         if artifact.structured_cfg {
                             assert_eq!(
-                                artifact.structured_edges,
-                                control_edges,
+                                artifact.structured_edges, control_edges,
                                 "structured metadata must account for every MIR edge"
                             );
                             assert_eq!(artifact.generic_dispatch_edges, 0);
-                        } else {
+                        }
+                        else {
                             assert_eq!(artifact.structured_edges, 0);
                             assert_eq!(
-                                artifact.generic_dispatch_edges,
-                                control_edges,
+                                artifact.generic_dispatch_edges, control_edges,
                                 "fallback metadata must account for every MIR edge"
                             );
                         }
@@ -145,7 +148,8 @@ fn reachable_cfg_fixtures() {
                             );
                             if matches!(n, 0 | 23) && !internal_backedge_target {
                                 assert_eq!(artifact.structured_backedges, 0);
-                            } else {
+                            }
+                            else {
                                 assert!(artifact.structured_backedges >= 1);
                             }
                             if artifact.structured_backedges > 0 {
@@ -155,8 +159,7 @@ fn reachable_cfg_fixtures() {
                         if matches!(n, 6 | 14 | 15) {
                             let expected = true;
                             assert_eq!(
-                                artifact.structured_cfg,
-                                expected,
+                                artifact.structured_cfg, expected,
                                 "diamond structuring: case {n}, mode {mode}, pc {pc:x}: {:?}",
                                 mir.control
                             );
@@ -217,7 +220,10 @@ fn cfg_boundaries_and_immutable_compile() {
             "overlapping guest instruction streams"
         ))
     ));
-    assert!(lift(&vec![0x90; 65]).is_ok(), "straight-line leaders fit the CFG budget");
+    assert!(
+        lift(&vec![0x90; 65]).is_ok(),
+        "straight-line leaders fit the CFG budget"
+    );
     assert!(matches!(
         lift(&vec![0x90; 129]),
         Err(CompileError::Budget(_))
@@ -285,24 +291,20 @@ fn cfg_boundaries_and_immutable_compile() {
         "Tier 1 and Tier 2 must share the structured IR backend"
     );
     assert_eq!(
-        tier_one.passes.state_writes_elided,
-        0,
+        tier_one.passes.state_writes_elided, 0,
         "Tier 1 must not enable state-write elision"
     );
     assert_eq!(
-        tier_one.passes.cpu_values_elided,
-        0,
+        tier_one.passes.cpu_values_elided, 0,
         "Tier 1 must not enable CPU-only value liveness"
     );
     assert_eq!(tier_one.passes.loop_hoisted, 0, "Tier 1 must not run LICM");
     assert_eq!(
-        tier_one.passes.ram_forwarded,
-        0,
+        tier_one.passes.ram_forwarded, 0,
         "Tier 1 must not run RAM forwarding"
     );
     assert_eq!(
-        tier_one.passes.helper_states_elided,
-        0,
+        tier_one.passes.helper_states_elided, 0,
         "Tier 1 must not run helper-state elision"
     );
     assert!(artifact.current(

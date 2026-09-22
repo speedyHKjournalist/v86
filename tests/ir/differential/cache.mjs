@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 const wasm=process.argv[2]||"build/v86-ir-cache-test.wasm";
-let clockMutation=null;
+let clock_mutation=null;
 const vm=new V86({wasm_fn:async imports=>{
     const tick=imports.env.microtick;
-    imports.env.microtick=()=>{if(clockMutation)clockMutation();return tick();};
+    imports.env.microtick=()=>{if(clock_mutation)clock_mutation();return tick();};
     return (await WebAssembly.instantiate(fs.readFileSync(wasm),imports)).instance.exports;
 },memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)),u32=n=>[n&255,n>>>8&255,n>>>16&255,n>>>24];
@@ -15,7 +15,7 @@ try {
     const word=a=>new DataView(cpu.mem8.buffer,cpu.mem8.byteOffset).getUint32(a,true);
     const set=(a,n)=>new DataView(cpu.mem8.buffer,cpu.mem8.byteOffset).setUint32(a,n,true);
     const count=()=>new Uint32Array(e.memory.buffer)[664>>2];
-    vm.run();let deadline=performance.now()+10000;while((word(0x500)&65535)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);}await vm.stop();await sleep(20);
+    vm.run();let deadline=performance.now()+10000;while((word(0x500)&65535)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);} await vm.stop();await sleep(20);
     const clear=()=>{cpu.jit_clear_cache();e.ir_cache_collect();assert.equal(e.ir_cache_stat(1),0);};
     const prepare=(code,pc=PC)=>{
         clear();cpu.in_hlt[0]=0;cpu.flags[0]=2;cpu.flags_changed[0]=0;cpu.is_32[0]=1;cpu.stack_size_32[0]=1;
@@ -29,7 +29,7 @@ try {
     };
     const run=async(address=PC)=>{
         cpu.instruction_pointer[0]=address;cpu.in_hlt[0]=0;vm.run();const end=performance.now()+10000;
-        while(!cpu.in_hlt[0]){assert(performance.now()<end,"guest halt timeout");await sleep(1);}await vm.stop();
+        while(!cpu.in_hlt[0]){assert(performance.now()<end,"guest halt timeout");await sleep(1);} await vm.stop();
     };
     const request=(length,tier=1,opt=1,cfg=1,budget=64,rep=8)=>cpu.ir_compile_cached(length,tier,opt,cfg,budget,rep);
     const reserve=(length=1)=>{
@@ -42,7 +42,7 @@ try {
         assert.equal(e.ir_cache_validate(r.id,r.slot),1);table.set(r.slot+OFFSET,instance.exports.f);assert.equal(e.ir_cache_finish(r.id,r.slot),1);
     };
     let programs=0;
-    for(const recording of [0,1])for(const tier of [1,2])for(const opt of [0,1]){
+    for(const recording of [0,1]) for(const tier of [1,2]) for(const opt of [0,1]){
         const code=[0x40,0x49,0x75,0xFC,0xA3,...u32(DATA),0xF4];prepare(code);
         e.performance_recording_enable(recording);const hits=e.ir_cache_stat(2);
         assert.equal(await request(code.length,tier,opt),true);assert.equal(e.ir_cache_stat(0),1);
@@ -55,13 +55,13 @@ try {
         prepare([0x40,0xF4]);
         assert.equal(e.ir_cache_set_missing_hint(hint),1);
         const field=hint?37:28,negatives=e.ir_cache_stat(field);
-        for(let n=0;n<3;n++)await run();
+        for(let n=0;n<3;n++) await run();
         assert(e.ir_cache_stat(field)>negatives,"repeated unpublished entry uses the selected negative witness");
         cpu.instruction_pointer[0]=PC;cpu.in_hlt[0]=0;assert(await request(1));
-        const afterMissing=e.ir_cache_stat(2);await run();
-        assert.equal(e.ir_cache_stat(2)-afterMissing,1,"publication invalidates a previous negative lookup");
-        clear();const afterRetire=e.ir_cache_stat(2);await run();
-        assert.equal(e.ir_cache_stat(2),afterRetire,"retired owners cannot survive in positive hints");
+        const after_missing=e.ir_cache_stat(2);await run();
+        assert.equal(e.ir_cache_stat(2)-after_missing,1,"publication invalidates a previous negative lookup");
+        clear();const after_retire=e.ir_cache_stat(2);await run();
+        assert.equal(e.ir_cache_stat(2),after_retire,"retired owners cannot survive in positive hints");
     }
     console.log(`PASS: ${wasm}: both negative-witness paths, publication invalidation and retirement`);
     // Only completed ordinary exits may bypass the outer dispatcher. Budget,
@@ -77,20 +77,20 @@ try {
         assert(await request(spec.length,1,1,1,spec.budget));
         cpu.instruction_pointer[0]=PC+spec.next;
         assert(await request(1));
-        const links=e.ir_cache_stat(6),beforeCount=count();
+        const links=e.ir_cache_stat(6),before_count=count();
         await run();
         assert.equal(e.ir_cache_stat(6)-links,spec.links,`${spec.name} continuation policy`);
-        assert.equal((count()-beforeCount)>>>0,3,`${spec.name} exact retirement`);
+        assert.equal((count()-before_count)>>>0,3,`${spec.name} exact retirement`);
         assert.equal(cpu.reg32[3],1);
     }
     console.log(`PASS: ${wasm}: ordinary and completed I/O/TSC successors chain; budget and cold-store exits yield with exact retirement`);
-    for(const mutation of ['bytes','mapping','context']) {
+    for(const mutation of ["bytes","mapping","context"]) {
         prepare([0xE4,0x93,0x43,0xF4]);
         const alternate=PC+0x4000;
         vm.write_memory(Uint8Array.of(0xE4,0x93,0x4B,0xF4),alternate);
         cpu.io.register_read(0x93,null,()=>{
-            if(mutation==='bytes') cpu.mem8[PC+2]=0x4B;
-            else if(mutation==='mapping') {set(0x13000+(PC>>>12)*4,alternate|3);e.full_clear_tlb();}
+            if(mutation==="bytes") cpu.mem8[PC+2]=0x4B;
+            else if(mutation==="mapping") {set(0x13000+(PC>>>12)*4,alternate|3);e.full_clear_tlb();}
             else cpu.instruction_pointer[0]=alternate+2;
             return 0x7A;
         });
@@ -100,18 +100,18 @@ try {
         assert.equal(cpu.reg32[0]&255,0x7A);assert.equal((count()-before)>>>0,3);
     }
     console.log(`PASS: ${wasm}: I/O cold continuation revalidates raw code writes, remapping and changed control flow`);
-    for(const mutation of ['bytes','mapping','context']) {
+    for(const mutation of ["bytes","mapping","context"]) {
         prepare([0x43,0x0F,0x31,0x43,0xF4]);
         const alternate=PC+0x4000;
         vm.write_memory(Uint8Array.of(0x43,0x0F,0x31,0x4B,0xF4),alternate);
         assert(await request(3));cpu.instruction_pointer[0]=PC+3;assert(await request(1));
         let observed=false;
-        clockMutation=()=>{
-            if(cpu.instruction_pointer[0]!==PC+3)return;
-            clockMutation=null;observed=true;
-            assert.equal(cpu.reg32[3],1,'timestamp observer sees the preceding dirty GPR');
-            if(mutation==='bytes')cpu.mem8[PC+3]=0x4B;
-            else if(mutation==='mapping'){set(0x13000+(PC>>>12)*4,alternate|3);e.full_clear_tlb();}
+        clock_mutation=()=>{
+            if(cpu.instruction_pointer[0]!==PC+3) return;
+            clock_mutation=null;observed=true;
+            assert.equal(cpu.reg32[3],1,"timestamp observer sees the preceding dirty GPR");
+            if(mutation==="bytes")cpu.mem8[PC+3]=0x4B;
+            else if(mutation==="mapping"){set(0x13000+(PC>>>12)*4,alternate|3);e.full_clear_tlb();}
             else cpu.instruction_pointer[0]=alternate+3;
         };
         const before=count();await run();assert(observed);
@@ -139,9 +139,9 @@ try {
             return 0x7A;
         };
         cpu.io.register_read(0x93,null,observe);
-        if(kind==="clock")clockMutation=()=>{if(cpu.instruction_pointer[0]===PC+3){clockMutation=null;observe();}};
+        if(kind==="clock")clock_mutation=()=>{if(cpu.instruction_pointer[0]===PC+3){clock_mutation=null;observe();}};
         assert(await request(4));const before=count(),checked=e.ir_cache_stat(32),rejected=e.ir_cache_stat(33);
-        await run();clockMutation=null;
+        await run();clock_mutation=null;
         assert.equal(observations,1,`${kind}/${mutation}: never replay completed observer`);
         assert.equal((count()-before)>>>0,4);
         assert.equal(cpu.reg32[3],["bytes","mapping","context"].includes(mutation)?0:2);
@@ -152,7 +152,7 @@ try {
             assert.equal(e.ir_cache_entry_stat(PC,0,1,3),3,"observer and tail execute in one activation");
         }
     }
-    clockMutation=null;
+    clock_mutation=null;
     console.log(`PASS: ${wasm}: in-owner scalar port/TSC continuation, exact retirement and raw-code/mapping/context/XMM/IRQ barriers`);
     // A pending bit alone must not break an owner. Compare the read-only query
     // against controller masking/priority, and check re-evaluation after a host
@@ -161,7 +161,7 @@ try {
         const op=kind==="port"?[0xE4,0x93]:[0x0F,0x31];
         prepare([0x43,...op,0x43,0xF4]);
         const raw=new Uint8Array(e.memory.buffer),master=e.get_pic_addr_master(),slave=e.get_pic_addr_slave();
-        const saved=raw.slice(master,master+13),savedSlave=raw.slice(slave,slave+13);
+        const saved=raw.slice(master,master+13),saved_slave=raw.slice(slave,slave+13);
         raw[master]=policy==="in-service"?1:0;raw[master+2]=policy==="in-service"?1:0;
         raw[master+3]=1;raw[master+12]=0;raw[slave+3]=0;
         assert.equal(e.ir_sti_no_pending_irq(),1);
@@ -169,25 +169,25 @@ try {
         let observations=0;
         const observe=()=>{observations++;if(policy==="unmask")raw[master]=1;return 0x7A;};
         cpu.io.register_read(0x93,null,observe);
-        if(kind==="clock")clockMutation=()=>{if(cpu.instruction_pointer[0]===PC+3){clockMutation=null;observe();}};
-        assert(await request(4));const before=count();await run();clockMutation=null;
+        if(kind==="clock")clock_mutation=()=>{if(cpu.instruction_pointer[0]===PC+3){clock_mutation=null;observe();}};
+        assert(await request(4));const before=count();await run();clock_mutation=null;
         assert.equal(observations,1);assert.equal((count()-before)>>>0,4);assert.equal(cpu.reg32[3],2);
         assert.equal(e.ir_cache_entry_stat(PC,0,1,3),policy==="unmask"?2:3);
         assert.equal(raw[master+3],1,"continuation preserves outstanding request");
-        raw.set(saved,master);raw.set(savedSlave,slave);
+        raw.set(saved,master);raw.set(saved_slave,slave);
     }
     console.log(`PASS: ${wasm}: masked/in-service IRQ continuation and callback unmask recheck`);
     for(const depth of [1,2]) for(const masked of [false,true]) {
         const code=[0x43,...Array(depth).fill(0xFB),0x90,0x43,0xF4];prepare(code);
         const raw=new Uint8Array(e.memory.buffer);
         const master=e.get_pic_addr_master(),slave=e.get_pic_addr_slave();
-        const saved=raw.slice(master,master+13),savedSlave=raw.slice(slave,slave+13);
+        const saved=raw.slice(master,master+13),saved_slave_local=raw.slice(slave,slave+13);
         raw[master]=0;raw[master+3]=+masked;raw[slave+3]=0;
         assert(await request(code.length-1));const before=count();await run();
         assert.equal(cpu.reg32[3],2);assert.equal((count()-before)>>>0,depth+4);
         assert.equal(e.ir_cache_entry_stat(PC,0,1,3),depth+3,"STI shadow retains SSA into its following block");
         assert.equal(raw[master+3],+masked,"STI leaves masked request pending");
-        raw.set(saved,master);raw.set(savedSlave,slave);
+        raw.set(saved,master);raw.set(saved_slave_local,slave);
     }
     console.log(`PASS: ${wasm}: no-pending single/nested STI shadow keeps following arithmetic in the same activation`);
     for(const enabled of [false,true]) {
@@ -195,25 +195,25 @@ try {
         assert(await request(2));cpu.instruction_pointer[0]=PC+2;assert(await request(1));
         const links=e.ir_cache_stat(6),before=count();await run();
         assert.equal(cpu.reg32[3],1);assert.equal((count()-before)>>>0,4);
-        assert.equal(e.ir_cache_stat(6)-links,enabled?1:0,'STI observes IRQs and respects changed control flags before chaining');
+        assert.equal(e.ir_cache_stat(6)-links,enabled?1:0,"STI observes IRQs and respects changed control flags before chaining");
     }
     prepare([0x40,0xF4]);assert(await request(1));await run();
-    let cachedChecks=e.ir_cache_stat(8),captureFallbacks=e.ir_cache_stat(9),warmHits=e.ir_cache_stat(2);
-    let guestSteps=e.ir_cache_stat(10),zeroStepExits=e.ir_cache_stat(12);
-    const entryHits=e.ir_cache_entry_stat(PC,0,1,1),entrySteps=e.ir_cache_entry_stat(PC,0,1,2);
-    const entryZero=e.ir_cache_entry_stat(PC,0,1,4);
+    let cached_checks=e.ir_cache_stat(8),capture_fallbacks=e.ir_cache_stat(9),warm_hits=e.ir_cache_stat(2);
+    let guest_steps=e.ir_cache_stat(10),zero_step_exits=e.ir_cache_stat(12);
+    const entry_hits=e.ir_cache_entry_stat(PC,0,1,1),entry_steps=e.ir_cache_entry_stat(PC,0,1,2);
+    const entry_zero=e.ir_cache_entry_stat(PC,0,1,4);
     assert.equal(e.ir_cache_entry_stat(PC,0,1,0),1);
     assert.equal(e.ir_cache_entry_stat(PC,0,1,5),1);
-    await run();assert.equal(e.ir_cache_stat(2)-warmHits,1);
-    assert(e.ir_cache_stat(8)-cachedChecks>=2,"warm admission uses cached pre/post source validation");
-    assert.equal(e.ir_cache_stat(9),captureFallbacks,"warm admission avoids read-only snapshot fallback");
-    assert.equal((e.ir_cache_stat(10)-guestSteps)>>>0,1,"activation diagnostics count the retired INC");
+    await run();assert.equal(e.ir_cache_stat(2)-warm_hits,1);
+    assert(e.ir_cache_stat(8)-cached_checks>=2,"warm admission uses cached pre/post source validation");
+    assert.equal(e.ir_cache_stat(9),capture_fallbacks,"warm admission avoids read-only snapshot fallback");
+    assert.equal((e.ir_cache_stat(10)-guest_steps)>>>0,1,"activation diagnostics count the retired INC");
     assert(e.ir_cache_stat(11)>=1,"activation diagnostics retain the maximum retired work");
-    assert.equal(e.ir_cache_stat(12),zeroStepExits,"normal activation is not a zero-step exit");
-    assert.equal((e.ir_cache_entry_stat(PC,0,1,1)-entryHits)>>>0,1,"entry-scoped hit count isolates the selected region");
-    assert.equal((e.ir_cache_entry_stat(PC,0,1,2)-entrySteps)>>>0,1,"entry-scoped guest steps isolate the selected region");
+    assert.equal(e.ir_cache_stat(12),zero_step_exits,"normal activation is not a zero-step exit");
+    assert.equal((e.ir_cache_entry_stat(PC,0,1,1)-entry_hits)>>>0,1,"entry-scoped hit count isolates the selected region");
+    assert.equal((e.ir_cache_entry_stat(PC,0,1,2)-entry_steps)>>>0,1,"entry-scoped guest steps isolate the selected region");
     assert(e.ir_cache_entry_stat(PC,0,1,3)>=1,"entry-scoped maximum records retired work");
-    assert.equal(e.ir_cache_entry_stat(PC,0,1,4),entryZero,"normal entry activation is not a zero-step exit");
+    assert.equal(e.ir_cache_entry_stat(PC,0,1,4),entry_zero,"normal entry activation is not a zero-step exit");
     assert.equal(e.ir_cache_entry_stat(PC+1,0,1,0),0,"entry diagnostics require an exact entry key");
     assert.equal(e.ir_cache_set_fast_validation(2),0);
     for(const recording of [0,1]) {
@@ -226,14 +226,14 @@ try {
             assert(await request(3));cpu.instruction_pointer[0]=other;assert(await request(7));
             assert.equal(e.ir_cache_set_fast_validation(fast),1);e.performance_recording_enable(recording);
             const full=e.ir_cache_stat(19),reuse=e.ir_cache_stat(18),post=e.ir_cache_stat(20),targets=e.ir_cache_stat(21),start=count();
-            const successors=e.ir_cache_stat(29),warmAdmissions=e.ir_cache_stat(34);
+            const successors=e.ir_cache_stat(29),warm_admissions=e.ir_cache_stat(34);
             await run();
             assert.equal(cpu.reg32[3],iterations);assert.equal(cpu.reg32[2],0);
             assert.equal((count()-start)>>>0,iterations*4+1);
             checks.push(e.ir_cache_stat(19)-full);
             assert.equal(e.ir_cache_stat(18)>reuse,!!fast);
             assert.equal(e.ir_cache_stat(20)>post,!!fast);
-            assert.equal(e.ir_cache_stat(34)>warmAdmissions,!!fast,
+            assert.equal(e.ir_cache_stat(34)>warm_admissions,!!fast,
                 "single-guard admission is used only when actual fetch translations are warm");
             assert(e.ir_cache_stat(21)>targets,"warm targets hit the bounded entry cache");
             assert(e.ir_cache_stat(29)>successors,"repeated normal edges reuse an owner-checked successor");
@@ -267,10 +267,10 @@ try {
     }
     console.log(`PASS: ${wasm}: fast/full admission A/B with recording off/on, exact retirement, fewer byte checks, raw MMIO code writes and callback remapping`);
     console.log(`PASS: ${wasm}: warm one-page IR admission validates cached mapping/source bytes without recapture and records entry-scoped activation work`);
-    const structuredPublications=e.ir_cache_stat(13),genericPublications=e.ir_cache_stat(14);
+    const structured_publications=e.ir_cache_stat(13),generic_publications=e.ir_cache_stat(14);
     prepare([0xEB,0xFE]);assert(await request(2));
-    assert.equal(e.ir_cache_stat(13)-structuredPublications,1,"structured publication counter advances");
-    assert.equal(e.ir_cache_stat(14),genericPublications,"structured loop does not count as generic publication");
+    assert.equal(e.ir_cache_stat(13)-structured_publications,1,"structured publication counter advances");
+    assert.equal(e.ir_cache_stat(14),generic_publications,"structured loop does not count as generic publication");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,6),1,"self-loop publication uses structured CFG");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,7),1,"structured self-loop records one backedge");
     assert.equal(e.ir_cache_entry_stat(PC,0,1,8),0,"structured self-loop bypasses generic dispatch edges");
@@ -280,25 +280,25 @@ try {
     // Entry fetch has architectural A-bit effects. A cold secondary page is not
     // eagerly fetched just because it belongs to the immutable request window.
     prepare([0xB8,...u32(0x12345678),0xF4],PC+4094);assert(await request(5));
-    let fetchHits=e.ir_cache_stat(2);assert.equal(word(0x13000+(PC>>>12)*4)&32,0);
-    await run(PC+4094);assert.equal(e.ir_cache_stat(2),fetchHits);assert.equal(word(0x13000+(PC>>>12)*4)&32,32);
+    let fetch_hits=e.ir_cache_stat(2);assert.equal(word(0x13000+(PC>>>12)*4)&32,0);
+    await run(PC+4094);assert.equal(e.ir_cache_stat(2),fetch_hits);assert.equal(word(0x13000+(PC>>>12)*4)&32,32);
     assert.equal(word(0x13000+(PC>>>12)*4+4)&32,32);assert.equal(cpu.reg32[0],0x12345678);
-    await run(PC+4094);assert.equal(e.ir_cache_stat(2)-fetchHits,1);
+    await run(PC+4094);assert.equal(e.ir_cache_stat(2)-fetch_hits,1);
     prepare([0xEB,0xFA,0x90,0x90,0x90,0x90],PC+4094);vm.write_memory(Uint8Array.of(0xF4),PC+4090);assert(await request(6));
-    fetchHits=e.ir_cache_stat(2);await run(PC+4094);assert.equal(e.ir_cache_stat(2),fetchHits);
+    fetch_hits=e.ir_cache_stat(2);await run(PC+4094);assert.equal(e.ir_cache_stat(2),fetch_hits);
     assert.equal(word(0x13000+(PC>>>12)*4+4)&32,0,"unreachable secondary page retains clear A bit");
-    e.ir_memory_read(PC+4096,1);await run(PC+4094);assert.equal(e.ir_cache_stat(2)-fetchHits,1);
+    e.ir_memory_read(PC+4096,1);await run(PC+4094);assert.equal(e.ir_cache_stat(2)-fetch_hits,1);
     console.log(`PASS: ${wasm}: cold entry fetch sets A bits, cross-page code waits for visible translations, unreachable pages are not eagerly accessed`);
     // Code aliases its own PTE: initial translation changes ADD's opcode (03)
     // into AND (23). Revalidation must reject the pre-fetch artifact.
     prepare([0x90],PC+0x400);cpu.reg32[0]=DATA;cpu.reg32[6]=-1;set(DATA,0x12345678);
     set(0x13400,0x13003);vm.write_memory(Uint8Array.of(0xF4),0x13404);e.full_clear_tlb();
-    assert(await request(2));fetchHits=e.ir_cache_stat(2);await run(PC+0x400);
-    assert.equal(e.ir_cache_stat(2),fetchHits);assert.equal(cpu.reg32[6],0x12345678);assert.equal(e.ir_cache_stat(0),0);
+    assert(await request(2));fetch_hits=e.ir_cache_stat(2);await run(PC+0x400);
+    assert.equal(e.ir_cache_stat(2),fetch_hits);assert.equal(cpu.reg32[6],0x12345678);assert.equal(e.ir_cache_stat(0),0);
     prepare([0x8B,0x06,0xF4]);set(0x13000+(DATA>>>12)*4,0);
     cpu.idtr_offset[0]=0x2000;cpu.idtr_size[0]=0x7FF;set(0x2000+14*8,8<<16);set(0x2004+14*8,0x180000|0x8E00);
-    vm.write_memory(Uint8Array.of(0xF4),0x180000);assert(await request(2));fetchHits=e.ir_cache_stat(2);await run();
-    assert.equal(e.ir_cache_stat(2)-fetchHits,1);assert.equal(cpu.cr[2]>>>0,DATA);assert.equal(cpu.instruction_pointer[0],0x180001);
+    vm.write_memory(Uint8Array.of(0xF4),0x180000);assert(await request(2));fetch_hits=e.ir_cache_stat(2);await run();
+    assert.equal(e.ir_cache_stat(2)-fetch_hits,1);assert.equal(cpu.cr[2]>>>0,DATA);assert.equal(cpu.instruction_pointer[0],0x180001);
     assert.deepEqual([0,4,8,12].map(n=>word(0x8FFF0+n)),[0,PC,8,2]);assert.equal(count(),0xFFFFFFFD);assert.equal(e.ir_cache_stat(0),0);
     console.log(`PASS: ${wasm}: fetch A-bit writes invalidate code/PTE aliases and an admitted data #PF preserves the exact exception frame without retiring the faulting instruction`);
     // Pending slots cannot execute; identity and phase validation precede installation.
@@ -332,10 +332,10 @@ try {
     console.log(`PASS: ${wasm}: pending/duplicate/forged/ABA publication, moved IP, raw and same-byte guest/host writes, physical remapping, secondary dependencies, active SMC and restore`);
     // IR-12 link lookup is a validated graph hint, never an unchecked call.
     prepare([0x40,0xF4]);assert(await request(1));cpu.instruction_pointer[0]=PC;
-    const linkBefore=e.ir_cache_stat(6),missBefore=e.ir_cache_stat(7);
-    let packed=e.ir_cache_link_target();assert.notEqual(packed,0n);assert.equal(e.ir_cache_stat(6)-linkBefore,1);
+    const link_before=e.ir_cache_stat(6),miss_before=e.ir_cache_stat(7);
+    let packed=e.ir_cache_link_target();assert.notEqual(packed,0n);assert.equal(e.ir_cache_stat(6)-link_before,1);
     assert.notEqual(Number(packed&0xFFFFFFFFn),0);
-    cpu.instruction_pointer[0]=PC+0x1000;assert.equal(e.ir_cache_link_target(),0n);assert.equal(e.ir_cache_stat(7)-missBefore,1);
+    cpu.instruction_pointer[0]=PC+0x1000;assert.equal(e.ir_cache_link_target(),0n);assert.equal(e.ir_cache_stat(7)-miss_before,1);
     cpu.instruction_pointer[0]=PC;vm.write_memory(Uint8Array.of(0x40),PC);assert.equal(e.ir_cache_link_target(),0n);
     e.ir_cache_collect();assert.equal(e.ir_cache_stat(0),0);
     console.log(`PASS: ${wasm}: validated IR link lookup rejects absent/stale targets without unchecked table dispatch`);
@@ -368,7 +368,7 @@ try {
             await new Promise((resolve,reject)=>{
                 const timer=setTimeout(()=>reject(new Error("legacy publication timeout")),10000);
                 cpu.test_hook_did_finalize_wasm=()=>{clearTimeout(timer);resolve();};
-                try{assert(e.jit_force_generate_unsafe(address));}catch(error){clearTimeout(timer);reject(error);}
+                try {assert(e.jit_force_generate_unsafe(address));} catch(error){clearTimeout(timer);reject(error);}
             });
         }
         cpu.test_hook_did_finalize_wasm=undefined;assert.equal(e.ir_cache_stat(0),capacity);
@@ -392,7 +392,7 @@ try {
             await new Promise((resolve,reject)=>{
                 const timer=setTimeout(()=>reject(new Error("legacy bridge callback timeout")),10000);
                 cpu.test_hook_did_finalize_wasm=()=>{clearTimeout(timer);resolve();};
-                try{assert(e.jit_force_generate_unsafe(PC));}catch(error){clearTimeout(timer);reject(error);}
+                try {assert(e.jit_force_generate_unsafe(PC));} catch(error){clearTimeout(timer);reject(error);}
             });
             cpu.test_hook_did_finalize_wasm=undefined;assert.equal(checked,1);e.ir_cache_collect();assert.equal(e.ir_cache_stat(1),0);
             console.log(`PASS: ${wasm}: publication/collection refuse a synchronous legacy-generator host callback while its JIT lock is held`);
@@ -400,9 +400,9 @@ try {
         for(const kind of ["sync","async","missing","table"]){
             prepare([0x40,0xF4]);
             WebAssembly.instantiate=kind==="sync"?()=>{throw new WebAssembly.CompileError("controlled");}:kind==="async"?()=>Promise.reject(new WebAssembly.CompileError("controlled")):kind==="missing"?()=>Promise.resolve({instance:{exports:{}}}):original;
-            const oldSet=table.set;
-            if(kind==="table")table.set=(index,f)=>{if(f!==null)throw new TypeError("controlled table failure");return oldSet.call(table,index,f);};
-            try{assert.equal(await request(1),false);}finally{table.set=oldSet;}
+            const old_set=table.set;
+            if(kind==="table")table.set=(index,f)=>{if(f!==null) throw new TypeError("controlled table failure");return old_set.call(table,index,f);};
+            try {assert.equal(await request(1),false);} finally {table.set=old_set;}
             e.ir_cache_collect();assert.equal(e.ir_cache_stat(1),0);assert.equal(e.jit_get_wasm_table_index_free_list_count(),899);
         }
         prepare([0x40,0xF4]);const queued=[];WebAssembly.instantiate=(code,imports)=>new Promise((resolve,reject)=>queued.push({code,imports,resolve,reject}));
@@ -412,13 +412,13 @@ try {
         hits=e.ir_cache_stat(2);await run();assert.equal(e.ir_cache_stat(2)-hits,1);
         for(const changed of ["wasm","exports","table"]){
             prepare([0x40,0xF4]);const pending=request(1),job=queued.at(-1);
-            const result=await original(job.code,job.imports),owner=cpu.wm,ownerExports=owner.exports,ownerTable=owner.wasm_table;
-            try{
-                if(changed==="wasm")cpu.wm={...owner};else if(changed==="exports")owner.exports={...ownerExports};else owner.wasm_table={};
+            const result=await original(job.code,job.imports),owner=cpu.wm,owner_exports=owner.exports,owner_table=owner.wasm_table;
+            try {
+                if(changed==="wasm")cpu.wm={...owner};else if(changed==="exports")owner.exports={...owner_exports};else owner.wasm_table={};
                 job.resolve(result);assert.equal(await pending,false);assert.equal(e.ir_cache_stat(0),0);
-            }finally{cpu.wm=owner;owner.exports=ownerExports;owner.wasm_table=ownerTable;}
+            } finally {cpu.wm=owner;owner.exports=owner_exports;owner.wasm_table=owner_table;}
             clear();assert.equal(e.jit_get_wasm_table_index_free_list_count(),899);
         }
-    }finally{WebAssembly.instantiate=original;}
+    } finally {WebAssembly.instantiate=original;}
     console.log(`PASS: ${wasm}: synchronous/asynchronous browser failures, missing exports, table failure, changed VM/export/table identities and late completion through the actual publication bridge`);
 } finally { await vm.destroy(); }

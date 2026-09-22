@@ -75,7 +75,7 @@ for(const release of [false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault=false,nullSegment=false,mmio=false}={}){
+        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false}={}){
             const [bytes,mode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
             cpu.cr[4]=cr4;
@@ -120,9 +120,9 @@ for(const release of [false,true]){
             e.instr32_DD_6_mem(DATA+delta);
             e.ir_test_x87_seed(); linear8[816]=empty; linear8[1032]=top;
             cpu.segment_offsets[3]=delta;
-            cpu.segment_is_null[3]=+nullSegment;
+            cpu.segment_is_null[3]=+null_segment;
             if(mmio) { set32(0x13000+6*4,0xA0003);set32(0x13000+7*4,0xA1003); }
-            if(pageFault) set32(0x13000+7*4,0);
+            if(page_fault) set32(0x13000+7*4,0);
             events=[];
             e.full_clear_tlb();
         }
@@ -151,8 +151,8 @@ for(const release of [false,true]){
         let special=0;
         for(let i=0;i<cases.length;i++) {
             const [,mode,width,op,group,invalid,unimpl]=cases[i];
-            if(invalid||unimpl||!mode||width!==32||![0xD8,0xDA,0xDC,0xDE].includes(op))continue;
-            for(let sample=0;sample<12;sample++)for(const precision of [0,2,3])for(let rounding=0;rounding<4;rounding++) {
+            if(invalid||unimpl||!mode||width!==32||![0xD8,0xDA,0xDC,0xDE].includes(op)) continue;
+            for(let sample=0;sample<12;sample++) for(const precision of [0,2,3]) for(let rounding=0;rounding<4;rounding++) {
                 compare(i,()=>{
                     reset(i);e.ir_test_x87_pattern(sample,0x3F|precision<<8|rounding<<10);
                     // Rotate raw F32/F64/integer encodings independently of ST values.

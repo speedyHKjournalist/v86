@@ -30,7 +30,8 @@ pub unsafe fn ir_io_check(port: u32, bytes: u32) -> u32 {
     valid(port, bytes);
     if cpu::test_privileges_for_io(port as i32, bytes as i32) {
         Outcome::Normal as u32
-    } else {
+    }
+    else {
         Outcome::ControlTransferred as u32
     }
 }
@@ -59,18 +60,24 @@ pub unsafe fn ir_out(port: u32, bytes: u32, value: u32) -> u32 {
 /// One device observation; never repeat it after a failed continuation check.
 #[no_mangle]
 pub unsafe fn ir_in_continue(port: u32, bytes: u32) -> u32 {
-    if ir_io_check(port, bytes) != 0 { return Outcome::ControlTransferred as u32; }
+    if ir_io_check(port, bytes) != 0 {
+        return Outcome::ControlTransferred as u32;
+    }
     let observer = super::continuation::ScalarObserver::capture();
     let value = read(port, bytes);
     match bytes {
-        1 => cpu::write_reg8(0, value), 2 => cpu::write_reg16(0, value),
-        4 => cpu::write_reg32(0, value), _ => unreachable!(),
+        1 => cpu::write_reg8(0, value),
+        2 => cpu::write_reg16(0, value),
+        4 => cpu::write_reg32(0, value),
+        _ => unreachable!(),
     }
     observer.finish()
 }
 #[no_mangle]
 pub unsafe fn ir_out_continue(port: u32, bytes: u32, value: u32) -> u32 {
-    if ir_io_check(port, bytes) != 0 { return Outcome::ControlTransferred as u32; }
+    if ir_io_check(port, bytes) != 0 {
+        return Outcome::ControlTransferred as u32;
+    }
     let observer = super::continuation::ScalarObserver::capture();
     write(port, bytes, value);
     observer.finish()

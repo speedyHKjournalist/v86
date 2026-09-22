@@ -15,6 +15,15 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         _ => unreachable!(),
     };
     if i.encoding.opcode == 0x0F31 {
-        super::adapters::call_abi(b, name, vec![], state, crate::ir::helper::HelperAbi::CpuReload);
-    } else { call(b, name, vec![], state, true); }
+        super::adapters::call_abi(
+            b,
+            name,
+            vec![],
+            state,
+            crate::ir::helper::HelperAbi::CpuReload,
+        );
+    }
+    else {
+        call(b, name, vec![], state, true);
+    }
 }

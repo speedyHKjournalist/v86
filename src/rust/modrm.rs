@@ -18,21 +18,30 @@ pub struct ModrmByte {
 }
 impl ModrmByte {
     #[cfg(feature = "ir-test-hooks")]
-    pub fn matches_shared(&self, ea: &crate::decode::EffectiveAddress, segment: Option<u8>) -> bool {
-        self.first_reg == ea.base.map(u32::from) && self.second_reg == ea.index.map(u32::from)
-            && self.shift == ea.scale && self.immediate as u32 == ea.displacement
+    pub fn matches_shared(
+        &self,
+        ea: &crate::decode::EffectiveAddress,
+        segment: Option<u8>,
+    ) -> bool {
+        self.first_reg == ea.base.map(u32::from)
+            && self.second_reg == ea.index.map(u32::from)
+            && self.shift == ea.scale
+            && self.immediate as u32 == ea.displacement
             && self.is_16 == (ea.address_size == 16)
             && segment.map_or(self.segment, u32::from) == ea.segment as u32
     }
 
     /// A locality hint, never a replacement for the runtime page/range check.
     pub fn has_nearby_read(&self, next: &Self, written_register: u32) -> bool {
-        !self.is_16 && !next.is_16
+        !self.is_16
+            && !next.is_16
             && (self.first_reg.is_some() || self.second_reg.is_some())
             && self.first_reg != Some(written_register)
             && self.second_reg != Some(written_register)
-            && self.first_reg == next.first_reg && self.second_reg == next.second_reg
-            && self.shift == next.shift && self.segment == next.segment
+            && self.first_reg == next.first_reg
+            && self.second_reg == next.second_reg
+            && self.shift == next.shift
+            && self.segment == next.segment
             && self.immediate.abs_diff(next.immediate) <= 128
     }
 

@@ -116,10 +116,12 @@ fn finish(mut b: IntegerBuilder, value: ValueId) -> Region {
         let shift = b.constant(32, Type::I64);
         let high = b.binary(Binary::Shr, value, shift);
         b.gpr[1] = b.node(Op::Truncate, vec![high], Type::I32);
-    } else {
+    }
+    else {
         b.gpr[0] = if b.ty(value) == Type::I32 {
             value
-        } else {
+        }
+        else {
             b.node(Op::Extend { signed: false }, vec![value], Type::I32)
         };
         b.gpr[1] = b.constant(0, Type::I32);
@@ -180,8 +182,13 @@ fn fixture(bits: u8, name: &str) -> Region {
         },
         "truncate-unsigned" | "truncate-signed" => {
             assert!(bits < 64);
-            let extended =
-                b.node(Op::Extend { signed: name == "truncate-signed" }, vec![x], Type::I64);
+            let extended = b.node(
+                Op::Extend {
+                    signed: name == "truncate-signed",
+                },
+                vec![x],
+                Type::I64,
+            );
             b.node(Op::Truncate, vec![extended], ty(bits))
         },
         "shl-nonzero" => b.binary(Binary::Shl, x, nonzero),
@@ -194,7 +201,13 @@ fn fixture(bits: u8, name: &str) -> Region {
 #[test]
 fn emit_scalar_identity_differentials() {
     std::fs::create_dir_all("build/ir-scalar").unwrap();
-    let layout = StateLayout { gpr: 0, flags: 32, eip: 36, committed: 40, flag_operand: 44 };
+    let layout = StateLayout {
+        gpr: 0,
+        flags: 32,
+        eip: 36,
+        committed: 40,
+        flag_operand: 44,
+    };
     let mut manifest = Vec::new();
     for bits in [1, 8, 16, 32, 64] {
         for name in CASES {
@@ -210,12 +223,20 @@ fn emit_scalar_identity_differentials() {
                 }
                 verify(&r).unwrap();
                 let wasm = emit(&lower(&r).unwrap(), layout, 100).unwrap().bytes;
-                std::fs::write(format!("build/ir-scalar/{bits}-{name}-{optimized}.wasm"), wasm).unwrap();
+                std::fs::write(
+                    format!("build/ir-scalar/{bits}-{name}-{optimized}.wasm"),
+                    wasm,
+                )
+                .unwrap();
             }
             manifest.push(format!("[{bits},\"{name}\"]"));
         }
     }
-    std::fs::write("build/ir-scalar/cases.json", format!("[{}]\n", manifest.join(","))).unwrap();
+    std::fs::write(
+        "build/ir-scalar/cases.json",
+        format!("[{}]\n", manifest.join(",")),
+    )
+    .unwrap();
 }
 #[test]
 fn budget_exhaustion_never_partially_rewrites_the_region() {
@@ -227,7 +248,11 @@ fn budget_exhaustion_never_partially_rewrites_the_region() {
         match scalar::run(&mut r, limit) {
             Err(message) => {
                 assert!(message.contains("work budget"));
-                assert_eq!(format!("{r:?}"), before, "partial mutation at budget {limit}");
+                assert_eq!(
+                    format!("{r:?}"),
+                    before,
+                    "partial mutation at budget {limit}"
+                );
             },
             Ok(stats) => {
                 assert!(stats.constants > 0);
@@ -258,12 +283,23 @@ fn scalar_rewrites_every_state_observation_without_removing_effects() {
     b.region.states[rep.index()].resume = ResumeKind::RepProgress;
     b.region.states[rep.index()].rep_progress = Some([alias; 3]);
     b.region.states[rep.index()].count_base = Some(alias);
-    let effect =
-        b.region.append(b.block, Op::PollBudget, vec![b.effect], &[Type::Effect], Some(rep))[0];
+    let effect = b.region.append(
+        b.block,
+        Op::PollBudget,
+        vec![b.effect],
+        &[Type::Effect],
+        Some(rep),
+    )[0];
     let after = snapshot(&mut b);
     b.region.states[after.index()].next_value = Some(alias);
     b.region.states[after.index()].count_base = Some(alias);
-    b.region.append(b.block, Op::PollBudget, vec![effect], &[Type::Effect], Some(after));
+    b.region.append(
+        b.block,
+        Op::PollBudget,
+        vec![effect],
+        &[Type::Effect],
+        Some(after),
+    );
     b.region.terminate(b.block, Terminator::Exit(after));
     let before = b.region.blocks[0].instructions.clone();
     let stats = scalar::run(&mut b.region, scalar::DEFAULT_WORK_LIMIT).unwrap();
@@ -303,7 +339,8 @@ fn inverse_bitfield_updates_and_extensions_keep_exact_widths() {
         let mut r = finish(b, extracted);
         let stats = scalar::run(&mut r, scalar::DEFAULT_WORK_LIMIT).unwrap();
         assert_eq!(stats.aliases, 1);
-        let Definition::Instruction(id, _) = r.values[r.states[0].gpr[0].index()].definition else {
+        let Definition::Instruction(id, _) = r.values[r.states[0].gpr[0].index()].definition
+        else {
             panic!();
         };
         assert_eq!(r.instructions[id.index()].args, vec![part]);
@@ -315,7 +352,12 @@ fn inverse_bitfield_updates_and_extensions_keep_exact_widths() {
     let byte = b.extract(base, 0, Type::I8);
     let wide = b.node(Op::Extend { signed: false }, vec![byte], Type::I32);
     let mut r = finish(b, wide);
-    assert_eq!(scalar::run(&mut r, scalar::DEFAULT_WORK_LIMIT).unwrap().aliases, 0);
+    assert_eq!(
+        scalar::run(&mut r, scalar::DEFAULT_WORK_LIMIT)
+            .unwrap()
+            .aliases,
+        0
+    );
     assert_eq!(r.states[0].gpr[0], wide);
 }
 #[test]
@@ -347,9 +389,14 @@ fn dependency_order_is_independent_of_instruction_arena_order() {
 }
 #[test]
 fn ignored_load_result_does_not_erase_the_memory_observation() {
-    let mut r =
-        lift_cpu_cfg(&[0x8B, 0x03, 0x31, 0xC0], GuestEip(0x1000), LinearAddress(0x100000), true, 8)
-            .unwrap();
+    let mut r = lift_cpu_cfg(
+        &[0x8B, 0x03, 0x31, 0xC0],
+        GuestEip(0x1000),
+        LinearAddress(0x100000),
+        true,
+        8,
+    )
+    .unwrap();
     let ordered = |r: &Region| {
         r.blocks
             .iter()
@@ -369,12 +416,26 @@ fn ignored_load_result_does_not_erase_the_memory_observation() {
 #[test]
 fn copy_and_fold_switches_are_independent() {
     let mut r = fixture(32, "add-r0");
-    let stats = passes::run(&mut r, PassConfig { copy: false, ..config() }).unwrap();
+    let stats = passes::run(
+        &mut r,
+        PassConfig {
+            copy: false,
+            ..config()
+        },
+    )
+    .unwrap();
     assert_eq!(stats.scalar_aliases, 0);
     assert_eq!(stats.copied, 0);
 
     let mut r = fixture(32, "sub-self");
-    let stats = passes::run(&mut r, PassConfig { fold: false, ..config() }).unwrap();
+    let stats = passes::run(
+        &mut r,
+        PassConfig {
+            fold: false,
+            ..config()
+        },
+    )
+    .unwrap();
     assert_eq!(stats.scalar_constants, 0);
 
     let mut r = fixture(32, "add-r0");
@@ -395,7 +456,13 @@ fn cross_block_aliases_rewrite_edges_conditions_and_entry_states() {
     b.region.param(join, Type::I32);
     let initial = snapshot(&mut b);
     b.region.blocks[middle.index()].entry_state = Some(initial);
-    b.region.terminate(entry, Terminator::Branch(Edge { target: middle, args: vec![b.effect] }));
+    b.region.terminate(
+        entry,
+        Terminator::Branch(Edge {
+            target: middle,
+            args: vec![b.effect],
+        }),
+    );
     b.block = middle;
     let zero = b.constant(0, Type::I32);
     let a = b.binary(Binary::Add, x, zero);
@@ -404,19 +471,34 @@ fn cross_block_aliases_rewrite_edges_conditions_and_entry_states() {
     b.gpr[0] = a;
     let incoming = snapshot(&mut b);
     b.region.blocks[join.index()].entry_state = Some(incoming);
-    let edge = Edge { target: join, args: vec![me, a] };
+    let edge = Edge {
+        target: join,
+        args: vec![me, a],
+    };
     b.region.terminate(
         middle,
-        Terminator::CondBranch { condition, taken: edge.clone(), not_taken: edge },
+        Terminator::CondBranch {
+            condition,
+            taken: edge.clone(),
+            not_taken: edge,
+        },
     );
     b.block = join;
     b.effect = je;
     let one = b.constant(1, Type::I32);
     let value = b.binary(Binary::Mul, a, one);
     let mut r = finish(b, value);
-    assert_eq!(scalar::run(&mut r, scalar::DEFAULT_WORK_LIMIT).unwrap().aliases, 3);
-    let Terminator::CondBranch { condition, taken, not_taken } =
-        r.blocks[middle.index()].terminator.as_ref().unwrap()
+    assert_eq!(
+        scalar::run(&mut r, scalar::DEFAULT_WORK_LIMIT)
+            .unwrap()
+            .aliases,
+        3
+    );
+    let Terminator::CondBranch {
+        condition,
+        taken,
+        not_taken,
+    } = r.blocks[middle.index()].terminator.as_ref().unwrap()
     else {
         panic!();
     };
@@ -430,14 +512,28 @@ fn cross_block_aliases_rewrite_edges_conditions_and_entry_states() {
 fn self_xor_exposes_flags_for_branch_pruning_and_budget_recovery() {
     // xor eax,eax; jnz dead; inc eax; jmp end; dead: inc ebx; end: nop
     let bytes = [0x31, 0xC0, 0x75, 3, 0x40, 0xEB, 1, 0x43, 0x90];
-    let original = lift_cpu_cfg(&bytes, GuestEip(0x1000), LinearAddress(0x100000), true, 16).unwrap();
+    let original =
+        lift_cpu_cfg(&bytes, GuestEip(0x1000), LinearAddress(0x100000), true, 16).unwrap();
     let mut optimized = original.clone();
-    let stats =
-        passes::run(&mut optimized, PassConfig { prune: true, phis: true, rounds: 2, ..config() })
-            .unwrap();
+    let stats = passes::run(
+        &mut optimized,
+        PassConfig {
+            prune: true,
+            phis: true,
+            rounds: 2,
+            ..config()
+        },
+    )
+    .unwrap();
     assert!(stats.scalar_constants > 0);
     assert!(stats.branches > 0 && stats.unreachable > 0);
-    let layout = StateLayout { gpr: 0, flags: 32, eip: 36, committed: 40, flag_operand: 44 };
+    let layout = StateLayout {
+        gpr: 0,
+        flags: 32,
+        eip: 36,
+        committed: 40,
+        flag_operand: 44,
+    };
     std::fs::create_dir_all("build/ir-scalar").unwrap();
     for budget in [1, 2, 3, 100] {
         for (opt, r) in [(false, &original), (true, &optimized)] {
@@ -462,5 +558,8 @@ fn unused_arena_slots_do_not_break_the_transaction() {
     verify(&r).unwrap();
     scalar::run(&mut r, scalar::DEFAULT_WORK_LIMIT).unwrap();
     verify(&r).unwrap();
-    assert_eq!(r.instructions.last().unwrap().args, vec![ValueId(u32::MAX); 2]);
+    assert_eq!(
+        r.instructions.last().unwrap().args,
+        vec![ValueId(u32::MAX); 2]
+    );
 }

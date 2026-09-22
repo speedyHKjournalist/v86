@@ -2,9 +2,15 @@
 //! unsuccessful probes bounded after arbitrary replacement, without tombstones.
 use super::entry::CpuEntryKey;
 const SIZE: usize = 512;
-pub struct HotIndex { slots: [Option<(CpuEntryKey, usize)>; SIZE] }
+pub struct HotIndex {
+    slots: [Option<(CpuEntryKey, usize)>; SIZE],
+}
 impl HotIndex {
-    pub const fn new() -> Self { Self { slots: [None; SIZE] } }
+    pub const fn new() -> Self {
+        Self {
+            slots: [None; SIZE],
+        }
+    }
     pub fn clear(&mut self) { self.slots.fill(None); }
     fn hash(key: CpuEntryKey) -> usize {
         let n = key.linear.0 ^ key.pc.0.rotate_left(13) ^ u32::from(key.default_32);
@@ -14,7 +20,9 @@ impl HotIndex {
         let mut at = Self::hash(key);
         for _ in 0..SIZE {
             let (saved, index) = self.slots[at]?;
-            if saved == key { return Some(index); }
+            if saved == key {
+                return Some(index);
+            }
             at = (at + 1) & (SIZE - 1);
         }
         None
@@ -61,16 +69,31 @@ mod tests {
         let mut index = HotIndex::new();
         let mut reference = std::collections::BTreeMap::new();
         let mut random = 0xA341316Cu32;
-        let key = |n: u32| CpuEntryKey { linear: LinearAddress(0x100000 + (n % 64) * 4096),
-            pc: GuestEip(0x100000 + (n % 128) * 4096), default_32: n & 128 != 0 };
+        let key = |n: u32| CpuEntryKey {
+            linear: LinearAddress(0x100000 + (n % 64) * 4096),
+            pc: GuestEip(0x100000 + (n % 128) * 4096),
+            default_32: n & 128 != 0,
+        };
         for step in 0..20000 {
-            random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
             let n = random & 255;
-            if step % 509 == 0 { index.clear(); reference.clear(); }
+            if step % 509 == 0 {
+                index.clear();
+                reference.clear();
+            }
             else if random & 256 != 0 && reference.len() < 128 {
-                index.insert(key(n), step); reference.insert(n, step);
-            } else { index.remove(key(n)); reference.remove(&n); }
-            for probe in 0..256 { assert_eq!(index.get(key(probe)), reference.get(&probe).copied()); }
+                index.insert(key(n), step);
+                reference.insert(n, step);
+            }
+            else {
+                index.remove(key(n));
+                reference.remove(&n);
+            }
+            for probe in 0..256 {
+                assert_eq!(index.get(key(probe)), reference.get(&probe).copied());
+            }
         }
     }
 }

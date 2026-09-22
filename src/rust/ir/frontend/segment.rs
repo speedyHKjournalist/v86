@@ -12,9 +12,7 @@ pub fn supports(i: &DecodedInstruction) -> bool {
         0x8C | 0x8E | 0xC4 | 0xC5 | 0x0FB2 | 0x0FB4 | 0x0FB5
     )
 }
-pub fn terminal(i: &DecodedInstruction) -> bool {
-    !matches!(i.encoding.opcode, 0x8C | 0x8E)
-}
+pub fn terminal(i: &DecodedInstruction) -> bool { !matches!(i.encoding.opcode, 0x8C | 0x8E) }
 pub fn lift(
     b: &mut IntegerBuilder,
     i: &DecodedInstruction,
@@ -40,10 +38,12 @@ pub fn lift(
             let offset = effective_offset(b, &ea);
             let address = segmented(b, offset, ea.segment, map);
             memory_store(b, address, selector, 16, map, i, count, false);
-        } else {
+        }
+        else {
             let value = if i.operand_size == 32 {
                 b.node(Op::Extend { signed: false }, vec![selector], Type::I32)
-            } else {
+            }
+            else {
                 selector
             };
             b.write(rm, i.operand_size, value);
@@ -55,11 +55,13 @@ pub fn lift(
             let offset = effective_offset(b, &ea);
             let address = segmented(b, offset, ea.segment, map);
             memory_read(b, address, 16, map, false).0
-        } else {
+        }
+        else {
             b.read(rm, 16)
         };
         (selector, b.constant(0, Type::I32), reg, 0, 0)
-    } else {
+    }
+    else {
         let ea = i.ea.unwrap();
         let offset = effective_offset(b, &ea);
         let address = segmented(b, offset, ea.segment, map);
@@ -69,7 +71,8 @@ pub fn lift(
         let selector = memory_read(b, tail, 16, map, false).0;
         let data = if i.operand_size == 16 {
             b.node(Op::Extend { signed: false }, vec![data], Type::I32)
-        } else {
+        }
+        else {
             data
         };
         let segment = match op {
@@ -85,7 +88,13 @@ pub fn lift(
     let selector = b.node(Op::Extend { signed: false }, vec![selector], Type::I32);
     let segment = b.constant(segment as u32, Type::I32);
     if op == 0x8E {
-        call(b, "ir_mov_segment_continue", vec![selector, segment], map, false);
+        call(
+            b,
+            "ir_mov_segment_continue",
+            vec![selector, segment],
+            map,
+            false,
+        );
         return Ok(());
     }
     let register = b.constant(register as u32, Type::I32);

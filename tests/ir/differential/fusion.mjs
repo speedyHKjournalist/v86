@@ -10,7 +10,7 @@ try {
  const cpu=vm.v86.cpu,e=cpu.wm.exports,mem=cpu.mem8,w=new Uint32Array(e.memory.buffer),v=new DataView(mem.buffer,mem.byteOffset);
  const A=0x100000,B=A+0x2000,DATA=0x110000,STACK=0x90000;
  vm.run();const end=performance.now()+10000;
- while(v.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<end);await sleep(1);}await vm.stop();
+ while(v.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<end);await sleep(1);} await vm.stop();
  const state=()=>({gpr:Array.from(cpu.reg32),flags:e.get_eflags()>>>0,ip:cpu.instruction_pointer[0]>>>0,
   data:v.getUint32(DATA,true),xmm:Array.from(cpu.reg_xmm32s),cr2:cpu.cr[2]>>>0,frame:Array.from(mem.slice(STACK-32,STACK))});
  function reset(mode,kind,{cold=false,miss=false,lazy=false,count=100,mmio=false}={}){
@@ -31,27 +31,27 @@ try {
  // Identical overlapping windows may share a trace; the peer is also a side entry.
  const overlap=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync("build/ir-fusion/overlap.wasm")),{e:{...e,m:e.memory}}).exports.f;
  reset(true,0); cpu.reg32[2]=A+3; mem.set([0x40,0xFF,0xE2,0x41,0xFF,0xE3],A);
- overlap(0); const overlapState=state(),overlapSteps=(w[664>>2]-100)>>>0;
- assert(overlapSteps>8);
+ overlap(0); const overlap_state=state(),overlap_steps=(w[664>>2]-100)>>>0;
+ assert(overlap_steps>8);
  reset(true,0); cpu.reg32[2]=A+3; mem.set([0x40,0xFF,0xE2,0x41,0xFF,0xE3],A);
- for(let i=0;i<overlapSteps;i++)e.ir_test_step();assert.deepEqual(overlapState,state());
+ for(let i=0;i<overlap_steps;i++)e.ir_test_step();assert.deepEqual(overlap_state,state());
  const four=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync("build/ir-fusion/four.wasm")),{e:{...e,m:e.memory}}).exports.f;
- const fourReset=()=>{reset(true,0);cpu.reg32[2]=B;cpu.reg32[3]=B+0x2000;cpu.reg32[6]=B+0x4000;cpu.reg32[7]=A;
+ const four_reset=()=>{reset(true,0);cpu.reg32[2]=B;cpu.reg32[3]=B+0x2000;cpu.reg32[6]=B+0x4000;cpu.reg32[7]=A;
   [[0x40,0xFF,0xE2],[0x41,0xFF,0xE3],[0x45,0xFF,0xE6],[0x40,0xFF,0xE7]].forEach((code,i)=>mem.set(code,A+i*0x2000));};
- fourReset();four(0);const fourState=state(),fourSteps=(w[664>>2]-100)>>>0;assert(fourSteps>24&&fourSteps<=32,'four-source activation is bounded and crosses the cycle repeatedly');
- fourReset();for(let i=0;i<fourSteps;i++)e.ir_test_step();assert.deepEqual(fourState,state());
+ four_reset();four(0);const four_state=state(),four_steps=(w[664>>2]-100)>>>0;assert(four_steps>24&&four_steps<=32,"four-source activation is bounded and crosses the cycle repeatedly");
+ four_reset();for(let i=0;i<four_steps;i++)e.ir_test_step();assert.deepEqual(four_state,state());
  const interior=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync("build/ir-fusion/four-interior.wasm")),{e:{...e,m:e.memory}}).exports.f;
- fourReset();cpu.reg32[7]=A+1;interior(0);
- const interiorState=state(),interiorSteps=(w[664>>2]-100)>>>0;assert(interiorSteps>24&&interiorSteps<=32);
- fourReset();cpu.reg32[7]=A+1;for(let i=0;i<interiorSteps;i++)e.ir_test_step();assert.deepEqual(interiorState,state());
- let helperComparisons=0;
- for(const mode of [false,true])for(const count of [3,4])for(const simd of [false,true])for(const opt of [false,true])for(const budget of [1,2,3,4,7,32])for(const fault of [false,true]) {
+ four_reset();cpu.reg32[7]=A+1;interior(0);
+ const interior_state=state(),interior_steps=(w[664>>2]-100)>>>0;assert(interior_steps>24&&interior_steps<=32);
+ four_reset();cpu.reg32[7]=A+1;for(let i=0;i<interior_steps;i++)e.ir_test_step();assert.deepEqual(interior_state,state());
+ let helper_comparisons=0;
+ for(const mode of [false,true]) for(const count of [3,4]) for(const simd of [false,true]) for(const opt of [false,true]) for(const budget of [1,2,3,4,7,32]) for(const fault of [false,true]) {
   const configure=()=>{
    reset(mode,0,{count:0xFFFFFFFC});const base=mode?0:0xFF000;
    cpu.reg32[2]=B-base;cpu.reg32[3]=B+0x2000-base;cpu.reg32[6]=B+0x4000-base;cpu.reg32[7]=A-base;
    for(let i=0;i<count;i++)mem.set([[0x40,0x41,0x45,0x40][i],...(simd?[0xF3,0x0F,0x51,0xC0]:[0xFA]),0xFF,[0xE2,0xE3,count===3?0xE7:0xE6,0xE7][i]],A+i*0x2000);
    cpu.reg_xmm32s[0]=0x40800000;cpu.cr[0]=cpu.cr[0]&~12|(simd&&fault?8:0);
-   if(!simd&&fault)wordsCpl(3);
+   if(!simd&&fault)words_cpl(3);
    v.setUint32(0x12000,v.getUint32(0x12000,true)|4,true);
    for(let i=0;i<count;i++)v.setUint32(0x13000+((A+i*0x2000)>>>12)*4,(A+i*0x2000)|7,true);
    e.full_clear_tlb();
@@ -61,19 +61,19 @@ try {
    cpu.segment_offsets[6]=0x4000;cpu.segment_limits[6]=0x67;cpu.sreg[6]=0x28;cpu.tss_size_32[0]=1;
    v.setUint32(0x4004,STACK,true);v.setUint32(0x4008,16,true);e.update_state_flags();
   };
-  function wordsCpl(cpl){w[612>>2]=cpl;cpu.sreg[1]=8|cpl;cpu.sreg[2]=16|cpl;}
+  function words_cpl(cpl){w[612>>2]=cpl;cpu.sreg[1]=8|cpl;cpu.sreg[2]=16|cpl;}
   const f=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(`build/ir-fusion/helpers-${mode}-${count}-${simd}-${opt}-${budget}.wasm`)),{e:{...e,m:e.memory}}).exports.f;
   configure();f(0);const actual=state(),steps=(w[664>>2]-0xFFFFFFFC)>>>0;
   assert(steps<=budget);if(!fault&&budget===32)assert(steps>count*3,"audited helpers retain state across the complete cycle");
   configure();for(let i=0;i<steps+(actual.ip===0x180000?1:0);i++)e.ir_test_step();
-  assert.deepEqual(actual,state(),`helper fusion ${mode}/${count}/${simd}/${opt}/${budget}/${fault}`);helperComparisons++;
+  assert.deepEqual(actual,state(),`helper fusion ${mode}/${count}/${simd}/${opt}/${budget}/${fault}`);helper_comparisons++;
  }
- console.log(`PASS: ${helperComparisons} three/four-source CLI/SSE helper comparisons with faults, budgets, count wrap and state retention`);
+ console.log(`PASS: ${helper_comparisons} three/four-source CLI/SSE helper comparisons with faults, budgets, count wrap and state retention`);
  cpu.cr[0]&=~12;
  let comparisons=0,retained=0;
- for(const mode of [false,true])for(let kind=0;kind<4;kind++)for(const optimize of [false,true])for(const budget of [1,2,3,4,7,32]){
+ for(const mode of [false,true]) for(let kind=0;kind<4;kind++) for(const optimize of [false,true]) for(const budget of [1,2,3,4,7,32]){
   const f=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(`build/ir-fusion/${mode}-${kind}-${optimize}-${budget}.wasm`)),{e:{...e,m:e.memory}}).exports.f;
-  for(const cold of [false,true])for(const miss of [false,true])for(const lazy of [false,true])for(const count of [100,0xFFFFFFFC]){
+  for(const cold of [false,true]) for(const miss of [false,true]) for(const lazy of [false,true]) for(const count of [100,0xFFFFFFFC]){
    const opts={cold,miss,lazy,count};reset(mode,kind,opts);f(0);const actual=state(),n=(w[664>>2]-count)>>>0;
    assert(n<=budget,`bounded count ${mode}/${kind}/${optimize}/${budget}: ${n}`);
    if(miss&&budget>=3)assert.equal(n,2,"prediction miss exits after the jump");
@@ -102,7 +102,7 @@ try {
  }
  // Both physical code dependencies, including a distinct virtual alias of the peer,
  // must take the committing store exit before any subsequent compiled instruction.
- for(const optimize of [false,true])for(const target of [A,B,0x114000]){
+ for(const optimize of [false,true]) for(const target of [A,B,0x114000]){
   reset(true,3);cpu.reg32[6]=target;
   if(target===0x114000)v.setUint32(0x13000+(target>>>12)*4,B|3,true);
   e.full_clear_tlb();e.ir_memory_write(target,mem[target===A?A:B],1);
@@ -112,4 +112,4 @@ try {
   v.setUint32(0x13000+(target>>>12)*4,target|3,true);e.full_clear_tlb();
  }
  console.log(`PASS: ${comparisons} fused/interpreter comparisons; ${retained} repeated state-retaining executions, guarded prediction misses, 16/32-bit, GPR/FLAGS/XMM, count wrap, cold/warm RAM, callback code mutation, peer #PF and source/alias stores`);
-}finally{await vm.destroy();}
+} finally {await vm.destroy();}

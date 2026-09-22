@@ -110,11 +110,21 @@ fn eligible_store(plan: &MemoryPlan) -> bool {
 // Only the native commit can reach the next instruction; MMIO/cross-page/code
 // aliases exit before the emitter establishes the forwarding value.
 fn committed_rmw(data: &MirData, effect: &EffectPlan) -> Option<(ValueId, u8)> {
-    let EffectPlan::RmwCommit { bytes, ticket, .. } = effect else { return None; };
-    let definition = data.value_definitions.get(ticket.index()).copied().flatten()?;
+    let EffectPlan::RmwCommit { bytes, ticket, .. } = effect
+    else {
+        return None;
+    };
+    let definition = data
+        .value_definitions
+        .get(ticket.index())
+        .copied()
+        .flatten()?;
     let read = data.memory.get(definition.index())?.as_ref()?;
     if !matches!(read.native, NativeMemory::ScalarLoad { ticket: Some(t), .. } if t == *ticket)
-        || read.guard != RamGuard::new(*bytes, true) { return None; }
+        || read.guard != RamGuard::new(*bytes, true)
+    {
+        return None;
+    }
     Some((read.address, *bytes))
 }
 
@@ -170,7 +180,11 @@ fn key_for(addresses: &[Option<AddressKey>], plan: &MemoryPlan) -> AddressKey {
 }
 
 fn value_plan(data: &MirData, value: ValueId) -> Option<&super::value::ValuePlan> {
-    let definition = data.value_definitions.get(value.index()).copied().flatten()?;
+    let definition = data
+        .value_definitions
+        .get(value.index())
+        .copied()
+        .flatten()?;
     data.values.get(definition.index())?.as_ref()
 }
 
@@ -188,19 +202,11 @@ fn native_offsets_disjoint(a: u32, a_bytes: u8, b: u32, b_bytes: u8) -> bool {
     // inequality is insufficient; byte offsets within a physical page must be
     // disjoint even under the worst-case page alias.
     (0..a_bytes).all(|i| {
-        (0..b_bytes).all(|j| {
-            (a.wrapping_add(i as u32) & 4095) != (b.wrapping_add(j as u32) & 4095)
-        })
+        (0..b_bytes).all(|j| (a.wrapping_add(i as u32) & 4095) != (b.wrapping_add(j as u32) & 4095))
     })
 }
 
-fn alias(
-    data: &MirData,
-    a: AddressKey,
-    a_bytes: u8,
-    b: AddressKey,
-    b_bytes: u8,
-) -> AliasProof {
+fn alias(data: &MirData, a: AddressKey, a_bytes: u8, b: AddressKey, b_bytes: u8) -> AliasProof {
     if a == b && a_bytes == b_bytes {
         return AliasProof::Exact;
     }
@@ -216,18 +222,14 @@ fn alias(
                 null_byte: bnull,
                 offset: bo,
             },
-        ) if abase == bbase && anull == bnull => {
-            constant_i32(data, ao).zip(constant_i32(data, bo))
-        },
+        ) if abase == bbase && anull == bnull => constant_i32(data, ao).zip(constant_i32(data, bo)),
         (AddressKey::Value(a), AddressKey::Value(b)) => {
             constant_i32(data, a).zip(constant_i32(data, b))
         },
         _ => None,
     };
     match constants {
-        Some((a, b)) if native_offsets_disjoint(a, a_bytes, b, b_bytes) => {
-            AliasProof::Disjoint
-        },
+        Some((a, b)) if native_offsets_disjoint(a, a_bytes, b, b_bytes) => AliasProof::Disjoint,
         _ => AliasProof::MayAlias,
     }
 }
@@ -286,7 +288,8 @@ fn plan_with_loops(
                 previous = None;
                 continue;
             }
-            let Some(memory) = data.memory.get(index) else {
+            let Some(memory) = data.memory.get(index)
+            else {
                 return Err(CompileError::InvalidIr(
                     "forwarding instruction outside arena".into(),
                 ));
@@ -302,7 +305,8 @@ fn plan_with_loops(
                 let key = key_for(&addresses, memory);
                 if eligible_load(memory) {
                     if let Some((old_key, bytes, old)) = previous {
-                        if alias(data, old_key, bytes, key, memory.guard.bytes) == AliasProof::Exact {
+                        if alias(data, old_key, bytes, key, memory.guard.bytes) == AliasProof::Exact
+                        {
                             if result[old.index()].is_none() {
                                 result[old.index()] = Some(Forwarding::Begin);
                             }
@@ -329,7 +333,8 @@ fn plan_with_loops(
                     previous = Some((key, memory.guard.bytes, id));
                     continue;
                 }
-            } else if let Some(effect) = &data.effects[index] {
+            }
+            else if let Some(effect) = &data.effects[index] {
                 if segment(effect).is_some() {
                     continue;
                 }
@@ -338,7 +343,8 @@ fn plan_with_loops(
                     previous = Some((key, bytes, id));
                     continue;
                 }
-            } else if data.calls[index].is_none() && data.control.polls[index].is_none() {
+            }
+            else if data.calls[index].is_none() && data.control.polls[index].is_none() {
                 if let Some(value) = &data.values[index] {
                     spend(&mut left, value.steps.len())?;
                     if value.steps.iter().all(|step| {
@@ -464,9 +470,7 @@ fn loop_plan(data: &MirData, work_limit: usize) -> Result<LoopPlan, CompileError
         for edge in cfg.terminator.edges() {
             let target = edge.target.index();
             if target >= nblocks {
-                return Err(CompileError::InvalidIr(
-                    "loop edge outside MIR CFG".into(),
-                ));
+                return Err(CompileError::InvalidIr("loop edge outside MIR CFG".into()));
             }
             if !predecessors[target].contains(&block) {
                 predecessors[target].push(block);
@@ -474,11 +478,7 @@ fn loop_plan(data: &MirData, work_limit: usize) -> Result<LoopPlan, CompileError
         }
     }
 
-    let all = if nblocks == 64 {
-        u64::MAX
-    } else {
-        (1u64 << nblocks) - 1
-    };
+    let all = if nblocks == 64 { u64::MAX } else { (1u64 << nblocks) - 1 };
     let mut dominates = vec![all; nblocks];
     for block in 0..nblocks {
         if data.control.entries.contains(&BlockId(block as u32)) || predecessors[block].is_empty() {
@@ -674,27 +674,47 @@ fn guard_plan(data: &MirData, work_limit: usize) -> Result<Vec<Option<Forwarding
                 if eligible_load(memory) || eligible_store(memory) {
                     let key = key_for(&addresses, memory);
                     if let Some((old_key, old_guard, old)) = &previous {
-                        if key == *old_key && old_guard.bytes >= memory.guard.bytes
-                            && old_guard.flags_mask & memory.guard.flags_mask == memory.guard.flags_mask
+                        if key == *old_key
+                            && old_guard.bytes >= memory.guard.bytes
+                            && old_guard.flags_mask & memory.guard.flags_mask
+                                == memory.guard.flags_mask
                             && old_guard.user_mask == memory.guard.user_mask
                             && old_guard.required_flags == memory.guard.required_flags
                         {
-                            if result[old.index()].is_none() { result[old.index()] = Some(Forwarding::Begin); }
+                            if result[old.index()].is_none() {
+                                result[old.index()] = Some(Forwarding::Begin);
+                            }
                             result[i] = Some(Forwarding::Reuse { previous: *old });
                         }
                     }
                     previous = Some((key, memory.guard.clone(), id));
                     continue;
                 }
-            } else if let Some(effect) = &data.effects[i] {
-                if segment(effect).is_some() { continue; }
-            } else if let Some(poll) = &data.control.polls[i] {
-                if poll.cost == 1 { continue; }
-            } else if data.calls[i].is_none() {
+            }
+            else if let Some(effect) = &data.effects[i] {
+                if segment(effect).is_some() {
+                    continue;
+                }
+            }
+            else if let Some(poll) = &data.control.polls[i] {
+                if poll.cost == 1 {
+                    continue;
+                }
+            }
+            else if data.calls[i].is_none() {
                 if let Some(value) = &data.values[i] {
                     spend(&mut left, value.steps.len())?;
-                    if value.steps.iter().all(|step| !matches!(step,
-                        Step::Read { cpu: Reading::Call { .. }, .. })) { continue; }
+                    if value.steps.iter().all(|step| {
+                        !matches!(
+                            step,
+                            Step::Read {
+                                cpu: Reading::Call { .. },
+                                ..
+                            }
+                        )
+                    }) {
+                        continue;
+                    }
                 }
             }
             previous = None;
@@ -702,9 +722,15 @@ fn guard_plan(data: &MirData, work_limit: usize) -> Result<Vec<Option<Forwarding
     }
     Ok(result)
 }
-pub(super) fn optimize_guards(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
+pub(super) fn optimize_guards(
+    data: &mut MirData,
+    work_limit: usize,
+) -> Result<usize, CompileError> {
     let next = guard_plan(data, work_limit)?;
-    let count = next.iter().filter(|p| matches!(p, Some(Forwarding::Reuse { .. }))).count();
+    let count = next
+        .iter()
+        .filter(|p| matches!(p, Some(Forwarding::Reuse { .. })))
+        .count();
     data.ram_guard_reuse = next;
     Ok(count)
 }
@@ -712,7 +738,11 @@ pub(super) fn verify_guards(data: &MirData) -> Result<(), CompileError> {
     if data.ram_guard_reuse.len() != data.memory.len()
         || (data.ram_guard_reuse.iter().any(Option::is_some)
             && data.ram_guard_reuse != guard_plan(data, DEFAULT_WORK_LIMIT)?)
-    { return Err(CompileError::InvalidIr("invalid RAM guard reuse certificate".into())); }
+    {
+        return Err(CompileError::InvalidIr(
+            "invalid RAM guard reuse certificate".into(),
+        ));
+    }
     Ok(())
 }
 pub(super) fn optimize(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
@@ -725,17 +755,21 @@ pub(super) fn optimize(data: &mut MirData, work_limit: usize) -> Result<usize, C
     Ok(count)
 }
 
-pub(super) fn optimize_loops(
-    data: &mut MirData,
-    work_limit: usize,
-) -> Result<usize, CompileError> {
+pub(super) fn optimize_loops(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
     let next_loop = loop_plan(data, work_limit)?;
     // Keep the update transactional: derive the compatible intra-block
     // certificate before publishing either plan.
     let next_forward = if data.ram_forwarding.iter().any(Option::is_some) {
         plan_with_loops(data, &next_loop, DEFAULT_WORK_LIMIT)?
-    } else { vec![None; data.memory.len()] };
-    let count = next_loop.instructions.iter().filter(|p| p.is_some()).count();
+    }
+    else {
+        vec![None; data.memory.len()]
+    };
+    let count = next_loop
+        .instructions
+        .iter()
+        .filter(|p| p.is_some())
+        .count();
     data.ram_loop_cache = next_loop;
     data.ram_forwarding = next_forward;
     Ok(count)

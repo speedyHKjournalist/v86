@@ -77,12 +77,14 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     let op = i.encoding.opcode;
     let bytes = if matches!(op, 0xF30F10 | 0xF30F11 | 0x660F6E | 0x660F7E) {
         4
-    } else if matches!(
+    }
+    else if matches!(
         op,
         0xF20F10 | 0xF20F11 | 0x0F13 | 0x660F13 | 0x0F17 | 0x660F17 | 0xF30F7E | 0x660FD6
     ) {
         8
-    } else {
+    }
+    else {
         16
     };
     let register = i.modrm.unwrap() >> 3 & 7;
@@ -109,7 +111,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
                 .unwrap();
             let commit = snapshot(b, i.instruction_pc, i.next_pc, count);
             b.region.instructions[store.index()].commit = Some(commit);
-        } else {
+        }
+        else {
             let values = b.region.append(
                 b.block,
                 Op::XmmLoad { bytes, register },
@@ -120,7 +123,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             b.xmm[register as usize] = values[0];
             b.effect = values[1];
         }
-    } else {
+    }
+    else {
         let rm = i.modrm.unwrap() & 7;
         if op == 0x660F6E {
             let value = b.read(rm, 32);
@@ -149,7 +153,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         let (source, destination) = if is_store(i) { (register, rm) } else { (rm, register) };
         let value = if bytes == 16 {
             b.xmm[source as usize]
-        } else {
+        }
+        else {
             let low = b.node(
                 Op::VectorExtract {
                     bits: bytes * 8,
@@ -165,7 +170,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
                     vec![old, old],
                     Type::V128,
                 )
-            } else {
+            }
+            else {
                 old
             };
             b.node(

@@ -94,7 +94,8 @@ fn address_and_guard_calls_are_legalized() {
                             assert_eq!(*success, None);
                             assert_eq!(call.name, "ir_sse_guard");
                             assert!(call.args.is_empty());
-                        } else {
+                        }
+                        else {
                             assert_eq!(*success, Some(0));
                             assert_eq!(call.name, "ir_memory_check");
                             let width = if bytes[0] == 0x66 { 16 } else { 32 };
@@ -117,9 +118,11 @@ fn stale_effect_plans_and_cpu_import_shadowing_are_rejected() {
     for mutation in 0..11 {
         let bytes: &[u8] = if mutation < 4 {
             &[0x40, 0x01, 0x08]
-        } else if mutation < 7 {
+        }
+        else if mutation < 7 {
             &[0x64, 0x8B, 0x00]
-        } else {
+        }
+        else {
             &[0x0F, 0x10, 0xC1]
         };
         let r = lift_cpu(bytes, GuestEip(0), LinearAddress(0), true).unwrap();

@@ -41,7 +41,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     let (offset, segment) = if let Some(ea) = i.ea {
         let offset = effective_offset(b, &ea);
         (offset, b.constant(ea.segment as u32, Type::I32))
-    } else {
+    }
+    else {
         (b.constant(0, Type::I32), b.constant(u32::MAX, Type::I32))
     };
     let (name, args) = match i.encoding.opcode {

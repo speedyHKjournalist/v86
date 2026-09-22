@@ -285,8 +285,6 @@ pub fn loopify_with_budget(nodes: &Graph, max_extra_basic_blocks: usize) -> Vec<
                 //);
             }
 
-
-
             if entries_to_group.len() * group.len() > max_extra_basic_blocks {
                 let mut subgroup_edges: Graph = Graph::new();
                 for elem in group {
@@ -337,7 +335,8 @@ pub fn loopify_with_budget(nodes: &Graph, max_extra_basic_blocks: usize) -> Vec<
                                     .collect(),
                             );
                         }
-                        let loop_nodes = loopify_with_budget(&subgroup_edges, max_extra_basic_blocks);
+                        let loop_nodes =
+                            loopify_with_budget(&subgroup_edges, max_extra_basic_blocks);
                         WasmStructure::Loop(loop_nodes)
                     })
                     .collect();

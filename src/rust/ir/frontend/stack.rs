@@ -58,9 +58,11 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             let offset = effective_offset(b, &ea);
             let source = segmented(b, offset, ea.segment, map);
             memory_read(b, source, width, map, false).0
-        } else if matches!(op, 0x68 | 0x6A) {
+        }
+        else if matches!(op, 0x68 | 0x6A) {
             b.constant(i.immediate.unwrap(), width_type(width))
-        } else {
+        }
+        else {
             b.read(
                 if op == 0xFF { i.modrm.unwrap() & 7 } else { op as u8 & 7 },
                 width,
@@ -69,7 +71,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         let destination = stack_address(b, new_sp, mode, map);
         b.gpr[4] = new_sp;
         memory_store(b, destination, value, width, map, i, count, false);
-    } else {
+    }
+    else {
         let destination = if let Some(ea) = i.ea {
             // Baseline POP memory resolves EA with temporarily incremented SP.
             b.gpr[4] = new_sp;
@@ -89,7 +92,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             b.effect = address[1];
             b.gpr[4] = old_sp;
             Some(address[0])
-        } else {
+        }
+        else {
             None
         };
         let source = stack_address(b, old_sp, mode, map);
@@ -97,7 +101,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         b.gpr[4] = new_sp;
         if let Some(destination) = destination {
             memory_store(b, destination, value, width, map, i, count, false);
-        } else {
+        }
+        else {
             // The pinned 5C implementation reads directly without incrementing;
             // 8F /0 uses pop16/pop32 before the register write. Their POP SP high
             // halves differ when a 32-bit stack increment carries out of bit 15.
@@ -163,7 +168,8 @@ fn multiple(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32, mode: Va
             b.gpr[4] = next;
             if slot == 7 {
                 memory_store(b, address, value, width, map, i, count, false);
-            } else {
+            }
+            else {
                 b.effect = b.region.append(
                     b.block,
                     Op::PartialStore { bytes: bytes as u8 },
@@ -172,7 +178,8 @@ fn multiple(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32, mode: Va
                     Some(map),
                 )[0];
             }
-        } else {
+        }
+        else {
             let value = memory_read(b, address, width, map, false).0;
             b.gpr[4] = next;
             b.write(reg, width, value);
@@ -201,7 +208,8 @@ fn enter(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32, mode: Value
                 .unwrap();
             b.region.instructions[read.index()].trap_after_fault = true;
             value
-        } else {
+        }
+        else {
             frame
         };
         let next = adjusted(b, b.gpr[4], mode, -bytes);

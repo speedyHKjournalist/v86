@@ -205,7 +205,8 @@ fn independent_entries_and_cpu_reads_are_not_commoned() {
     assert_eq!(run(&mut r, config()).unwrap().commoned, 0);
     let old = r.blocks[a.index()].terminator.take().unwrap();
     let condition = r.append(a, Op::Const(1), vec![], &[Type::I1], None)[0];
-    let Terminator::Branch(taken) = old else {
+    let Terminator::Branch(taken) = old
+    else {
         panic!()
     };
     r.terminate(
@@ -285,7 +286,8 @@ fn pruning_removes_dead_memory_and_rewrites_all_arenas() {
         else {
             panic!()
         };
-        let Definition::Instruction(id, _) = r.values[condition.index()].definition else {
+        let Definition::Instruction(id, _) = r.values[condition.index()].definition
+        else {
             panic!()
         };
         r.instructions[id.index()].op = Op::Const(selected);
@@ -348,10 +350,12 @@ fn pruning_removes_dead_memory_and_rewrites_all_arenas() {
     assert_eq!(stats.unreachable, 0);
 
     let mut dead_helper = diamond();
-    let Some(Terminator::CondBranch { condition, .. }) = &dead_helper.blocks[0].terminator else {
+    let Some(Terminator::CondBranch { condition, .. }) = &dead_helper.blocks[0].terminator
+    else {
         panic!()
     };
-    let Definition::Instruction(id, _) = dead_helper.values[condition.index()].definition else {
+    let Definition::Instruction(id, _) = dead_helper.values[condition.index()].definition
+    else {
         panic!()
     };
     dead_helper.instructions[id.index()].op = Op::Const(0);
@@ -374,7 +378,8 @@ fn pruning_removes_dead_memory_and_rewrites_all_arenas() {
         &[Type::Effect],
         state,
     )[0];
-    let Terminator::Branch(mut edge) = term else {
+    let Terminator::Branch(mut edge) = term
+    else {
         panic!()
     };
     edge.args[0] = after;

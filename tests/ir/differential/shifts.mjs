@@ -18,9 +18,9 @@ function reference(c,regs,flags,last,memory,count) {
     const original=(BigInt(dst<8?regs[r]:memory)>> (dst<8?lsb:0n))&mask;
     let result=original,cf=BigInt(flags&1),n=(immediate<0?(immediate===-2?1:count):immediate)&31;
     if((group===2||group===3)&&width<32)n%=width+1;
-    if(n===0)return dst<8?[...regs,flags]:[...regs,flags,Number(original)];
+    if(n===0) return dst<8?[...regs,flags]:[...regs,flags,Number(original)];
     let pair=group===8?(original<<w)|(BigInt(regs[1])&mask):((BigInt(regs[1])&mask)<<w)|original;
-    const pairMask=(1n<<(2n*w))-1n;
+    const pair_mask=(1n<<(2n*w))-1n;
     for(let bit=0;bit<n;bit++) {
         const low=result&1n,high=result>>(w-1n)&1n;
         if(group===0){result=(result<<1n|high)&mask;cf=high;}
@@ -30,19 +30,19 @@ function reference(c,regs,flags,last,memory,count) {
         else if(group===4||group===6){result=result<<1n&mask;cf=high;}
         else if(group===5){result>>=1n;cf=low;}
         else if(group===7){result=result>>1n|high<<(w-1n);cf=low;}
-        else if(group===8){cf=pair>>(2n*w-1n)&1n;pair=(pair<<1n|cf)&pairMask;result=pair>>w;}
+        else if(group===8){cf=pair>>(2n*w-1n)&1n;pair=(pair<<1n|cf)&pair_mask;result=pair>>w;}
         else {cf=pair&1n;pair=pair>>1n|cf<<(2n*w-1n);result=pair&mask;}
     }
     const high=result>>(w-1n)&1n;
     let of=(group===1||group===3)?high^(result>>(w-2n)&1n):group===5?original>>(w-1n):group===7?0n:group===9?(original>>(w-1n))^high:cf^high;
     if(group===8&&width===32&&n!==1)of=0n;
-    let outFlags=flags&~0x801|Number(cf)|Number(of)<<11;
+    let out_flags=flags&~0x801|Number(cf)|Number(of)<<11;
     if(group>=4) {
         const parity=Number(result&255n).toString(2).replaceAll("0","").length%2===0;
         const af=Number(result&15n)<(last&15);
-        outFlags=outFlags&~0xD4|Number(parity)<<2|Number(af)<<4|Number(result===0n)<<6|Number(high)<<7;
+        out_flags=out_flags&~0xD4|Number(parity)<<2|Number(af)<<4|Number(result===0n)<<6|Number(high)<<7;
     }
-    const out=[...regs,outFlags>>>0];
+    const out=[...regs,out_flags>>>0];
     if(dst<8)out[r]=Number(BigInt(regs[r])&~(mask<<lsb)|result<<lsb)>>>0;
     return dst<8?out:[...out,Number(result)];
 }
@@ -96,7 +96,7 @@ try {
     for(let i=0;i<cases.length;i++) {
         const [bytes,,,group,dst,immediate]=cases[i];
         const counts=immediate===-1?Array.from({length:dst<8?256:32},(_,n)=>n):[immediate<0?1:immediate];
-        for(const count of counts)for(const input of values)for(const opt of [0,1]) {
+        for(const count of counts) for(const input of values) for(const opt of [0,1]) {
             reset(i,input,count,ADDRESS,true);
             const independent=reference(cases[i],Array.from(cpu.reg32,x=>x>>>0),e.get_eflags()>>>0,words[104>>2],get32(ADDRESS),count);
             instances[i][opt].exports.f(0);const actual=state(),actual_raw=raw_state();
@@ -115,7 +115,7 @@ try {
     const observe=(kind,a,value)=>events.push({kind,a,value,regs:Array.from(cpu.reg32,x=>x>>>0),flags:e.get_eflags()>>>0,ip:cpu.instruction_pointer[0]>>>0});
     cpu.io.mmap_register(0xA0000,0x20000,a=>{observe("r8",a);return 0x80+(a&7);},(a,v)=>observe("w8",a,v),
         a=>{observe("r32",a);return 0x89ABCDEF|0;},(a,v)=>observe("w32",a,v>>>0));
-    for(const [c,i] of selected)for(const count of [0,1,9,17,32,255])for(const opt of [0,1]) {
+    for(const [c,i] of selected) for(const count of [0,1,9,17,32,255]) for(const opt of [0,1]) {
         for(const fault of ["missing","readonly","segment",...(c[2]>8?["cross","device-cross"]:[])]) {
             const address=fault.includes("cross")?0x300FFF:ADDRESS;
             reset(i,0x8D7,count,address,false,fault,true);instances[i][opt].exports.f(0);
@@ -128,16 +128,16 @@ try {
         const actual=state(),observed=events.slice();assert(observed.some(e=>e.kind.startsWith("r"))&&observed.some(e=>e.kind.startsWith("w")));
         reset(i,0x8D7,count,ADDRESS,false,"device",true);e.ir_test_step();
         assert.deepEqual(actual,state());assert.deepEqual(observed,events,`device FLAGS group=${c[3]} width=${c[2]} count=${count}`);devices++;
-        reset(i,0x12347FFF,count,ADDRESS,false,"",true);instances[i][opt].exports.f(0);const lazyState=state();
-        reset(i,0x12347FFF,count,ADDRESS,false,"",true);e.ir_test_step();assert.deepEqual(lazyState,state());lazy++;
+        reset(i,0x12347FFF,count,ADDRESS,false,"",true);instances[i][opt].exports.f(0);const lazy_state=state();
+        reset(i,0x12347FFF,count,ADDRESS,false,"",true);e.ir_test_step();assert.deepEqual(lazy_state,state());lazy++;
     }
     console.log(`PASS: ${faults} shift memory faults, ${devices} MMIO read/write observers, ${lazy} lazy-FLAGS slow paths (including zero counts)`);
     let chains=0;
     const prefixes=JSON.parse(fs.readFileSync("build/ir-shifts/chains.json"));
-    for(let id=0;id<prefixes.length;id++)for(const opt of [0,1]) {
+    for(let id=0;id<prefixes.length;id++) for(const opt of [0,1]) {
         const instance=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(`build/ir-shifts/chain-${id}-${opt}.wasm`)),{e:imports});
         const combined=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(`build/ir-shifts/combined-${id}-${opt}.wasm`)),{e:imports});
-        for(const input of values)for(const count of [0,1,2,7,16,31]) {
+        for(const input of values) for(const count of [0,1,2,7,16,31]) {
             const configure=()=>{reset(0,input,count);cpu.is_32[0]=1;e.update_state_flags();mem.set([...prefixes[id],0xC1,0xE2,count],PC);};
             configure();instance.exports.f(0);e.ir_test_step();const actual=state();
             configure();e.ir_test_step();e.ir_test_step();assert.deepEqual(actual,state(),`IR exit provenance ALU=${id} count=${count}`);chains++;

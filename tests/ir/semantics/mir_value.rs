@@ -35,9 +35,11 @@ fn scalar_region(ty: Type, operation: Binary) -> Region {
         args.push(if ty == Type::I64 {
             let low = b.node(Op::Extend { signed: false }, vec![x], Type::I64);
             b.node(Op::Insert { lsb: 32 }, vec![low, b.gpr[reg + 1]], Type::I64)
-        } else if ty == Type::I32 {
+        }
+        else if ty == Type::I32 {
             x
-        } else {
+        }
+        else {
             b.extract(x, 0, ty)
         });
     }
@@ -49,7 +51,8 @@ fn scalar_region(ty: Type, operation: Binary) -> Region {
     };
     b.gpr[1] = if b.ty(result) == Type::I64 {
         b.extract(result, 32, Type::I32)
-    } else {
+    }
+    else {
         b.constant(0, Type::I32)
     };
     let state = b.region.state(StateMap {
@@ -164,7 +167,8 @@ fn packed_selection_is_shared_by_register_and_memory_paths() {
                             _ => None,
                         })
                         .unwrap()
-                } else {
+                }
+                else {
                     mir.values
                         .iter()
                         .flatten()
@@ -316,7 +320,8 @@ fn invalid_programs_fail_stack_and_contract_validation() {
                         _ => None,
                     })
                     .unwrap()
-            } else {
+            }
+            else {
                 mir.values
                     .iter_mut()
                     .flatten()

@@ -1,7 +1,13 @@
 //! Owned use/definition facts for allocation after machine rewrites.
 //! Recovery uses are conservative for both CPU and standalone ABIs.
 use super::{control, value::Step, MirData};
-use crate::ir::{backend::locals::{Allocation, Interference}, hir, ids::*, lowering::CompileError, types::Type};
+use crate::ir::{
+    backend::locals::{Allocation, Interference},
+    hir,
+    ids::*,
+    lowering::CompileError,
+    types::Type,
+};
 use std::collections::BTreeSet;
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Instruction {
@@ -76,7 +82,8 @@ pub fn capture(region: &hir::Region) -> Graph {
                     recovery_id: b.entry_state,
                     exit_uses: if let hir::Terminator::Exit(s) = t {
                         state(region, Some(*s))
-                    } else {
+                    }
+                    else {
                         vec![]
                     },
                     terminator: match t {
@@ -319,20 +326,35 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
     let mut left = work_limit;
     spend(&mut left, n.saturating_mul(n) + ni + nv)?;
     require(n > 0 && !graph.entries.is_empty() && data.control.entries == graph.entries)?;
-    require(data.control.blocks.len() == n && data.control.polls.len() == ni
-        && data.values.len() == ni && data.memory.len() == ni && data.effects.len() == ni
-        && data.calls.len() == ni && data.stack_elided.len() == ni
-        && data.value_blocks.len() == nv && data.value_definitions.len() == nv
-        && data.allocation.value_local.len() == nv)?;
+    require(
+        data.control.blocks.len() == n
+            && data.control.polls.len() == ni
+            && data.values.len() == ni
+            && data.memory.len() == ni
+            && data.effects.len() == ni
+            && data.calls.len() == ni
+            && data.stack_elided.len() == ni
+            && data.value_blocks.len() == nv
+            && data.value_definitions.len() == nv
+            && data.allocation.value_local.len() == nv,
+    )?;
     let ty = |v: ValueId| data.value_types.get(v.index()).copied().ok_or_else(invalid);
     let local = |v: ValueId| -> Result<usize, CompileError> {
         let t = ty(v)?;
-        let slot = data.allocation.value_local.get(v.index()).copied().flatten().ok_or_else(invalid)?;
+        let slot = data
+            .allocation
+            .value_local
+            .get(v.index())
+            .copied()
+            .flatten()
+            .ok_or_else(invalid)?;
         require(t != Type::Effect && data.allocation.local_types.get(slot) == Some(&t))?;
         Ok(slot)
     };
     for (v, slot) in data.allocation.value_local.iter().enumerate() {
-        if slot.is_some() { local(ValueId(v as u32))?; }
+        if slot.is_some() {
+            local(ValueId(v as u32))?;
+        }
     }
     let mut owners = vec![None; nv];
     let mut positions = vec![None; ni];
@@ -341,40 +363,62 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
     let mut entries = vec![false; n];
     for e in &graph.entries {
         let is_entry = entries.get_mut(e.index()).ok_or_else(invalid)?;
-        require(!*is_entry)?; *is_entry = true;
+        require(!*is_entry)?;
+        *is_entry = true;
     }
     let cold_dispatch = data.control.cold_dispatch()?;
     for (b, block) in graph.blocks.iter().enumerate() {
         let control = &data.control.blocks[b];
-        require(control.instructions == block.instructions && control.recovery == block.recovery_id
-            && control.budget_cost == if cold_dispatch[b] { 0 } else { 1 })?;
+        require(
+            control.instructions == block.instructions
+                && control.recovery == block.recovery_id
+                && control.budget_cost == if cold_dispatch[b] { 0 } else { 1 },
+        )?;
         for &v in &block.params {
             require(ty(v)? != Type::RmwTicket)?;
             produced[v.index()] = true;
-            require(owners[v.index()].replace((b, None)).is_none()
-                && data.value_blocks[v.index()] == Some(BlockId(b as u32))
-                && data.value_definitions[v.index()].is_none())?;
+            require(
+                owners[v.index()].replace((b, None)).is_none()
+                    && data.value_blocks[v.index()] == Some(BlockId(b as u32))
+                    && data.value_definitions[v.index()].is_none(),
+            )?;
         }
-        let params = block.params.iter().filter(|v| data.value_types[v.index()] != Type::Effect)
-            .map(|&v| local(v)).collect::<Result<Vec<_>, _>>()?;
+        let params = block
+            .params
+            .iter()
+            .filter(|v| data.value_types[v.index()] != Type::Effect)
+            .map(|&v| local(v))
+            .collect::<Result<Vec<_>, _>>()?;
         require(control.params == params)?;
         for (p, &id) in block.instructions.iter().enumerate() {
             let inst = graph.instructions.get(id.index()).ok_or_else(invalid)?;
             require(positions[id.index()].replace((b, p)).is_none())?;
             let machine_effects = usize::from(data.memory[id.index()].is_some())
-                + usize::from(data.effects[id.index()].is_some()) + usize::from(data.calls[id.index()].is_some())
+                + usize::from(data.effects[id.index()].is_some())
+                + usize::from(data.calls[id.index()].is_some())
                 + usize::from(data.control.polls[id.index()].is_some());
-            require(if inst.ordered { machine_effects == 1 && data.values[id.index()].is_none() }
-                else { machine_effects == 0 })?;
+            require(if inst.ordered {
+                machine_effects == 1 && data.values[id.index()].is_none()
+            }
+            else {
+                machine_effects == 0
+            })?;
             let (_, mut outputs, _) = plan_references(data, id);
-            if let Some(value) = &data.values[id.index()] { outputs.push(value.result); }
-            for output in outputs { ty(output)?; produced[output.index()] = true; }
+            if let Some(value) = &data.values[id.index()] {
+                outputs.push(value.result);
+            }
+            for output in outputs {
+                ty(output)?;
+                produced[output.index()] = true;
+            }
 
             for &v in &inst.definitions {
                 ty(v)?;
-                require(owners[v.index()].replace((b, Some(p))).is_none()
-                    && data.value_blocks[v.index()] == Some(BlockId(b as u32))
-                    && data.value_definitions[v.index()] == Some(id))?;
+                require(
+                    owners[v.index()].replace((b, Some(p))).is_none()
+                        && data.value_blocks[v.index()] == Some(BlockId(b as u32))
+                        && data.value_definitions[v.index()] == Some(id),
+                )?;
             }
         }
         let edge = |e: &Edge| -> Result<control::Edge, CompileError> {
@@ -383,48 +427,87 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
             let mut pairs = vec![];
             for (&a, &p) in e.arguments.iter().zip(&target.params) {
                 require(ty(a)? == ty(p)?)?;
-                if ty(a)? != Type::Effect { pairs.push((local(a)?, local(p)?)); }
+                if ty(a)? != Type::Effect {
+                    pairs.push((local(a)?, local(p)?));
+                }
             }
             control::schedule(e.target, &pairs, &data.allocation.local_types)
         };
         let expected = match &block.terminator {
-            Terminator::Exit(s) => { require(s.index() < data.states.len())?; control::Terminator::Exit(*s) },
+            Terminator::Exit(s) => {
+                require(s.index() < data.states.len())?;
+                control::Terminator::Exit(*s)
+            },
             Terminator::Jump(e) => control::Terminator::Jump(edge(e)?),
             Terminator::Branch(v, a, b) => {
                 require(ty(*v)? == Type::I1)?;
-                control::Terminator::Branch { condition: local(*v)?, taken: edge(a)?, not_taken: edge(b)? }
+                control::Terminator::Branch {
+                    condition: local(*v)?,
+                    taken: edge(a)?,
+                    not_taken: edge(b)?,
+                }
             },
         };
         require(control.terminator == expected)?;
-        for e in edges(&block.terminator) { predecessors[e.target.index()].push(b); }
+        for e in edges(&block.terminator) {
+            predecessors[e.target.index()].push(b);
+        }
     }
     let mut reachable = entries.clone();
     let mut pending = graph.entries.clone();
     while let Some(b) = pending.pop() {
         for e in edges(&graph.blocks[b.index()].terminator) {
-            if !reachable[e.target.index()] { reachable[e.target.index()] = true; pending.push(e.target); }
+            if !reachable[e.target.index()] {
+                reachable[e.target.index()] = true;
+                pending.push(e.target);
+            }
         }
     }
     require(reachable.iter().all(|&r| r))?;
     let mut dom = vec![vec![true; n]; n];
-    for b in 0..n { if entries[b] { dom[b].fill(false); dom[b][b] = true; } }
+    for b in 0..n {
+        if entries[b] {
+            dom[b].fill(false);
+            dom[b][b] = true;
+        }
+    }
     loop {
         let mut changed = false;
         for b in 0..n {
-            if entries[b] { continue; }
+            if entries[b] {
+                continue;
+            }
             spend(&mut left, n.saturating_mul(predecessors[b].len() + 1))?;
             let mut next = vec![true; n];
-            for &p in &predecessors[b] { for v in 0..n { next[v] &= dom[p][v]; } }
+            for &p in &predecessors[b] {
+                for v in 0..n {
+                    next[v] &= dom[p][v];
+                }
+            }
             next[b] = true;
-            if next != dom[b] { dom[b] = next; changed = true; }
+            if next != dom[b] {
+                dom[b] = next;
+                changed = true;
+            }
         }
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
     let available = |v: ValueId, b: usize, p: usize| -> Result<(), CompileError> {
-        let (owner, at) = owners.get(v.index()).copied().flatten().ok_or_else(invalid)?;
+        let (owner, at) = owners
+            .get(v.index())
+            .copied()
+            .flatten()
+            .ok_or_else(invalid)?;
         require(dom[b][owner] && (owner != b || at.is_none_or(|at| at < p)))?;
-        if let Some(id) = data.value_definitions[v.index()] { require(!data.stack_elided[id.index()])?; }
-        if ty(v)? != Type::Effect { require(produced[v.index()])?; local(v)?; }
+        if let Some(id) = data.value_definitions[v.index()] {
+            require(!data.stack_elided[id.index()])?;
+        }
+        if ty(v)? != Type::Effect {
+            require(produced[v.index()])?;
+            local(v)?;
+        }
         Ok(())
     };
     let state_values = |id: StateId| -> Result<Vec<ValueId>, CompileError> {
@@ -432,78 +515,163 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
         let mut values = vec![];
         for materialization in [&state.cpu, &state.standalone] {
             for w in &materialization.writes {
-                super::value::verify_expression_types(&data.value_types, &w.expression,
-                    if w.store == Store::I32 { WasmType::I32 } else { WasmType::V128 })?;
+                super::value::verify_expression_types(
+                    &data.value_types,
+                    &w.expression,
+                    if w.store == Store::I32 { WasmType::I32 } else { WasmType::V128 },
+                )?;
                 values.extend(expression(&w.expression));
             }
-            if let Some(v) = materialization.count.base { require(ty(v)? == Type::I32)?; values.push(v); }
+            if let Some(v) = materialization.count.base {
+                require(ty(v)? == Type::I32)?;
+                values.push(v);
+            }
         }
-        super::value::verify_expression_types(&data.value_types, &state.decoded_next.expression, WasmType::I32)?;
+        super::value::verify_expression_types(
+            &data.value_types,
+            &state.decoded_next.expression,
+            WasmType::I32,
+        )?;
         values.extend(expression(&state.decoded_next.expression));
         Ok(values)
     };
     let mut materialized_values = Vec::with_capacity(data.states.len());
     for (i, state) in data.states.iter().enumerate() {
-        spend(&mut left, state.cpu.writes.iter().chain(&state.standalone.writes)
-            .map(|w| w.expression.len() + 1).sum::<usize>() + state.decoded_next.expression.len() + 1)?;
+        spend(
+            &mut left,
+            state
+                .cpu
+                .writes
+                .iter()
+                .chain(&state.standalone.writes)
+                .map(|w| w.expression.len() + 1)
+                .sum::<usize>()
+                + state.decoded_next.expression.len()
+                + 1,
+        )?;
         materialized_values.push(state_values(StateId(i as u32))?);
     }
     let check_state = |id: StateId, b, p| -> Result<(), CompileError> {
-        for &v in materialized_values.get(id.index()).ok_or_else(invalid)? { available(v, b, p)?; } Ok(())
+        for &v in materialized_values.get(id.index()).ok_or_else(invalid)? {
+            available(v, b, p)?;
+        }
+        Ok(())
     };
     for (b, block) in graph.blocks.iter().enumerate() {
-        if let Some(s) = block.recovery_id { check_state(s, b, 0)?; }
-        let roots: Vec<_> = block.params.iter().copied().filter(|v| data.value_types[v.index()] == Type::Effect).collect();
+        if let Some(s) = block.recovery_id {
+            check_state(s, b, 0)?;
+        }
+        let roots: Vec<_> = block
+            .params
+            .iter()
+            .copied()
+            .filter(|v| data.value_types[v.index()] == Type::Effect)
+            .collect();
         require(roots.len() <= 1)?;
         let mut effect = roots.first().copied();
         let mut pending_rmw = None;
         for (p, &id) in block.instructions.iter().enumerate() {
             let inst = &graph.instructions[id.index()];
             if data.stack_elided[id.index()] {
-                require(data.values[id.index()].is_some() && data.memory[id.index()].is_none()
-                    && data.effects[id.index()].is_none() && data.calls[id.index()].is_none()
-                    && inst.before.is_none() && inst.after.is_none())?;
+                require(
+                    data.values[id.index()].is_some()
+                        && data.memory[id.index()].is_none()
+                        && data.effects[id.index()].is_none()
+                        && data.calls[id.index()].is_none()
+                        && inst.before.is_none()
+                        && inst.after.is_none(),
+                )?;
                 continue;
             }
-            let input_effects: Vec<_> = inst.uses.iter().copied().filter(|v| ty(*v) == Ok(Type::Effect)).collect();
-            let output_effects: Vec<_> = inst.definitions.iter().copied().filter(|v| ty(*v) == Ok(Type::Effect)).collect();
+            let input_effects: Vec<_> = inst
+                .uses
+                .iter()
+                .copied()
+                .filter(|v| ty(*v) == Ok(Type::Effect))
+                .collect();
+            let output_effects: Vec<_> = inst
+                .definitions
+                .iter()
+                .copied()
+                .filter(|v| ty(*v) == Ok(Type::Effect))
+                .collect();
             if !input_effects.is_empty() || !output_effects.is_empty() {
-                require(inst.ordered && input_effects.len() == 1 && output_effects.len() == 1
-                    && input_effects.first().copied() == effect
-                    && inst.uses.last().copied() == effect
-                    && inst.definitions.last() == output_effects.first())?;
+                require(
+                    inst.ordered
+                        && input_effects.len() == 1
+                        && output_effects.len() == 1
+                        && input_effects.first().copied() == effect
+                        && inst.uses.last().copied() == effect
+                        && inst.definitions.last() == output_effects.first(),
+                )?;
                 effect = output_effects.first().copied();
-                require(pending_rmw.is_none() || matches!(data.effects[id.index()], Some(super::effect::EffectPlan::RmwCommit {..})))?;
+                require(
+                    pending_rmw.is_none()
+                        || matches!(
+                            data.effects[id.index()],
+                            Some(super::effect::EffectPlan::RmwCommit { .. })
+                        ),
+                )?;
             }
             if let Some(memory) = &data.memory[id.index()] {
-                if let super::memory::NativeMemory::ScalarLoad {ticket: Some(ticket), ..} = memory.native {
-                    require(pending_rmw.is_none() && ty(ticket)? == Type::RmwTicket
-                        && matches!(memory.guard.bytes, 1 | 2 | 4)
-                        && memory.guard == super::memory::RamGuard::new(memory.guard.bytes, true))?;
+                if let super::memory::NativeMemory::ScalarLoad {
+                    ticket: Some(ticket),
+                    ..
+                } = memory.native
+                {
+                    require(
+                        pending_rmw.is_none()
+                            && ty(ticket)? == Type::RmwTicket
+                            && matches!(memory.guard.bytes, 1 | 2 | 4)
+                            && memory.guard
+                                == super::memory::RamGuard::new(memory.guard.bytes, true),
+                    )?;
                     pending_rmw = Some((ticket, memory.guard.bytes, memory.before));
                 }
             }
-            if let Some(super::effect::EffectPlan::RmwCommit {ticket, bytes, value, observe, commit, ..}) = &data.effects[id.index()] {
-                require(pending_rmw == Some((*ticket, *bytes, observe.count))
-                    && ty(*value)?.bits() == Some(*bytes * 8)
-                    && observe.values == *commit && inst.after == Some(*commit))?;
+            if let Some(super::effect::EffectPlan::RmwCommit {
+                ticket,
+                bytes,
+                value,
+                observe,
+                commit,
+                ..
+            }) = &data.effects[id.index()]
+            {
+                require(
+                    pending_rmw == Some((*ticket, *bytes, observe.count))
+                        && ty(*value)?.bits() == Some(*bytes * 8)
+                        && observe.values == *commit
+                        && inst.after == Some(*commit),
+                )?;
                 pending_rmw = None;
             }
             // Non-value plans are sealed but still checked against owned operand,
             // definition and observation facts, independently of the original HIR.
             if let Some(call) = &data.calls[id.index()] {
-                let helper = data.helpers.get(call.helper.index()).and_then(Option::as_ref).ok_or_else(invalid)?;
-                require(call.args.len() == helper.signature.params.len()
-                    && call.exits == helper.exit_outcomes
-                    && call.normal == if helper.cpu_exit { None } else { Some(0) })?;
-                for result in &call.staged { require(ty(result.value)? == result.ty)?; }
+                let helper = data
+                    .helpers
+                    .get(call.helper.index())
+                    .and_then(Option::as_ref)
+                    .ok_or_else(invalid)?;
+                require(
+                    call.args.len() == helper.signature.params.len()
+                        && call.exits == helper.exit_outcomes
+                        && call.normal == if helper.cpu_exit { None } else { Some(0) },
+                )?;
+                for result in &call.staged {
+                    require(ty(result.value)? == result.ty)?;
+                }
             }
             let (plan_uses, plan_defs, plan_states) = plan_references(data, id);
             for v in plan_uses {
                 require(inst.uses.contains(&v))?;
                 available(v, b, p)?;
             }
-            for v in plan_defs { require(inst.definitions.contains(&v))?; ty(v)?; }
+            for v in plan_defs {
+                require(inst.definitions.contains(&v))?;
+                ty(v)?;
+            }
             for state in plan_states {
                 require(Some(state) == inst.before || Some(state) == inst.after)?;
             }
@@ -511,11 +679,20 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
                 require(inst.definitions.contains(&plan.result))?;
                 super::value::verify_program_types(&data.value_types, plan)?;
                 expression(&plan.steps)
-            } else { inst.uses.clone() };
+            }
+            else {
+                inst.uses.clone()
+            };
             spend(&mut left, input.len() + inst.recovery.len() + 1)?;
-            for v in input { available(v, b, p)?; }
-            if let Some(s) = inst.before { check_state(s, b, p)?; }
-            if let Some(s) = inst.after { check_state(s, b, p + 1)?; }
+            for v in input {
+                available(v, b, p)?;
+            }
+            if let Some(s) = inst.before {
+                check_state(s, b, p)?;
+            }
+            if let Some(s) = inst.after {
+                check_state(s, b, p + 1)?;
+            }
             if let Some(poll) = &data.control.polls[id.index()] {
                 require(Some(poll.recovery) == inst.before && poll.cost == 1)?;
                 check_state(poll.recovery, b, p)?;
@@ -523,10 +700,18 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
         }
         require(pending_rmw.is_none())?;
         for edge in edges(&block.terminator) {
-            for &arg in &edge.arguments { if ty(arg)? == Type::Effect { require(Some(arg) == effect)?; } }
+            for &arg in &edge.arguments {
+                if ty(arg)? == Type::Effect {
+                    require(Some(arg) == effect)?;
+                }
+            }
         }
-        for v in term_uses(block) { available(v, b, block.instructions.len())?; }
-        if let Terminator::Exit(s) = block.terminator { check_state(s, b, block.instructions.len())?; }
+        for v in term_uses(block) {
+            available(v, b, block.instructions.len())?;
+        }
+        if let Terminator::Exit(s) = block.terminator {
+            check_state(s, b, block.instructions.len())?;
+        }
     }
     // Recompute liveness independently from the current value programs. Check
     // existing allocation instead of requiring a particular allocator's colors.
@@ -537,74 +722,173 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
         for (b, block) in graph.blocks.iter().enumerate().rev() {
             let mut live: BTreeSet<_> = term_uses(block).into_iter().collect();
             for e in edges(&block.terminator) {
-                live.extend(inputs[e.target.index()].iter().filter(|v| !graph.blocks[e.target.index()].params.contains(v)));
+                live.extend(
+                    inputs[e.target.index()]
+                        .iter()
+                        .filter(|v| !graph.blocks[e.target.index()].params.contains(v)),
+                );
             }
             outputs[b] = live.clone();
             for &id in block.instructions.iter().rev() {
-                if data.stack_elided[id.index()] { continue; }
-                for v in &graph.instructions[id.index()].definitions { live.remove(v); }
+                if data.stack_elided[id.index()] {
+                    continue;
+                }
+                for v in &graph.instructions[id.index()].definitions {
+                    live.remove(v);
+                }
                 live.extend(uses(data, id));
                 spend(&mut left, live.len() + 1)?;
             }
             live.extend(&block.recovery);
-            if inputs[b] != live { inputs[b] = live; changed = true; }
+            if inputs[b] != live {
+                inputs[b] = live;
+                changed = true;
+            }
         }
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
     let mut check_live = |live: &BTreeSet<ValueId>| -> Result<(), CompileError> {
         spend(&mut left, live.len() + 1)?;
         let mut occupied = BTreeSet::new();
-        for &v in live { if ty(v)? != Type::Effect { require(occupied.insert(local(v)?))?; } }
+        for &v in live {
+            if ty(v)? != Type::Effect {
+                require(occupied.insert(local(v)?))?;
+            }
+        }
         Ok(())
     };
     for (b, block) in graph.blocks.iter().enumerate() {
-        let mut live = outputs[b].clone(); check_live(&live)?;
+        let mut live = outputs[b].clone();
+        check_live(&live)?;
         for &id in block.instructions.iter().rev() {
-            if data.stack_elided[id.index()] { continue; }
-            live.extend(&graph.instructions[id.index()].definitions); check_live(&live)?;
-            for v in &graph.instructions[id.index()].definitions { live.remove(v); }
-            live.extend(uses(data, id)); check_live(&live)?;
+            if data.stack_elided[id.index()] {
+                continue;
+            }
+            live.extend(&graph.instructions[id.index()].definitions);
+            check_live(&live)?;
+            for v in &graph.instructions[id.index()].definitions {
+                live.remove(v);
+            }
+            live.extend(uses(data, id));
+            check_live(&live)?;
         }
-        live.extend(&block.recovery); live.extend(&block.params); check_live(&live)?;
+        live.extend(&block.recovery);
+        live.extend(&block.params);
+        check_live(&live)?;
     }
     Ok(())
 }
 
 fn plan_references(data: &MirData, id: InstId) -> (Vec<ValueId>, Vec<ValueId>, Vec<StateId>) {
-    use super::{arithmetic::ArithmeticPlan, effect::EffectPlan, memory::{Argument, NativeMemory, SlowResult, VectorCombine}};
-    let mut uses = vec![]; let mut defs = vec![]; let mut states = vec![];
-    let args = |call: &super::memory::RuntimeCall| call.args.iter().filter_map(|a| match a { Argument::Value(v) => Some(*v), _ => None }).collect::<Vec<_>>();
+    use super::{
+        arithmetic::ArithmeticPlan,
+        effect::EffectPlan,
+        memory::{Argument, NativeMemory, SlowResult, VectorCombine},
+    };
+    let mut uses = vec![];
+    let mut defs = vec![];
+    let mut states = vec![];
+    let args = |call: &super::memory::RuntimeCall| {
+        call.args
+            .iter()
+            .filter_map(|a| match a {
+                Argument::Value(v) => Some(*v),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
     if let Some(m) = &data.memory[id.index()] {
-        uses.push(m.address); uses.extend(args(&m.call)); states.push(m.before);
+        uses.push(m.address);
+        uses.extend(args(&m.call));
+        states.push(m.before);
         match &m.native {
-            NativeMemory::ScalarLoad {result, ticket} => { defs.push(*result); defs.extend(ticket); },
-            NativeMemory::ScalarStore {value, commit} => { uses.push(*value); states.extend(commit); },
-            NativeMemory::VectorLoad {result, combine} => {
+            NativeMemory::ScalarLoad { result, ticket } => {
                 defs.push(*result);
-                match combine {VectorCombine::None => (), VectorCombine::ReplaceWord {old, ..} | VectorCombine::Shuffle {old, ..} | VectorCombine::Binary {old, ..} => uses.push(*old)}
+                defs.extend(ticket);
             },
-            NativeMemory::VectorStore {value, mask, commit, ..} => { uses.push(*value); uses.extend(mask); states.push(*commit); },
+            NativeMemory::ScalarStore { value, commit } => {
+                uses.push(*value);
+                states.extend(commit);
+            },
+            NativeMemory::VectorLoad { result, combine } => {
+                defs.push(*result);
+                match combine {
+                    VectorCombine::None => (),
+                    VectorCombine::ReplaceWord { old, .. }
+                    | VectorCombine::Shuffle { old, .. }
+                    | VectorCombine::Binary { old, .. } => uses.push(*old),
+                }
+            },
+            NativeMemory::VectorStore {
+                value,
+                mask,
+                commit,
+                ..
+            } => {
+                uses.push(*value);
+                uses.extend(mask);
+                states.push(*commit);
+            },
         }
         match &m.result {
-            SlowResult::Packed {result, ..} => defs.push(*result),
-            SlowResult::Rmw {result, ticket, read_value} => { defs.extend([*result, *ticket]); uses.extend(args(read_value)); },
-            SlowResult::Store {commit, ..} => states.extend(commit), SlowResult::CpuExit {..} => (),
+            SlowResult::Packed { result, .. } => defs.push(*result),
+            SlowResult::Rmw {
+                result,
+                ticket,
+                read_value,
+            } => {
+                defs.extend([*result, *ticket]);
+                uses.extend(args(read_value));
+            },
+            SlowResult::Store { commit, .. } => states.extend(commit),
+            SlowResult::CpuExit { .. } => (),
         }
     }
     if let Some(e) = &data.effects[id.index()] {
         uses.extend(args(e.call()));
         match e {
-            EffectPlan::Address {offset, result, before, ..} => { uses.push(*offset); defs.push(*result); states.push(*before); },
-            EffectPlan::Check {before, ..} => states.push(*before),
-            EffectPlan::RmwCommit {ticket, value, observe, commit, ..} => { uses.extend([*ticket, *value]); states.extend([observe.values, observe.count, *commit]); },
-            EffectPlan::Arithmetic(ArithmeticPlan::Division(d)) => { uses.extend([d.dividend, d.divisor]); defs.extend([d.quotient, d.remainder]); states.push(d.before); },
-            EffectPlan::Arithmetic(ArithmeticPlan::CompareExchange(c)) => { uses.push(c.address); states.push(c.before); },
+            EffectPlan::Address {
+                offset,
+                result,
+                before,
+                ..
+            } => {
+                uses.push(*offset);
+                defs.push(*result);
+                states.push(*before);
+            },
+            EffectPlan::Check { before, .. } => states.push(*before),
+            EffectPlan::RmwCommit {
+                ticket,
+                value,
+                observe,
+                commit,
+                ..
+            } => {
+                uses.extend([*ticket, *value]);
+                states.extend([observe.values, observe.count, *commit]);
+            },
+            EffectPlan::Arithmetic(ArithmeticPlan::Division(d)) => {
+                uses.extend([d.dividend, d.divisor]);
+                defs.extend([d.quotient, d.remainder]);
+                states.push(d.before);
+            },
+            EffectPlan::Arithmetic(ArithmeticPlan::CompareExchange(c)) => {
+                uses.push(c.address);
+                states.push(c.before);
+            },
         }
     }
     if let Some(c) = &data.calls[id.index()] {
-        uses.extend(&c.args); states.push(c.state);
-        defs.extend(c.staged.iter().map(|s| s.value)); defs.extend(c.reload.iter().map(|(v, _)| *v));
-        if let Some(d) = &c.delivery { states.push(d.restore); }
+        uses.extend(&c.args);
+        states.push(c.state);
+        defs.extend(c.staged.iter().map(|s| s.value));
+        defs.extend(c.reload.iter().map(|(v, _)| *v));
+        if let Some(d) = &c.delivery {
+            states.push(d.restore);
+        }
     }
     (uses, defs, states)
 }
@@ -612,9 +896,24 @@ fn plan_references(data: &MirData, id: InstId) -> (Vec<ValueId>, Vec<ValueId>, V
 #[cfg(test)]
 mod verifier_tests {
     use super::*;
-    use crate::ir::{frontend::{lift::lift_cpu, decode::{GuestEip, LinearAddress}}, lowering::lower};
+    use crate::ir::{
+        frontend::{
+            decode::{GuestEip, LinearAddress},
+            lift::lift_cpu,
+        },
+        lowering::lower,
+    };
     fn fixture() -> super::super::MirRegion {
-        lower(&lift_cpu(&[0x40, 0x01, 0x00, 0x8B, 0x08], GuestEip(0x1000), LinearAddress(0x1000), true).unwrap()).unwrap()
+        lower(
+            &lift_cpu(
+                &[0x40, 0x01, 0x00, 0x8B, 0x08],
+                GuestEip(0x1000),
+                LinearAddress(0x1000),
+                true,
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
     #[test]
     fn owned_verifier_rejects_corrupt_graphs_without_hir() {
@@ -625,22 +924,55 @@ mod verifier_tests {
             match mutation {
                 0 => data.control.entries[0] = BlockId(u32::MAX),
                 1 => data.control.blocks[0].instructions.push(InstId(u32::MAX)),
-                2 => data.allocation.value_local.iter_mut().for_each(|s| { if s.is_some() { *s = Some(0); } }),
-                3 => { let p = data.values.iter_mut().flatten().next().unwrap(); p.steps = vec![Step::Value(p.result)]; },
+                2 => data.allocation.value_local.iter_mut().for_each(|s| {
+                    if s.is_some() {
+                        *s = Some(0);
+                    }
+                }),
+                3 => {
+                    let p = data.values.iter_mut().flatten().next().unwrap();
+                    p.steps = vec![Step::Value(p.result)];
+                },
                 4 => data.states[0].cpu.count.base = Some(ValueId(u32::MAX)),
                 5 => data.memory.iter_mut().flatten().next().unwrap().address = ValueId(u32::MAX),
                 6 => data.value_blocks.clear(),
-                7 => data.allocation_graph.blocks[0].params.push(ValueId(u32::MAX)),
+                7 => data.allocation_graph.blocks[0]
+                    .params
+                    .push(ValueId(u32::MAX)),
                 8 => data.control.blocks[0].budget_cost = 0,
-                9 => data.control.blocks[0].terminator = control::Terminator::Exit(StateId(u32::MAX)),
+                9 => {
+                    data.control.blocks[0].terminator = control::Terminator::Exit(StateId(u32::MAX))
+                },
                 10 => {
-                    let root = data.allocation_graph.blocks[0].params.iter().copied().find(|v| data.value_types[v.index()] == Type::Effect).unwrap();
-                    let last = data.allocation_graph.instructions.iter_mut().rev().find(|i| i.uses.last().is_some_and(|v| data.value_types[v.index()] == Type::Effect)).unwrap();
+                    let root = data.allocation_graph.blocks[0]
+                        .params
+                        .iter()
+                        .copied()
+                        .find(|v| data.value_types[v.index()] == Type::Effect)
+                        .unwrap();
+                    let last = data
+                        .allocation_graph
+                        .instructions
+                        .iter_mut()
+                        .rev()
+                        .find(|i| {
+                            i.uses
+                                .last()
+                                .is_some_and(|v| data.value_types[v.index()] == Type::Effect)
+                        })
+                        .unwrap();
                     *last.uses.last_mut().unwrap() = root;
                 },
                 11 => {
-                    let commit = data.effects.iter_mut().flatten().find(|p| matches!(p, super::super::effect::EffectPlan::RmwCommit {..})).unwrap();
-                    if let super::super::effect::EffectPlan::RmwCommit {bytes, ..} = commit { *bytes = 2; }
+                    let commit = data
+                        .effects
+                        .iter_mut()
+                        .flatten()
+                        .find(|p| matches!(p, super::super::effect::EffectPlan::RmwCommit { .. }))
+                        .unwrap();
+                    if let super::super::effect::EffectPlan::RmwCommit { bytes, .. } = commit {
+                        *bytes = 2;
+                    }
                 },
                 _ => data.memory.iter_mut().for_each(|m| *m = None),
             }
@@ -651,18 +983,29 @@ mod verifier_tests {
     fn owned_verifier_accepts_every_machine_stage_and_bounds_work() {
         let mut mir = fixture();
         mir.verify().unwrap();
-        mir.fold_constants().unwrap(); mir.verify().unwrap();
-        mir.schedule_operand_stack(262_144).unwrap(); mir.verify().unwrap();
-        mir.allocate_machine_locals(4_000_000).unwrap(); mir.verify().unwrap();
-        mir.forward_ram_reads(262_144).unwrap(); mir.verify().unwrap();
+        mir.fold_constants().unwrap();
+        mir.verify().unwrap();
+        mir.schedule_operand_stack(262_144).unwrap();
+        mir.verify().unwrap();
+        mir.allocate_machine_locals(4_000_000).unwrap();
+        mir.verify().unwrap();
+        mir.forward_ram_reads(262_144).unwrap();
+        mir.verify().unwrap();
         assert!(matches!(verify(&mir, 1), Err(CompileError::Budget(_))));
     }
 }
 
-fn cpu_state_demand(data: &MirData, id: StateId, work: &mut Vec<ValueId>, left: &mut usize) -> Result<(), CompileError> {
+fn cpu_state_demand(
+    data: &MirData,
+    id: StateId,
+    work: &mut Vec<ValueId>,
+    left: &mut usize,
+) -> Result<(), CompileError> {
     let state = &data.states[id.index()];
     for (index, write) in state.cpu.writes.iter().enumerate() {
-        if super::state_elision::elided(data, id, index) { continue; }
+        if super::state_elision::elided(data, id, index) {
+            continue;
+        }
         spend(left, write.expression.len() + 1)?;
         work.extend(expression(&write.expression));
     }
@@ -676,7 +1019,10 @@ fn cpu_state_demand(data: &MirData, id: StateId, work: &mut Vec<ValueId>, left: 
 pub(super) fn cpu_demand(data: &MirData, work_limit: usize) -> Result<Vec<bool>, CompileError> {
     let graph = &data.allocation_graph;
     let mut left = work_limit;
-    spend(&mut left, graph.instructions.len() + data.value_types.len() + graph.blocks.len())?;
+    spend(
+        &mut left,
+        graph.instructions.len() + data.value_types.len() + graph.blocks.len(),
+    )?;
     let mut live = vec![false; graph.instructions.len()];
     let mut seen = vec![false; data.value_types.len()];
     let mut work = vec![];
@@ -684,14 +1030,18 @@ pub(super) fn cpu_demand(data: &MirData, work_limit: usize) -> Result<Vec<bool>,
     for block in &graph.blocks {
         states.extend(block.recovery_id);
         match block.terminator {
-            Terminator::Exit(s) => { states.insert(s); },
+            Terminator::Exit(s) => {
+                states.insert(s);
+            },
             Terminator::Branch(v, ..) => work.push(v),
             _ => (),
         }
         for &id in &block.instructions {
             let inst = &graph.instructions[id.index()];
             states.extend(inst.after);
-            if !super::helper_state::elided(data, id) { states.extend(inst.before); }
+            if !super::helper_state::elided(data, id) {
+                states.extend(inst.before);
+            }
             // Every non-value instruction remains pinned. Its explicit inputs
             // include effect ordering; CPU snapshots are separate roots above.
             if data.values[id.index()].is_none() {
@@ -705,8 +1055,12 @@ pub(super) fn cpu_demand(data: &MirData, work_limit: usize) -> Result<Vec<bool>,
             if let Some(call) = &data.calls[id.index()] {
                 if let Some((source, destination)) = call.xmm_observation {
                     for write in &data.states[call.state.index()].cpu.writes {
-                        if [source, destination].iter().any(|&reg| write.address ==
-                            super::value::Address::Absolute(crate::cpu::global_pointers::get_reg_xmm_offset(reg as u32))) {
+                        if [source, destination].iter().any(|&reg| {
+                            write.address
+                                == super::value::Address::Absolute(
+                                    crate::cpu::global_pointers::get_reg_xmm_offset(reg as u32),
+                                )
+                        }) {
                             spend(&mut left, write.expression.len() + 1)?;
                             work.extend(expression(&write.expression));
                         }
@@ -715,23 +1069,38 @@ pub(super) fn cpu_demand(data: &MirData, work_limit: usize) -> Result<Vec<bool>,
             }
         }
     }
-    for state in states { cpu_state_demand(data, state, &mut work, &mut left)?; }
+    for state in states {
+        cpu_state_demand(data, state, &mut work, &mut left)?;
+    }
     while let Some(v) = work.pop() {
         spend(&mut left, 1)?;
-        if seen[v.index()] { continue; } seen[v.index()] = true;
+        if seen[v.index()] {
+            continue;
+        }
+        seen[v.index()] = true;
         if let Some(id) = data.value_definitions[v.index()] {
             if !live[id.index()] {
                 live[id.index()] = true;
-                if let Some(plan) = &data.values[id.index()] { work.extend(expression(&plan.steps)); }
-                else { work.extend(&graph.instructions[id.index()].uses); }
+                if let Some(plan) = &data.values[id.index()] {
+                    work.extend(expression(&plan.steps));
+                }
+                else {
+                    work.extend(&graph.instructions[id.index()].uses);
+                }
             }
-        } else if let Some(owner) = data.value_blocks[v.index()] {
-            let parameter = graph.blocks[owner.index()].params.iter().position(|&p| p == v)
+        }
+        else if let Some(owner) = data.value_blocks[v.index()] {
+            let parameter = graph.blocks[owner.index()]
+                .params
+                .iter()
+                .position(|&p| p == v)
                 .ok_or_else(|| CompileError::InvalidIr("missing machine block parameter".into()))?;
             for block in &graph.blocks {
                 for edge in edges(&block.terminator) {
                     spend(&mut left, 1)?;
-                    if edge.target == owner { work.push(edge.arguments[parameter]); }
+                    if edge.target == owner {
+                        work.push(edge.arguments[parameter]);
+                    }
                 }
             }
         }
@@ -742,59 +1111,110 @@ pub(super) fn cpu_demand(data: &MirData, work_limit: usize) -> Result<Vec<bool>,
 /// Same-block CPU backing knowledge. Calls and memory effects discard it;
 /// normal CpuReload results establish new facts after an actual observation.
 /// State IDs may be used at multiple sites, so their certificates intersect.
-pub(super) fn backing_sync(data: &MirData, work_limit: usize) -> Result<Vec<Vec<bool>>, CompileError> {
-    use super::{materialize::Store, value::{Address, Load, Reading}};
+pub(super) fn backing_sync(
+    data: &MirData,
+    work_limit: usize,
+) -> Result<Vec<Vec<bool>>, CompileError> {
+    use super::{
+        materialize::Store,
+        value::{Address, Load, Reading},
+    };
     let mut left = work_limit;
     spend(&mut left, data.states.len() + data.values.len())?;
     let mut masks: Vec<Option<Vec<bool>>> = vec![None; data.states.len()];
-    let mut observe = |id: StateId, known: &[(Address, Store, ValueId)], left: &mut usize| -> Result<(), CompileError> {
+    let mut observe = |id: StateId,
+                       known: &[(Address, Store, ValueId)],
+                       left: &mut usize|
+     -> Result<(), CompileError> {
         let state = &data.states[id.index()];
         spend(left, state.cpu.writes.len().saturating_mul(known.len() + 1))?;
-        let next: Vec<bool> = state.cpu.writes.iter().map(|w| {
-            // PC, previous-IP and instruction accounting keep their original
-            // phases even when two expressions happen to compare equal.
-            !matches!(w.address, Address::Eip | Address::Committed)
-                && w.address != Address::Absolute(crate::cpu::global_pointers::previous_ip as u32)
-                && known.iter().any(|&(address, store, v)| address == w.address && store == w.store
-                    && w.expression == [Step::Value(v)])
-        }).collect();
-        if let Some(mask) = &mut masks[id.index()] { for (old, new) in mask.iter_mut().zip(next) { *old &= new; } }
-        else { masks[id.index()] = Some(next); }
+        let next: Vec<bool> = state
+            .cpu
+            .writes
+            .iter()
+            .map(|w| {
+                // PC, previous-IP and instruction accounting keep their original
+                // phases even when two expressions happen to compare equal.
+                !matches!(w.address, Address::Eip | Address::Committed)
+                    && w.address
+                        != Address::Absolute(crate::cpu::global_pointers::previous_ip as u32)
+                    && known.iter().any(|&(address, store, v)| {
+                        address == w.address && store == w.store && w.expression == [Step::Value(v)]
+                    })
+            })
+            .collect();
+        if let Some(mask) = &mut masks[id.index()] {
+            for (old, new) in mask.iter_mut().zip(next) {
+                *old &= new;
+            }
+        }
+        else {
+            masks[id.index()] = Some(next);
+        }
         Ok(())
     };
     let remember = |reading: &Reading, v, known: &mut Vec<(Address, Store, ValueId)>| {
-        if let Reading::Memory {address, load} = reading {
-            let store = match load { Load::I32 => Store::I32, Load::V128 => Store::V128, _ => return };
+        if let Reading::Memory { address, load } = reading {
+            let store = match load {
+                Load::I32 => Store::I32,
+                Load::V128 => Store::V128,
+                _ => return,
+            };
             known.retain(|&(a, _, _)| a != *address);
             known.push((*address, store, v));
         }
     };
     for block in &data.allocation_graph.blocks {
         let mut known = vec![];
-        if let Some(s) = block.recovery_id { observe(s, &known, &mut left)?; }
+        if let Some(s) = block.recovery_id {
+            observe(s, &known, &mut left)?;
+        }
         for &id in &block.instructions {
             spend(&mut left, 1)?;
-            if data.stack_elided[id.index()] { continue; }
+            if data.stack_elided[id.index()] {
+                continue;
+            }
             let inst = &data.allocation_graph.instructions[id.index()];
             // Caller-owned fault delivery can restore the same state after the
             // callee has changed backing. That restoration must retain all writes.
-            if data.calls[id.index()].as_ref().is_some_and(|c| c.delivery.is_some()) { known.clear(); }
-            if let Some(s) = inst.before { observe(s, &known, &mut left)?; }
-            if let Some(s) = inst.after { observe(s, &known, &mut left)?; }
-            if let Some(value) = &data.values[id.index()] {
-                if let [Step::Read {cpu, ..}] = &value.steps[..] { remember(cpu, value.result, &mut known); }
+            if data.calls[id.index()]
+                .as_ref()
+                .is_some_and(|c| c.delivery.is_some())
+            {
+                known.clear();
             }
-            if data.memory[id.index()].is_some() || data.effects[id.index()].is_some() { known.clear(); }
+            if let Some(s) = inst.before {
+                observe(s, &known, &mut left)?;
+            }
+            if let Some(s) = inst.after {
+                observe(s, &known, &mut left)?;
+            }
+            if let Some(value) = &data.values[id.index()] {
+                if let [Step::Read { cpu, .. }] = &value.steps[..] {
+                    remember(cpu, value.result, &mut known);
+                }
+            }
+            if data.memory[id.index()].is_some() || data.effects[id.index()].is_some() {
+                known.clear();
+            }
             if let Some(call) = &data.calls[id.index()] {
                 known.clear();
                 // A native FP branch can assign SSA without writing CPU memory.
                 // Its helper-only sibling cannot authorize a joint certificate.
                 if call.native_fp.is_none() && call.normal.is_some() {
-                    for (v, reading) in &call.reload { remember(reading, *v, &mut known); }
+                    for (v, reading) in &call.reload {
+                        remember(reading, *v, &mut known);
+                    }
                 }
             }
         }
-        if let Terminator::Exit(s) = block.terminator { observe(s, &known, &mut left)?; }
+        if let Terminator::Exit(s) = block.terminator {
+            observe(s, &known, &mut left)?;
+        }
     }
-    Ok(masks.into_iter().zip(&data.states).map(|(mask, state)| mask.unwrap_or_else(|| vec![false; state.cpu.writes.len()])).collect())
+    Ok(masks
+        .into_iter()
+        .zip(&data.states)
+        .map(|(mask, state)| mask.unwrap_or_else(|| vec![false; state.cpu.writes.len()]))
+        .collect())
 }

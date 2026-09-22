@@ -28,7 +28,8 @@ fn region(mode: u8, xmm: bool, backing: bool) -> Region {
         (0..8)
             .map(|r| b.node(Op::ReadXmm(r), vec![], Type::V128))
             .collect()
-    } else {
+    }
+    else {
         vec![]
     };
     let vectors = if xmm { (0..8).map(|r| vectors[(r + 1) % 8]).collect() } else { vectors };
@@ -118,7 +119,8 @@ fn state_plans_preserve_order_pc_backing_and_count_modes() {
                             emit(&mir, layout(), 100).unwrap().bytes,
                         )
                         .unwrap();
-                    } else {
+                    }
+                    else {
                         assert!(emit(&mir, layout(), 100).is_err());
                     }
                 }

@@ -30,7 +30,7 @@ for(const release of [false,true]){
 
         const PC=0x8000,STACK=0x90000,UD=0x180100,NM=0x180300,PF=0x180400,GP=0x180500,DATA=0x6000;
         const cr0=cpu.cr[0],cr4=cpu.cr[4];
-        let events=[],mutate=false,contextMutation="",activeCase=0;
+        let events=[],mutate=false,context_mutation="",active_case=0;
         const physical=a=>DATA+(a-0xA0000);
         const observe=(kind,a,value)=>events.push([kind,a,value,Array.from(cpu.reg32),cpu.instruction_pointer[0],fpu_state()]);
         cpu.io.mmap_register(0xA0000,0x20000,
@@ -39,15 +39,15 @@ for(const release of [false,true]){
             a=>{
                 observe("read32",a);
                 if(mutate){cpu.reg32[0]=0x12345670;cpu.reg_xmm32s[8]=0x3F800000;cpu.flags[0]^=1;cpu.flags_changed[0]=0;}
-                if(contextMutation==="segment") cpu.segment_offsets[3]=0x100;
-                if(contextMutation==="descriptor") cpu.gdtr_size[0]=31;
-                if(contextMutation==="task") cpu.segment_offsets[6]=0x123000;
-                if(contextMutation==="control-flags") cpu.flags[0]|=0x400;
-                if(contextMutation==="paging") {cpu.cr[4]^=0x80;e.full_clear_tlb();}
-                if(contextMutation==="mode") {cpu.is_32[0]^=1;e.update_state_flags();}
-                if(contextMutation==="redirect") cpu.instruction_pointer[0]=PC+0x100;
-                if(contextMutation==="code") vm.write_memory(Uint8Array.of(0x90),PC+cases[activeCase][0].length-1);
-                if(contextMutation==="cache") cpu.jit_clear_cache();
+                if(context_mutation==="segment") cpu.segment_offsets[3]=0x100;
+                if(context_mutation==="descriptor") cpu.gdtr_size[0]=31;
+                if(context_mutation==="task") cpu.segment_offsets[6]=0x123000;
+                if(context_mutation==="control-flags") cpu.flags[0]|=0x400;
+                if(context_mutation==="paging") {cpu.cr[4]^=0x80;e.full_clear_tlb();}
+                if(context_mutation==="mode") {cpu.is_32[0]^=1;e.update_state_flags();}
+                if(context_mutation==="redirect") cpu.instruction_pointer[0]=PC+0x100;
+                if(context_mutation==="code") vm.write_memory(Uint8Array.of(0x90),PC+cases[active_case][0].length-1);
+                if(context_mutation==="cache") cpu.jit_clear_cache();
                 return view.getInt32(physical(a),true);
             },
             (a,x)=>{observe("write32",a,x);set32(physical(a),x);});
@@ -83,15 +83,15 @@ for(const release of [false,true]){
                 previous:linear32[560>>2]>>>0,
                 cr2:cpu.cr[2]>>>0,
                 context:[cpu.cr[4],cpu.is_32[0],...cpu.segment_offsets,cpu.gdtr_size[0]],
-                code:Buffer.from(mem.slice(PC,PC+cases[activeCase][0].length)),
+                code:Buffer.from(mem.slice(PC,PC+cases[active_case][0].length)),
                 fpu:fpu_state(),xmm:Array.from(cpu.reg_xmm32s),mxcsr:cpu.mxcsr[0],
                 data:Buffer.from(mem.slice(DATA, DATA+8192)),
                 events:events.slice(),
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault=false,nullSegment=false,mmio=false,sample=0,rounding=0,callbackMutation=false,changeContext=""}={}){
-            activeCase=i;contextMutation=changeContext;
+        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0,callbackMutation: callback_mutation=false,changeContext: change_context=""}={}){
+            active_case=i;context_mutation=change_context;
             const [bytes,mode,opcode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
             cpu.cr[4]=cr4;
@@ -153,11 +153,11 @@ for(const release of [false,true]){
             for(let n=0;n<4;n++) set32(DATA+delta+4*n,values[n]);
             cpu.reg32[0]=values[0];
             cpu.segment_offsets[3]=delta;
-            cpu.segment_is_null[3]=+nullSegment;
+            cpu.segment_is_null[3]=+null_segment;
             if(mmio) { set32(0x13000+6*4,0xA0023);set32(0x13000+7*4,0xA1023); }
-            if(changeContext==="walk") set32(0x13000+6*4,mmio?0xA0003:0x6003);
-            if(pageFault) set32(0x13000+(delta ? 7 : 6)*4,0);
-            cpu.reg32[1]=3;mutate=callbackMutation;
+            if(change_context==="walk") set32(0x13000+6*4,mmio?0xA0003:0x6003);
+            if(page_fault) set32(0x13000+(delta ? 7 : 6)*4,0);
+            cpu.reg32[1]=3;mutate=callback_mutation;
             if(cases[i][6]===6) set32(0x13000+7*4,0);
             events=[];
             e.full_clear_tlb();
@@ -188,18 +188,18 @@ for(const release of [false,true]){
             for(let sample=0;sample<8;sample++) {
                 compare(i,()=>reset(i,{sample}));comparisons++;
             }
-            if(kind===3) for(const callbackMutation of [false,true]) {
-                compare(i,()=>reset(i,{mmio:true,callbackMutation}));comparisons++;
+            if(kind===3) for(const callback_mutation_local of [false,true]) {
+                compare(i,()=>reset(i,{mmio:true,callbackMutation: callback_mutation_local}));comparisons++;
                 assert.equal(compare(i,()=>reset(i,{delta:0xFFF,pageFault:true})).ip,PF);comparisons++;
             }
-            if(kind===3) for(const changeContext of ["segment","paging","mode","redirect","code","cache","walk","descriptor","task","control-flags"]) {
-                const configure=()=>reset(i,{mmio:true,callbackMutation:true,changeContext});
+            if(kind===3) for(const change_context_local of ["segment","paging","mode","redirect","code","cache","walk","descriptor","task","control-flags"]) {
+                const configure=()=>reset(i,{mmio:true,callbackMutation:true,changeContext: change_context_local});
                 configure();e.ir_test_step();e.ir_test_step();
                 const expected=state();
                 for(const opt of [0,1,2,3]) {
                     configure();instances[i][opt].exports.f(0);
-                    assert.equal(linear32[664>>2],102,`observer exit retirement ${changeContext}/${i}/${opt}`);
-                    assert.deepEqual(state(),expected,`observer must exit before suffix: ${changeContext}/${i}/${opt}`);
+                    assert.equal(linear32[664>>2],102,`observer exit retirement ${change_context_local}/${i}/${opt}`);
+                    assert.deepEqual(state(),expected,`observer must exit before suffix: ${change_context_local}/${i}/${opt}`);
                 }
                 comparisons++;
             }

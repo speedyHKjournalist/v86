@@ -135,7 +135,8 @@ fn simd_identities_respect_lane_widths_operand_order_and_three_source_limit() {
             // Three-source shuffle stays untouched, and a 16-bit extract must
             // keep its truncation even though the source scalar is 32 bits.
             assert_eq!(stats.shuffled + stats.eliminated, 0, "case {case}");
-        } else {
+        }
+        else {
             assert!(stats.shuffled + stats.eliminated > 0, "case {case}");
         }
         if case == 18 {

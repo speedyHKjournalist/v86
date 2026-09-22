@@ -1,26 +1,26 @@
 // Sequential fresh-VM, same-image paired acceptance; no concurrent benchmark jobs.
-import fs from 'node:fs';
-import assert from 'node:assert/strict';
-import {spawnSync} from 'node:child_process';
-import {createHash} from 'node:crypto';
-const [disk, prefix='build/ir13-xp-paired'] = process.argv.slice(2);
+import fs from "node:fs";
+import assert from "node:assert/strict";
+import {spawnSync} from "node:child_process";
+import {createHash as create_hash} from "node:crypto";
+const [disk, prefix="build/ir13-xp-paired"] = process.argv.slice(2);
 assert(disk);
 const runs = Number(process.env.IR_COMPARE_RUNS || 3);
 assert(Number.isInteger(runs) && runs >= 3 && runs <= 10);
 const rows=[];
-const variants=process.env.IR_BASELINE_WASM?['ir','legacy','baseline_ir']:['ir','legacy'];
+const variants=process.env.IR_BASELINE_WASM?["ir","legacy","baseline_ir"]:["ir","legacy"];
 for(let round=0;round<runs;round++) for(const variant of round%2?[...variants].reverse():variants) {
-    const backend=variant==='baseline_ir'?'ir':variant;
-    const wasm=variant==='baseline_ir'?process.env.IR_BASELINE_WASM:'build/v86-ir-runtime.wasm';
-    const file=`${prefix}-${round}-${variant}.jsonl`, fd=fs.openSync(file,'w');
-    const child=spawnSync(process.execPath,['tests/ir/performance/xp_boot.mjs',disk,backend,wasm],{
-        env:{...process.env,IR_BOOT_MS:process.env.IR_BOOT_MS||'180000',IR_BOOT_TARGET:'desktop',IR_DIAGNOSTICS:'0',IR_BENCH_RECORD:'0'},
-        stdio:['ignore',fd,fd],timeout:300000,
+    const backend=variant==="baseline_ir"?"ir":variant;
+    const wasm=variant==="baseline_ir"?process.env.IR_BASELINE_WASM:"build/v86-ir-runtime.wasm";
+    const file=`${prefix}-${round}-${variant}.jsonl`, fd=fs.openSync(file,"w");
+    const child=spawnSync(process.execPath,["tests/ir/performance/xp_boot.mjs",disk,backend,wasm],{
+        env:{...process.env,IR_BOOT_MS:process.env.IR_BOOT_MS||"180000",IR_BOOT_TARGET:"desktop",IR_DIAGNOSTICS:"0",IR_BENCH_RECORD:"0"},
+        stdio:["ignore",fd,fd],timeout:300000,
     });
     fs.closeSync(fd);
     assert.equal(child.status,0,`run failed: ${file}: ${child.error||child.signal||child.status}`);
-    const events=fs.readFileSync(file,'utf8').split('\n').filter(l=>l.startsWith('{')).map(l=>JSON.parse(l));
-    const result=events.findLast(e=>e.event==='result');
+    const events=fs.readFileSync(file,"utf8").split("\n").filter(l=>l.startsWith("{")).map(l=>JSON.parse(l));
+    const result=events.findLast(e=>e.event==="result");
     assert(result?.completed&&result.milestone,`milestone not reached: ${file}`);
     const ir=result.jit?.ir;
     const work=result.ir_work||{guest_steps:ir?.cache_guest_steps,activations:ir?.cache_hits,full_checks:ir?.cache_full_checks,observer_checks:0};
@@ -44,13 +44,13 @@ const medians=Object.fromEntries(variants.map(backend=>[backend,{
     mips:median(rows.filter(r=>r.backend===backend).map(r=>r.mips)),
     instructions:median(rows.filter(r=>r.backend===backend).map(r=>r.instructions)),
 }]));
-const result={milestone:'first 800x600x32 mode (not desktop idle)',runs,rows,medians,
-    artifacts:Object.fromEntries([...new Set(rows.map(r=>r.wasm))].map(file=>[file,createHash('sha256').update(fs.readFileSync(file)).digest('hex')])),
+const result={milestone:"first 800x600x32 mode (not desktop idle)",runs,rows,medians,
+    artifacts:Object.fromEntries([...new Set(rows.map(r=>r.wasm))].map(file=>[file,create_hash("sha256").update(fs.readFileSync(file)).digest("hex")])),
     time_ratio:medians.ir.ms/medians.legacy.ms,throughput_ratio:medians.ir.mips/medians.legacy.mips,
     baseline_time_ratio:medians.baseline_ir?medians.ir.ms/medians.baseline_ir.ms:null,
     baseline_throughput_ratio:medians.baseline_ir?medians.ir.mips/medians.baseline_ir.mips:null,
     pass:medians.ir.ms<=medians.legacy.ms&&medians.ir.mips>=medians.legacy.mips};
-fs.writeFileSync(`${prefix}-summary.json`,JSON.stringify(result,null,2)+'\n');
+fs.writeFileSync(`${prefix}-summary.json`,JSON.stringify(result,null,2)+"\n");
 console.log(JSON.stringify(result));
 
 process.exitCode=result.pass?0:1;

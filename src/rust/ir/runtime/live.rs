@@ -63,9 +63,7 @@ pub fn dirty_page(page: u32) {
 }
 /// Returning observers may continue only if no code write/reset occurred during
 /// the call. Exhaustion permanently forces a cold exit, without wrapping.
-pub(super) fn continuation_epoch() -> u64 {
-    LIVE.try_lock().unwrap().continuation_epoch
-}
+pub(super) fn continuation_epoch() -> u64 { LIVE.try_lock().unwrap().continuation_epoch }
 #[inline(always)]
 pub(super) unsafe fn entry() -> CpuEntryKey {
     let linear = *gp::instruction_pointer as u32;
@@ -184,7 +182,8 @@ pub unsafe fn ir_compile_live(
     };
     let result = if cfg != 0 {
         compile_cpu_cfg_region(&request, &source, &config)
-    } else {
+    }
+    else {
         compile_cpu_region(&request, &source, &config)
     };
     match result {
@@ -208,18 +207,18 @@ pub unsafe fn ir_compile_live(
     }
 }
 #[no_mangle]
-pub fn ir_live_error() -> u32 {
-    LIVE.try_lock().unwrap().error
-}
+pub fn ir_live_error() -> u32 { LIVE.try_lock().unwrap().error }
 /// The caller copies bytes synchronously before replacing, releasing or resetting the job.
 /// Returning bytes is not evidence that they are still valid for execution.
 #[no_mangle]
 pub fn ir_live_info(id: u64, field: u32) -> u32 {
     let state = LIVE.try_lock().unwrap();
-    let Some(job) = state.job.as_ref().filter(|j| j.artifact.key.job == id) else {
+    let Some(job) = state.job.as_ref().filter(|j| j.artifact.key.job == id)
+    else {
         return 0;
     };
-    let EntryContract::Cpu(entry) = job.artifact.entry else {
+    let EntryContract::Cpu(entry) = job.artifact.entry
+    else {
         unreachable!()
     };
     match field {
@@ -238,16 +237,19 @@ pub fn ir_live_info(id: u64, field: u32) -> u32 {
 #[no_mangle]
 pub fn ir_live_mapping(id: u64, index: u32, physical: u32) -> u32 {
     let state = LIVE.try_lock().unwrap();
-    let Some(job) = state.job.as_ref().filter(|j| j.artifact.key.job == id) else {
+    let Some(job) = state.job.as_ref().filter(|j| j.artifact.key.job == id)
+    else {
         return 0;
     };
     match job.source.mappings.get(index as usize) {
         Some(mapping) => {
             if physical == 1 {
                 mapping.physical.0
-            } else if physical == 0 {
+            }
+            else if physical == 0 {
                 mapping.linear.0
-            } else {
+            }
+            else {
                 0
             }
         },
@@ -277,7 +279,8 @@ pub unsafe fn ir_live_validate(id: u64) -> bool {
     {
         return false;
     }
-    let Ok(current) = capture(context.linear.0, job.source.bytes.len()) else {
+    let Ok(current) = capture(context.linear.0, job.source.bytes.len())
+    else {
         return false;
     };
     job.artifact.current(

@@ -1,27 +1,27 @@
-import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import {V86} from '../../../build/libv86.mjs';
-const wasm=process.argv[2]||'build/v86-ir-cache-test.wasm';
-let clockObserver=null,rdtscActive=false;
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import {V86} from "../../../build/libv86.mjs";
+const wasm=process.argv[2]||"build/v86-ir-cache-test.wasm";
+let clock_observer=null,rdtsc_active=false;
 const vm=new V86({wasm_fn:async imports=>{
  const tick=imports.env.microtick;
- imports.env.microtick=()=>{if(rdtscActive)clockObserver?.();return tick();};
+ imports.env.microtick=()=>{if(rdtsc_active)clock_observer?.();return tick();};
  return (await WebAssembly.instantiate(fs.readFileSync(wasm),imports)).instance.exports;
-},memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync('build/jit-capacity.bin')).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:'none'},autostart:false});
+},memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 try {
- await new Promise(r=>vm.add_listener('emulator-loaded',r));
+ await new Promise(r=>vm.add_listener("emulator-loaded",r));
  const cpu=vm.v86.cpu,e=cpu.wm.exports,PC=0x100000,DATA=0x110000,STACK=0x90000;
  const words=()=>new Uint32Array(e.memory.buffer),v=()=>new DataView(cpu.mem8.buffer,cpu.mem8.byteOffset);
- const until=async(test)=>{const end=performance.now()+15000;while(!test()){assert(performance.now()<end,'timeout');await sleep(1);}};
+ const until=async(test)=>{const end=performance.now()+15000;while(!test()){assert(performance.now()<end,"timeout");await sleep(1);}};
  vm.run();await until(()=>v().getUint16(0x500,true)===0xCAFE);await vm.stop();
  assert.throws(()=>vm.configure_ir_diagnostics(3),RangeError);assert.equal(e.ir_diagnostic_config(3),0);
  let imported=false;const instantiate=WebAssembly.instantiate;
  WebAssembly.instantiate=(code,imports)=>{
-  imported=WebAssembly.Module.imports(new WebAssembly.Module(code)).some(i=>i.name==='ir_diagnostic_begin');
+  imported=WebAssembly.Module.imports(new WebAssembly.Module(code)).some(i=>i.name==="ir_diagnostic_begin");
   const rdtsc=imports.e?.ir_rdtsc_continue;
   if(rdtsc)imports={...imports,e:{...imports.e,ir_rdtsc_continue:(...args)=>{
-   rdtscActive=true;try{return rdtsc(...args);}finally{rdtscActive=false;}
+   rdtsc_active=true;try {return rdtsc(...args);} finally {rdtsc_active=false;}
   }}};
   return instantiate(code,imports);
  };
@@ -45,13 +45,13 @@ try {
   const sum=Object.values(d.timings).reduce((n,r)=>n+r.sampled_ms,0);
   assert(Math.abs(sum-tot.sampled_batch_ms)<0.01,`exclusive timers conserve time: ${sum}/${tot.sampled_batch_ms}`);
   assert.equal(Object.values(d.helper_exits).reduce((n,r)=>n+r.count,0),d.exits.helper_control_or_fault.count+d.exits.helper_yield.count+d.exits.helper_invalidated.count);
-  assert.equal(['rdtsc','cpuid','read_cr','write_cr','clts'].reduce((n,k)=>n+d.control_exits[k].count,0),d.helper_exits.cpu_control.count);
+  assert.equal(["rdtsc","cpuid","read_cr","write_cr","clts"].reduce((n,k)=>n+d.control_exits[k].count,0),d.helper_exits.cpu_control.count);
   for(const [phase,total] of Object.entries(d.compiler)) {
    const rows=d.compiler_breakdown.map(b=>b.phases[phase]).filter(Boolean);
    assert.equal(rows.reduce((n,r)=>n+r.calls,0),total.calls,`${phase}: classified calls conserve total`);
    assert(Math.abs(rows.reduce((n,r)=>n+r.ms,0)-total.ms)<0.001,`${phase}: classified time conserves total`);
   }
-  assert.equal(d.exits.unclassified.count,0,'all executed test exits classified');
+  assert.equal(d.exits.unclassified.count,0,"all executed test exits classified");
   return d;
  };
  const loop=[0x40,0x49,0x75,0xFC,0xF4];
@@ -60,8 +60,8 @@ try {
  await prepare(1,loop);assert(await cpu.ir_compile_cached(5,2,1,1,32,8));assert.equal(imported,true);await run();assert.deepEqual(state(),plain);
  let d=check();assert(d.exits.budget.count>0);assert(d.timings.state_write.sampled_calls>0);assert(d.timings.generated.sampled_ms>0);assert(d.compiler.emit.calls>0);assert(d.publication.calls>0);
  assert.equal(d.totals.batches,d.totals.sampled_batches);
- d.exits.budget.count=-1;assert(report().exits.budget.count>0,'copied snapshot');
- const oldSession=d.session;assert(await vm.configure_ir_diagnostics(1));e.ir_diagnostic_publication(oldSession,12345,1);assert.equal(report().publication.calls,0,'late publication belongs to its session');
+ d.exits.budget.count=-1;assert(report().exits.budget.count>0,"copied snapshot");
+ const old_session=d.session;assert(await vm.configure_ir_diagnostics(1));e.ir_diagnostic_publication(old_session,12345,1);assert.equal(report().publication.calls,0,"late publication belongs to its session");
  await prepare(1,[0xC6,0x06,0x90,0x40,0xF4]);assert(await cpu.ir_compile_cached(4,2,1,1,32,8));await run();d=check();assert.equal(d.exits.scalar_store.count,1);assert(d.timings.memory_slow.sampled_calls>0);
  // Device callback cannot reset live timing/exit state or change compiler policy.
  let rejected=0;cpu.io.mmap_register(0xA0000,0x20000,()=>0,()=>{},()=>{rejected+=e.ir_diagnostic_config(0)===0;return 7;},()=>{});
@@ -75,16 +75,16 @@ try {
  v().setUint32(0x13000+(DATA>>>12)*4,DATA|3,true);e.full_clear_tlb();
  // Rejected in-owner continuations keep their semantic family in diagnostics.
  // An observer's XMM mutation must survive without stale SSA writeback.
- for(const [name,code,family] of [['in',[0xE4,0x93],'port_read'],['out',[0xE6,0x93],'port_write'],['rdtsc',[0x0F,0x31],'cpu_control']]) {
+ for(const [name,code,family] of [["in",[0xE4,0x93],"port_read"],["out",[0xE6,0x93],"port_write"],["rdtsc",[0x0F,0x31],"cpu_control"]]) {
   await prepare(1,[...code,0x43,0xF4]);let observed=0;
   const mutate=()=>{observed++;cpu.reg_xmm32s[0]^=1;return 7;};
-  if(name==='in')cpu.io.register_read(0x93,null,mutate);
-  else if(name==='out')cpu.io.register_write(0x93,null,mutate);
-  else clockObserver=()=>{if(cpu.instruction_pointer[0]===PC+2){clockObserver=null;mutate();}};
-  assert(await cpu.ir_compile_cached(3,2,1,1,32,8));await run();clockObserver=null;
+  if(name==="in")cpu.io.register_read(0x93,null,mutate);
+  else if(name==="out")cpu.io.register_write(0x93,null,mutate);
+  else clock_observer=()=>{if(cpu.instruction_pointer[0]===PC+2){clock_observer=null;mutate();}};
+  assert(await cpu.ir_compile_cached(3,2,1,1,32,8));await run();clock_observer=null;
   d=check();assert.equal(observed,1);assert.equal(cpu.reg32[3],1);assert.equal(words()[664>>2],3);
   assert.equal(d.helper_exits[family].count,1,`${name}: declined continuation remains classified`);
-  if(name==='rdtsc')assert.equal(d.control_exits.rdtsc.count,1);
+  if(name==="rdtsc")assert.equal(d.control_exits.rdtsc.count,1);
  }
  // Delayed compilation cannot reinstall diagnostic code after switching off.
  await prepare(1,loop);let resolve,held;
@@ -94,4 +94,4 @@ try {
  WebAssembly.instantiate=instantiate;
  assert.equal(report().enabled,false);
  console.log(`PASS: ${wasm}: diagnostic off/on exact guest state, no off-mode imports, counter/timer conservation, budget/store/MMIO/fault exits, active rejection, copied snapshots and stale-session publication`);
-}finally{await vm.destroy();}
+} finally {await vm.destroy();}

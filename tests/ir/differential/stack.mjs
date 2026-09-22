@@ -17,7 +17,7 @@ try {
     vm.run(); const deadline=performance.now()+10000;
     while(view.getUint16(0x500,true)!==0xCAFE) { assert(performance.now()<deadline); await sleep(1); }
     await vm.stop();
-    const initialCr0=cpu.cr[0], oldGdt=[cpu.gdtr_offset[0],cpu.gdtr_size[0]];
+    const initial_cr0=cpu.cr[0], old_gdt=[cpu.gdtr_offset[0],cpu.gdtr_size[0]];
     const PC=0x100000,HANDLER=0x180000,BASE=0x310000,DEST=0x320040;
     let reads=0,writes=0,windows=[];
     const imports={...e,m:e.memory,ir_memory_read:(...a)=>{reads++;return e.ir_memory_read(...a);},
@@ -25,8 +25,8 @@ try {
     const instances=modules.map(pair=>pair.map(module=>new WebAssembly.Instance(module,{e:imports})));
     function reset(i, ss32, offset=0x40, high=0, hot=false) {
         const [bytes,mode32,width,name]=cases[i];
-        e.ir_test_set_cr0(initialCr0|0x10000);
-        cpu.gdtr_offset[0]=oldGdt[0];cpu.gdtr_size[0]=oldGdt[1];
+        e.ir_test_set_cr0(initial_cr0|0x10000);
+        cpu.gdtr_offset[0]=old_gdt[0];cpu.gdtr_size[0]=old_gdt[1];
         cpu.sreg.set([16,8,16,16,16,16]); cpu.segment_access_bytes.set([0x93,0x9B,0x93,0x93,0x93,0x93]);
         cpu.segment_offsets.fill(0,0,6);cpu.segment_limits.fill(0xFFFFFFFF,0,6);cpu.segment_is_null.fill(0,0,6);
         cpu.is_32[0]=+mode32;cpu.stack_size_32[0]=+ss32;words[612>>2]=0;
@@ -73,12 +73,12 @@ try {
             assert.deepEqual(actual,state(),`wrap/high ESP ${cases[i][3]} ss32=${ss32} offset=${offset}`);wraps++;
         }
     console.log(`PASS: ${total} real CPU stack comparisons, ${native} native warm stack paths, ${wraps} SP-wrap/high-ESP comparisons`);
-    const findCase=(name,mode32,width)=>cases.findIndex(c=>c[3]===name&&c[1]===mode32&&c[2]===width);
+    const find_case=(name,mode32,width)=>cases.findIndex(c=>c[3]===name&&c[1]===mode32&&c[2]===width);
     let faults=0;
     for(const [name,fault] of [["push_mem","source"],["pop_mem","destination"],["pop_r0","stack"],
         ["push_mem","segment"],["pop_mem","segment"],["pop_fs","segment"]])
         for(const mode32 of [false,true]) for(const width of [16,32]) for(const ss32 of [false,true]) for(const opt of [0,1]) {
-            const i=findCase(name,mode32,width),offset=fault==="stack"?0x1000:0x40;
+            const i=find_case(name,mode32,width),offset=fault==="stack"?0x1000:0x40;
             const configure=()=>{
                 reset(i,ss32,offset);
                 if(fault==="source")set32(0x13000+0x320*4,0);
@@ -96,7 +96,7 @@ try {
             faults++;
         }
     for(const width of [16,32]) for(const opt of [0,1]) {
-        const i=findCase("push_r4",true,width);
+        const i=find_case("push_r4",true,width);
         const configure=()=>{
             reset(i,true);
             // Ring3 PUSH faults onto a distinct valid ring0 stack through a real TSS.
@@ -122,16 +122,16 @@ try {
         assert.deepEqual(actual,state(),`real ring3 PUSH write fault width=${width}`);faults++;
     }
     console.log(`PASS: ${faults} real stack faults, including POP temporary-ESP segment faults and ring3 PUSH through a TSS`);
-    let events=[],onEvent;
+    let events=[],on_event;
     const observe=(kind,a,value)=>{events.push({kind,a,value,regs:Array.from(cpu.reg32,x=>x>>>0),esp:cpu.reg32[4]>>>0,eax:cpu.reg32[0]>>>0,
-        flags:e.get_eflags()>>>0,ip:cpu.instruction_pointer[0]>>>0});if(onEvent)onEvent();};
+        flags:e.get_eflags()>>>0,ip:cpu.instruction_pointer[0]>>>0});if(on_event)on_event();};
     cpu.io.mmap_register(0xA0000,0x20000,
         a=>{observe("r8",a);return 0x80+(a&7);},(a,v)=>observe("w8",a,v),
         a=>{observe("r32",a);return 0x89ABCDEF|0;},(a,v)=>observe("w32",a,v>>>0));
     let devices=0;
     for(const name of ["push_r4","pop_r4","push_mem","pop_mem","pop_mem_esp","pusha","popa","leave"])
-        for(const mode32 of [false,true])for(const width of [16,32])for(const ss32 of [false,true])for(const opt of [0,1]) {
-            const i=findCase(name,mode32,width);
+        for(const mode32 of [false,true]) for(const width of [16,32]) for(const ss32 of [false,true]) for(const opt of [0,1]) {
+            const i=find_case(name,mode32,width);
             const configure=()=>{
                 reset(i,ss32);
                 const page=name==="push_mem"||name==="pop_mem"?0x320:0x310;
@@ -145,15 +145,15 @@ try {
             assert.deepEqual(actual,state(),`stack MMIO ${name}`);devices++;
         }
     console.log(`PASS: ${devices} stack MMIO comparisons, including old ESP observation and POP [ESP] post-increment addressing`);
-    let multipleFaults=0, skipped=0, multipleWraps=0, aliasStores=0;
+    let multiple_faults=0, skipped=0, multiple_wraps=0, alias_stores=0;
     for(const name of ["popa","leave"]) for(const mode32 of [false,true]) for(const width of [16,32])
-        for(const ss32 of [false,true]) for(const opt of [0,1]) for(const deviceFirst of [false,true]) {
-            const i=findCase(name,mode32,width),offset=name==="popa"?0x1000-4*width/8:0x1000;
+        for(const ss32 of [false,true]) for(const opt of [0,1]) for(const device_first of [false,true]) {
+            const i=find_case(name,mode32,width),offset=name==="popa"?0x1000-4*width/8:0x1000;
             const configure=()=>{
                 reset(i,ss32,name==="leave"?0x40:offset);
                 if(name==="leave")cpu.reg32[5]=ss32?BASE+0x1000:0x12341000;
                 set32(0x13000+0x311*4,0);
-                if(deviceFirst && name==="popa")set32(0x13000+0x310*4,0xA0003);
+                if(device_first && name==="popa")set32(0x13000+0x310*4,0xA0003);
                 // Leave a normal kernel stack below the faulting range. POPA's
                 // device-first case also uses the device for the exception frame;
                 // only its writes are allowed, no POPA device read may occur.
@@ -164,13 +164,13 @@ try {
             assert.equal(actual.ip,HANDLER);assert.equal(words[664>>2],101);
             assert.equal(observed.filter(e=>e.kind.startsWith("r")).length,0,"range fault precedes device read");
             configure();e.ir_test_step();e.ir_test_step();
-            assert.deepEqual(actual,state(),`${name} range fault width=${width} ss32=${ss32} device=${deviceFirst}`);
-            assert.deepEqual(observed,events);multipleFaults++;
+            assert.deepEqual(actual,state(),`${name} range fault width=${width} ss32=${ss32} device=${device_first}`);
+            assert.deepEqual(observed,events);multiple_faults++;
         }
     // PUSHA preflight faults must precede every register write, with the original
     // user ESP saved by real exception delivery to a separate kernel stack.
-    for(const width of [16,32]) for(const opt of [0,1]) for(const lastPage of [false,true]) {
-        const i=findCase("pusha",true,width),offset=0x1000+4*width/8;
+    for(const width of [16,32]) for(const opt of [0,1]) for(const last_page of [false,true]) {
+        const i=find_case("pusha",true,width),offset=0x1000+4*width/8;
         const configure=()=>{
             reset(i,true,offset);
             for(const [index,low,high] of [[0,0,0],[1,0xFFFF,0x00CF9A00],[2,0xFFFF,0x00CF9200],
@@ -183,8 +183,8 @@ try {
             cpu.sreg.set([0x23,0x1B,0x23,0x23,0x23,0x23]);
             cpu.segment_access_bytes.set([0xF3,0xFB,0xF3,0xF3,0xF3,0xF3]);words[612>>2]=3;
             set32(0x12000,0x13007);set32(0x13000+0x100*4,0x100007);
-            set32(0x13000+0x310*4,lastPage?0xA0007:0x310005);
-            set32(0x13000+0x311*4,lastPage?0x311005:0x311007);
+            set32(0x13000+0x310*4,last_page?0xA0007:0x310005);
+            set32(0x13000+0x311*4,last_page?0x311005:0x311007);
             mem.fill(0xCC,0x8FFC0,0x90020);windows.push([0x8FFC0,[]]);
             e.full_clear_tlb();e.update_state_flags();events=[];
         };
@@ -193,10 +193,10 @@ try {
         assert.equal(get32(0x90000-8),BASE+offset,"PUSHA fault preserves initial ESP");
         assert.equal(words[664>>2],101);assert.deepEqual(events,[],"no PUSHA device write before range fault");
         configure();e.ir_test_step();e.ir_test_step();
-        assert.deepEqual(actual,state(),`PUSHA preflight width=${width} lastPage=${lastPage}`);multipleFaults++;
+        assert.deepEqual(actual,state(),`PUSHA preflight width=${width} lastPage=${last_page}`);multiple_faults++;
     }
     for(const mode32 of [false,true]) for(const width of [16,32]) for(const ss32 of [false,true]) for(const opt of [0,1]) {
-        const i=findCase("popa",mode32,width);
+        const i=find_case("popa",mode32,width);
         const configure=()=>{reset(i,ss32);set32(0x13000+0x310*4,0xA0003);e.full_clear_tlb();events=[];};
         configure();instances[i][opt].exports.f(0);
         const observed=events.slice(),skip=0xA0040+3*width/8;
@@ -207,44 +207,42 @@ try {
     }
     for(const name of ["pusha","popa","leave"]) for(const mode32 of [false,true]) for(const width of [16,32])
         for(const ss32 of [false,true]) for(const opt of [0,1]) for(const offset of [1,0xFFF1,0xFFFE]) {
-            const i=findCase(name,mode32,width);
+            const i=find_case(name,mode32,width);
             reset(i,ss32,offset,ss32?0:0xABCD0000);instances[i][opt].exports.f(0);
             const actual=state(),executed=name==="pusha"?2:3;
             assert.equal(words[664>>2],100+executed);
             reset(i,ss32,offset,ss32?0:0xABCD0000);for(let n=0;n<executed;n++)e.ir_test_step();
-            assert.deepEqual(actual,state(),`multiple stack wrap ${name} mode=${mode32} width=${width} ss32=${ss32} offset=${offset}`);multipleWraps++;
+            assert.deepEqual(actual,state(),`multiple stack wrap ${name} mode=${mode32} width=${width} ss32=${ss32} offset=${offset}`);multiple_wraps++;
         }
     for(const mode32 of [false,true]) for(const width of [16,32]) for(const opt of [0,1]) {
-        const i=findCase("pusha",mode32,width);
+        const i=find_case("pusha",mode32,width);
         const configure=()=>{reset(i,true);cpu.reg32[4]=PC+2+width;
             windows.push([PC-8,[]]);e.full_clear_tlb();};
         configure();instances[i][opt].exports.f(0);const actual=state();
         assert.equal(actual.ip,PC+cases[i][0].length-1,"PUSHA exits before modified following instruction");
         assert.equal(words[664>>2],102);
-        configure();e.ir_test_step();e.ir_test_step();assert.deepEqual(actual,state());aliasStores++;
+        configure();e.ir_test_step();e.ir_test_step();assert.deepEqual(actual,state());alias_stores++;
     }
-    console.log(`PASS: ${multipleFaults} multi-stack preflight/LEAVE faults, ${skipped} skipped-SP device checks, ${multipleWraps} stack wraps, ${aliasStores} self-alias PUSHA exits`);
+    console.log(`PASS: ${multiple_faults} multi-stack preflight/LEAVE faults, ${skipped} skipped-SP device checks, ${multiple_wraps} stack wraps, ${alias_stores} self-alias PUSHA exits`);
     let remaps=0;
-    for(const name of ["pusha","popa"])for(const mode32 of [false,true])for(const width of [16,32])
-        for(const ss32 of [false,true])for(const opt of [0,1]) {
-            const i=findCase(name,mode32,width),offset=0x1000+(name==="pusha"?1:-1)*4*width/8;
+    for(const name of ["pusha","popa"]) for(const mode32 of [false,true]) for(const width of [16,32])
+        for(const ss32 of [false,true]) for(const opt of [0,1]) {
+            const i=find_case(name,mode32,width),offset=0x1000+(name==="pusha"?1:-1)*4*width/8;
             const configure=()=>{
-                onEvent=undefined;reset(i,ss32,offset);
-                const devicePage=name==="pusha"?0x311:0x310,remapPage=name==="pusha"?0x310:0x311;
-                set32(0x13000+devicePage*4,0xA0003);
+                on_event=undefined;reset(i,ss32,offset);
+                const device_page=name==="pusha"?0x311:0x310,remap_page=name==="pusha"?0x310:0x311;
+                set32(0x13000+device_page*4,0xA0003);
                 mem.fill(0x42,0x330000,0x331000);windows.push([0x330000,[]],[0x330FC0,[]]);
                 e.full_clear_tlb();events=[];
-                onEvent=()=>{set32(0x13000+remapPage*4,0x330003);e.full_clear_tlb();onEvent=undefined;};
+                on_event=()=>{set32(0x13000+remap_page*4,0x330003);e.full_clear_tlb();on_event=undefined;};
             };
             configure();instances[i][opt].exports.f(0);const actual=state(),observed=events.slice();
-            assert.equal(onEvent,undefined);assert.equal(words[664>>2],name==="pusha"?102:103);
+            assert.equal(on_event,undefined);assert.equal(words[664>>2],name==="pusha"?102:103);
             configure();for(let n=0;n<(name==="pusha"?2:3);n++)e.ir_test_step();
             assert.deepEqual(actual,state(),`${name} translation changed by device width=${width} ss32=${ss32}`);
             assert.deepEqual(observed,events);remaps++;
         }
     console.log(`PASS: ${remaps} multi-stack device remaps; each later access rechecks translation`);
-
-
 
 
 } finally {await vm.destroy();}

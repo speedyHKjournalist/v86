@@ -66,9 +66,7 @@ pub struct Poll {
     pub recovery: StateId,
     pub cost: u32,
 }
-fn invalid() -> CompileError {
-    CompileError::InvalidIr("invalid lowered control flow".into())
-}
+fn invalid() -> CompileError { CompileError::InvalidIr("invalid lowered control flow".into()) }
 
 /// Resolve simultaneous local assignments. Sinks are safe to write immediately;
 /// a cycle saves one source and redirects every use of that old source to scratch.
@@ -111,9 +109,11 @@ pub(crate) fn schedule(
                 source,
                 destination,
             });
-        } else {
+        }
+        else {
             // No sink: every remaining destination supplies another assignment.
-            let Source::Local(local) = pending[0].0 else {
+            let Source::Local(local) = pending[0].0
+            else {
                 return Err(invalid());
             };
             let scratch = edge.scratch.len();
@@ -210,7 +210,9 @@ pub fn lower(region: &Region, allocation: &Allocation) -> Result<ControlFlow, Co
             .all(|id| region.states[id.index()].count_base.is_some());
     let cold = cold_dispatch(&region.entries, &blocks)?;
     for (index, block) in blocks.iter_mut().enumerate() {
-        if cold[index] { block.budget_cost = 0; }
+        if cold[index] {
+            block.budget_cost = 0;
+        }
     }
     Ok(ControlFlow {
         entries: region.entries.clone(),
@@ -225,7 +227,8 @@ pub fn lower(region: &Region, allocation: &Allocation) -> Result<ControlFlow, Co
                         recovery: inst.state.unwrap(),
                         cost: 1,
                     })
-                } else {
+                }
+                else {
                     None
                 }
             })
@@ -251,7 +254,10 @@ fn cold_dispatch(entries: &[BlockId], blocks: &[Block]) -> Result<Vec<bool>, Com
     let mut incoming = vec![Vec::new(); blocks.len()];
     for (index, block) in blocks.iter().enumerate() {
         for edge in block.terminator.edges() {
-            incoming.get_mut(edge.target.index()).ok_or_else(invalid)?.push(index);
+            incoming
+                .get_mut(edge.target.index())
+                .ok_or_else(invalid)?
+                .push(index);
         }
     }
     let mut admitted = vec![false; blocks.len()];
@@ -265,9 +271,12 @@ fn cold_dispatch(entries: &[BlockId], blocks: &[Block]) -> Result<Vec<bool>, Com
     loop {
         let mut changed = false;
         for (index, block) in blocks.iter().enumerate() {
-            if !admitted[index] && block.recovery.is_none()
-                && block.instructions.is_empty() && block.params.is_empty()
-                && !block.terminator.edges().is_empty() && !incoming[index].is_empty()
+            if !admitted[index]
+                && block.recovery.is_none()
+                && block.instructions.is_empty()
+                && block.params.is_empty()
+                && !block.terminator.edges().is_empty()
+                && !incoming[index].is_empty()
                 && incoming[index].iter().all(|&from| admitted[from])
             {
                 admitted[index] = true;
@@ -275,7 +284,9 @@ fn cold_dispatch(entries: &[BlockId], blocks: &[Block]) -> Result<Vec<bool>, Com
                 changed = true;
             }
         }
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
     Ok(cold)
 }
@@ -293,14 +304,17 @@ impl ControlFlow {
         }
         let cold = self.cold_dispatch()?;
         for (index, block) in self.blocks.iter().enumerate() {
-            if block.budget_cost != if cold[index] { 0 } else { 1 } { return Err(invalid()); }
+            if block.budget_cost != if cold[index] { 0 } else { 1 } {
+                return Err(invalid());
+            }
             if self.entries.contains(&BlockId(index as u32)) {
                 if degrees[index] != 0 || !block.params.is_empty() {
                     return Err(CompileError::Unsupported(
                         "entry prologue with internal predecessors/parameters",
                     ));
                 }
-            } else if block.recovery.is_none() && !cold[index] {
+            }
+            else if block.recovery.is_none() && !cold[index] {
                 return Err(CompileError::Unsupported(
                     "block budget recovery map missing",
                 ));
@@ -337,18 +351,43 @@ impl ControlFlow {
 #[cfg(test)]
 mod cold_dispatch_tests {
     use super::*;
-    fn edge(target: u32) -> Edge { Edge { target: BlockId(target), scratch: vec![], copies: vec![] } }
+    fn edge(target: u32) -> Edge {
+        Edge {
+            target: BlockId(target),
+            scratch: vec![],
+            copies: vec![],
+        }
+    }
     #[test]
     fn only_bounded_cold_scaffolding_can_have_zero_budget_cost() {
-        let entry = Block { params: vec![], instructions: vec![InstId(0)], recovery: None,
-            budget_cost: 1, terminator: Terminator::Jump(edge(1)) };
-        let cold = Block { params: vec![], instructions: vec![], recovery: None,
-            budget_cost: 0, terminator: Terminator::Jump(edge(2)) };
-        let guest = Block { params: vec![], instructions: vec![InstId(1)], recovery: Some(StateId(0)),
-            budget_cost: 1, terminator: Terminator::Exit(StateId(0)) };
-        let graph = ControlFlow { entries: vec![BlockId(0)], blocks: vec![entry,cold,guest],
-            dynamic_counts: true, polls: vec![] };
-        assert_eq!(graph.cold_dispatch().unwrap(), vec![false,true,false]);
+        let entry = Block {
+            params: vec![],
+            instructions: vec![InstId(0)],
+            recovery: None,
+            budget_cost: 1,
+            terminator: Terminator::Jump(edge(1)),
+        };
+        let cold = Block {
+            params: vec![],
+            instructions: vec![],
+            recovery: None,
+            budget_cost: 0,
+            terminator: Terminator::Jump(edge(2)),
+        };
+        let guest = Block {
+            params: vec![],
+            instructions: vec![InstId(1)],
+            recovery: Some(StateId(0)),
+            budget_cost: 1,
+            terminator: Terminator::Exit(StateId(0)),
+        };
+        let graph = ControlFlow {
+            entries: vec![BlockId(0)],
+            blocks: vec![entry, cold, guest],
+            dynamic_counts: true,
+            polls: vec![],
+        };
+        assert_eq!(graph.cold_dispatch().unwrap(), vec![false, true, false]);
         graph.check_target(true).unwrap();
         for variant in 0..5 {
             let mut invalid = graph.clone();
@@ -359,7 +398,10 @@ mod cold_dispatch_tests {
                 3 => invalid.blocks[2].terminator = Terminator::Jump(edge(1)),
                 _ => invalid.blocks[0].terminator = Terminator::Jump(edge(2)),
             }
-            assert!(invalid.check_target(true).is_err(), "variant {variant} must pay normal budget and provide recovery");
+            assert!(
+                invalid.check_target(true).is_err(),
+                "variant {variant} must pay normal budget and provide recovery"
+            );
         }
     }
 }

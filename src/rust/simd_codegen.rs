@@ -151,7 +151,8 @@ pub fn supported(name: &str, mmx: bool) -> bool {
 fn address(r: u32, mmx: bool) -> u32 {
     if mmx {
         gp::get_reg_mmx_offset(r)
-    } else {
+    }
+    else {
         gp::get_reg_xmm_offset(r)
     }
 }
@@ -164,7 +165,10 @@ pub fn prepare_instruction(ctx: &mut JitContext) {
     let mut a = ctx.cpu.eip;
     let mut kind = None;
     let mut scalar_width = None;
-    if cfg!(target_feature = "simd128") && !cfg!(feature = "profiler") && unsafe { crate::jit::JIT_SIMD_CACHE } {
+    if cfg!(target_feature = "simd128")
+        && !cfg!(feature = "profiler")
+        && unsafe { crate::jit::JIT_SIMD_CACHE }
+    {
         let prefix = match read8(a) {
             p @ (0x66 | 0xF2 | 0xF3) => {
                 a += 1;
@@ -177,40 +181,52 @@ pub fn prepare_instruction(ctx: &mut JitContext) {
             let mmx = prefix == 0 && opcode >= 0x60;
             let name = if prefix == 0 {
                 format!("instr_0F{:02X}", opcode)
-            } else {
+            }
+            else {
                 format!("instr_{:02X}0F{:02X}", prefix, opcode)
             };
             let op = operation(&name, mmx);
-            if let Some(Op::Float(double, true, 0x51 | 0x58 | 0x59 | 0x5C | 0x5D | 0x5E | 0x5F)) = op {
+            if let Some(Op::Float(double, true, 0x51 | 0x58 | 0x59 | 0x5C | 0x5D | 0x5E | 0x5F)) =
+                op
+            {
                 scalar_width = Some(if double { 8 } else { 4 });
             }
             // Scalar operations use the separate low-lane cache above. The
             // full-vector cache would reconstruct untouched lanes each time.
             // Mixed-precision ADDSUB chains quickly reach NaNs; materializing
             // the entire cache at each helper call was slower than direct stores.
-            if !matches!(op, Some(Op::Float(_, true, _) | Op::Float(_, _, 0xD0))) && matches!(
-                op,
-                Some(
-                    Op::Binary(_)
-                        | Op::AndNot
-                        | Op::Pack(_)
-                        | Op::Unpack(..)
-                        | Op::Shift(..)
-                        | Op::MulHigh(_)
-                        | Op::MulDwords
-                        | Op::Sad
-                        | Op::Float(..)
+            if !matches!(op, Some(Op::Float(_, true, _) | Op::Float(_, _, 0xD0)))
+                && matches!(
+                    op,
+                    Some(
+                        Op::Binary(_)
+                            | Op::AndNot
+                            | Op::Pack(_)
+                            | Op::Unpack(..)
+                            | Op::Shift(..)
+                            | Op::MulHigh(_)
+                            | Op::MulDwords
+                            | Op::Sad
+                            | Op::Float(..)
+                    )
                 )
-            ) && (!mmx || !matches!(opcode, 0xFE | 0xF5))
-                || matches!(name.as_str(), "instr_F20F12" | "instr_F30F12" | "instr_F30F16")
+                && (!mmx || !matches!(opcode, 0xFE | 0xF5))
+                || matches!(
+                    name.as_str(),
+                    "instr_F20F12" | "instr_F30F12" | "instr_F30F16"
+                )
             {
                 kind = Some(mmx);
             }
         }
     }
     if scalar_width.is_some() {
-        if ctx.simd_cache_kind.is_some() { flush_cache(ctx); }
-        if scalar_width != ctx.scalar_cache_width { flush_scalar_cache(ctx); }
+        if ctx.simd_cache_kind.is_some() {
+            flush_cache(ctx);
+        }
+        if scalar_width != ctx.scalar_cache_width {
+            flush_scalar_cache(ctx);
+        }
         ctx.scalar_cache_width = scalar_width;
         return;
     }
@@ -224,17 +240,26 @@ pub fn prepare_instruction(ctx: &mut JitContext) {
 // memory. This avoids reconstructing a full XMM on every scalar operation.
 fn write_scalar_subset(ctx: &mut JitContext, operands: Option<(u32, u32)>) {
     for (addr, local, bytes) in &ctx.scalar_cache {
-        if operands.map_or(false, |(src, dst)| *addr != src && *addr != dst) { continue; }
+        if operands.map_or(false, |(src, dst)| *addr != src && *addr != dst) {
+            continue;
+        }
         ctx.builder.const_i32(*addr as i32);
         ctx.builder.get_local_v128(local);
-        ctx.builder.simd_lane(if *bytes == 4 { 0x1B } else { 0x1D }, 0);
-        if *bytes == 4 { ctx.builder.store_aligned_i32(0); }
-        else { ctx.builder.store_aligned_i64(0); }
+        ctx.builder
+            .simd_lane(if *bytes == 4 { 0x1B } else { 0x1D }, 0);
+        if *bytes == 4 {
+            ctx.builder.store_aligned_i32(0);
+        }
+        else {
+            ctx.builder.store_aligned_i64(0);
+        }
     }
 }
 fn flush_scalar_cache(ctx: &mut JitContext) {
     write_scalar_subset(ctx, None);
-    for (_, local, _) in ctx.scalar_cache.drain(..) { ctx.builder.free_local_v128(local); }
+    for (_, local, _) in ctx.scalar_cache.drain(..) {
+        ctx.builder.free_local_v128(local);
+    }
     ctx.scalar_cache_width = None;
 }
 fn cache_scalar(ctx: &mut JitContext, addr: u32, bytes: u32) {
@@ -249,13 +274,16 @@ fn cache_scalar(ctx: &mut JitContext, addr: u32, bytes: u32) {
 fn write_cache(ctx: &mut JitContext) { write_cache_subset(ctx, None); }
 fn write_cache_subset(ctx: &mut JitContext, operands: Option<(u32, u32)>) {
     for (addr, local, mmx) in &ctx.simd_cache {
-        if operands.map_or(false, |(src, dst)| *addr != src && *addr != dst) { continue; }
+        if operands.map_or(false, |(src, dst)| *addr != src && *addr != dst) {
+            continue;
+        }
         ctx.builder.const_i32(*addr as i32);
         ctx.builder.get_local_v128(local);
         if *mmx {
             ctx.builder.simd_lane(0x1D, 0);
             ctx.builder.store_aligned_i64(0);
-        } else {
+        }
+        else {
             ctx.builder.simd_memory(0x0B, 2);
         }
     }
@@ -277,7 +305,11 @@ fn cache_value(ctx: &mut JitContext, dst: u32, mmx: bool) {
     ctx.simd_cache.push((dst, value, mmx));
 }
 fn load(ctx: &mut JitContext, address: u32, bytes: u32) {
-    if let Some((_, local, _)) = ctx.scalar_cache.iter().find(|(a, _, b)| *a == address && *b == bytes) {
+    if let Some((_, local, _)) = ctx
+        .scalar_cache
+        .iter()
+        .find(|(a, _, b)| *a == address && *b == bytes)
+    {
         ctx.builder.get_local_v128(local);
         return;
     }
@@ -307,12 +339,14 @@ fn emit(ctx: &mut JitContext, op: Op, src: u32, dst: u32, bytes: u32, source_byt
             load(ctx, dst, bytes);
             load(ctx, src, source_bytes);
             ctx.builder.simd(if signed { 0xBD } else { 0xBF });
-        } else {
+        }
+        else {
             ctx.builder.simd_zero();
         }
         ctx.builder
             .simd_shuffle([2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]);
-    } else if let Op::MulDwords = op {
+    }
+    else if let Op::MulDwords = op {
         for addr in [dst, src] {
             load(ctx, addr, bytes);
             ctx.builder.simd_zero();
@@ -320,7 +354,8 @@ fn emit(ctx: &mut JitContext, op: Op, src: u32, dst: u32, bytes: u32, source_byt
                 .simd_shuffle([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]);
         }
         ctx.builder.simd(0xDE);
-    } else if let Op::Sad = op {
+    }
+    else if let Op::Sad = op {
         load(ctx, dst, bytes);
         load(ctx, src, source_bytes);
         ctx.builder.simd(0x79);
@@ -341,7 +376,8 @@ fn emit(ctx: &mut JitContext, op: Op, src: u32, dst: u32, bytes: u32, source_byt
         ctx.builder
             .simd_shuffle([0, 1, 2, 3, 16, 17, 18, 19, 8, 9, 10, 11, 16, 17, 18, 19]);
         ctx.builder.free_local_v128(sums);
-    } else if let Op::Shift(opcode, bits, arithmetic) = op {
+    }
+    else if let Op::Shift(opcode, bits, arithmetic) = op {
         load(ctx, src, source_bytes);
         ctx.builder.simd_lane(0x1D, 0);
         let count = ctx.builder.set_new_local_i64();
@@ -353,7 +389,8 @@ fn emit(ctx: &mut JitContext, op: Op, src: u32, dst: u32, bytes: u32, source_byt
             load(ctx, dst, bytes);
             ctx.builder.const_i32((bits - 1) as i32);
             ctx.builder.simd(opcode);
-        } else {
+        }
+        else {
             ctx.builder.simd_zero();
         }
         ctx.builder.else_();
@@ -363,11 +400,13 @@ fn emit(ctx: &mut JitContext, op: Op, src: u32, dst: u32, bytes: u32, source_byt
         ctx.builder.simd(opcode);
         ctx.builder.block_end();
         ctx.builder.free_local_i64(count);
-    } else {
+    }
+    else {
         if let Op::AndNot = op {
             load(ctx, src, source_bytes);
             load(ctx, dst, bytes);
-        } else {
+        }
+        else {
             load(ctx, dst, bytes);
             load(ctx, src, source_bytes);
         }
@@ -405,10 +444,12 @@ fn emit(ctx: &mut JitContext, op: Op, src: u32, dst: u32, bytes: u32, source_byt
     }
     if let Some(mmx) = ctx.simd_cache_kind {
         cache_value(ctx, dst, mmx);
-    } else if bytes == 8 {
+    }
+    else if bytes == 8 {
         ctx.builder.simd_lane(0x1D, 0);
         ctx.builder.store_aligned_i64(0);
-    } else {
+    }
+    else {
         ctx.builder.simd_memory(0x0B, 2);
     }
 }
@@ -416,17 +457,21 @@ pub fn register(ctx: &mut JitContext, name: &str, src: u32, dst: u32, mmx: bool)
     if !cfg!(target_feature = "simd128") {
         return false;
     }
-    let Some(op) = operation(name, mmx) else {
+    let Some(op) = operation(name, mmx)
+    else {
         return false;
     };
     let bytes = if mmx { 8 } else { 16 };
     if let Op::CompareFlags(double) = op {
         compare_flags(ctx, address(src, false), dst, double);
-    } else if let Op::Convert = op {
+    }
+    else if let Op::Convert = op {
         convert(ctx, name, address(src, false), dst);
-    } else if let Op::Float(double, scalar, opcode) = op {
+    }
+    else if let Op::Float(double, scalar, opcode) = op {
         float_emit(ctx, name, address(src, false), dst, double, scalar, opcode);
-    } else {
+    }
+    else {
         emit(ctx, op, address(src, mmx), address(dst, mmx), bytes, bytes);
     }
     if mmx {
@@ -445,7 +490,8 @@ pub fn memory(
     if !cfg!(target_feature = "simd128") {
         return false;
     }
-    let Some(op) = operation(name, mmx) else {
+    let Some(op) = operation(name, mmx)
+    else {
         return false;
     };
     let scratch = gp::sse_scratch_register as u32;
@@ -460,17 +506,21 @@ pub fn memory(
             codegen::gen_modrm_resolve_safe_read64(ctx, modrm);
             ctx.builder.store_aligned_i64(0);
         },
-        _ if matches!(name, "instr_660FD0" | "instr_F20FD0") =>
-            codegen::gen_modrm_resolve_safe_read128_aligned(ctx, modrm, scratch),
+        _ if matches!(name, "instr_660FD0" | "instr_F20FD0") => {
+            codegen::gen_modrm_resolve_safe_read128_aligned(ctx, modrm, scratch)
+        },
         _ => codegen::gen_modrm_resolve_safe_read128(ctx, modrm, scratch),
     }
     if let Op::CompareFlags(double) = op {
         compare_flags(ctx, scratch, dst, double);
-    } else if let Op::Convert = op {
+    }
+    else if let Op::Convert = op {
         convert(ctx, name, scratch, dst);
-    } else if let Op::Float(double, scalar, opcode) = op {
+    }
+    else if let Op::Float(double, scalar, opcode) = op {
         float_emit(ctx, name, scratch, dst, double, scalar, opcode);
-    } else {
+    }
+    else {
         emit(
             ctx,
             op,
@@ -512,9 +562,11 @@ pub fn shift_immediate(
             }
         }
         ctx.builder.simd_shuffle(lanes);
-    } else if count >= bits && kind != 4 {
+    }
+    else if count >= bits && kind != 4 {
         ctx.builder.simd_zero();
-    } else {
+    }
+    else {
         load(ctx, dst, if mmx { 8 } else { 16 });
         ctx.builder.const_i32(count.min(bits - 1) as i32);
         let base = match bits {
@@ -535,7 +587,8 @@ pub fn shift_immediate(
     if mmx {
         ctx.builder.simd_lane(0x1D, 0);
         ctx.builder.store_aligned_i64(0);
-    } else {
+    }
+    else {
         ctx.builder.simd_memory(0x0B, 2);
     }
     if mmx {
@@ -591,7 +644,8 @@ fn shuffle(ctx: &mut JitContext, name: &str, src: u32, dst: u32, imm: u32) {
     if mmx {
         ctx.builder.simd_lane(0x1D, 0);
         ctx.builder.store_aligned_i64(0);
-    } else {
+    }
+    else {
         ctx.builder.simd_memory(0x0B, 2);
     }
 }
@@ -613,11 +667,13 @@ pub fn shuffle_memory(ctx: &mut JitContext, name: &str, modrm: ModrmByte, dst: u
         ctx.builder.const_i32(scratch as i32);
         codegen::gen_modrm_resolve_safe_read32(ctx, modrm);
         ctx.builder.store_aligned_i32(0);
-    } else if mmx || name == "instr_F20FC2" {
+    }
+    else if mmx || name == "instr_F20FC2" {
         ctx.builder.const_i32(scratch as i32);
         codegen::gen_modrm_resolve_safe_read64(ctx, modrm);
         ctx.builder.store_aligned_i64(0);
-    } else {
+    }
+    else {
         codegen::gen_modrm_resolve_safe_read128(ctx, modrm, scratch);
     }
     shuffle(ctx, name, scratch, address(dst, mmx), imm);
@@ -642,10 +698,12 @@ fn float_emit(
     let bytes = if scalar {
         if double {
             8
-        } else {
+        }
+        else {
             4
         }
-    } else {
+    }
+    else {
         16
     };
     let base = if double { 0xF0 } else { 0xE4 };
@@ -659,7 +717,8 @@ fn float_emit(
             ctx.builder.simd(base);
             ctx.builder.simd_shuffle(if double {
                 [0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26, 27, 28, 29, 30, 31]
-            } else {
+            }
+            else {
                 [0, 1, 2, 3, 20, 21, 22, 23, 8, 9, 10, 11, 28, 29, 30, 31]
             });
         },
@@ -670,12 +729,15 @@ fn float_emit(
                 let lanes = if double {
                     if high {
                         [8, 9, 10, 11, 12, 13, 14, 15, 24, 25, 26, 27, 28, 29, 30, 31]
-                    } else {
+                    }
+                    else {
                         [0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23]
                     }
-                } else if high {
+                }
+                else if high {
                     [4, 5, 6, 7, 12, 13, 14, 15, 20, 21, 22, 23, 28, 29, 30, 31]
-                } else {
+                }
+                else {
                     [0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27]
                 };
                 ctx.builder.simd_shuffle(lanes);
@@ -708,7 +770,8 @@ fn float_emit(
             if matches!(opcode, 0x58 | 0x59) {
                 load(ctx, src, bytes);
                 load(ctx, dst, bytes);
-            } else {
+            }
+            else {
                 load(ctx, dst, bytes);
                 load(ctx, src, bytes);
             }
@@ -747,13 +810,15 @@ fn finish_float(
     if ctx.scalar_cache_width.is_some() {
         ctx.builder.if_v128();
         write_scalar_subset(ctx, Some((src, dst)));
-    } else if ctx.simd_cache_kind.is_some() {
+    }
+    else if ctx.simd_cache_kind.is_some() {
         ctx.builder.if_v128();
         // Only the exceptional branch materializes registers for the original
         // pure arithmetic helper. It reads only these operands and writes dst;
         // unrelated cached registers remain in locals, even on the cold path.
         write_cache_subset(ctx, Some((src, dst)));
-    } else {
+    }
+    else {
         ctx.builder.if_void();
     }
     match source_bytes {
@@ -784,12 +849,14 @@ fn finish_float(
     }
     if ctx.scalar_cache_width.is_some() {
         ctx.builder.const_i32(dst as i32);
-        ctx.builder.simd_memory(if bytes == 4 { 0x5C } else { 0x5D }, 2);
+        ctx.builder
+            .simd_memory(if bytes == 4 { 0x5C } else { 0x5D }, 2);
         ctx.builder.else_();
         ctx.builder.get_local_v128(&result);
         ctx.builder.block_end();
         cache_scalar(ctx, dst, bytes);
-    } else if ctx.simd_cache_kind.is_some() {
+    }
+    else if ctx.simd_cache_kind.is_some() {
         // Bypass the compile-time cache after the helper changed the target.
         ctx.builder.const_i32(dst as i32);
         ctx.builder.simd_memory(0, 2);
@@ -805,7 +872,8 @@ fn finish_float(
         }
         ctx.builder.block_end();
         cache_value(ctx, dst, false);
-    } else {
+    }
+    else {
         ctx.builder.else_();
         ctx.builder.const_i32(dst as i32);
         ctx.builder.get_local_v128(&result);
@@ -831,10 +899,12 @@ fn compare(ctx: &mut JitContext, name: &str, src: u32, dst: u32, imm: u32) {
     let bytes = if scalar {
         if double {
             8
-        } else {
+        }
+        else {
             4
         }
-    } else {
+    }
+    else {
         16
     };
     let op = imm & 7;
@@ -851,7 +921,8 @@ fn compare(ctx: &mut JitContext, name: &str, src: u32, dst: u32, imm: u32) {
         if op == 7 {
             ctx.builder.simd(0x4D);
         }
-    } else {
+    }
+    else {
         load(ctx, dst, bytes);
         load(ctx, src, bytes);
         ctx.builder.simd(
@@ -916,7 +987,8 @@ fn convert_integer(ctx: &mut JitContext, double: bool, truncate: bool) {
     if truncate {
         ctx.builder.get_local_v128(&input);
         ctx.builder.simd(if double { 0x7A } else { 0x69 });
-    } else {
+    }
+    else {
         ctx.builder.load_fixed_i32(gp::mxcsr as u32);
         ctx.builder.const_i32(13);
         ctx.builder.shr_u_i32();
@@ -950,7 +1022,8 @@ fn convert_integer(ctx: &mut JitContext, double: bool, truncate: bool) {
     if double {
         ctx.builder.const_i64(0xC1E0000000000000u64 as i64);
         ctx.builder.simd(0x12);
-    } else {
+    }
+    else {
         ctx.builder.const_i32(0xCF000000u32 as i32);
         ctx.builder.simd(0x11);
     }
@@ -959,7 +1032,8 @@ fn convert_integer(ctx: &mut JitContext, double: bool, truncate: bool) {
     if double {
         ctx.builder.const_i64(0x41E0000000000000);
         ctx.builder.simd(0x12);
-    } else {
+    }
+    else {
         ctx.builder.const_i32(0x4F000000);
         ctx.builder.simd(0x11);
     }
@@ -1006,13 +1080,15 @@ pub fn cross_convert(
         ctx.builder.store_aligned_i64(0);
         ctx.builder.free_local_v128(result);
         crate::jit_instructions::mmx_finish(ctx, Some(dst));
-    } else {
+    }
+    else {
         ctx.builder.const_i32(address(dst, false) as i32);
         load(ctx, src, 8);
         ctx.builder.simd(if double { 0xFE } else { 0xFA });
         if double {
             ctx.builder.simd_memory(0x0B, 2);
-        } else {
+        }
+        else {
             ctx.builder.simd_lane(0x1D, 0);
             ctx.builder.store_aligned_i64(0);
         }
@@ -1031,7 +1107,8 @@ pub fn integer_to_scalar(ctx: &mut JitContext, dst: u32, double: bool) {
     if double {
         ctx.builder.simd_lane(0x1D, 0);
         ctx.builder.store_aligned_i64(0);
-    } else {
+    }
+    else {
         ctx.builder.simd_lane(0x1B, 0);
         ctx.builder.store_aligned_i32(0);
     }

@@ -35,10 +35,12 @@ fn selector_query_fixtures() {
                                 dest << 3
                                     | if operand < 8 {
                                         0xC0 | operand as u8
-                                    } else {
+                                    }
+                                    else {
                                         if asize == 32 {
                                             6
-                                        } else {
+                                        }
+                                        else {
                                             7
                                         }
                                     },

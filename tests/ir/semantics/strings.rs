@@ -64,7 +64,8 @@ fn string_order_and_repeat_dispatch() {
             let result = lift_cpu(&[prefix, op], GuestEip(0), LinearAddress(0), true);
             if prefix == 0xF0 {
                 assert!(result.is_err());
-            } else {
+            }
+            else {
                 assert!(result
                     .unwrap()
                     .helpers
@@ -86,7 +87,8 @@ fn string_order_and_repeat_dispatch() {
                 .iter()
                 .filter_map(|i| if let Op::SegmentAddress { segment } = i.op {
                     Some(segment)
-                } else {
+                }
+                else {
                     None
                 })
                 .collect::<Vec<_>>(),

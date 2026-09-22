@@ -42,7 +42,11 @@ fn config_none() -> PassConfig {
     }
 }
 
-fn state(b: &mut IntegerBuilder, pc: u32, gpr: [crate::ir::ids::ValueId; 8]) -> crate::ir::ids::StateId {
+fn state(
+    b: &mut IntegerBuilder,
+    pc: u32,
+    gpr: [crate::ir::ids::ValueId; 8],
+) -> crate::ir::ids::StateId {
     b.region.state(StateMap {
         instruction_pc: GuestEip(pc),
         next_pc: GuestEip(pc + 1),
@@ -221,7 +225,10 @@ fn ir10_per_pass_modules_and_stats() {
     )
     .unwrap();
     assert!(stats.copied >= 2);
-    assert_eq!(stats.folded + stats.commoned + stats.removed + stats.branches, 0);
+    assert_eq!(
+        stats.folded + stats.commoned + stats.removed + stats.branches,
+        0
+    );
     write_standalone("copy", &optimized, 1);
 
     let baseline = dce_region();
@@ -278,17 +285,29 @@ fn ir10_per_pass_modules_and_stats() {
     )
     .unwrap();
     let baseline = lower(&flags).unwrap();
-    std::fs::write("build/ir10/flags-0.wasm", emit_cpu(&baseline, 100).unwrap().bytes).unwrap();
+    std::fs::write(
+        "build/ir10/flags-0.wasm",
+        emit_cpu(&baseline, 100).unwrap().bytes,
+    )
+    .unwrap();
     let mut optimized = lower(&flags).unwrap();
     let dead = optimized
         .elide_dead_cpu_values(crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT)
         .unwrap();
     assert!(dead > 0);
-    std::fs::write("build/ir10/flags-1.wasm", emit_cpu(&optimized, 100).unwrap().bytes).unwrap();
+    std::fs::write(
+        "build/ir10/flags-1.wasm",
+        emit_cpu(&optimized, 100).unwrap().bytes,
+    )
+    .unwrap();
 
     let helper = helper_region(false);
     let baseline = lower(&helper).unwrap();
-    std::fs::write("build/ir10/helper-0.wasm", emit_cpu(&baseline, 100).unwrap().bytes).unwrap();
+    std::fs::write(
+        "build/ir10/helper-0.wasm",
+        emit_cpu(&baseline, 100).unwrap().bytes,
+    )
+    .unwrap();
     let mut optimized = lower(&helper).unwrap();
     assert_eq!(
         optimized
@@ -300,7 +319,11 @@ fn ir10_per_pass_modules_and_stats() {
         .elide_dead_cpu_values(crate::ir::mir::cpu_liveness::DEFAULT_WORK_LIMIT)
         .unwrap();
     assert!(helper_dead > 0);
-    std::fs::write("build/ir10/helper-1.wasm", emit_cpu(&optimized, 100).unwrap().bytes).unwrap();
+    std::fs::write(
+        "build/ir10/helper-1.wasm",
+        emit_cpu(&optimized, 100).unwrap().bytes,
+    )
+    .unwrap();
 }
 
 #[test]

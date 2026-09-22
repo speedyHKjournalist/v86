@@ -43,9 +43,11 @@ pub fn mandatory_prefix(flags: u8, available: u8) -> u8 {
     let present = flags & available;
     if present & PREFIX_66 != 0 {
         PREFIX_66
-    } else if present & PREFIX_F2 != 0 {
+    }
+    else if present & PREFIX_F2 != 0 {
         PREFIX_F2
-    } else {
+    }
+    else {
         present & PREFIX_F3
     }
 }
@@ -77,7 +79,8 @@ pub fn address_form(modrm: u8, size: u8, sib: Option<u8>) -> AddressForm {
             _ => (Some(3), None),
         };
         (base, index, 0, mode == 0 && rm == 6)
-    } else if rm == 4 {
+    }
+    else if rm == 4 {
         let sib = sib.expect("SIB required");
         let b = sib & 7;
         let i = sib >> 3 & 7;
@@ -87,7 +90,8 @@ pub fn address_form(modrm: u8, size: u8, sib: Option<u8>) -> AddressForm {
             sib >> 6,
             b == 5 && mode == 0,
         )
-    } else {
+    }
+    else {
         (
             if rm == 5 && mode == 0 { None } else { Some(rm) },
             None,
@@ -101,9 +105,11 @@ pub fn address_form(modrm: u8, size: u8, sib: Option<u8>) -> AddressForm {
         scale,
         displacement_bytes: if mode == 1 {
             1
-        } else if mode == 2 || absolute {
+        }
+        else if mode == 2 || absolute {
             size / 8
-        } else {
+        }
+        else {
             0
         },
         segment: if base == Some(5) || size == 32 && base == Some(4) { 2 } else { 3 },

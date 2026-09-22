@@ -23,19 +23,42 @@ fn config(optimize: bool) -> IrConfig {
 #[test]
 fn optimization_policy_disables_all_optional_stages_and_caps_level_one() {
     use crate::ir::passes::PassConfig;
-    for bytes in [vec![0x40,0x49,0x75,0xFC],vec![0xFF,0x06,0x8B,0x1E,0x43],vec![0x31,0xC0,0x83,0xC0,0x01]] {
-        let mut req = request(0x100000,0x100000,true); req.tier = Tier::Two;
-        let snapshot = ImmutableCodeSnapshot { bytes, dependencies: vec![CodeDependency {page:PhysicalAddress(0x100000),version:1}],
-            mappings:vec![CodeMapping {linear:LinearAddress(0x100000),physical:PhysicalAddress(0x100000)}] };
-        let plain = compile_cpu_cfg_region(&req,&snapshot,&config(false)).unwrap();
-        let mut disabled = config(true); disabled.passes = PassConfig::default().disable(PassConfig::MASK);
-        let off = compile_cpu_cfg_region(&req,&snapshot,&disabled).unwrap();
-        assert_eq!(plain.code.bytes,off.code.bytes,"every optional stage can be disabled independently of correctness checks");
-        let mut small = config(true); small.passes = PassConfig::tier1();
-        let mut cold = request(0x100000,0x100000,true); cold.tier=Tier::One;
-        let one = compile_cpu_cfg_region(&cold,&snapshot,&small).unwrap();
-        let capped = compile_cpu_cfg_region(&req,&snapshot,&small).unwrap();
-        assert_eq!(one.code.bytes,capped.code.bytes,"level one must not run Tier-2-only machine or loop passes");
+    for bytes in [
+        vec![0x40, 0x49, 0x75, 0xFC],
+        vec![0xFF, 0x06, 0x8B, 0x1E, 0x43],
+        vec![0x31, 0xC0, 0x83, 0xC0, 0x01],
+    ] {
+        let mut req = request(0x100000, 0x100000, true);
+        req.tier = Tier::Two;
+        let snapshot = ImmutableCodeSnapshot {
+            bytes,
+            dependencies: vec![CodeDependency {
+                page: PhysicalAddress(0x100000),
+                version: 1,
+            }],
+            mappings: vec![CodeMapping {
+                linear: LinearAddress(0x100000),
+                physical: PhysicalAddress(0x100000),
+            }],
+        };
+        let plain = compile_cpu_cfg_region(&req, &snapshot, &config(false)).unwrap();
+        let mut disabled = config(true);
+        disabled.passes = PassConfig::default().disable(PassConfig::MASK);
+        let off = compile_cpu_cfg_region(&req, &snapshot, &disabled).unwrap();
+        assert_eq!(
+            plain.code.bytes, off.code.bytes,
+            "every optional stage can be disabled independently of correctness checks"
+        );
+        let mut small = config(true);
+        small.passes = PassConfig::tier1();
+        let mut cold = request(0x100000, 0x100000, true);
+        cold.tier = Tier::One;
+        let one = compile_cpu_cfg_region(&cold, &snapshot, &small).unwrap();
+        let capped = compile_cpu_cfg_region(&req, &snapshot, &small).unwrap();
+        assert_eq!(
+            one.code.bytes, capped.code.bytes,
+            "level one must not run Tier-2-only machine or loop passes"
+        );
     }
 }
 fn request(pc: u32, linear: u32, mode: bool) -> CompileRequest {
@@ -88,13 +111,23 @@ fn automatic_cfg_budget_shrinks_without_weakening_snapshot_checks() {
     assert_eq!(shortened.mappings.len(), 2);
     assert_eq!(shortened.dependencies.len(), 2);
     assert_eq!(artifact.guest_bytes, shortened.bytes.len());
-    assert!(artifact.current(req.key, &shortened.dependencies,
-        EntryContract::Cpu(req.cpu_entry()), &shortened.mappings));
-    assert_eq!(bytes.bytes.len(), 97, "original failed-input fingerprint survives");
+    assert!(artifact.current(
+        req.key,
+        &shortened.dependencies,
+        EntryContract::Cpu(req.cpu_entry()),
+        &shortened.mappings
+    ));
+    assert_eq!(
+        bytes.bytes.len(),
+        97,
+        "original failed-input fingerprint survives"
+    );
 
     bytes.mappings[1].physical = PhysicalAddress(0x102000);
-    assert!(matches!(compile_cpu_cfg_bounded(&req, &bytes, &options),
-        Err(crate::ir::lowering::CompileError::InvalidIr(_))));
+    assert!(matches!(
+        compile_cpu_cfg_bounded(&req, &bytes, &options),
+        Err(crate::ir::lowering::CompileError::InvalidIr(_))
+    ));
 
     // A byte-budget split inside MOV's immediate must stop at the previous
     // complete instruction, never publish a truncated instruction.
@@ -107,7 +140,11 @@ fn automatic_cfg_budget_shrinks_without_weakening_snapshot_checks() {
     options.max_code_bytes = 512;
     let (_, shortened, retries) = compile_cpu_cfg_bounded(&req, &bytes, &options).unwrap();
     assert_eq!(retries, 0);
-    assert_eq!(shortened.bytes.len(), 477, "instruction-aligned internal target survives");
+    assert_eq!(
+        shortened.bytes.len(),
+        477,
+        "instruction-aligned internal target survives"
+    );
 
     // Branch-heavy graphs still exercise the bounded fallback; compacting
     // fallthrough must not bypass decode/graph limits or publish partial opcodes.
@@ -201,7 +238,8 @@ fn entry_execution_fixtures() {
                             let source = snapshot(bytes.clone(), linear);
                             let artifact = if cfg {
                                 compile_cpu_cfg_region(&req, &source, &config(opt))
-                            } else {
+                            }
+                            else {
                                 compile_cpu_region(&req, &source, &config(opt))
                             }
                             .unwrap();
@@ -291,7 +329,8 @@ fn loop_motion_is_tier_two_only_and_honors_diagnostic_disable() {
                         artifact.passes.loop_hoisted > 0,
                         "optimized Tier 2 must actually run LICM"
                     );
-                } else {
+                }
+                else {
                     assert_eq!(artifact.passes.loop_hoisted, 0);
                 }
                 assert_eq!(artifact.entry, EntryContract::Cpu(req.cpu_entry()));
@@ -313,7 +352,8 @@ fn guarded_ram_forwarding_is_tier_two_only_in_both_cpu_compile_entry_points() {
                     options.passes.rounds = rounds;
                     let artifact = if cfg {
                         compile_cpu_cfg_region(&req, &bytes, &options)
-                    } else {
+                    }
+                    else {
                         compile_cpu_region(&req, &bytes, &options)
                     }
                     .unwrap();
@@ -397,43 +437,126 @@ fn shared_entries_compile_one_guarded_body() {
             for optimize in [false, true] {
                 let req = request(0x1000, 0x100000, mode);
                 let bytes = snapshot(vec![0x40, 0x43, 0x49, 0x75, 0xFB], 0x100000);
-                let entries: Vec<_> = [0, 1, 2].iter().enumerate().map(|(i, &offset)| CpuEntryRequest {
-                    offset, key: PublicationKey { job: req.key.job + i as u64,
-                        slot: req.key.slot + i as u32, ..req.key },
-                }).collect();
-                let mut options = config(optimize); options.execution_budget = budget;
-                let artifact = compile_cpu_shared_entries(&req, &bytes, &entries, &options).unwrap();
+                let entries: Vec<_> = [0, 1, 2]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &offset)| CpuEntryRequest {
+                        offset,
+                        key: PublicationKey {
+                            job: req.key.job + i as u64,
+                            slot: req.key.slot + i as u32,
+                            ..req.key
+                        },
+                    })
+                    .collect();
+                let mut options = config(optimize);
+                options.execution_budget = budget;
+                let artifact =
+                    compile_cpu_shared_entries(&req, &bytes, &entries, &options).unwrap();
                 assert_eq!(artifact.alternate_entries.len(), 2);
                 assert_eq!(artifact.cpu_entries().count(), 3);
                 assert_eq!(artifact.guest_bytes, bytes.bytes.len());
                 assert_eq!(artifact.dependencies, bytes.dependencies);
-                for entry in artifact.cpu_entries() { assert!(artifact.accepts_entry(entry)); }
+                for entry in artifact.cpu_entries() {
+                    assert!(artifact.accepts_entry(entry));
+                }
                 assert!(!artifact.accepts_entry(request(0x1003, 0x100003, mode).cpu_entry()));
-                std::fs::write(format!("build/ir-shared-entry/{}.wasm", cases.len()), &artifact.code.bytes).unwrap();
+                std::fs::write(
+                    format!("build/ir-shared-entry/{}.wasm", cases.len()),
+                    &artifact.code.bytes,
+                )
+                .unwrap();
                 cases.push(format!("[{mode},{budget},{optimize}]"));
             }
         }
     }
-    std::fs::write("build/ir-shared-entry/cases.json", format!("[{}]", cases.join(","))).unwrap();
+    std::fs::write(
+        "build/ir-shared-entry/cases.json",
+        format!("[{}]", cases.join(",")),
+    )
+    .unwrap();
 }
 
 #[test]
 fn shared_entries_reject_ambiguous_streams_and_bad_identity() {
     let req = request(0x1000, 0x100000, true);
     let bytes = snapshot(vec![0xB8, 0x40, 0x40, 0x40, 0x40, 0x40], 0x100000);
-    let first = CpuEntryRequest { offset: 0, key: req.key };
-    let second = CpuEntryRequest { offset: 1, key: PublicationKey { job: 18, slot: 4, ..req.key } };
-    assert!(matches!(compile_cpu_shared_entries(&req, &bytes, &[first.clone(), second], &config(true)),
-        Err(crate::ir::lowering::CompileError::Unsupported("overlapping guest instruction streams"))));
-    for (offset, key) in [(0, PublicationKey { job: 18, slot: 4, ..req.key }),
-        (6, PublicationKey { job: 18, slot: 4, ..req.key }), (5, req.key),
-        (5, PublicationKey { job: 18, slot: 4, vm_generation: 3, ..req.key })] {
-        assert!(compile_cpu_shared_entries(&req, &bytes,
-            &[first.clone(), CpuEntryRequest { offset, key }], &config(true)).is_err());
+    let first = CpuEntryRequest {
+        offset: 0,
+        key: req.key,
+    };
+    let second = CpuEntryRequest {
+        offset: 1,
+        key: PublicationKey {
+            job: 18,
+            slot: 4,
+            ..req.key
+        },
+    };
+    assert!(matches!(
+        compile_cpu_shared_entries(&req, &bytes, &[first.clone(), second], &config(true)),
+        Err(crate::ir::lowering::CompileError::Unsupported(
+            "overlapping guest instruction streams"
+        ))
+    ));
+    for (offset, key) in [
+        (
+            0,
+            PublicationKey {
+                job: 18,
+                slot: 4,
+                ..req.key
+            },
+        ),
+        (
+            6,
+            PublicationKey {
+                job: 18,
+                slot: 4,
+                ..req.key
+            },
+        ),
+        (5, req.key),
+        (
+            5,
+            PublicationKey {
+                job: 18,
+                slot: 4,
+                vm_generation: 3,
+                ..req.key
+            },
+        ),
+    ] {
+        assert!(compile_cpu_shared_entries(
+            &req,
+            &bytes,
+            &[first.clone(), CpuEntryRequest { offset, key }],
+            &config(true)
+        )
+        .is_err());
     }
-    let artifact = compile_cpu_shared_entries(&req, &bytes,
-        &[first, CpuEntryRequest { offset: 5, key: PublicationKey { job: 18, slot: 4, ..req.key } }], &config(true)).unwrap();
-    assert_eq!(artifact.alternate_entries.len(), 1, "instruction-aligned sibling shares the body");
+    let artifact = compile_cpu_shared_entries(
+        &req,
+        &bytes,
+        &[
+            first,
+            CpuEntryRequest {
+                offset: 5,
+                key: PublicationKey {
+                    job: 18,
+                    slot: 4,
+                    ..req.key
+                },
+            },
+        ],
+        &config(true),
+    )
+    .unwrap();
+    assert_eq!(
+        artifact.alternate_entries.len(),
+        1,
+        "instruction-aligned sibling shares the body"
+    );
 }
 
 #[test]
@@ -441,12 +564,12 @@ fn cpu_prologue_imports_only_pointer_bases_used_by_machine_plans() {
     // The emitter owns these names in the import section; register-only code
     // must not call opaque imports whose results have no machine-plan consumer.
     let programs: &[(&[u8], bool, bool)] = &[
-        (&[0x40, 0x43], false, false),                    // GPR arithmetic
-        (&[0x66, 0x0F, 0xEF, 0xC0], false, false),        // PXOR XMM0,XMM0
-        (&[0x8B, 0x06], true, false),                    // scalar load
-        (&[0x89, 0x06], true, true),                     // scalar store + code guard
-        (&[0xFF, 0x06], true, true),                     // RMW read + separate commit
-        (&[0x0F, 0xC7, 0x0E], true, false),              // CMPXCHG8B guarded effect
+        (&[0x40, 0x43], false, false),             // GPR arithmetic
+        (&[0x66, 0x0F, 0xEF, 0xC0], false, false), // PXOR XMM0,XMM0
+        (&[0x8B, 0x06], true, false),              // scalar load
+        (&[0x89, 0x06], true, true),               // scalar store + code guard
+        (&[0xFF, 0x06], true, true),               // RMW read + separate commit
+        (&[0x0F, 0xC7, 0x0E], true, false),        // CMPXCHG8B guarded effect
     ];
     for &(code, tlb, ram) in programs {
         let req = request(0x1000, 0x100000, true);
@@ -454,8 +577,15 @@ fn cpu_prologue_imports_only_pointer_bases_used_by_machine_plans() {
         for optimize in [false, true] {
             let artifact = compile_cpu_region(&req, &input, &config(optimize)).unwrap();
             for (name, needed) in [("ir_tlb_base", tlb), ("ir_memory_base", ram)] {
-                assert_eq!(artifact.code.bytes.windows(name.len()).any(|w| w == name.as_bytes()),
-                    needed, "{code:02X?}, optimized={optimize}: {name}");
+                assert_eq!(
+                    artifact
+                        .code
+                        .bytes
+                        .windows(name.len())
+                        .any(|w| w == name.as_bytes()),
+                    needed,
+                    "{code:02X?}, optimized={optimize}: {name}"
+                );
             }
         }
     }

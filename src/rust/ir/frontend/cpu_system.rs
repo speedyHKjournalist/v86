@@ -1,6 +1,6 @@
 //! Terminal system-state transitions with CPU-owned results.
 use super::{adapters::call, decode::DecodedInstruction, integer::IntegerBuilder, lift::snapshot};
-use crate::ir::{state::ResumeKind, hir::Binary, types::Type};
+use crate::ir::{hir::Binary, state::ResumeKind, types::Type};
 
 pub fn supports(i: &DecodedInstruction) -> bool {
     matches!(

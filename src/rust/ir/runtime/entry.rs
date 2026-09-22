@@ -9,9 +9,7 @@ pub struct CpuEntryKey {
     pub default_32: bool,
 }
 impl CpuEntryKey {
-    pub fn cs_base(self) -> u32 {
-        self.linear.0.wrapping_sub(self.pc.0)
-    }
+    pub fn cs_base(self) -> u32 { self.linear.0.wrapping_sub(self.pc.0) }
 }
 
 /// A standalone artifact cannot be admitted as a CPU entry (or vice versa).
@@ -24,7 +22,12 @@ pub enum EntryContract {
 // Normal edges and audited, committed observer exits can request a successor.
 // Fault, invalidation and budget exits never authorize unchecked continuation.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ExitKind { None, Normal, Observer, Poll }
+enum ExitKind {
+    None,
+    Normal,
+    Observer,
+    Poll,
+}
 static mut EXIT_KIND: ExitKind = ExitKind::None;
 // A byte-validation certificate is valid only in a synchronous CPU interval
 // without unobserved host writes. No certificate survives a new CPU batch,
@@ -35,11 +38,15 @@ static mut ADMISSION_EPOCH: u64 = 1;
 // byte certificates survive: dirty_page retires every affected physical owner.
 static mut CONTINUATION_EPOCH: u64 = 1;
 pub(super) fn code_write_barrier() {
-    unsafe { CONTINUATION_EPOCH = CONTINUATION_EPOCH.saturating_add(1); }
+    unsafe {
+        CONTINUATION_EPOCH = CONTINUATION_EPOCH.saturating_add(1);
+    }
 }
 #[no_mangle]
 pub fn ir_admission_barrier() {
-    unsafe { ADMISSION_EPOCH = ADMISSION_EPOCH.saturating_add(1); }
+    unsafe {
+        ADMISSION_EPOCH = ADMISSION_EPOCH.saturating_add(1);
+    }
     code_write_barrier();
 }
 /// Fused artifacts read this non-shared CPU-owned epoch at recovery polls. Any
@@ -49,7 +56,9 @@ pub fn ir_admission_epoch_address() -> u32 { core::ptr::addr_of!(CONTINUATION_EP
 #[cfg(feature = "ir-experimental")]
 pub(super) fn admission_epoch() -> u64 { unsafe { ADMISSION_EPOCH } }
 #[cfg(feature = "ir-experimental")]
-pub(super) fn link_requested() -> bool { unsafe { matches!(EXIT_KIND, ExitKind::Normal | ExitKind::Observer) } }
+pub(super) fn link_requested() -> bool {
+    unsafe { matches!(EXIT_KIND, ExitKind::Normal | ExitKind::Observer) }
+}
 #[cfg(feature = "ir-experimental")]
 pub(super) fn profile_link_requested() -> bool { unsafe { EXIT_KIND == ExitKind::Normal } }
 #[cfg(feature = "ir-experimental")]

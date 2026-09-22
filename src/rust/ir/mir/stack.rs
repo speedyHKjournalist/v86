@@ -23,7 +23,8 @@ pub fn schedule(data: &mut MirData, work_limit: usize) -> Result<usize, CompileE
                 if elided[id.index()] {
                     continue;
                 }
-                let Some(consumer) = values[id.index()].as_ref() else {
+                let Some(consumer) = values[id.index()].as_ref()
+                else {
                     previous = None;
                     continue;
                 };
@@ -52,7 +53,8 @@ pub fn schedule(data: &mut MirData, work_limit: usize) -> Result<usize, CompileE
                                 .flat_map(|s| {
                                     if *s == Step::Value(result) {
                                         producer.steps.clone()
-                                    } else {
+                                    }
+                                    else {
                                         vec![s.clone()]
                                     }
                                 })

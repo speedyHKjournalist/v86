@@ -89,7 +89,8 @@ fn key(i: &DecodedInstruction) -> u32 {
     i.encoding.opcode
         | if (0x0F71..=0x0F73).contains(&i.encoding.opcode) {
             (i.encoding.group as u32) << 24
-        } else {
+        }
+        else {
             0
         }
 }
@@ -108,7 +109,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         let offset = b.read(7, i.address_size);
         let offset = if i.address_size == 16 {
             b.node(Op::Extend { signed: false }, vec![offset], Type::I32)
-        } else {
+        }
+        else {
             offset
         };
         let segment = b.constant(i.prefixes.segment.unwrap_or(3) as u32, Type::I32);
@@ -119,7 +121,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             state,
             true,
         );
-    } else if let Some(ea) = i.ea {
+    }
+    else if let Some(ea) = i.ea {
         let offset = effective_offset(b, &ea);
         let segment = b.constant(ea.segment as u32, Type::I32);
         call(
@@ -129,7 +132,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             state,
             true,
         );
-    } else {
+    }
+    else {
         call(
             b,
             "ir_mmx_reg",

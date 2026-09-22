@@ -83,7 +83,7 @@ for(const release of [false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault=false,nullSegment=false,mmio=false,sample=0,rounding=0,pending=false,cpl=0,iopl=0,initialIf=false}={}){
+        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0,pending=false,cpl=0,iopl=0,initialIf: initial_if=false}={}){
             const [bytes,mode,opcode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
             cpu.cr[4]=cr4;
@@ -97,7 +97,7 @@ for(const release of [false,true]){
             cpu.stack_size_32[0]=1;
             linear32[612>>2]=cpl;
             cpu.reg32.set([0x12345678,0xFEDCBA98,0x89ABCDEF,0x7FFFFFFF,STACK,0x55555555,0x10203040,0xAABBCCDD]);
-            cpu.flags[0]=flags|iopl<<12|Number(initialIf)<<9;
+            cpu.flags[0]=flags|iopl<<12|Number(initial_if)<<9;
             cpu.flags_changed[0]=0;
             linear32[104>>2]=0x76543210;
             cpu.instruction_pointer[0]=PC;
@@ -148,18 +148,18 @@ for(const release of [false,true]){
             cpu.reg32[1]=3;
             cpu.reg32[6]=DATA+128;
             cpu.reg32[7]=DATA;
-            const portWrite=(port,value)=>{const old=cpu.reg32[0];cpu.reg32[0]=value;e.instr_E6(port);cpu.reg32[0]=old;};
-            const originalFlags=cpu.flags[0];cpu.flags[0]&=~0x200;
+            const port_write=(port,value)=>{const old=cpu.reg32[0];cpu.reg32[0]=value;e.instr_E6(port);cpu.reg32[0]=old;};
+            const original_flags=cpu.flags[0];cpu.flags[0]&=~0x200;
             linear32[612>>2]=0;
-            for(const [port,value] of [[0x20,0x11],[0x21,0x20],[0x21,4],[0x21,1],[0x21,0xFE]]) portWrite(port,value);
+            for(const [port,value] of [[0x20,0x11],[0x21,0x20],[0x21,4],[0x21,1],[0x21,0xFE]]) port_write(port,value);
             cpu.device_lower_irq(0);if(pending)cpu.device_raise_irq(0);
-            cpu.flags[0]=originalFlags;linear32[612>>2]=cpl;
+            cpu.flags[0]=original_flags;linear32[612>>2]=cpl;
             e.update_state_flags();
 
             cpu.segment_offsets[3]=delta;
-            cpu.segment_is_null[3]=+nullSegment;
+            cpu.segment_is_null[3]=+null_segment;
             if(mmio) { set32(0x13000+6*4,0xA0003);set32(0x13000+7*4,0xA1003); }
-            if(pageFault) set32(0x13000+(delta ? 7 : 6)*4,0);
+            if(page_fault) set32(0x13000+(delta ? 7 : 6)*4,0);
             events=[];
             e.full_clear_tlb();
         }
@@ -189,9 +189,9 @@ for(const release of [false,true]){
         let comparisons=0;
         for(let i=0;i<cases.length;i++) {
             const [,mode,name,,memory,depth]=cases[i];
-            for(const pending of [false,true]) for(const initialIf of [false,true]) for(const flags of [2,0x42]) {
+            for(const pending of [false,true]) for(const initial_if_local of [false,true]) for(const flags of [2,0x42]) {
                 const commit=name==="ud"?0:1;
-                const result=compare(i,()=>reset(i,{pending,initialIf,flags}),101+depth+commit);
+                const result=compare(i,()=>reset(i,{pending,initialIf: initial_if_local,flags}),101+depth+commit);
                 if(pending && !["ud","int","cli"].includes(name)) assert.equal(result.ip,IRQ);
                 comparisons++;
             }

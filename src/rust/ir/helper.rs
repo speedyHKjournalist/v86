@@ -1,5 +1,5 @@
-pub mod imports;
 pub mod cpu_registry;
+pub mod imports;
 use super::{effects::Effects, types::Type};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExceptionOwner {
@@ -52,9 +52,7 @@ pub struct HelperDescriptor {
     pub exception_owner: ExceptionOwner,
     pub abi: HelperAbi,
 }
-pub fn cpu_reload_types() -> Vec<Type> {
-    [vec![Type::I32; 14], vec![Type::V128; 8]].concat()
-}
+pub fn cpu_reload_types() -> Vec<Type> { [vec![Type::I32; 14], vec![Type::V128; 8]].concat() }
 impl HelperDescriptor {
     /// Unreviewed helpers observe everything. They are not eligible for DCE/CSE.
     pub fn conservative(name: String, params: Vec<Type>, results: Vec<Type>) -> Self {

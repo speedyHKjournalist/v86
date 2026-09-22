@@ -21,7 +21,11 @@ pub struct Plan {
     enabled: bool,
 }
 
-fn derive(region: &Region, calls: &[Option<CallPlan>], work_limit: usize) -> Result<Plan, CompileError> {
+fn derive(
+    region: &Region,
+    calls: &[Option<CallPlan>],
+    work_limit: usize,
+) -> Result<Plan, CompileError> {
     if calls.len() != region.instructions.len() {
         return Err(CompileError::InvalidIr(
             "helper-state call-plan mismatch".into(),
@@ -34,13 +38,19 @@ fn derive(region: &Region, calls: &[Option<CallPlan>], work_limit: usize) -> Res
     for block in &region.blocks {
         for &id in &block.instructions {
             let inst = &region.instructions[id.index()];
-            let Op::CallHelper(helper) = inst.op else { continue };
+            let Op::CallHelper(helper) = inst.op
+            else {
+                continue;
+            };
             let descriptor = region
                 .helpers
                 .get(helper.index())
                 .ok_or_else(|| CompileError::InvalidIr("helper-state descriptor missing".into()))?;
-            let Some(plan) = calls.get(id.index()).and_then(Option::as_ref) else {
-                return Err(CompileError::InvalidIr("helper-state call plan missing".into()));
+            let Some(plan) = calls.get(id.index()).and_then(Option::as_ref)
+            else {
+                return Err(CompileError::InvalidIr(
+                    "helper-state call plan missing".into(),
+                ));
             };
             let normal_preserves = matches!(
                 descriptor.abi,
@@ -57,7 +67,10 @@ fn derive(region: &Region, calls: &[Option<CallPlan>], work_limit: usize) -> Res
                 && plan.normal.is_some();
         }
     }
-    Ok(Plan { eligible, enabled: false })
+    Ok(Plan {
+        eligible,
+        enabled: false,
+    })
 }
 
 pub(crate) fn lower(
@@ -89,7 +102,12 @@ pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, Com
     if data.helper_state.eligible.len() > work_limit {
         return Err(CompileError::Budget("helper-state work"));
     }
-    let count = data.helper_state.eligible.iter().filter(|&&eligible| eligible).count();
+    let count = data
+        .helper_state
+        .eligible
+        .iter()
+        .filter(|&&eligible| eligible)
+        .count();
     data.helper_state.enabled = true;
     Ok(count)
 }
@@ -111,7 +129,6 @@ pub(super) fn eligible(data: &MirData, id: InstId) -> bool {
         .copied()
         .unwrap_or(false)
 }
-
 
 #[cfg(test)]
 mod tests {

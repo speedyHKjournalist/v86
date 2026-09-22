@@ -169,7 +169,8 @@ fn catalogue_lengths_and_all_modrm_sib_forms() {
                 let sib_count =
                     if mode32 && encoding.e && !encoding.ignore_mod && m < 0xC0 && m & 7 == 4 {
                         256
-                    } else {
+                    }
+                    else {
                         1
                     };
                 for sib in 0..sib_count {
@@ -184,7 +185,8 @@ fn catalogue_lengths_and_all_modrm_sib_forms() {
                             2 => {
                                 if mode32 {
                                     4
-                                } else {
+                                }
+                                else {
                                     2
                                 }
                             },
@@ -200,14 +202,16 @@ fn catalogue_lengths_and_all_modrm_sib_forms() {
                         ImmediateKind::Operand => {
                             if op_size32 {
                                 4
-                            } else {
+                            }
+                            else {
                                 2
                             }
                         },
                         ImmediateKind::Address => {
                             if mode32 {
                                 4
-                            } else {
+                            }
+                            else {
                                 2
                             }
                         },
@@ -332,7 +336,8 @@ fn independent_disassembler_corpus() {
                     2 => {
                         if size32 {
                             4
-                        } else {
+                        }
+                        else {
                             2
                         }
                     },

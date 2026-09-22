@@ -179,7 +179,8 @@ fn rmw_ticket_is_affine_and_cannot_cross_effects() {
     let b = interrupted.entries[0];
     let term = interrupted.blocks[0].terminator.take().unwrap();
     let value = interrupted.append(b, Op::PollBudget, vec![effect], &[Type::Effect], fault)[0];
-    let Definition::Instruction(id, _) = interrupted.values[value.index()].definition else {
+    let Definition::Instruction(id, _) = interrupted.values[value.index()].definition
+    else {
         panic!()
     };
     let appended = interrupted.blocks[0].instructions.pop().unwrap();

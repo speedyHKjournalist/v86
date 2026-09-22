@@ -1,7 +1,7 @@
 //! Owned machine plans. HIR is borrowed only while checking the lowering boundary.
 pub mod allocation;
-pub mod budget;
 pub mod arithmetic;
+pub mod budget;
 pub mod call;
 pub mod control;
 pub mod cpu_liveness;
@@ -61,9 +61,7 @@ pub struct MirRegion {
 }
 impl Deref for MirRegion {
     type Target = MirData;
-    fn deref(&self) -> &MirData {
-        &self.data
-    }
+    fn deref(&self) -> &MirData { &self.data }
 }
 impl MirRegion {
     /// Independent post-lowering graph, type, allocation and proof validation.
@@ -126,9 +124,7 @@ impl MirRegion {
     pub(crate) fn ram_loop_resets(&self, block: super::ids::BlockId) -> &[usize] {
         &self.data.ram_loop_cache.resets[block.index()]
     }
-    pub(crate) fn ram_loop_cache_slots(&self) -> usize {
-        self.data.ram_loop_cache.slots
-    }
+    pub(crate) fn ram_loop_cache_slots(&self) -> usize { self.data.ram_loop_cache.slots }
 
     /// Skip CPU state stores that are proven identical to the backing state at
     /// entry. The certificate is derived while HIR is still available; enabling
@@ -195,23 +191,26 @@ pub struct Draft<'a> {
 }
 impl Deref for Draft<'_> {
     type Target = MirData;
-    fn deref(&self) -> &MirData {
-        &self.data
-    }
+    fn deref(&self) -> &MirData { &self.data }
 }
 impl DerefMut for Draft<'_> {
-    fn deref_mut(&mut self) -> &mut MirData {
-        &mut self.data
-    }
+    fn deref_mut(&mut self) -> &mut MirData { &mut self.data }
 }
 impl<'a> Draft<'a> {
     pub(super) fn new(hir: &'a Region, data: MirData) -> Self {
         let allocation_witness = data.allocation.clone();
-        Self { hir, hir_witness: hir, data, allocation_witness }
+        Self {
+            hir,
+            hir_witness: hir,
+            data,
+            allocation_witness,
+        }
     }
     pub fn finish(self) -> Result<MirRegion, CompileError> {
         if !std::ptr::eq(self.hir, self.hir_witness) {
-            return Err(CompileError::InvalidIr("lowering source changed after allocation".into()));
+            return Err(CompileError::InvalidIr(
+                "lowering source changed after allocation".into(),
+            ));
         }
         super::verify::verify(self.hir).map_err(|e| CompileError::InvalidIr(e.0))?;
         let data = &self.data;
@@ -263,7 +262,9 @@ impl<'a> Draft<'a> {
         helper_state::verify(self.hir, data)?;
         cpu_liveness::verify(self.hir, data)?;
         if data.poll_batches.iter().any(Option::is_some) {
-            return Err(CompileError::InvalidIr("initial budget batches must be disabled".into()));
+            return Err(CompileError::InvalidIr(
+                "initial budget batches must be disabled".into(),
+            ));
         }
         budget::verify(data)?;
         Ok(MirRegion { data: self.data })

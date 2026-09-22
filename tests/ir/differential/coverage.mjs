@@ -7,10 +7,10 @@ const modules=cases.map((_,i)=>[0,1].map(opt=>new WebAssembly.Module(fs.readFile
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 for(const release of [false,true]){
-    let randomObserver;
+    let random_observer;
     const vm=new V86({
         wasm_fn:async imports=>{
-            imports.env.get_rand_int=()=>{randomObserver?.();return 0x89ABCDEF|0;};
+            imports.env.get_rand_int=()=>{random_observer?.();return 0x89ABCDEF|0;};
             return (await WebAssembly.instantiate(fs.readFileSync((process.argv[2]||"build/v86-ir-test")+(release?"-release":"")+".wasm"),imports)).instance.exports;
         },
         memory_size:32<<20,
@@ -42,7 +42,7 @@ for(const release of [false,true]){
             (a,x)=>{observe("write8",a,x);mem[physical(a)]=x;},
             a=>{observe("read32",a);return view.getInt32(physical(a),true);},
             (a,x)=>{observe("write32",a,x);set32(physical(a),x);});
-        randomObserver=()=>observe("random",0,0x89ABCDEF);
+        random_observer=()=>observe("random",0,0x89ABCDEF);
         const imports={...e,m:e.memory};
         const instances=modules.map(pair=>pair.map(module=>new WebAssembly.Instance(module,{e:imports})));
 
@@ -80,7 +80,7 @@ for(const release of [false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault=false,nullSegment=false,mmio=false,sample=0,rounding=0}={}){
+        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0}={}){
             const [bytes,mode,opcode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~14|task);
             cpu.cr[4]=cr4;
@@ -148,9 +148,9 @@ for(const release of [false,true]){
             }
 
             cpu.segment_offsets[3]=delta;
-            cpu.segment_is_null[3]=+nullSegment;
+            cpu.segment_is_null[3]=+null_segment;
             if(mmio) { set32(0x13000+6*4,0xA0003);set32(0x13000+7*4,0xA1003); }
-            if(pageFault) set32(0x13000+(delta ? 7 : 6)*4,0);
+            if(page_fault) set32(0x13000+(delta ? 7 : 6)*4,0);
             events=[];
             e.full_clear_tlb();
         }
@@ -180,8 +180,8 @@ for(const release of [false,true]){
         let comparisons=0;
         for(let i=0;i<cases.length;i++) {
             const [,mode,opcode,dirty,memory,width,kind,sse]=cases[i], before=dirty?102:101;
-            const canExecute=release || ![1,2,3].includes(kind);
-            if(canExecute) {
+            const can_execute=release || ![1,2,3].includes(kind);
+            if(can_execute) {
                 const success=kind>=2;
                 for(let sample=0;sample<(opcode===0x63?16:1);sample++) {
                     const result=compare(i,()=>reset(i,{sample}),before+Number(success));

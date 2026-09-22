@@ -45,7 +45,8 @@ fn division_plans_fix_guest_bounds_and_host_trap_guards() {
                         .find_map(|p| {
                             if let EffectPlan::Arithmetic(ArithmeticPlan::Division(p)) = p {
                                 Some(p)
-                            } else {
+                            }
+                            else {
                                 None
                             }
                         })
@@ -58,7 +59,8 @@ fn division_plans_fix_guest_bounds_and_host_trap_guards() {
                                 minimum: low,
                                 maximum: high,
                             }
-                        } else {
+                        }
+                        else {
                             QuotientRange::Unsigned { maximum: max }
                         }
                     );
@@ -106,7 +108,8 @@ fn compare_exchange_plans_fix_cpu_slots_guard_and_commit() {
                         .find_map(|p| {
                             if let EffectPlan::Arithmetic(ArithmeticPlan::CompareExchange(p)) = p {
                                 Some(p)
-                            } else {
+                            }
+                            else {
                                 None
                             }
                         })
@@ -144,7 +147,14 @@ fn altered_arithmetic_plans_fail_before_emission() {
             .effects
             .iter_mut()
             .flatten()
-            .find_map(|p| if let EffectPlan::Arithmetic(p) = p { Some(p) } else { None })
+            .find_map(|p| {
+                if let EffectPlan::Arithmetic(p) = p {
+                    Some(p)
+                }
+                else {
+                    None
+                }
+            })
             .unwrap();
         match p {
             ArithmeticPlan::Division(p) => match mutation {

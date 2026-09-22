@@ -60,7 +60,8 @@ fn terminal_cpu_helper_contract() {
         let r = lift_cpu(bytes, GuestEip(0), LinearAddress(0), true).unwrap();
         verify(&r).unwrap();
         let call=r.instructions.iter().find(|i|matches!(i.op,Op::CallHelper(id) if matches!(r.helpers[id.index()].abi,HelperAbi::CpuExit))).unwrap();
-        let Op::CallHelper(id) = call.op else {
+        let Op::CallHelper(id) = call.op
+        else {
             unreachable!()
         };
         assert!(after_call(&r.helpers[id.index()], Outcome::Normal).is_err());

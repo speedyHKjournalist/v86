@@ -69,7 +69,12 @@ fn evaluate(r: &Region, i: &Instruction, values: &[Lattice]) -> Lattice {
         let no = values[i.args[2].index()];
         return match values[i.args[0].index()] {
             Lattice::Constant(n) => {
-                if n != 0 { yes } else { no }
+                if n != 0 {
+                    yes
+                }
+                else {
+                    no
+                }
             },
             Lattice::Overdefined => yes.join(no),
             Lattice::Unknown if yes == no => yes,
@@ -257,7 +262,9 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
     let mut branches = Vec::new();
     let mut stats = Stats::default();
     for (b, block) in region.blocks.iter().enumerate() {
-        analysis.work.spend(1 + block.params.len() + block.instructions.len())?;
+        analysis
+            .work
+            .spend(1 + block.params.len() + block.instructions.len())?;
         if !analysis.reachable[b] {
             continue;
         }

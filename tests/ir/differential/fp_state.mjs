@@ -75,7 +75,7 @@ for(const release of [false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault=false,nullSegment=false,mmio=false,badMxcsr=false}={}){
+        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,badMxcsr: bad_mxcsr=false}={}){
             const [bytes,mode,group]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
             cpu.cr[4]=cr4;
@@ -122,14 +122,14 @@ for(const release of [false,true]){
             e.instr_0FAE_0_mem(DATA);
             mem.copyWithin(DATA+delta,DATA,DATA+288);
             if(group===2) set32(DATA+delta,0x5F80);
-            if(badMxcsr) set32(DATA+delta+(group===1?24:0),0x10000);
+            if(bad_mxcsr) set32(DATA+delta+(group===1?24:0),0x10000);
             e.ir_test_x87_seed(); linear8[816]=empty; linear8[1032]=top;
             cpu.reg_xmm32s.fill(0x76543210);
             cpu.mxcsr[0]=0x3F80;
             cpu.segment_offsets[3]=delta;
-            cpu.segment_is_null[3]=+nullSegment;
+            cpu.segment_is_null[3]=+null_segment;
             if(mmio) { set32(0x13000+6*4,0xA0003);set32(0x13000+7*4,0xA1003); }
-            if(pageFault) set32(0x13000+7*4,0);
+            if(page_fault) set32(0x13000+7*4,0);
             events=[];
             e.full_clear_tlb();
         }

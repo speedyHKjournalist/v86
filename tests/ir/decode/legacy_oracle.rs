@@ -56,7 +56,8 @@ pub fn ir_test_compare_analysis(physical: u32, length: u32, mode32: u32) -> u32 
         ea_context.eip = physical + decoded.modrm_offset.unwrap() as u32 + 1;
         let old_ea = crate::modrm::decode(&mut ea_context, decoded.modrm.unwrap());
         !old_ea.matches_shared(ea, decoded.prefixes.segment)
-    } else {
+    }
+    else {
         false
     };
     ((legacy.eip - physical != decoded.length as u32) as u32)
@@ -87,7 +88,8 @@ pub fn ir_test_snapshot_decode(physical: u32) -> u32 {
         cs_offset: 0,
         state_flags: CachedStateFlags::of_u32(1),
     };
-    let Some(snapshot) = context.instruction_snapshot() else {
+    let Some(snapshot) = context.instruction_snapshot()
+    else {
         return 0;
     };
     match decode(

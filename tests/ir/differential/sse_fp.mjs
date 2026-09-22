@@ -38,8 +38,8 @@ for(const release of [false,true]){
             (a,x)=>{observe("write8",a,x);mem[physical(a)]=x;},
             a=>{observe("read32",a);return view.getInt32(physical(a),true);},
             (a,x)=>{observe("write32",a,x);set32(physical(a),x);});
-        let registerCalls=0;
-        const imports={...e,m:e.memory,ir_sse_fp_reg_continue:(...args)=>{registerCalls++;return e.ir_sse_fp_reg_continue(...args);}};
+        let register_calls=0;
+        const imports={...e,m:e.memory,ir_sse_fp_reg_continue:(...args)=>{register_calls++;return e.ir_sse_fp_reg_continue(...args);}};
         const instances=modules.map(pair=>pair.map(module=>new WebAssembly.Instance(module,{e:imports})));
 
         function desc(n,base,access){
@@ -76,7 +76,7 @@ for(const release of [false,true]){
                 frame:Buffer.from(mem.slice(STACK-96,STACK+16)),
             };
         }
-        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault=false,nullSegment=false,mmio=false,sample=0,rounding=0,denormal=0,masks=true}={}){
+        function reset(i,{task=0,empty=0,top=0,flags=0x8D7,delta=0,pageFault: page_fault=false,nullSegment: null_segment=false,mmio=false,sample=0,rounding=0,denormal=0,masks=true}={}){
             const [bytes,mode,opcode]=cases[i];
             e.ir_test_set_cr0((cr0|0x10000)&~12|task);
             cpu.cr[4]=cr4;
@@ -146,9 +146,9 @@ for(const release of [false,true]){
             for(let n=0;n<4;n++) set32(DATA+delta+4*n,values[n]);
             cpu.reg32[0]=values[0];
             cpu.segment_offsets[3]=delta;
-            cpu.segment_is_null[3]=+nullSegment;
+            cpu.segment_is_null[3]=+null_segment;
             if(mmio) { set32(0x13000+6*4,0xA0003);set32(0x13000+7*4,0xA1003); }
-            if(pageFault) set32(0x13000+(delta ? 7 : 6)*4,0);
+            if(page_fault) set32(0x13000+(delta ? 7 : 6)*4,0);
             events=[];
             e.full_clear_tlb();
         }
@@ -179,19 +179,19 @@ for(const release of [false,true]){
             const i=cases.findIndex(c=>c[1]&&c[2]===op&&!c[3]&&!c[4]&&!c[0].includes(0x67));
             assert(i>=0);
             for(const opt of [0,1]) {
-                reset(i);cpu.reg_xmm32s.fill(0x3F800000);registerCalls=0;instances[i][opt].exports.f(0);
-                assert.equal(registerCalls,0,'finite packed arithmetic must use native SIMD');
-                reset(i,{sample:2});registerCalls=0;instances[i][opt].exports.f(0);
-                assert.equal(registerCalls,1,'special values must retain scalar payload semantics');
-                reset(i,{task:8});registerCalls=0;instances[i][opt].exports.f(0);
-                assert.equal(registerCalls,1,'task fault must use precise recovery');
+                reset(i);cpu.reg_xmm32s.fill(0x3F800000);register_calls=0;instances[i][opt].exports.f(0);
+                assert.equal(register_calls,0,"finite packed arithmetic must use native SIMD");
+                reset(i,{sample:2});register_calls=0;instances[i][opt].exports.f(0);
+                assert.equal(register_calls,1,"special values must retain scalar payload semantics");
+                reset(i,{task:8});register_calls=0;instances[i][opt].exports.f(0);
+                assert.equal(register_calls,1,"task fault must use precise recovery");
             }
         }
         // Each operation has a unique non-NaN IEEE result. Exercise cases the
         // previous three finite-value guards rejected, plus invalid operations
         // whose result (rather than an input) introduces a NaN. Compare full
         // XMM/MXCSR/x87/FLAGS state, without canonicalising NaN bits.
-        let resultGuardCases=0;
+        let result_guard_cases=0;
         const pairs32 = [[0x7F800000n,0x3F800000n], [0xFF800000n,0xBF800000n],
             [0x3F800000n,0x7F800000n], [0xBF800000n,0xFF800000n],
             [0x7F7FFFFFn,0x7F7FFFFFn], [0n,0n], [0x80000000n,0n],
@@ -235,23 +235,23 @@ for(const release of [false,true]){
                         : (bits&0x7FFFFFFFn)>0x7F800000n;
                 }
                 for(const opt of [0,1]) {
-                    configure();registerCalls=0;instances[i][opt].exports.f(0);
+                    configure();register_calls=0;instances[i][opt].exports.f(0);
                     assert.deepEqual(state(),expected,`result guard ${op}/${a}/${b}/${rounding}/${opt}`);
-                    assert.equal(registerCalls,Number(nan),'only active NaN results require the payload-preserving helper');
+                    assert.equal(register_calls,Number(nan),"only active NaN results require the payload-preserving helper");
                     assert.equal(linear32[664>>2],102);
-                    resultGuardCases++;
+                    result_guard_cases++;
                 }
             }
             for(const task of [4,8,12]) for(const opt of [0,1]) {
                 reset(i,{task});const expected=interpreter(i);
-                reset(i,{task});registerCalls=0;instances[i][opt].exports.f(0);
+                reset(i,{task});register_calls=0;instances[i][opt].exports.f(0);
                 assert.deepEqual(state(),expected,`native FP task guard ${op}/${task}/${opt}`);
-                assert.equal(registerCalls,1,'task fault must keep precise CPU helper recovery');
+                assert.equal(register_calls,1,"task fault must keep precise CPU helper recovery");
                 assert.equal(linear32[664>>2],101);
-                resultGuardCases++;
+                result_guard_cases++;
             }
         }
-        console.log(`PASS: ${resultGuardCases} exact PS/PD/SS/SD result guards, scalar lane preservation and task faults`);
+        console.log(`PASS: ${result_guard_cases} exact PS/PD/SS/SD result guards, scalar lane preservation and task faults`);
         let comparisons=0;
         for(let i=0;i<cases.length;i++) {
             const [,mode,opcode,dirty,memory,width]=cases[i], before=dirty?102:101;
