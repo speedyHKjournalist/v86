@@ -100,7 +100,8 @@ fn dynamic_eip_is_verified_and_kept_alive_by_state_maps() {
     let a = r.append(b, Op::Const(13), vec![], &[Type::I32], None)[0];
     let c = r.append(b, Op::Const(29), vec![], &[Type::I32], None)[0];
     let target = r.append(b, Op::Binary(Binary::Add), vec![a, c], &[Type::I32], None)[0];
-    let crate::ir::hir::Terminator::Exit(map) = term else {
+    let crate::ir::hir::Terminator::Exit(map) = term
+    else {
         panic!()
     };
     r.states[map.index()].next_value = Some(target);
@@ -108,8 +109,8 @@ fn dynamic_eip_is_verified_and_kept_alive_by_state_maps() {
     run(
         &mut r,
         PassConfig {
-        debug: Default::default(),
-        disabled: 0,
+            debug: Default::default(),
+            disabled: 0,
             prune: false,
             merge: false,
             phis: false,

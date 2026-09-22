@@ -29,7 +29,8 @@ pub(super) fn binary(
                 w.get_local_v128(destination);
                 w.const_i32(*maximum as i32);
                 w.simd(*opcode);
-            } else {
+            }
+            else {
                 w.simd_zero();
             }
             w.else_();

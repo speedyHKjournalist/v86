@@ -32,10 +32,12 @@ fn sse_fp_fixtures() {
                             8 | if memory {
                                 if address32 {
                                     5
-                                } else {
+                                }
+                                else {
                                     6
                                 }
-                            } else {
+                            }
+                            else {
                                 0xC0
                             },
                         );

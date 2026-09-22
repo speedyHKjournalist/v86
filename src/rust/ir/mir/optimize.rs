@@ -67,7 +67,8 @@ pub(super) fn expression(steps: &[Step]) -> (Vec<Step>, usize) {
     let mut folds = 0;
     for step in steps {
         out.push(step.clone());
-        let Step::Scalar(op) = step else {
+        let Step::Scalar(op) = step
+        else {
             continue;
         };
         let n = out.len();
@@ -79,7 +80,8 @@ pub(super) fn expression(steps: &[Step]) -> (Vec<Step>, usize) {
                 },
                 _ => None,
             }
-        } else {
+        }
+        else {
             None
         }
         .or_else(|| {
@@ -107,7 +109,8 @@ pub(super) fn fold_constants(data: &mut MirData) -> Result<usize, CompileError> 
     let mut folds = 0;
     let mut work = 0usize;
     for (index, plan) in data.values.iter().enumerate() {
-        let Some(plan) = plan else {
+        let Some(plan) = plan
+        else {
             continue;
         };
         work = work.saturating_add(plan.steps.len());

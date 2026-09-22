@@ -10,7 +10,7 @@ try {
  await new Promise(r=>vm.add_listener("emulator-loaded",r));
  const cpu=vm.v86.cpu,e=cpu.wm.exports,w=new Uint32Array(e.memory.buffer),view=new DataView(cpu.mem8.buffer,cpu.mem8.byteOffset);
  vm.run();const deadline=performance.now()+10000;
- while(view.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);}await vm.stop();
+ while(view.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);} await vm.stop();
  const A=0x100000,B=A+0x2000;
  cpu.jit_clear_cache();e.ir_cache_collect();cpu.in_hlt[0]=0;cpu.flags[0]=2;cpu.flags_changed[0]=0;
  cpu.segment_offsets.fill(0,0,6);cpu.is_32[0]=1;cpu.stack_size_32[0]=1;cpu.reg32.fill(0);
@@ -27,4 +27,4 @@ try {
  assert.equal(counter(),((cpu.reg32[0]+cpu.reg32[1])*2-([A+1,B+1].includes(cpu.instruction_pointer[0])?1:0))>>>0);
  console.log(JSON.stringify({fusion:!!enabled,diagnostic_period:Number(process.env.IR_DIAGNOSTICS||0),ms,mips:n/ms/1000,instructions:n,activations,instructions_per_activation:n/activations,
  full_checks:(e.ir_cache_stat(19)-full)>>>0,fused_publications:e.ir_cache_stat(23)}));
-}finally{await vm.destroy();}
+} finally {await vm.destroy();}

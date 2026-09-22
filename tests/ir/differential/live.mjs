@@ -4,14 +4,14 @@ import {V86} from "../../../build/libv86.mjs";
 const wasm=process.argv[2]||"build/v86-ir-test.wasm";
 const vm=new V86({wasm_path:wasm,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-try{
+try {
     await new Promise(r=>vm.add_listener("emulator-loaded",r));
     const cpu=vm.v86.cpu,e=cpu.wm.exports;
     let mem,raw,words,view;
     const refresh=()=>{mem=cpu.mem8;raw=new Uint8Array(e.memory.buffer);words=new Uint32Array(e.memory.buffer);view=new DataView(mem.buffer,mem.byteOffset);};refresh();
     const set32=(a,n)=>view.setUint32(a,n,true),set64=(a,n)=>view.setBigUint64(a,BigInt(n),true);
     vm.run();const deadline=performance.now()+10000;
-    while(view.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);}await vm.stop();await sleep(20);cpu.jit_clear_cache();
+    while(view.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);} await vm.stop();await sleep(20);cpu.jit_clear_cache();
     let mmio=0;cpu.io.mmap_register(0xA0000,0x4000,()=>{mmio++;return 0x40;},()=>mmio++,()=>{mmio++;return 0x40404040;},()=>mmio++);
     const PC=0x100000,DATA=0x110000;
     const defaults=(linear=PC,pc=0x1000,mode=true)=>{
@@ -43,8 +43,8 @@ try{
     };
     const valid=id=>{const before=unchanged();const result=e.ir_live_validate(id);refresh();assert.deepEqual(unchanged(),before,"revalidation is read-only");return result;};
     let compiled=0;
-    for(const mode of [false,true])for(const cfg of [0,1])for(const opt of [0,1])for(const kind of [0,1,2,3,4,5]){
-        if(kind===4&&!cfg)continue;
+    for(const mode of [false,true]) for(const cfg of [0,1]) for(const opt of [0,1]) for(const kind of [0,1,2,3,4,5]){
+        if(kind===4&&!cfg) continue;
         const prefix=mode?[]:[0x67];
         const programs=[[0x40],[...prefix,0x8B,0x06],[...prefix,0x89,0x06],[0x0F,0xA2],[0x40,0x49,0x75,0xFC],[0x66,0x0F,0xEF,0xC1]];
         const code=programs[kind],linear=compiled&1?0x800000:PC,pc=compiled&2?0xFFFFFFFC:0x1000;
@@ -58,14 +58,14 @@ try{
     }
     console.log(`PASS: ${wasm}: ${compiled} IR artifacts compiled inside the live CPU Wasm, read-only capture and revalidation, actual execution vs interpreter`);
     let faults=0;
-    for(const mode of [false,true])for(const cfg of [0,1])for(const opt of [0,1]){
+    for(const mode of [false,true]) for(const cfg of [0,1]) for(const opt of [0,1]){
         const code=mode?[0x8B,0x06]:[0x67,0x8B,0x06];
         const prepare=()=>{defaults(PC,0x1000,mode);mem.set(code,PC);set32(0x13000+(DATA>>>12)*4,0);
             cpu.idtr_offset[0]=0x2000;cpu.idtr_size[0]=0x7FF;set32(0x2000+14*8,8<<16);set32(0x2004+14*8,0x180000|0x8E00);mem.fill(0xCC,0x8FFE0,0x90000);};
-        const faultState=()=>({...state(),previous:words[560>>2],cr2:cpu.cr[2]>>>0,frame:Buffer.from(mem.slice(0x8FFE0,0x90000))});
-        prepare();const id=compile(code.length,cfg,opt);assert(id);assert.equal(valid(id),1);module(id).instance.exports.f(0);refresh();const actual=faultState();
+        const fault_state=()=>({...state(),previous:words[560>>2],cr2:cpu.cr[2]>>>0,frame:Buffer.from(mem.slice(0x8FFE0,0x90000))});
+        prepare();const id=compile(code.length,cfg,opt);assert(id);assert.equal(valid(id),1);module(id).instance.exports.f(0);refresh();const actual=fault_state();
         assert.equal(actual.ip,0x180000);assert.equal(actual.cr2,DATA);assert.equal(words[664>>2],0xFFFFFFFC);
-        prepare();e.ir_test_step();refresh();assert.deepEqual(actual,faultState());faults++;
+        prepare();e.ir_test_step();refresh();assert.deepEqual(actual,fault_state());faults++;
     }
     console.log(`PASS: ${wasm}: ${faults} live-compiled data page faults preserve exact exception frames and do not retire the faulting instruction`);
     let paging=0;
@@ -108,7 +108,7 @@ try{
         if(where==="directory")cpu.cr[3]=0xA0000;
         if(where==="table")set32(0x12000,0xA0003);
         if(where==="code")set32(0x13000+(PC>>>12)*4,0xA0003);
-        if(where==="pae-directory")new BigUint64Array(e.memory.buffer,968,4)[0]=0xA0001n;
+        if(where==="pae-directory") new BigUint64Array(e.memory.buffer,968,4)[0]=0xA0001n;
         if(where==="pae-table")set64(0x16000,0xA0003);
         assert.equal(compile(1),0n,where);assert.equal(e.ir_live_error(),4,where);assert.equal(mmio,0);paging++;
     }
@@ -133,11 +133,11 @@ try{
     // Straight-line coalescing makes 65 NOPs legal. Preserve exact execution
     // budgets and keep a separate, genuinely over-budget CFG rejection case.
     defaults();mem.fill(0x90,PC,PC+65);id=compile(65);assert(id>0n);assert.equal(valid(id),1);
-    const nopState=state(),nopCount=words[664>>2];module(id).instance.exports.f(0);refresh();
-    const nops=(words[664>>2]-nopCount)>>>0;
+    const nop_state=state(),nop_count=words[664>>2];module(id).instance.exports.f(0);refresh();
+    const nops=(words[664>>2]-nop_count)>>>0;
     // Work units include CFG dispatch as well as instruction polls.
     assert(nops>0&&nops<=32,"coalesced NOPs stop within the execution work budget");
-    assert.deepEqual(state(),{...nopState,ip:PC+nops},"budget exit preserves exact retirement and architectural state");
+    assert.deepEqual(state(),{...nop_state,ip:PC+nops},"budget exit preserves exact retirement and architectural state");
     defaults();const branches=Uint8Array.from({length:130},(_,i)=>i%2?0:0x75);mem.set(branches,PC);
     assert.equal(compile(branches.length),0n,"distinct conditional blocks still exceed the CFG budget");
     assert.equal(e.ir_live_error(),7);assert.equal(e.ir_live_info(id,0),0,"failed compilation discards the previous artifact");
@@ -153,6 +153,6 @@ try{
         }
     });
     vm.write_memory(Uint8Array.from([0xBA,2,5,0,0,0xB9,0x40,0x0D,3,0,0xEE,0xE2,0xFD,0xF4]),PC);
-    vm.run();const until=performance.now()+10000;while(!cpu.in_hlt[0]){assert(performance.now()<until);await sleep(5);}await vm.stop();assert.equal(busy,1);
+    vm.run();const until=performance.now()+10000;while(!cpu.in_hlt[0]){assert(performance.now()<until);await sleep(5);} await vm.stop();assert.equal(busy,1);
     console.log(`PASS: ${wasm}: live compilation refuses a real legacy JIT callback without guest/MMIO/TLB mutation`);
-}finally{await vm.destroy();}
+} finally {await vm.destroy();}

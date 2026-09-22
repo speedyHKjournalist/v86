@@ -7,7 +7,8 @@ pub unsafe fn ir_flags_stack_check() -> u32 {
     if *gp::flags & cpu::FLAG_VM != 0 && cpu::getiopl() < 3 {
         cpu::trigger_gp(0);
         Outcome::ControlTransferred as u32
-    } else {
+    }
+    else {
         Outcome::Normal as u32
     }
 }
@@ -70,7 +71,8 @@ pub unsafe fn ir_mov_segment_continue(selector: u32, segment: u32) -> u32 {
     if !*gp::protected_mode || cpu::vm86_mode() {
         assert!(cpu::switch_seg(segment as i32, (selector & 65535) as i32));
         Outcome::Normal as u32
-    } else {
+    }
+    else {
         ir_load_segment(selector, segment, 0, 0, 0)
     }
 }

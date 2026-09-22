@@ -9,14 +9,16 @@ unsafe fn permission(r: u32, index: u32) -> bool {
     if *gp::cpl != 0 {
         cpu::trigger_gp(0);
         false
-    } else {
+    }
+    else {
         true
     }
 }
 unsafe fn finish(fault: bool) -> u32 {
     if fault {
         Outcome::ControlTransferred as u32
-    } else {
+    }
+    else {
         *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);
         Outcome::Invalidated as u32
     }

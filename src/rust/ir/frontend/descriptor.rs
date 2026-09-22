@@ -28,7 +28,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             _ => unreachable!(),
         };
         call(b, name, vec![address, width], map, true);
-    } else {
+    }
+    else {
         let reg = b.constant((i.modrm.unwrap() & 7) as u32, Type::I32);
         let name = match group {
             4 => "ir_smsw_reg",

@@ -124,7 +124,8 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
     for plan in memory.iter().flatten() {
         let extra = if let super::mir::memory::SlowResult::Rmw { read_value, .. } = &plan.result {
             Some(read_value)
-        } else {
+        }
+        else {
             None
         };
         for call in std::iter::once(&plan.call).chain(extra) {
@@ -186,9 +187,14 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
         super::mir::state_elision::DEFAULT_WORK_LIMIT,
     )?;
     drop(proof_clock);
-    let allocation = { let _clock = CompileScope::new(7); allocate(region).map_err(CompileError::Budget)? };
+    let allocation = {
+        let _clock = CompileScope::new(7);
+        allocate(region).map_err(CompileError::Budget)?
+    };
     let control = super::mir::control::lower(region, &allocation)?;
-    Ok(Draft::new(region, MirData {
+    Ok(Draft::new(
+        region,
+        MirData {
             ram_forwarding: vec![None; region.instructions.len()],
             ram_guard_reuse: vec![None; region.instructions.len()],
             ram_loop_cache: super::mir::forwarding::LoopPlan::disabled(
@@ -228,5 +234,6 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
             control,
             values,
             states,
-        }))
+        },
+    ))
 }

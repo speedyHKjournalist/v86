@@ -52,9 +52,11 @@ fn simd_transfer_fixtures() {
                 );
                 let width = if matches!(op, 0x660F6E | 0x660F7E) {
                     4
-                } else if matches!(op, 0xF30F12 | 0xF30F16) {
+                }
+                else if matches!(op, 0xF30F12 | 0xF30F16) {
                     16
-                } else {
+                }
+                else {
                     8
                 };
                 for register in 0..8 {
@@ -84,9 +86,11 @@ fn simd_transfer_fixtures() {
                             (register << 3)
                                 | if operand < 8 {
                                     0xC0 | operand as u8
-                                } else if asize == 32 {
+                                }
+                                else if asize == 32 {
                                     0x86
-                                } else {
+                                }
+                                else {
                                     0x85
                                 },
                         ]);
@@ -132,7 +136,8 @@ fn simd_transfer_contracts() {
         let result = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true);
         if bytes[0] == 0xF0 {
             assert!(result.is_err());
-        } else {
+        }
+        else {
             assert!(result
                 .unwrap()
                 .helpers

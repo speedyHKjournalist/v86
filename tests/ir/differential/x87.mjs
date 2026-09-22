@@ -133,7 +133,7 @@ for(const release of [false,true]){
 
         let special=0;
         for(let i=0;i<cases.length;i++) {
-            if(!cases[i][4])continue;
+            if(!cases[i][4]) continue;
             for(let sample=0;sample<12;sample++) for(const precision of [0,1,2,3]) for(let rounding=0;rounding<4;rounding++) {
                 compare(i,()=>{reset(i);e.ir_test_x87_pattern(sample,0x3F|precision<<8|rounding<<10);},102,`sample=${sample} precision=${precision} rounding=${rounding}`);special++;
             }
@@ -142,20 +142,20 @@ for(const release of [false,true]){
         // FYL2XP1 used to pass NaNs through the host ln implementation. Node
         // 24's Wasm tiers may canonicalize that payload differently. Check an
         // explicit F80 oracle, not merely two calls that could share the bug.
-        const logarithmCase=cases.findIndex(c=>c[1]===0xD9&&c[2]===7&&c[3]===1&&c[4]);
-        assert(logarithmCase>=0);
+        const logarithm_case=cases.findIndex(c=>c[1]===0xD9&&c[2]===7&&c[3]===1&&c[4]);
+        assert(logarithm_case>=0);
         for(const [mantissa,exponent,expectedMantissa,expectedExponent] of [
             [0xC000000000012345n,0x7FFF,0xC000000000012000n,0x7FFF],
             [0x8000000000054321n,0xFFFF,0xC000000000054000n,0xFFFF],
             [0xA000000000000000n,0xC000,0xC000000000000000n,0xFFFF], // ln(-2.5+1)
         ]) {
             const configure=()=>{
-                reset(logarithmCase);
+                reset(logarithm_case);
                 const v=new DataView(e.memory.buffer);
                 v.setBigUint64(1152,mantissa,true);v.setUint16(1160,exponent,true);
                 v.setBigUint64(1168,0x8000000000000000n,true);v.setUint16(1176,0x3FFF,true); // ST1=1
             };
-            const expected=compare(logarithmCase,configure,102,"deterministic logarithm");
+            const expected=compare(logarithm_case,configure,102,"deterministic logarithm");
             assert.equal(expected.fpu.st.readBigUInt64LE(16),expectedMantissa);
             assert.equal(expected.fpu.st.readUInt16LE(24),expectedExponent);
         }

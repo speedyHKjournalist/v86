@@ -31,7 +31,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         );
         b.effect = values[1];
         values[0]
-    } else {
+    }
+    else {
         let mut lanes = operation.lanes();
         if i.encoding.opcode == 0x0F12 {
             // Register MOVHLPS takes the source high qword; memory MOVLPS takes low.

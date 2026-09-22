@@ -29,9 +29,7 @@ pub fn supports(i: &DecodedInstruction) -> bool {
             | 0x0FA9
     )
 }
-pub fn pops(i: &DecodedInstruction) -> bool {
-    i.encoding.opcode & 1 != 0
-}
+pub fn pops(i: &DecodedInstruction) -> bool { i.encoding.opcode & 1 != 0 }
 fn segment(op: u32) -> u8 {
     match op {
         0x06 | 0x07 => 0,
@@ -73,26 +71,31 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         let value = memory_read(b, address, width, map, false).0;
         let value = if width == 16 {
             b.node(Op::Extend { signed: false }, vec![value], Type::I32)
-        } else {
+        }
+        else {
             value
         };
         let bytes = b.constant((width / 8) as u32, Type::I32);
         if flags {
             call(b, "ir_pop_flags", vec![value, bytes], map, true);
-        } else {
+        }
+        else {
             let seg = b.constant(segment(i.encoding.opcode) as u32, Type::I32);
             call(b, "ir_pop_segment", vec![value, seg, bytes], map, true);
         }
-    } else {
+    }
+    else {
         let value = if flags {
             let value = flags_value(b);
             if width == 16 {
                 b.node(Op::Truncate, vec![value], Type::I16)
-            } else {
+            }
+            else {
                 let mask = b.constant(0xFCFFFF, Type::I32);
                 b.binary(Binary::And, value, mask)
             }
-        } else {
+        }
+        else {
             b.node(
                 Op::ReadSegment(segment(i.encoding.opcode)),
                 vec![],

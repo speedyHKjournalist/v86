@@ -19,23 +19,23 @@ try {
         assert(performance.now() < deadline, "BIOS timeout"); await sleep(1);
     }
     await vm.stop();
-    const cmovFalse = cases.findIndex(b => b[1] === 0x0F && b[2] === 0x41 && b[3] === 0x11);
-    assert(cmovFalse >= 0);
+    const cmov_false = cases.findIndex(b => b[1] === 0x0F && b[2] === 0x41 && b[3] === 0x11);
+    assert(cmov_false >= 0);
     const PC = 0x100000, HANDLER = 0x180000, STACK = 0x90000;
     const set32 = (a, v) => new DataView(mem.buffer, mem.byteOffset).setUint32(a, v, true);
     const get32 = a => new DataView(mem.buffer, mem.byteOffset).getUint32(a, true);
-    const initialCr0 = cpu.cr[0];
-    let slowReads = 0, slowWrites = 0, segmentFaults = 0;
+    const initial_cr0 = cpu.cr[0];
+    let slow_reads = 0, slow_writes = 0, segment_faults = 0;
     const imports = {...e, m: e.memory,
-        ir_rmw_read: (...args) => { slowReads++; return e.ir_rmw_read(...args); },
-        ir_rmw_write: (...args) => { slowWrites++; return e.ir_rmw_write(...args); },
-        ir_memory_read: (...args) => { slowReads++; return e.ir_memory_read(...args); },
-        ir_memory_write: (...args) => { slowWrites++; return e.ir_memory_write(...args); },
-        ir_segment_address: (...args) => { segmentFaults++; return e.ir_segment_address(...args); },
+        ir_rmw_read: (...args) => { slow_reads++; return e.ir_rmw_read(...args); },
+        ir_rmw_write: (...args) => { slow_writes++; return e.ir_rmw_write(...args); },
+        ir_memory_read: (...args) => { slow_reads++; return e.ir_memory_read(...args); },
+        ir_memory_write: (...args) => { slow_writes++; return e.ir_memory_write(...args); },
+        ir_segment_address: (...args) => { segment_faults++; return e.ir_segment_address(...args); },
     };
     const instances = modules.map(pair => pair.map(module => new WebAssembly.Instance(module, {e: imports})));
     function reset(i, address, hot, fault = "none", csBase = 0) {
-        e.ir_test_set_cr0(initialCr0 | 0x10000); // WP: supervisor writes respect read-only PTEs.
+        e.ir_test_set_cr0(initial_cr0 | 0x10000); // WP: supervisor writes respect read-only PTEs.
         cpu.segment_offsets.fill(0, 0, 6); cpu.segment_offsets[1] = csBase;
         cpu.segment_is_null.fill(0, 0, 6);
         const regs = [0x7FFFFFFF, address, 0x81ABFEDC, 0x12345678, STACK, 0x77777777, 3, 0x88888888];
@@ -69,7 +69,7 @@ try {
         if(fault === "readonly") set32(0x13000 + page * 4, page * 4096 | 1);
         if(fault === "segment") cpu.segment_is_null[i === 13 ? 4 : 3] = 1;
         if(fault !== "none") e.full_clear_tlb();
-        slowReads = slowWrites = segmentFaults = 0;
+        slow_reads = slow_writes = segment_faults = 0;
     }
     function snapshot(address) {
         return {regs: Array.from(cpu.reg32, x => x >>> 0), flags: e.get_eflags() >>> 0,
@@ -84,7 +84,7 @@ try {
             const actual = snapshot(address), executed = actual.ip === PC + cases[i].length - 1 ? 2 : 3;
             assert.equal(words[664 >> 2], 100 + executed, "CPU instruction accounting never double-counts materialization");
             if(hot && address === 0x310040) {
-                assert.equal(slowReads + slowWrites + segmentFaults, 0, "warm same-page RAM uses native Wasm"); fast++;
+                assert.equal(slow_reads + slow_writes + segment_faults, 0, "warm same-page RAM uses native Wasm"); fast++;
             }
             assert(get32(0x13000 + (address >>> 12) * 4) & 0x20, "page-walk accessed bit");
             reset(i, address, hot);
@@ -93,21 +93,21 @@ try {
             total++;
         }
     for(const [i, fault, address] of [[0,"missing",0x310040], [0,"cross",0x310FFF],
-        [3,"readonly",0x310040], [3,"cross",0x310FFF], [13,"segment",0x310040], [20,"readonly",0x310040], [20,"cross",0x310FFF], [cmovFalse,"missing",0x310040]]) for(const opt of [0,1]) for(const csBase of [0, 0x10000]) {
-        reset(i, address, false, fault, csBase);
+        [3,"readonly",0x310040], [3,"cross",0x310FFF], [13,"segment",0x310040], [20,"readonly",0x310040], [20,"cross",0x310FFF], [cmov_false,"missing",0x310040]]) for(const opt of [0,1]) for(const cs_base of [0, 0x10000]) {
+        reset(i, address, false, fault, cs_base);
         instances[i][opt].exports.f(0);
         const actual = snapshot(address);
         assert.equal(actual.ip, HANDLER, "real CPU exception delivered before return");
         assert.equal(words[664 >> 2], 101, "faulting instruction not committed");
         assert.equal(actual.regs[4], STACK - 16, "one exception frame, no duplicate delivery");
         assert.equal(get32(STACK - 12), PC + 1, "fault EIP points to MOV, after preceding INC");
-        reset(i, address, false, fault, csBase);
+        reset(i, address, false, fault, cs_base);
         e.ir_test_step(); e.ir_test_step();
         assert.deepEqual(actual, snapshot(address), `real fault ${fault}, opt=${opt}`);
         faults++;
     }
-    let events = [], remapDuringRead = false;
-    const remap = () => { if(remapDuringRead) { set32(0x13000 + 0xA0 * 4, 0x330003); e.full_clear_tlb(); } };
+    let events = [], remap_during_read = false;
+    const remap = () => { if(remap_during_read) { set32(0x13000 + 0xA0 * 4, 0x330003); e.full_clear_tlb(); } };
     const observe = (kind, address, value) => events.push({kind, address, value,
         eax: cpu.reg32[0] >>> 0, ip: cpu.instruction_pointer[0] >>> 0, flags: e.get_eflags() >>> 0});
     cpu.io.mmap_register(0xA0000, 0x20000,
@@ -121,7 +121,7 @@ try {
         instances[i][opt].exports.f(0);
         const actual = snapshot(0xA0040), observed = events.slice();
         const executed = actual.ip === PC + cases[i].length - 1 ? 2 : 3;
-        assert(slowReads + slowWrites > 0, "MMIO must take an observing slow path");
+        assert(slow_reads + slow_writes > 0, "MMIO must take an observing slow path");
         reset(i, 0xA0040, false); events = [];
         for(let step = 0; step < executed; step++) e.ir_test_step();
         assert.deepEqual(actual, snapshot(0xA0040), "MMIO CPU state differential");
@@ -129,7 +129,7 @@ try {
         mmio++;
     }
     for(const opt of [0,1]) {
-        reset(20, 0xA0040, false); events = []; remapDuringRead = true;
+        reset(20, 0xA0040, false); events = []; remap_during_read = true;
         const untouched = Array.from(mem.slice(0x330040, 0x330044));
         instances[20][opt].exports.f(0);
         const actual = snapshot(0xA0040), observed = events.slice();
@@ -139,7 +139,7 @@ try {
         e.ir_test_step(); e.ir_test_step();
         assert.deepEqual(observed, events);
         assert.deepEqual(actual, snapshot(0xA0040));
-        remapDuringRead = false;
+        remap_during_read = false;
     }
     for(const opt of [0,1]) {
         const configure = () => {
@@ -170,12 +170,12 @@ try {
         const last = cases[3].length - 1, alias = 0x800000 + last;
         set32(0x15000, 0x100003); e.full_clear_tlb();
         e.ir_memory_write(alias, mem[PC + last], 1);
-        cpu.reg32[1] = alias; slowWrites = 0;
-        const oldEbx = cpu.reg32[3];
+        cpu.reg32[1] = alias; slow_writes = 0;
+        const old_ebx = cpu.reg32[3];
         instances[3][opt].exports.f(0);
-        assert.equal(slowWrites, 0, "self-modifying alias takes native store then exit");
+        assert.equal(slow_writes, 0, "self-modifying alias takes native store then exit");
         assert.equal(cpu.instruction_pointer[0], PC + last, "never execute stale instructions after a store");
-        assert.equal(cpu.reg32[3], oldEbx, "following INC has not executed");
+        assert.equal(cpu.reg32[3], old_ebx, "following INC has not executed");
         assert.equal(get32(PC + last), 0x81ABFEDC);
     }
     // A cached supervisor translation must not become a CPL3 RAM fast path.
@@ -183,11 +183,11 @@ try {
     reset(0, 0x310040, true);
     const cpl = new Uint8Array(cpu.wasm_memory.buffer, 612, 1);
     cpl[0] = 3;
-    const guardStop = new Error("user permission slow path");
+    const guard_stop = new Error("user permission slow path");
     const guarded = new WebAssembly.Instance(modules[0][0], {e: {...imports,
-        ir_memory_read: () => { throw guardStop; },
+        ir_memory_read: () => { throw guard_stop; },
     }});
-    try { assert.throws(() => guarded.exports.f(0), e => e === guardStop); }
+    try { assert.throws(() => guarded.exports.f(0), e => e === guard_stop); }
     finally { cpl[0] = 0; }
     // Non-zero CS base exercises GuestEip -> linear CPU IP conversion on successful exits.
     for(const opt of [0,1]) {

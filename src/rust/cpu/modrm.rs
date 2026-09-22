@@ -7,7 +7,8 @@ unsafe fn resolve(modrm: i32, size: u8) -> OrPageFault<i32> {
     let base = form.base.map_or(0, |r| {
         if size == 16 {
             read_reg16(r as i32)
-        } else {
+        }
+        else {
             read_reg32(r as i32)
         }
     });
@@ -16,14 +17,16 @@ unsafe fn resolve(modrm: i32, size: u8) -> OrPageFault<i32> {
         .map_or(0, |r| {
             if size == 16 {
                 read_reg16(r as i32)
-            } else {
+            }
+            else {
                 read_reg32(r as i32)
             }
         })
         .wrapping_shl(form.scale as u32);
     let early_segment = if form.segment_before_displacement {
         Some(get_seg_prefix(form.segment as i32)?)
-    } else {
+    }
+    else {
         None
     };
     let displacement = match form.displacement_bytes {
@@ -40,19 +43,14 @@ unsafe fn resolve(modrm: i32, size: u8) -> OrPageFault<i32> {
         .wrapping_add(offset)
         .wrapping_add(if early_segment.is_none() {
             get_seg_prefix(form.segment as i32)?
-        } else {
+        }
+        else {
             0
         }))
 }
-pub unsafe fn resolve_modrm16(m: i32) -> OrPageFault<i32> {
-    resolve(m, 16)
-}
-pub unsafe fn resolve_modrm32(m: i32) -> OrPageFault<i32> {
-    resolve(m, 32)
-}
-pub unsafe fn resolve_modrm32_(m: i32) -> OrPageFault<i32> {
-    resolve(m, 32)
-}
+pub unsafe fn resolve_modrm16(m: i32) -> OrPageFault<i32> { resolve(m, 16) }
+pub unsafe fn resolve_modrm32(m: i32) -> OrPageFault<i32> { resolve(m, 32) }
+pub unsafe fn resolve_modrm32_(m: i32) -> OrPageFault<i32> { resolve(m, 32) }
 #[cfg(feature = "ir-test-hooks")]
 #[path = "../../../tests/ir/decode/legacy_modrm.rs"]
 pub mod legacy;

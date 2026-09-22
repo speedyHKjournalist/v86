@@ -11,11 +11,11 @@ for(const [primary,expected] of [
 globalThis.location={href:"https://example.test/demo/"};
 assert.equal(encode_worker_options({wasm_path:"custom.wasm",wasm_fallback_path:"portable.wasm"}).wasm_fallback_path,"https://example.test/demo/portable.wasm");
 const primary=fs.readFileSync("build/v86-ir-test.wasm");
-const instantiate=WebAssembly.instantiate;let primaryRejected=0;
+const instantiate=WebAssembly.instantiate;let primary_rejected=0;
 // Exercise the loader's capability-rejection path even on SIMD-capable CI hosts.
 WebAssembly.instantiate=(bytes,imports)=>{
     if(!(bytes instanceof WebAssembly.Module)&&Buffer.from(bytes).equals(primary)) {
-        primaryRejected++;return Promise.reject(new WebAssembly.CompileError("test host rejects SIMD core"));
+        primary_rejected++;return Promise.reject(new WebAssembly.CompileError("test host rejects SIMD core"));
     }
     return instantiate(bytes,imports);
 };
@@ -27,7 +27,7 @@ async function until(test,label){const end=performance.now()+10000;while(!test()
 try {
     await new Promise(r=>vm.add_listener("emulator-loaded",r));
     WebAssembly.instantiate=instantiate;
-    assert.equal(primaryRejected,1);
+    assert.equal(primary_rejected,1);
     const cpu=vm.v86.cpu,e=cpu.wm.exports,PC=0x100000;
     // Online compilation can grow Wasm memory and detach an old typed view.
     const words=()=>new Uint32Array(e.memory.buffer);

@@ -177,7 +177,8 @@ impl WasmBuilder {
         if let Some((_, local)) = self.deferred_stores.iter().find(|(a, _)| *a == address) {
             let local = local.unsafe_clone();
             self.set_local(&local);
-        } else {
+        }
+        else {
             let local = self.set_new_local();
             self.deferred_stores.push((address, local));
         }
@@ -188,7 +189,8 @@ impl WasmBuilder {
             let local = local.unsafe_clone();
             self.get_local(&local);
             true
-        } else {
+        }
+        else {
             false
         }
     }
@@ -410,7 +412,8 @@ impl WasmBuilder {
         if let Some(local) = self.free_locals_i32.pop() {
             self.reuse_local_index(local.0, WasmType::I32);
             local
-        } else {
+        }
+        else {
             WasmLocal(self.new_local_index(WasmType::I32))
         }
     }
@@ -447,7 +450,8 @@ impl WasmBuilder {
         if let Some(local) = self.free_locals_i64.pop() {
             self.reuse_local_index(local.0, WasmType::I64);
             local
-        } else {
+        }
+        else {
             WasmLocalI64(self.new_local_index(WasmType::I64))
         }
     }
@@ -481,7 +485,8 @@ impl WasmBuilder {
         if let Some(local) = self.free_locals_f32.pop() {
             self.reuse_local_index(local.0, WasmType::F32);
             local
-        } else {
+        }
+        else {
             WasmLocalF32(self.new_local_index(WasmType::F32))
         }
     }
@@ -511,7 +516,8 @@ impl WasmBuilder {
         if let Some(local) = self.free_locals_f64.pop() {
             self.reuse_local_index(local.0, WasmType::F64);
             local
-        } else {
+        }
+        else {
             WasmLocalF64(self.new_local_index(WasmType::F64))
         }
     }
@@ -537,7 +543,8 @@ impl WasmBuilder {
         if let Some(local) = self.free_locals_v128.pop() {
             self.reuse_local_index(local.0, WasmType::V128);
             local
-        } else {
+        }
+        else {
             WasmLocalV128(self.new_local_index(WasmType::V128))
         }
     }

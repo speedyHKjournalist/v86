@@ -73,7 +73,8 @@ pub fn lower(inst: &Instruction) -> Option<ArithmeticPlan> {
                     minimum: -(1i64 << (bits - 1)),
                     maximum: (1i64 << (bits - 1)) - 1,
                 }
-            } else {
+            }
+            else {
                 QuotientRange::Unsigned {
                     maximum: (1i64 << bits) - 1,
                 }

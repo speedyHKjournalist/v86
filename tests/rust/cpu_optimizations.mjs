@@ -314,7 +314,7 @@ try {
         // into the fault-test page. Do not capture that borrowed ESP as the
         // original stack on replay, or later fault frames corrupt copy output.
         const p=[0xBD,...u32(original_stack),0xBC,...u32(0x801FFC),0x58];
-        const faultEip=base+p.length; p.push(0x5A);
+        const fault_eip_local=base+p.length; p.push(0x5A);
         const resume=base+p.length; p.push(0x89,0xEC,...done);
         p.push(0xE9,...u32(-p.length-5));
         vm.write_memory(Uint8Array.from([
@@ -327,23 +327,23 @@ try {
         // Subsequent fault frames overwrite the popped stack slot, so the
         // precise fault address is the invariant across repeated execution.
         await run(base);
-        assert.equal(word(RESULT+4),faultEip,"cached POP retains precise page fault EIP");
+        assert.equal(word(RESULT+4),fault_eip_local,"cached POP retains precise page fault EIP");
         cpu.reg32[4]=original_stack;
     }
     // Warm writers against RAM, then redirect the same compiled code to a
     // previously compiled target. Cached stores/copies must invalidate it.
     const smc_target=0x388000, writer=0x389000, pointer=DATA+768;
-    const targetBytes=value => {
+    const target_bytes=value => {
         const p=[0xB8,...u32(value),0xA3,...u32(RESULT+32),...done];
         p.push(0xE9,...u32(-p.length-5));
         while(p.length<64) p.push(0x90);
         return p;
     };
     for(const copy of [false,true]) {
-        vm.write_memory(Uint8Array.from(targetBytes(1)),smc_target);
+        vm.write_memory(Uint8Array.from(target_bytes(1)),smc_target);
         await compile(smc_target); await run(smc_target);
         assert.equal(word(RESULT+32),1);
-        vm.write_memory(Uint8Array.from(targetBytes(777)),DATA+1024);
+        vm.write_memory(Uint8Array.from(target_bytes(777)),DATA+1024);
         vm.write_memory(Uint8Array.from(u32(DATA+4096)),pointer);
         const p=[0x8B,0x3D,...u32(pointer)];
         if(copy) p.push(0xBE,...u32(DATA+1024),0xB9,...u32(64),
@@ -364,24 +364,24 @@ try {
         const p=[...(kind.startsWith("rmw") ? [0xFC,0xBF,...u32(0x801FD0),0xB9,...u32(12),0x31,0xC0,0xF3,0xAB] : []),
             0xFC,0xBE,...u32(DATA),0xBF,...u32(0x801FD0),
             0xB9,...u32(64),0xB8,...u32(0x12345678),0xF9];
-        let faultEip, copied, size;
+        let fault_eip_local_local, copied, size;
         if(kind === "stores" || kind === "rmw-stores") {
             p.push(0xBF,...u32(0x801FFC));
             if(kind === "rmw-stores") p.push(0xC7,0x07,...u32(0));
             const op=kind === "stores" ? 0x89 : 0x01;
             p.push(op,0x07);
-            faultEip=base+p.length; p.push(op,0x87,...u32(4)); size=4; copied=1;
+            fault_eip_local_local=base+p.length; p.push(op,0x87,...u32(4)); size=4; copied=1;
         } else if(kind.startsWith("rmw")) {
-            size=4;copied=12;faultEip=base+p.length;
+            size=4;copied=12;fault_eip_local_local=base+p.length;
             p.push(kind === "rmw-add" ? 0x01 : 0x31,0x07,0x83,0xC7,4,0x49,0x75,0xF8);
         } else if(kind.endsWith("loop")) {
             size=kind === "byte-loop" ? 1 : 4; copied=48/size;
-            faultEip=base+p.length+2;
+            fault_eip_local_local=base+p.length+2;
             p.push(...(size === 1 ? [0x8A,0x06,0x88,0x07,0x46,0x47,0x49,0x75,0xF7] :
                 [0x8B,0x06,0x89,0x07,0x83,0xC6,4,0x83,0xC7,4,0x49,0x75,0xF3]));
         } else {
             size=kind === "stosw" ? 2 : 4; copied=48/size;
-            faultEip=base+p.length; p.push(0xF3,...(size === 2 ? [0x66] : []),0xAB);
+            fault_eip_local_local=base+p.length; p.push(0xF3,...(size === 2 ? [0x66] : []),0xAB);
         }
         const resume=base+p.length;
         p.push(...done,0xE9,...u32(-p.length-done.length-5));
@@ -392,7 +392,7 @@ try {
         ]),pf_handler);
         vm.write_memory(Uint8Array.from(p),base);
         await compile(base); await run(base);
-        assert.equal(word(RESULT+12),faultEip,kind+" precise fault EIP");
+        assert.equal(word(RESULT+12),fault_eip_local_local,kind+" precise fault EIP");
         if(kind === "stores" || kind === "rmw-stores") {
             assert.equal(word(0x101FFC),0x12345678,"first cached store committed");
         } else {

@@ -20,27 +20,27 @@ try {
         fs.readFileSync(`build/ir-budget-batch/${i}.wasm`)),{e:{...e,m:e.memory}}));
     const snapshot=()=>({regs:Array.from(cpu.reg32),flags:e.get_eflags()>>>0,last:words[104>>2],
         ip:cpu.instruction_pointer[0]>>>0,previous:words[560>>2],count:words[664>>2],
-        xmm:Array.from(cpu.reg_xmm32s),data:view.getUint32(DATA,true)});
+        xmm:Array.from(cpu.reg_xmm32s),data:Array.from(cpu.mem8.slice(DATA,DATA+16))});
     const base=new Map();let comparisons=0,steps=0;
     for(let i=0;i<cases.length;i++) {
         const [program,bytes,mode,batch,budget]=cases[i];
         for(const counter of [1,2,7,0x10001,0xFFFFFFFF]) for(const flags of [2,0x8D7])
-        for(const initial of [100,0xFFFFFFFC]) {
+        for(const initial of [100,0xFFFFFFFC]) for(const fp_bits of [0x3F800000,0x7F812345]) {
             const reset=()=>{
                 cpu.segment_offsets.fill(0,0,6);cpu.segment_offsets[1]=PC-0x8000;cpu.segment_is_null.fill(0,0,6);
                 cpu.segment_limits.fill(0xFFFFFFFF,0,6);cpu.stack_size_32[0]=1;cpu.is_32[0]=+mode;
                 cpu.reg32.set([0x7FFFFFFF,counter,0x81828384,0x80000000,0x90000,0xABCD0123,DATA,0x55555555]);
                 cpu.flags[0]=flags;cpu.flags_changed[0]=0x8D5;
                 words[96>>2]=31;words[104>>2]=0x7FFFFFFF;words[112>>2]=flags&64?0:0x80000000;
-                cpu.reg_xmm32s.fill(0x7F812345);cpu.in_hlt[0]=0;words[612>>2]=0;
+                cpu.reg_xmm32s.fill(fp_bits);cpu.in_hlt[0]=0;words[612>>2]=0;
                 cpu.instruction_pointer[0]=PC;words[560>>2]=0x12345678;words[664>>2]=initial;
                 cpu.mem8.set(bytes,PC);e.update_state_flags();e.full_clear_tlb();
-                e.ir_memory_read(DATA,4);e.ir_memory_write(DATA,0x12345678,4);
+                cpu.mem8.fill(0xA5,DATA,DATA+16);e.ir_memory_read(DATA,4);e.ir_memory_write(DATA,0x12345678,4);
             };
             reset();instances[i].exports.f(0);const actual=snapshot();
             const retired=(actual.count-initial)>>>0;
             assert(retired<=budget,`budget exceeded ${i}/${retired}/${budget}`);
-            const key=[program,mode,budget,counter,flags,initial].join("/");
+            const key=[program,mode,budget,counter,flags,initial,fp_bits].join("/");
             if(batch) assert.deepEqual(actual,base.get(key),`exact poll prefix ${key}`);
             else base.set(key,actual);
             reset();for(let j=0;j<retired;j++)e.ir_test_step();
@@ -48,9 +48,9 @@ try {
             // Previous-IP is a CPU-private recovery slot, not an architectural
             // register: a BeforeInstruction poll and a completed helper have
             // different legal values. The on/off oracle above checks it exactly.
-            const {previous:actualPrevious,...actualArchitecture}=actual;
-            const {previous:expectedPrevious,...expectedArchitecture}=expected;
-            assert(Number.isInteger(actualPrevious)&&Number.isInteger(expectedPrevious));
+            const {previous:actual_previous,...actualArchitecture}=actual;
+            const {previous:expected_previous,...expectedArchitecture}=expected;
+            assert(Number.isInteger(actual_previous)&&Number.isInteger(expected_previous));
             assert.deepEqual(actualArchitecture,expectedArchitecture,`interpreter prefix ${i}/${key}`);
             comparisons++;steps+=retired;
         }

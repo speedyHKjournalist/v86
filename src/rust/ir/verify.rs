@@ -2,15 +2,14 @@ use super::{analysis::cfg::Cfg, helper::ExceptionOwner, hir::*, ids::*, types::T
 #[derive(Debug, Eq, PartialEq)]
 pub struct VerifyError(pub String);
 impl From<&str> for VerifyError {
-    fn from(s: &str) -> Self {
-        Self(s.to_owned())
-    }
+    fn from(s: &str) -> Self { Self(s.to_owned()) }
 }
 type Result<T> = std::result::Result<T, VerifyError>;
 fn require(ok: bool, reason: &str) -> Result<()> {
     if ok {
         Ok(())
-    } else {
+    }
+    else {
         Err(reason.into())
     }
 }
@@ -170,7 +169,8 @@ pub fn verify(region: &Region) -> Result<()> {
                 rep == [map.gpr[1], map.gpr[6], map.gpr[7]] && map.next_value.is_none(),
                 "REP progress must match materialized GPRs",
             )?;
-        } else {
+        }
+        else {
             require(
                 map.resume != super::state::ResumeKind::RepProgress,
                 "REP state missing progress",
@@ -241,8 +241,12 @@ pub fn verify(region: &Region) -> Result<()> {
             }
             args.clear();
             results.clear();
-            for &value in &inst.args { args.push(ty(value)?); }
-            for &value in &inst.results { results.push(ty(value)?); }
+            for &value in &inst.args {
+                args.push(ty(value)?);
+            }
+            for &value in &inst.results {
+                results.push(ty(value)?);
+            }
             require(
                 !args.contains(&Type::RmwTicket) || matches!(inst.op, Op::RmwStore { .. }),
                 "RMW ticket escapes to another operation",
@@ -266,7 +270,8 @@ pub fn verify(region: &Region) -> Result<()> {
                 )?;
                 effect = inst.results.last().copied();
                 state(inst.state.ok_or("ordered operation needs state map")?, b, p)?;
-            } else {
+            }
+            else {
                 require(
                     !args.contains(&Type::Effect) && !results.contains(&Type::Effect),
                     "pure operation consumes effect",
@@ -332,7 +337,8 @@ pub fn verify(region: &Region) -> Result<()> {
                     )?;
                     let result = if matches!(op, Binary::Eq | Binary::Ult | Binary::Slt) {
                         Type::I1
-                    } else {
+                    }
+                    else {
                         args[0]
                     };
                     require(results[0] == result, "binary result type")?;
@@ -462,7 +468,8 @@ pub fn verify(region: &Region) -> Result<()> {
                     let commit = &region.states[inst.commit.unwrap().index()];
                     require(
                         commit.gpr == map.gpr
-                            && commit.flags == map.flags && commit.xmm == map.xmm
+                            && commit.flags == map.flags
+                            && commit.xmm == map.xmm
                             && commit.instruction_pc == map.instruction_pc
                             && commit.next_pc == map.next_pc
                             && commit.count_base == map.count_base
@@ -506,10 +513,12 @@ pub fn verify(region: &Region) -> Result<()> {
                             && args.as_slice()
                                 == if store {
                                     &[Type::LinearAddress, Type::V128][..]
-                                } else {
+                                }
+                                else {
                                     &[Type::LinearAddress][..]
                                 }
-                            && results.as_slice() == if store { &[][..] } else { &[Type::V128][..] },
+                            && results.as_slice()
+                                == if store { &[][..] } else { &[Type::V128][..] },
                         "XMM memory signature",
                     )?;
                     let map = &region.states[inst.state.unwrap().index()];
@@ -522,8 +531,9 @@ pub fn verify(region: &Region) -> Result<()> {
                         let commit = &region.states[inst.commit.unwrap().index()];
                         require(
                             commit.gpr == map.gpr
-                            && commit.flags == map.flags && commit.xmm == map.xmm
-                            && commit.instruction_pc == map.instruction_pc
+                                && commit.flags == map.flags
+                                && commit.xmm == map.xmm
+                                && commit.instruction_pc == map.instruction_pc
                                 && commit.next_pc == map.next_pc
                                 && commit.count_base == map.count_base
                                 && map.committed_instructions.checked_add(1)
@@ -632,7 +642,8 @@ pub fn verify(region: &Region) -> Result<()> {
                         && args[0] == Type::LinearAddress
                         && (if inst.unmasked_word_store {
                             args[1] == Type::I32
-                        } else {
+                        }
+                        else {
                             memory_width(args[1]) == Some(*bytes)
                         })
                         && results.is_empty(),
@@ -653,7 +664,8 @@ pub fn verify(region: &Region) -> Result<()> {
                                 && region.states[inst.state.unwrap().index()].resume
                                     == if matches!(helper.abi, super::helper::HelperAbi::CpuRep) {
                                         super::state::ResumeKind::RepProgress
-                                    } else {
+                                    }
+                                    else {
                                         super::state::ResumeKind::BeforeInstruction
                                     },
                             "CPU exit helper must terminate at its pre-instruction state",

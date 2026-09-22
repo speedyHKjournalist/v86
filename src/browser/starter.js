@@ -1741,6 +1741,7 @@ V86.prototype.configure_ir_diagnostics = function(period)
     if(this.worker_controller) return this.worker_controller.rpc("configure_ir_diagnostics", [period]);
     return this.v86.cpu.configure_ir_diagnostics(period);
 };
+// eslint-disable-next-line no-self-assign -- Keep the public name through Closure compilation.
 V86.prototype["configure_ir_diagnostics"] = V86.prototype.configure_ir_diagnostics;
 
 /** Return the last 16 compiler dumps as independent copies; optionally clear the ring. */
@@ -1749,6 +1750,7 @@ V86.prototype.get_ir_dumps = function(clear = false)
     if(this.worker_controller) return this.worker_controller.rpc("get_ir_dumps", [!!clear]);
     return this.v86.cpu.get_ir_dumps(!!clear);
 };
+// eslint-disable-next-line no-self-assign -- Keep the public name through Closure compilation.
 V86.prototype["get_ir_dumps"] = V86.prototype.get_ir_dumps;
 
 /** Returns a copied runtime snapshot; in CPU Worker mode returns a Promise. */
@@ -1757,6 +1759,7 @@ V86.prototype.get_jit_info = function()
     if(this.worker_controller) return this.worker_controller.rpc("get_jit_info");
     return this.v86.cpu.get_jit_info();
 };
+// eslint-disable-next-line no-self-assign -- Keep the public name through Closure compilation.
 V86.prototype["get_jit_info"] = V86.prototype.get_jit_info;
 
 /**

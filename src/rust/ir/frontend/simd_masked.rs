@@ -6,9 +6,7 @@ use super::{
     simd_moves::prepare,
 };
 use crate::ir::{hir::Op, state::ResumeKind, types::Type};
-pub fn supports(i: &DecodedInstruction) -> bool {
-    i.encoding.opcode == 0x660FF7
-}
+pub fn supports(i: &DecodedInstruction) -> bool { i.encoding.opcode == 0x660FF7 }
 pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     prepare(b, i, count);
     let source = i.modrm.unwrap() >> 3 & 7;
@@ -18,7 +16,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     let offset = b.read(7, i.address_size);
     let offset = if i.address_size == 16 {
         b.node(Op::Extend { signed: false }, vec![offset], Type::I32)
-    } else {
+    }
+    else {
         offset
     };
     let address = segmented(b, offset, i.prefixes.segment.unwrap_or(3), map);

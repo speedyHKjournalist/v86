@@ -40,10 +40,12 @@ fn mmx_fixtures() {
                                     | if encoded_memory {
                                         if address32 {
                                             5
-                                        } else {
+                                        }
+                                        else {
                                             6
                                         }
-                                    } else {
+                                    }
+                                    else {
                                         0xC0 | if address32 { 0 } else { 1 }
                                     },
                             );

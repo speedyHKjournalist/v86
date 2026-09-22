@@ -30,7 +30,8 @@ fn scalar_store_continuation_fixtures() {
             for optimize in [false, true] {
                 let mut region = if cfg {
                     lift_cpu_cfg(bytes, GuestEip(PC), LinearAddress(PC), true, 64)
-                } else {
+                }
+                else {
                     lift_cpu(bytes, GuestEip(PC), LinearAddress(PC), true)
                 }
                 .unwrap();
@@ -43,7 +44,10 @@ fn scalar_store_continuation_fixtures() {
                         .forward_ram_reads(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)
                         .unwrap();
                     if !cfg {
-                        assert_eq!(forwarded, usize::from(name == "store_load" || name.starts_with("rmw_load")));
+                        assert_eq!(
+                            forwarded,
+                            usize::from(name == "store_load" || name.starts_with("rmw_load"))
+                        );
                     }
                 }
                 let artifact = emit_cpu_with_code_pages(&mir, 100, &[CODE_PAGE]).unwrap();
@@ -104,28 +108,42 @@ fn vector_store_continuation_fixtures() {
         let mut bytes = vec![0x66, 0x0F, 0xEF, 0xC2, 0x43]; // PXOR XMM0,XMM2; INC EBX.
         bytes.extend_from_slice(store);
         bytes.extend_from_slice(&[0x40, 0x8B, 0x16]); // INC EAX; MOV EDX,[ESI].
-        std::fs::write(format!("build/ir-vector-store/{name}.json"), format!("{bytes:?}")).unwrap();
+        std::fs::write(
+            format!("build/ir-vector-store/{name}.json"),
+            format!("{bytes:?}"),
+        )
+        .unwrap();
         for variant in 0..6 {
             let mut region = if variant < 2 {
                 lift_cpu(&bytes, GuestEip(PC), LinearAddress(PC), true)
-            } else {
+            }
+            else {
                 lift_cpu_cfg(&bytes, GuestEip(PC), LinearAddress(PC), true, 64)
-            }.unwrap();
+            }
+            .unwrap();
             // An incomplete region ending at the store would silently pass a
             // standalone-store differential; explicitly require the whole tail.
-            assert!(region.states.iter().any(|s| s.next_pc.0 == PC + bytes.len() as u32));
+            assert!(region
+                .states
+                .iter()
+                .any(|s| s.next_pc.0 == PC + bytes.len() as u32));
             if variant % 2 != 0 {
                 run(&mut region, PassConfig::default()).unwrap();
             }
             let mir = lower(&region).unwrap();
             let artifact = if variant >= 4 {
                 crate::ir::backend::wasm::emit_cpu(&mir, 100).unwrap()
-            } else {
+            }
+            else {
                 // Include a second immutable source page: aliases of any
                 // dependency, not only the current PC, must force an exit.
                 emit_cpu_with_code_pages(&mir, 100, &[CODE_PAGE, CODE_PAGE + 0x2000]).unwrap()
             };
-            std::fs::write(format!("build/ir-vector-store/{name}-{variant}.wasm"), artifact.bytes).unwrap();
+            std::fs::write(
+                format!("build/ir-vector-store/{name}-{variant}.wasm"),
+                artifact.bytes,
+            )
+            .unwrap();
         }
     }
 }
@@ -133,10 +151,18 @@ fn vector_store_continuation_fixtures() {
 #[test]
 fn vector_store_continuation_rejects_forged_commit_state() {
     use crate::ir::{hir::Op, verify::verify};
-    for bytes in [&[0x0F, 0x11, 0x01, 0x43][..], &[0x66, 0x0F, 0xF7, 0xC1, 0x43][..]] {
+    for bytes in [
+        &[0x0F, 0x11, 0x01, 0x43][..],
+        &[0x66, 0x0F, 0xF7, 0xC1, 0x43][..],
+    ] {
         let region = lift_cpu(bytes, GuestEip(PC), LinearAddress(PC), true).unwrap();
-        let commit = region.instructions.iter().find(|i| matches!(i.op, Op::XmmStore { .. } | Op::XmmMaskedStore { .. }))
-            .unwrap().commit.unwrap();
+        let commit = region
+            .instructions
+            .iter()
+            .find(|i| matches!(i.op, Op::XmmStore { .. } | Op::XmmMaskedStore { .. }))
+            .unwrap()
+            .commit
+            .unwrap();
         for field in 0..4 {
             let mut broken = region.clone();
             let state = &mut broken.states[commit.index()];

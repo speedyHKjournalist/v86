@@ -1,4 +1,3 @@
-use crate::ir::runtime::diagnostics::{self as diag, Exit as DiagnosticExit, Stage as DiagnosticStage};
 use super::structure::{self, Structure};
 use crate::cpu::global_pointers as gp;
 use crate::ir::mir::arithmetic::{
@@ -13,6 +12,9 @@ use crate::ir::mir::memory::{
     Argument, MemoryPlan, NativeMemory, RamGuard, RuntimeCall, SlowResult, VectorCombine,
 };
 use crate::ir::mir::value::{Address, Load, Reading, Step, ValuePlan};
+use crate::ir::runtime::diagnostics::{
+    self as diag, Exit as DiagnosticExit, Stage as DiagnosticStage,
+};
 use crate::ir::runtime::entry::CpuEntryKey;
 use crate::ir::{ids::*, lowering::CompileError, mir::MirRegion, types::Type};
 use crate::wasmgen::wasm_builder::{Label, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128};
@@ -83,28 +85,40 @@ struct Emitter<'a> {
 impl Emitter<'_> {
     fn diagnostic_begin(&mut self, stage: DiagnosticStage) {
         if let Some((_, active)) = &self.diagnostic {
-            self.w.get_local(active); self.w.if_void();
+            self.w.get_local(active);
+            self.w.if_void();
             self.w.const_i32(stage as i32);
-            self.w.call_signature("ir_diagnostic_begin", crate::ir::helper::imports::signature("ir_diagnostic_begin"));
+            self.w.call_signature(
+                "ir_diagnostic_begin",
+                crate::ir::helper::imports::signature("ir_diagnostic_begin"),
+            );
             self.w.block_end();
         }
     }
     fn diagnostic_end(&mut self) {
         if let Some((_, active)) = &self.diagnostic {
-            self.w.get_local(active); self.w.if_void();
-            self.w.call_signature("ir_diagnostic_end", crate::ir::helper::imports::signature("ir_diagnostic_end"));
+            self.w.get_local(active);
+            self.w.if_void();
+            self.w.call_signature(
+                "ir_diagnostic_end",
+                crate::ir::helper::imports::signature("ir_diagnostic_end"),
+            );
             self.w.block_end();
         }
     }
     fn diagnostic_exit(&mut self, reason: DiagnosticExit) {
         if let Some((base, _)) = &self.diagnostic {
-            self.w.get_local(base); self.w.const_i32(reason as i32); self.w.store_aligned_i32(4);
+            self.w.get_local(base);
+            self.w.const_i32(reason as i32);
+            self.w.store_aligned_i32(4);
         }
     }
     fn admission_barrier(&mut self) {
         if self.linkable_entry {
-            self.w.call_signature("ir_admission_barrier",
-                crate::ir::helper::imports::signature("ir_admission_barrier"));
+            self.w.call_signature(
+                "ir_admission_barrier",
+                crate::ir::helper::imports::signature("ir_admission_barrier"),
+            );
         }
     }
     fn normal_exit(&mut self, state: StateId) {
@@ -116,14 +130,17 @@ impl Emitter<'_> {
                 self.w.eqz_i32();
                 self.w.if_void();
             }
-            self.w.call_signature("ir_request_link", crate::ir::helper::imports::signature("ir_request_link"));
-            if self.interrupt_shadow.is_some() { self.w.block_end(); }
+            self.w.call_signature(
+                "ir_request_link",
+                crate::ir::helper::imports::signature("ir_request_link"),
+            );
+            if self.interrupt_shadow.is_some() {
+                self.w.block_end();
+            }
         }
         self.return_to_cpu_with_link(true);
     }
-    fn return_to_cpu(&mut self) {
-        self.return_to_cpu_with_link(false);
-    }
+    fn return_to_cpu(&mut self) { self.return_to_cpu_with_link(false); }
     fn return_to_cpu_with_link(&mut self, completed: bool) {
         if let Some(depth) = &self.interrupt_shadow {
             self.w.get_local(depth);
@@ -131,8 +148,14 @@ impl Emitter<'_> {
             let depth = depth.unsafe_clone();
             self.diagnostic_exit(DiagnosticExit::InterruptShadow);
             self.w.get_local(&depth);
-            let name = if completed && self.linkable_entry { "ir_sti_finish_link" } else { "ir_sti_finish" };
-            self.w.call_signature(name, crate::ir::helper::imports::signature(name));
+            let name = if completed && self.linkable_entry {
+                "ir_sti_finish_link"
+            }
+            else {
+                "ir_sti_finish"
+            };
+            self.w
+                .call_signature(name, crate::ir::helper::imports::signature(name));
             self.w.block_end();
         }
         self.w.return_();
@@ -160,9 +183,11 @@ impl Emitter<'_> {
     fn temporary(&mut self, ty: Type) -> Local {
         if ty == Type::V128 {
             Local::V128(self.w.set_new_local_v128())
-        } else if matches!(ty, Type::I64 | Type::RmwTicket) {
+        }
+        else if matches!(ty, Type::I64 | Type::RmwTicket) {
             Local::I64(self.w.set_new_local_i64())
-        } else {
+        }
+        else {
             Local::I32(self.w.set_new_local())
         }
     }
@@ -281,9 +306,7 @@ impl Emitter<'_> {
         }
         self.diagnostic_end();
     }
-    fn state(&mut self, state: StateId) {
-        self.observe_state(state, state, false);
-    }
+    fn state(&mut self, state: StateId) { self.observe_state(state, state, false); }
     fn copy_edge_values(&mut self, edge: &MirEdge) {
         let mut scratch = Vec::new();
         for copy in &edge.copies {
@@ -316,38 +339,57 @@ impl Emitter<'_> {
         self.w.const_i32(edge.target.0 as i32);
         self.w.set_local(pc);
     }
-    fn emit_block_body(&mut self, id: BlockId, remaining: &WasmLocal) {
+    fn emit_block_body(&mut self, id: BlockId, remaining: &WasmLocal, allow_batch: bool) {
         let resets = self.mir.ram_loop_resets(id).to_vec();
         for slot in resets {
             self.cache_clear(MemoryCache::Loop(slot));
         }
         let block = self.mir.control.blocks[id.index()].clone();
         self.poll(block.recovery, block.budget_cost, remaining);
-        let batch = self.mir.budget_batch(id).filter(|_| self.cpu && self.batch_polls
-            && self.interrupt_shadow.is_none() && self.diagnostic.is_none());
+        let batch = self.mir.budget_batch(id).filter(|_| {
+            allow_batch
+                && self.cpu
+                && self.batch_polls
+                && self.interrupt_shadow.is_none()
+                && self.diagnostic.is_none()
+        });
         if let Some(batch) = batch {
-            for &id in &block.instructions[..batch.start] { self.instruction(id, remaining); }
+            for &id in &block.instructions[..batch.start] {
+                self.instruction(id, remaining);
+            }
             let cost = batch.cost;
-            // The preceding mandatory poll already checked the active epoch and charged one unit.
-            // No observer or fault can occur in the proved body. Only skip the
-            // remaining checks when every original unit of credit is present.
+            // Reserve dispatcher work, not guest retirement. Every StateMap and
+            // fault/observer path is unchanged. Mixed bodies keep the original
+            // epoch checks, so a callback cannot execute stale subsequent code.
             self.w.get_local(remaining);
             self.w.const_i32(cost as i32);
             self.w.geu_i32();
             self.w.if_void();
-            self.w.get_local(remaining); self.w.const_i32(cost as i32);
-            self.w.sub_i32(); self.w.set_local(remaining);
+            self.w.get_local(remaining);
+            self.w.const_i32(cost as i32);
+            self.w.sub_i32();
+            self.w.set_local(remaining);
             for &id in &block.instructions[batch.start..] {
-                if self.mir.control.polls[id.index()].is_none() {
+                if let Some(poll) = &self.mir.control.polls[id.index()] {
+                    if !batch.pure {
+                        self.check_poll(Some(poll.recovery), None);
+                    }
+                }
+                else {
                     self.instruction(id, remaining);
                 }
             }
             self.w.else_();
-            for &id in &block.instructions[batch.start..] { self.instruction(id, remaining); }
+            for &id in &block.instructions[batch.start..] {
+                self.instruction(id, remaining);
+            }
             self.w.block_end();
             self.budget_batch_blocks += 1;
-        } else {
-            for id in block.instructions { self.instruction(id, remaining); }
+        }
+        else {
+            for id in block.instructions {
+                self.instruction(id, remaining);
+            }
         }
     }
     fn emit_structured_edge(
@@ -364,6 +406,153 @@ impl Emitter<'_> {
             .get(&edge.target)
             .expect("verified structure provides a branch label");
         self.w.br(label);
+    }
+    fn emit_structured_terminator(
+        &mut self,
+        id: BlockId,
+        next: &[BlockId],
+        labels: &BTreeMap<BlockId, Label>,
+    ) {
+        match self.mir.control.blocks[id.index()].terminator.clone() {
+            MirTerminator::Exit(state) => self.normal_exit(state),
+            MirTerminator::Jump(edge) => self.emit_structured_edge(&edge, next, labels),
+            MirTerminator::Branch {
+                condition,
+                taken,
+                not_taken,
+            } => {
+                self.get_local(condition);
+                self.w.if_void();
+                self.emit_structured_edge(&taken, next, labels);
+                self.w.else_();
+                self.emit_structured_edge(&not_taken, next, labels);
+                self.w.block_end();
+            },
+        }
+    }
+    /// Emit a body whose original dispatcher credits have already been reserved.
+    /// Epoch and fault checks still occur at their original recovery points.
+    fn emit_reserved_body(&mut self, id: BlockId, pure: bool, remaining: &WasmLocal) {
+        let block = self.mir.control.blocks[id.index()].clone();
+        for slot in self.mir.ram_loop_resets(id).to_vec() {
+            self.cache_clear(MemoryCache::Loop(slot));
+        }
+        self.check_poll(block.recovery, None);
+        for &inst in &block.instructions {
+            if let Some(poll) = &self.mir.control.polls[inst.index()] {
+                if !pure {
+                    self.check_poll(Some(poll.recovery), None);
+                }
+            }
+            else {
+                self.instruction(inst, remaining);
+            }
+        }
+    }
+    fn emit_prepaid_edge(
+        &mut self,
+        edge: &MirEdge,
+        header: BlockId,
+        backedge: crate::ir::mir::budget::LoopBackedge,
+        hot: Label,
+        labels: &BTreeMap<BlockId, Label>,
+        remaining: &WasmLocal,
+    ) {
+        if edge.target == backedge.target {
+            self.copy_edge_values(edge);
+            if backedge.target != header {
+                self.emit_reserved_body(backedge.target, true, remaining);
+                let MirTerminator::Jump(back) = self.mir.control.blocks[backedge.target.index()]
+                    .terminator
+                    .clone()
+                else {
+                    unreachable!("verified budget latch")
+                };
+                self.copy_edge_values(&back);
+            }
+            self.w.br(hot);
+        }
+        else {
+            // Only the loop-taking arm consumes the prepaid latch. Other normal
+            // successors must see precisely the original remaining budget.
+            if backedge.cost != 0 {
+                self.w.get_local(remaining);
+                self.w.const_i32(backedge.cost as i32);
+                self.w.add_i32();
+                self.w.set_local(remaining);
+            }
+            self.emit_structured_edge(edge, &[], labels);
+        }
+    }
+    /// Keep the residual-budget body outside the hot backedge. Duplicating both
+    /// arms *inside* a loop increases host phi/register pressure even when the
+    /// residual arm is rarely taken. The original body is still the exact oracle
+    /// for every small budget, and every observer/epoch/fault check is retained.
+    fn emit_prepaid_loop(
+        &mut self,
+        id: BlockId,
+        remaining: &WasmLocal,
+        next: &[BlockId],
+        labels: &BTreeMap<BlockId, Label>,
+    ) -> bool {
+        let block = &self.mir.control.blocks[id.index()];
+        let Some(batch) = self.mir.budget_batch(id).filter(|b| {
+            b.start == 0
+                && b.backedge.is_some()
+                && self.cpu
+                && self.batch_polls
+                && self.interrupt_shadow.is_none()
+                && self.diagnostic.is_none()
+                && block.recovery.is_some()
+        })
+        else {
+            return false;
+        };
+        let block = block.clone();
+        let backedge = batch.backedge.unwrap();
+        let cost = batch.cost + block.budget_cost + backedge.cost;
+        let done = self.w.block_void();
+        let residual = self.w.block_void();
+        let hot = self.w.loop_void();
+        self.w.get_local(remaining);
+        self.w.const_i32(cost as i32);
+        self.w.ltu_i32();
+        self.w.br_if(residual);
+        self.w.get_local(remaining);
+        self.w.const_i32(cost as i32);
+        self.w.sub_i32();
+        self.w.set_local(remaining);
+        self.emit_reserved_body(id, batch.pure, remaining);
+        let mut hot_labels = labels.clone();
+        for target in next {
+            hot_labels.insert(*target, done);
+        }
+        // A normal loop exit must skip the residual body, including fallthrough.
+        match block.terminator {
+            MirTerminator::Jump(edge) => {
+                self.emit_prepaid_edge(&edge, id, backedge, hot, &hot_labels, remaining)
+            },
+            MirTerminator::Branch {
+                condition,
+                taken,
+                not_taken,
+            } => {
+                self.get_local(condition);
+                self.w.if_void();
+                self.emit_prepaid_edge(&taken, id, backedge, hot, &hot_labels, remaining);
+                self.w.else_();
+                self.emit_prepaid_edge(&not_taken, id, backedge, hot, &hot_labels, remaining);
+                self.w.block_end();
+            },
+            MirTerminator::Exit(_) => unreachable!("verified loop budget certificate"),
+        }
+        self.w.block_end(); // hot loop
+        self.w.block_end(); // residual entry
+        self.emit_block_body(id, remaining, false);
+        self.emit_structured_terminator(id, next, labels);
+        self.w.block_end(); // normal continuation
+        self.budget_batch_blocks += 1;
+        true
     }
     fn emit_structured(&mut self, roots: &[Structure], remaining: &WasmLocal) {
         #[derive(Clone)]
@@ -394,26 +583,9 @@ impl Emitter<'_> {
 
             match item {
                 Work::Node(Structure::BasicBlock(id)) => {
-                    self.emit_block_body(id, remaining);
-                    match self.mir.control.blocks[id.index()].terminator.clone() {
-                        MirTerminator::Exit(state) => {
-                            self.normal_exit(state);
-                        },
-                        MirTerminator::Jump(edge) => {
-                            self.emit_structured_edge(&edge, &next, &labels);
-                        },
-                        MirTerminator::Branch {
-                            condition,
-                            taken,
-                            not_taken,
-                        } => {
-                            self.get_local(condition);
-                            self.w.if_void();
-                            self.emit_structured_edge(&taken, &next, &labels);
-                            self.w.else_();
-                            self.emit_structured_edge(&not_taken, &next, &labels);
-                            self.w.block_end();
-                        },
+                    if !self.emit_prepaid_loop(id, remaining, &next, &labels) {
+                        self.emit_block_body(id, remaining, true);
+                        self.emit_structured_terminator(id, &next, &labels);
                     }
                 },
                 Work::Node(Structure::Loop(children)) => {
@@ -497,7 +669,8 @@ impl Emitter<'_> {
         self.w.if_void();
         if trap_after_fault {
             self.w.unreachable();
-        } else {
+        }
+        else {
             self.diagnostic_exit(DiagnosticExit::Fault);
             self.return_to_cpu();
         }
@@ -513,9 +686,7 @@ impl Emitter<'_> {
         self.w.free_local(outcome);
         self.w.free_local_i64(packed);
     }
-    fn prepare_memory_call(&mut self, state: StateId) {
-        self.observe_state(state, state, true);
-    }
+    fn prepare_memory_call(&mut self, state: StateId) { self.observe_state(state, state, true); }
     fn planned_ram_guard(&mut self, address: ValueId, guard: &RamGuard) -> WasmLocal {
         self.w.get_local(self.tlb.as_ref().unwrap());
         self.get(address);
@@ -653,8 +824,12 @@ impl Emitter<'_> {
         self.w.unreachable();
         self.w.block_end();
         if self.diagnostic.is_some() {
-            self.w.get_local(&outcome); self.w.const_i32(2); self.w.eq_i32(); self.w.if_void();
-            self.diagnostic_exit(DiagnosticExit::Fault); self.w.block_end();
+            self.w.get_local(&outcome);
+            self.w.const_i32(2);
+            self.w.eq_i32();
+            self.w.if_void();
+            self.diagnostic_exit(DiagnosticExit::Fault);
+            self.w.block_end();
         }
         self.w.free_local(outcome);
         self.w.block_end();
@@ -697,7 +872,8 @@ impl Emitter<'_> {
         self.get(plan.divisor);
         if plan.signed {
             self.w.div_s_i64();
-        } else {
+        }
+        else {
             self.w.div_i64();
         }
         let quotient = self.w.set_new_local_i64();
@@ -723,7 +899,8 @@ impl Emitter<'_> {
         self.get(plan.divisor);
         if plan.signed {
             self.w.rem_s_i64();
-        } else {
+        }
+        else {
             self.w.rem_i64();
         }
         let remainder = self.w.set_new_local_i64();
@@ -738,10 +915,23 @@ impl Emitter<'_> {
     fn runtime_call(&mut self, call: &RuntimeCall) {
         // These three imports cannot observe host state on success. Segment
         // faults terminate the activation, whose admission interval is revoked.
-        if !matches!(call.name, "ir_segment_address" | "ir_pop_address" | "ir_rmw_value") {
+        if !matches!(
+            call.name,
+            "ir_segment_address" | "ir_pop_address" | "ir_rmw_value"
+        ) {
             self.admission_barrier();
         }
-        self.diagnostic_begin(if call.name.starts_with("ir_memory") || call.name.starts_with("ir_rmw") || call.name.starts_with("ir_xmm") { DiagnosticStage::MemorySlow } else { DiagnosticStage::Helper });
+        self.diagnostic_begin(
+            if call.name.starts_with("ir_memory")
+                || call.name.starts_with("ir_rmw")
+                || call.name.starts_with("ir_xmm")
+            {
+                DiagnosticStage::MemorySlow
+            }
+            else {
+                DiagnosticStage::Helper
+            },
+        );
         for arg in &call.args {
             match *arg {
                 Argument::Value(value) => self.get(value),
@@ -800,7 +990,12 @@ impl Emitter<'_> {
             None => self.planned_memory(plan, None, guard_proof),
         }
     }
-    fn planned_memory(&mut self, plan: &MemoryPlan, cache: Option<MemoryCache>, guard_proof: Option<Forwarding>) {
+    fn planned_memory(
+        &mut self,
+        plan: &MemoryPlan,
+        cache: Option<MemoryCache>,
+        guard_proof: Option<Forwarding>,
+    ) {
         let bytes = plan.guard.bytes;
         if matches!(guard_proof, Some(Forwarding::Begin)) {
             self.w.const_i32(0);
@@ -821,7 +1016,10 @@ impl Emitter<'_> {
             self.w.free_local(checked);
             self.w.block_end();
             entry
-        } else { self.planned_ram_guard(plan.address, &plan.guard) };
+        }
+        else {
+            self.planned_ram_guard(plan.address, &plan.guard)
+        };
         self.w.if_void();
         if guard_proof.is_some() {
             self.w.get_local(&entry);
@@ -909,7 +1107,8 @@ impl Emitter<'_> {
                         self.w.block_end();
                     }
                     self.w.free_local(mask);
-                } else {
+                }
+                else {
                     self.w.get_local(&pointer);
                     self.get(*value);
                     match bytes {
@@ -937,7 +1136,8 @@ impl Emitter<'_> {
                     self.w.simd_lane(0x1A, *lane);
                     self.set(*result);
                     self.w.free_local(word);
-                } else {
+                }
+                else {
                     self.w.simd_memory(
                         match bytes {
                             4 => 0x5C,
@@ -1030,7 +1230,8 @@ impl Emitter<'_> {
                 self.w.block_end();
                 if *trap_after_fault {
                     self.w.unreachable();
-                } else {
+                }
+                else {
                     self.diagnostic_exit(DiagnosticExit::Fault);
                     self.return_to_cpu();
                 }
@@ -1051,8 +1252,12 @@ impl Emitter<'_> {
                 self.w.block_end();
                 self.diagnostic_exit(DiagnosticExit::VectorMemory);
                 if self.diagnostic.is_some() {
-                    self.w.get_local(&outcome); self.w.const_i32(2); self.w.eq_i32(); self.w.if_void();
-                    self.diagnostic_exit(DiagnosticExit::Fault); self.w.block_end();
+                    self.w.get_local(&outcome);
+                    self.w.const_i32(2);
+                    self.w.eq_i32();
+                    self.w.if_void();
+                    self.diagnostic_exit(DiagnosticExit::Fault);
+                    self.w.block_end();
                 }
                 self.w.free_local(outcome);
                 self.return_to_cpu();
@@ -1163,27 +1368,47 @@ impl Emitter<'_> {
         }
     }
     fn planned_call(&mut self, id: InstId, plan: &CallPlan) {
-        if self.cpu && self.mir.helpers[plan.helper.index()].as_ref().unwrap().name == "ir_sti_finish_continue" {
-            self.w.call_signature("ir_sti_no_pending_irq",
-                crate::ir::helper::imports::signature("ir_sti_no_pending_irq"));
+        if self.cpu
+            && self.mir.helpers[plan.helper.index()].as_ref().unwrap().name
+                == "ir_sti_finish_continue"
+        {
+            self.w.call_signature(
+                "ir_sti_no_pending_irq",
+                crate::ir::helper::imports::signature("ir_sti_no_pending_irq"),
+            );
             // Clear before either arm: the slow helper owns the entire unwind,
             // and return_to_cpu must not deliver the same IRQ scope twice.
             self.w.const_i32(0);
-            self.w.set_local(self.interrupt_shadow.as_ref().expect("completed STI scope"));
-            self.w.eqz_i32(); self.w.if_void();
+            self.w
+                .set_local(self.interrupt_shadow.as_ref().expect("completed STI scope"));
+            self.w.eqz_i32();
+            self.w.if_void();
             self.planned_call_slow(id, plan);
             self.w.block_end();
             return;
         }
         if let Some(fp) = plan.native_fp.filter(|_| self.cpu) {
             let (source, destination) = plan.xmm_observation.unwrap();
-            let operand = |reg: u8| self.mir.states[plan.state.index()].cpu.writes.iter()
-                .find(|w| w.address == Address::Absolute(gp::get_reg_xmm_offset(reg as u32))).unwrap().expression.clone();
-            let left_steps=operand(destination); let right_steps=operand(source);
-            self.value_steps(&left_steps); let left=self.w.set_new_local_v128();
-            self.value_steps(&right_steps); let right=self.w.set_new_local_v128();
-            self.w.get_local_v128(&left); self.w.get_local_v128(&right); self.w.simd(fp.opcode);
-            let result=self.w.set_new_local_v128();
+            let operand = |reg: u8| {
+                self.mir.states[plan.state.index()]
+                    .cpu
+                    .writes
+                    .iter()
+                    .find(|w| w.address == Address::Absolute(gp::get_reg_xmm_offset(reg as u32)))
+                    .unwrap()
+                    .expression
+                    .clone()
+            };
+            let left_steps = operand(destination);
+            let right_steps = operand(source);
+            self.value_steps(&left_steps);
+            let left = self.w.set_new_local_v128();
+            self.value_steps(&right_steps);
+            let right = self.w.set_new_local_v128();
+            self.w.get_local_v128(&left);
+            self.w.get_local_v128(&right);
+            self.w.simd(fp.opcode);
+            let result = self.w.set_new_local_v128();
             // Scalar and ordinary SIMD add/sub/mul/div have the same IEEE
             // result bits except for the permitted choice of NaN payload/sign.
             // Test the result once: result != result detects every NaN lane,
@@ -1191,26 +1416,47 @@ impl Emitter<'_> {
             // subnormals, infinities and overflow remain exact, not fast-math.
             // These baseline arithmetic forms do not update MXCSR. Keep the CR0
             // task-fault and scalar-NaN paths, before any architectural write.
-            self.w.load_fixed_i32(gp::cr as u32); self.w.const_i32(12); self.w.and_i32();
-            self.w.get_local_v128(&result); self.w.get_local_v128(&result);
+            self.w.load_fixed_i32(gp::cr as u32);
+            self.w.const_i32(12);
+            self.w.and_i32();
+            self.w.get_local_v128(&result);
+            self.w.get_local_v128(&result);
             self.w.simd(if fp.double { 0x48 } else { 0x42 }); // f64x2.ne / f32x4.ne
             if fp.scalar {
                 // Only lane zero is architecturally evaluated. Upper lanes may
                 // contain signalling NaNs and must neither reject nor change.
                 self.w.simd_lane(0x1B, 0); // i32x4.extract_lane (low mask word)
-            } else { self.w.simd(0x53); } // v128.any_true
+            }
+            else {
+                self.w.simd(0x53);
+            } // v128.any_true
             self.w.or_i32();
-            self.w.eqz_i32(); self.w.if_void();
+            self.w.eqz_i32();
+            self.w.if_void();
             self.w.get_local_v128(&result);
             if fp.scalar {
                 self.w.get_local_v128(&left);
                 let bytes = if fp.double { 8 } else { 4 };
-                self.w.simd_shuffle(std::array::from_fn(|i| if i < bytes { i as u8 } else { i as u8 + 16 }));
+                self.w.simd_shuffle(std::array::from_fn(|i| {
+                    if i < bytes {
+                        i as u8
+                    }
+                    else {
+                        i as u8 + 16
+                    }
+                }));
             }
             self.set(plan.reload[0].0);
-            self.w.else_(); self.planned_call_slow(id, plan); self.w.block_end();
-            self.w.free_local_v128(result); self.w.free_local_v128(right); self.w.free_local_v128(left);
-        } else { self.planned_call_slow(id, plan); }
+            self.w.else_();
+            self.planned_call_slow(id, plan);
+            self.w.block_end();
+            self.w.free_local_v128(result);
+            self.w.free_local_v128(right);
+            self.w.free_local_v128(left);
+        }
+        else {
+            self.planned_call_slow(id, plan);
+        }
     }
     fn planned_call_slow(&mut self, id: InstId, plan: &CallPlan) {
         // Generic helpers may return after an MMIO/host callback. Revoke before
@@ -1219,8 +1465,11 @@ impl Emitter<'_> {
         let call = self.mir.helpers[plan.helper.index()].as_ref().unwrap();
         let code_preserved = crate::ir::helper::cpu_registry::preserves_code_on_success(&call.name);
         let segment_continue = self.cpu && call.name == "ir_mov_segment_continue";
-        let interrupt_check = self.cpu && matches!(call.name.as_str(), "ir_cli_check" | "ir_sti_check");
-        if selective.is_none() && !code_preserved && !segment_continue && !interrupt_check { self.admission_barrier(); }
+        let interrupt_check =
+            self.cpu && matches!(call.name.as_str(), "ir_cli_check" | "ir_sti_check");
+        if selective.is_none() && !code_preserved && !segment_continue && !interrupt_check {
+            self.admission_barrier();
+        }
         let trim_state = self.cpu && self.mir.helper_state_observation_elided(id);
         if segment_continue {
             // Real/VM86 segment transfers cannot observe SSA state or host RAM.
@@ -1228,36 +1477,59 @@ impl Emitter<'_> {
             // revoke all certificates before entering that terminal path.
             self.w.load_fixed_u8(gp::protected_mode as u32);
             self.w.load_fixed_i32(gp::flags as u32);
-            self.w.const_i32(crate::cpu::cpu::FLAG_VM); self.w.and_i32(); self.w.eqz_i32(); self.w.and_i32();
-            self.w.if_void(); self.admission_barrier(); self.prepare_memory_call(plan.state); self.w.block_end();
-        } else if interrupt_check {
+            self.w.const_i32(crate::cpu::cpu::FLAG_VM);
+            self.w.and_i32();
+            self.w.eqz_i32();
+            self.w.and_i32();
+            self.w.if_void();
+            self.admission_barrier();
+            self.prepare_memory_call(plan.state);
+            self.w.block_end();
+        }
+        else if interrupt_check {
             // The normal real-mode / ring-0 non-VM86 path reads only backing
             // privilege bits and cannot observe GPRs, arithmetic flags or RAM.
             // Other paths retain full precise materialization before any fault.
-            self.w.load_fixed_u8(gp::protected_mode as u32); self.w.eqz_i32();
-            self.w.load_fixed_u8(gp::cpl as u32); self.w.eqz_i32();
-            self.w.load_fixed_i32(gp::flags as u32); self.w.const_i32(crate::cpu::cpu::FLAG_VM);
-            self.w.and_i32(); self.w.eqz_i32(); self.w.and_i32(); self.w.or_i32();
-            self.w.eqz_i32(); self.w.if_void();
-            self.admission_barrier(); self.prepare_memory_call(plan.state);
+            self.w.load_fixed_u8(gp::protected_mode as u32);
+            self.w.eqz_i32();
+            self.w.load_fixed_u8(gp::cpl as u32);
+            self.w.eqz_i32();
+            self.w.load_fixed_i32(gp::flags as u32);
+            self.w.const_i32(crate::cpu::cpu::FLAG_VM);
+            self.w.and_i32();
+            self.w.eqz_i32();
+            self.w.and_i32();
+            self.w.or_i32();
+            self.w.eqz_i32();
+            self.w.if_void();
+            self.admission_barrier();
+            self.prepare_memory_call(plan.state);
             self.w.block_end();
-        } else if let Some((source, destination)) = selective {
+        }
+        else if let Some((source, destination)) = selective {
             // A failing task guard can deliver an exception and must see the
             // entire precise state. The successful register-only path has no
             // observer: synchronize operands and reload only its destination.
             self.w.load_fixed_i32(gp::cr as u32);
-            self.w.const_i32(12); self.w.and_i32(); self.w.if_void();
-            self.admission_barrier(); self.prepare_memory_call(plan.state);
+            self.w.const_i32(12);
+            self.w.and_i32();
+            self.w.if_void();
+            self.admission_barrier();
+            self.prepare_memory_call(plan.state);
             self.w.else_();
             self.diagnostic_begin(DiagnosticStage::StateWrite);
             for write in &self.mir.states[plan.state.index()].cpu.writes {
                 if write.address == Address::Absolute(gp::get_reg_xmm_offset(source as u32))
-                    || write.address == Address::Absolute(gp::get_reg_xmm_offset(destination as u32)) {
+                    || write.address
+                        == Address::Absolute(gp::get_reg_xmm_offset(destination as u32))
+                {
                     self.state_write(write);
                 }
             }
-            self.diagnostic_end(); self.w.block_end();
-        } else if !trim_state {
+            self.diagnostic_end();
+            self.w.block_end();
+        }
+        else if !trim_state {
             let observation =
                 if self.cpu { plan.cpu_observation } else { plan.standalone_observation };
             match observation {
@@ -1268,7 +1540,19 @@ impl Emitter<'_> {
         // Observers retain full state synchronization. Only a successful,
         // unchanged execution context may request another cold admission. The
         // pre-call barrier forces source/mapping validation after raw host writes.
-        let observer_link = self.entry.filter(|_| matches!(call.name.as_str(), "ir_in" | "ir_out" | "ir_rdtsc" | "ir_in_continue" | "ir_out_continue" | "ir_rdtsc_continue"))
+        let observer_link = self
+            .entry
+            .filter(|_| {
+                matches!(
+                    call.name.as_str(),
+                    "ir_in"
+                        | "ir_out"
+                        | "ir_rdtsc"
+                        | "ir_in_continue"
+                        | "ir_out_continue"
+                        | "ir_rdtsc_continue"
+                )
+            })
             .map(|entry| {
                 self.w.load_fixed_i32(gp::instruction_pointer as u32);
                 let next = self.w.set_new_local();
@@ -1309,34 +1593,57 @@ impl Emitter<'_> {
             if code_preserved {
                 if exit == 4 && self.linkable_entry {
                     if let Some(depth) = &self.interrupt_shadow {
-                        self.w.get_local(depth); self.w.eqz_i32(); self.w.if_void();
+                        self.w.get_local(depth);
+                        self.w.eqz_i32();
+                        self.w.if_void();
                     }
-                    self.w.call_signature("ir_request_link", crate::ir::helper::imports::signature("ir_request_link"));
-                    if self.interrupt_shadow.is_some() { self.w.block_end(); }
-                } else { self.admission_barrier(); }
+                    self.w.call_signature(
+                        "ir_request_link",
+                        crate::ir::helper::imports::signature("ir_request_link"),
+                    );
+                    if self.interrupt_shadow.is_some() {
+                        self.w.block_end();
+                    }
+                }
+                else {
+                    self.admission_barrier();
+                }
             }
             if exit == 4 {
                 if let Some((entry, next, cpl)) = &observer_link {
                     self.w.get_local(next);
                     self.w.const_i32(entry.cs_base() as i32);
                     self.w.const_i32(i32::from(entry.default_32));
-                    self.w.call_signature("ir_entry_matches", crate::ir::helper::imports::signature("ir_entry_matches"));
-                    self.w.load_fixed_u8(gp::cpl as u32); self.w.get_local(cpl); self.w.eq_i32(); self.w.and_i32();
+                    self.w.call_signature(
+                        "ir_entry_matches",
+                        crate::ir::helper::imports::signature("ir_entry_matches"),
+                    );
+                    self.w.load_fixed_u8(gp::cpl as u32);
+                    self.w.get_local(cpl);
+                    self.w.eq_i32();
+                    self.w.and_i32();
                     if let Some(depth) = &self.interrupt_shadow {
-                        self.w.get_local(depth); self.w.eqz_i32(); self.w.and_i32();
+                        self.w.get_local(depth);
+                        self.w.eqz_i32();
+                        self.w.and_i32();
                     }
                     self.w.if_void();
-                    self.w.call_signature("ir_request_observer_link", crate::ir::helper::imports::signature("ir_request_observer_link"));
+                    self.w.call_signature(
+                        "ir_request_observer_link",
+                        crate::ir::helper::imports::signature("ir_request_observer_link"),
+                    );
                     self.w.block_end();
                 }
             }
             if let Some((base, _)) = &self.diagnostic {
                 self.w.get_local(base);
-                self.w.const_i32(crate::ir::runtime::diagnostics::helper_category(&call.name) as i32);
+                self.w
+                    .const_i32(crate::ir::runtime::diagnostics::helper_category(&call.name) as i32);
                 self.w.store_aligned_i32(8);
             }
             self.diagnostic_exit(match exit as u32 {
-                3 => DiagnosticExit::HelperYield, 4 => DiagnosticExit::HelperInvalidated,
+                3 => DiagnosticExit::HelperYield,
+                4 => DiagnosticExit::HelperInvalidated,
                 _ => DiagnosticExit::HelperTransfer,
             });
             self.return_to_cpu();
@@ -1349,14 +1656,16 @@ impl Emitter<'_> {
             self.w.if_void();
             self.w.unreachable();
             self.w.block_end();
-        } else {
+        }
+        else {
             self.w.unreachable();
         }
         // A checked observer explicitly revalidated this exact active owner.
         // Refresh the fused poll certificate only on its verified Normal path.
         if crate::ir::helper::cpu_registry::checked_scalar_continuation(&call.name) {
             if let Some((address, epoch)) = &self.fused_epoch {
-                self.w.get_local(address); self.w.load_unaligned_i64(0);
+                self.w.get_local(address);
+                self.w.load_unaligned_i64(0);
                 self.w.set_local_i64(epoch);
             }
         }
@@ -1367,12 +1676,16 @@ impl Emitter<'_> {
             self.w.add_i32();
             self.w.set_local(depth);
         }
-        if !plan.reload.is_empty() { self.diagnostic_begin(DiagnosticStage::StateReload); }
+        if !plan.reload.is_empty() {
+            self.diagnostic_begin(DiagnosticStage::StateReload);
+        }
         for (value, reading) in &plan.reload {
             self.read_value(reading);
             self.set(*value);
         }
-        if !plan.reload.is_empty() { self.diagnostic_end(); }
+        if !plan.reload.is_empty() {
+            self.diagnostic_end();
+        }
         for (slot, temp) in staged {
             self.get_temporary(&temp);
             self.mask(slot.ty);
@@ -1381,7 +1694,8 @@ impl Emitter<'_> {
         }
         self.w.free_local(outcome);
         if let Some((_, next, cpl)) = observer_link {
-            self.w.free_local(next); self.w.free_local(cpl);
+            self.w.free_local(next);
+            self.w.free_local(cpl);
         }
     }
     fn address(&self, address: Address) -> u32 {
@@ -1445,16 +1759,22 @@ impl Emitter<'_> {
         self.value_steps(&plan.steps);
         self.set(plan.result);
     }
-    fn poll(&mut self, state: Option<StateId>, cost: u32, remaining: &WasmLocal) {
-        if let Some(state) = state {
-            self.w.get_local(remaining);
-            self.w.eqz_i32();
+    /// A prepaid body skips only the local budget test. Epoch invalidation is
+    /// still checked at exactly the original instruction boundary.
+    fn check_poll(&mut self, state: Option<StateId>, remaining: Option<&WasmLocal>) {
+        if let Some(state) = state.filter(|_| remaining.is_some() || self.fused_epoch.is_some()) {
+            if let Some(remaining) = remaining {
+                self.w.get_local(remaining);
+                self.w.eqz_i32();
+            }
             if let Some((address, epoch)) = &self.fused_epoch {
                 self.w.get_local(address);
                 self.w.load_unaligned_i64(0);
                 self.w.get_local_i64(epoch);
                 self.w.ne_i64();
-                self.w.or_i32();
+                if remaining.is_some() {
+                    self.w.or_i32();
+                }
             }
             if let Some(depth) = &self.interrupt_shadow {
                 self.w.get_local(depth);
@@ -1463,15 +1783,36 @@ impl Emitter<'_> {
             }
             self.w.if_void();
             self.diagnostic_exit(DiagnosticExit::Budget);
-            if let Some((address, epoch)) = self.fused_epoch.as_ref().filter(|_| self.diagnostic.is_some()) {
-                self.w.get_local(address); self.w.load_unaligned_i64(0);
-                self.w.get_local_i64(epoch); self.w.ne_i64(); self.w.if_void();
-                self.diagnostic_exit(DiagnosticExit::Epoch); self.w.block_end();
+            if let Some((address, epoch)) = self
+                .fused_epoch
+                .as_ref()
+                .filter(|_| self.diagnostic.is_some())
+            {
+                self.w.get_local(address);
+                self.w.load_unaligned_i64(0);
+                self.w.get_local_i64(epoch);
+                self.w.ne_i64();
+                self.w.if_void();
+                self.diagnostic_exit(DiagnosticExit::Epoch);
+                self.w.block_end();
             }
             self.state(state);
+            // Polls are distinct from opaque helper/fault exits. Do not revoke a
+            // still-current byte certificate solely because local credits ran
+            // out. No link is requested and no epoch is refreshed. Shadow and
+            // diagnostic exits retain the conservative observer treatment.
+            if self.linkable_entry && self.interrupt_shadow.is_none() && self.diagnostic.is_none() {
+                self.w.call_signature(
+                    "ir_request_poll_exit",
+                    crate::ir::helper::imports::signature("ir_request_poll_exit"),
+                );
+            }
             self.return_to_cpu();
             self.w.block_end();
         }
+    }
+    fn poll(&mut self, state: Option<StateId>, cost: u32, remaining: &WasmLocal) {
+        self.check_poll(state, Some(remaining));
         self.w.get_local(remaining);
         self.w.const_i32(cost as i32);
         self.w.sub_i32();
@@ -1484,12 +1825,20 @@ impl Emitter<'_> {
         let mir = self.mir;
         if let Some(plan) = &mir.control.polls[id.index()] {
             self.poll(Some(plan.recovery), plan.cost, remaining);
-        } else if let Some(plan) = &mir.memory[id.index()] {
-            self.memory_with_forwarding(plan, mir.ram_forwarding(id), mir.ram_loop_cache(id), mir.ram_guard_reuse(id));
-        } else if let Some(plan) = &mir.effects[id.index()] {
+        }
+        else if let Some(plan) = &mir.memory[id.index()] {
+            self.memory_with_forwarding(
+                plan,
+                mir.ram_forwarding(id),
+                mir.ram_loop_cache(id),
+                mir.ram_guard_reuse(id),
+            );
+        }
+        else if let Some(plan) = &mir.effects[id.index()] {
             self.planned_effect(plan);
             if mir.ram_forwarding(id) == Some(Forwarding::Begin) {
-                let EffectPlan::RmwCommit { value, .. } = plan else {
+                let EffectPlan::RmwCommit { value, .. } = plan
+                else {
                     unreachable!("verified RMW forwarding certificate")
                 };
                 // Slow tickets and code aliases already returned. Seed only
@@ -1499,9 +1848,11 @@ impl Emitter<'_> {
                 self.cache_set_value(MemoryCache::Chain);
                 self.cache_mark_valid(MemoryCache::Chain);
             }
-        } else if let Some(plan) = &mir.calls[id.index()] {
+        }
+        else if let Some(plan) = &mir.calls[id.index()] {
             self.planned_call(id, plan);
-        } else {
+        }
+        else {
             if self.cpu && !mir.cpu_instruction_live(id) {
                 return;
             }
@@ -1540,26 +1891,40 @@ pub(crate) fn emit_cpu_entry(
     emit_cpu_inner(mir, budget, Some(entry), code_pages, false, &[])
 }
 pub(crate) fn emit_cpu_fused_entry(
-    mir: &MirRegion, budget: u32, entry: CpuEntryKey, code_pages: &[u32],
+    mir: &MirRegion,
+    budget: u32,
+    entry: CpuEntryKey,
+    code_pages: &[u32],
 ) -> Result<Artifact, CompileError> {
     if mir.control.entries.len() != 1 {
-        return Err(CompileError::Unsupported("fused entry requires one cold root"));
+        return Err(CompileError::Unsupported(
+            "fused entry requires one cold root",
+        ));
     }
     emit_cpu_inner(mir, budget, Some(entry), code_pages, true, &[])
 }
 /// A single function/table owner for several instruction-aligned cold entries.
 /// The runtime still validates the whole immutable code snapshot on admission.
 pub(crate) fn emit_cpu_shared_entry(
-    mir: &MirRegion, budget: u32, entry: CpuEntryKey,
-    aliases: &[CpuEntryKey], code_pages: &[u32], fused: bool,
+    mir: &MirRegion,
+    budget: u32,
+    entry: CpuEntryKey,
+    aliases: &[CpuEntryKey],
+    code_pages: &[u32],
+    fused: bool,
 ) -> Result<Artifact, CompileError> {
     if aliases.is_empty() || aliases.len() > 7 || mir.control.entries.len() != 1 {
         return Err(CompileError::Budget("shared CPU entry count"));
     }
     for (i, alias) in aliases.iter().enumerate() {
-        if *alias == entry || aliases[..i].contains(alias)
-            || alias.cs_base() != entry.cs_base() || alias.default_32 != entry.default_32 {
-            return Err(CompileError::InvalidIr("incompatible shared CPU entry".into()));
+        if *alias == entry
+            || aliases[..i].contains(alias)
+            || alias.cs_base() != entry.cs_base()
+            || alias.default_32 != entry.default_32
+        {
+            return Err(CompileError::InvalidIr(
+                "incompatible shared CPU entry".into(),
+            ));
         }
     }
     emit_cpu_inner(mir, budget, Some(entry), code_pages, fused, aliases)
@@ -1599,7 +1964,9 @@ fn emit_inner(
     fused: bool,
     aliases: &[CpuEntryKey],
 ) -> Result<Artifact, CompileError> {
-    emit_inner_with_batches(mir, layout, budget, cpu, entry, code_pages, fused, aliases, true)
+    emit_inner_with_batches(
+        mir, layout, budget, cpu, entry, code_pages, fused, aliases, true,
+    )
 }
 fn emit_inner_with_batches(
     mir: &MirRegion,
@@ -1730,9 +2097,13 @@ fn emit_inner_with_batches(
     // Diagnostic policy is fixed at compilation; changing it invalidates all
     // artifacts. Ordinary builds emit no diagnostic instructions/imports.
     if entry.is_some() && diag::enabled() {
-        e.w.call_signature("ir_diagnostic_address", crate::ir::helper::imports::signature("ir_diagnostic_address"));
+        e.w.call_signature(
+            "ir_diagnostic_address",
+            crate::ir::helper::imports::signature("ir_diagnostic_address"),
+        );
         let base = e.w.set_new_local();
-        e.w.get_local(&base); e.w.load_aligned_i32(0);
+        e.w.get_local(&base);
+        e.w.load_aligned_i32(0);
         let active = e.w.set_new_local();
         e.diagnostic = Some((base, active));
     }
@@ -1768,8 +2139,10 @@ fn emit_inner_with_batches(
             e.w.const_i32(alias.linear.0 as i32);
             e.w.const_i32(alias.cs_base() as i32);
             e.w.const_i32(i32::from(alias.default_32));
-            e.w.call_signature("ir_entry_matches",
-                crate::ir::helper::imports::signature("ir_entry_matches"));
+            e.w.call_signature(
+                "ir_entry_matches",
+                crate::ir::helper::imports::signature("ir_entry_matches"),
+            );
             e.w.or_i32();
         }
         e.w.eqz_i32();
@@ -1780,11 +2153,16 @@ fn emit_inner_with_batches(
     }
     if cpu {
         if entry.is_none() || !aliases.is_empty() {
-            e.w.call_signature("ir_enter", crate::ir::helper::imports::signature("ir_enter"));
+            e.w.call_signature(
+                "ir_enter",
+                crate::ir::helper::imports::signature("ir_enter"),
+            );
         }
         if fused {
-            e.w.call_signature("ir_admission_epoch_address",
-                crate::ir::helper::imports::signature("ir_admission_epoch_address"));
+            e.w.call_signature(
+                "ir_admission_epoch_address",
+                crate::ir::helper::imports::signature("ir_admission_epoch_address"),
+            );
             let address = e.w.set_new_local();
             e.w.get_local(&address);
             e.w.load_unaligned_i64(0);
@@ -1805,13 +2183,30 @@ fn emit_inner_with_batches(
         // only region. Derive requirements from the owned, verified machine
         // plans, including CMPXCHG8B and RMW's separate commit effect.
         let needs_tlb = mir.memory.iter().any(Option::is_some)
-            || mir.effects.iter().flatten().any(|plan| matches!(plan,
-                EffectPlan::Arithmetic(ArithmeticPlan::CompareExchange(_))));
-        let needs_memory_base = mir.memory.iter().flatten().any(|plan| matches!(
-            plan.native, NativeMemory::ScalarStore { commit: Some(_), .. } | NativeMemory::VectorStore { .. }))
-            || mir.effects.iter().flatten().any(|plan| matches!(plan, EffectPlan::RmwCommit { .. }));
+            || mir.effects.iter().flatten().any(|plan| {
+                matches!(
+                    plan,
+                    EffectPlan::Arithmetic(ArithmeticPlan::CompareExchange(_))
+                )
+            });
+        let needs_memory_base = mir.memory.iter().flatten().any(|plan| {
+            matches!(
+                plan.native,
+                NativeMemory::ScalarStore {
+                    commit: Some(_),
+                    ..
+                } | NativeMemory::VectorStore { .. }
+            )
+        }) || mir
+            .effects
+            .iter()
+            .flatten()
+            .any(|plan| matches!(plan, EffectPlan::RmwCommit { .. }));
         if needs_tlb {
-            e.w.call_signature("ir_tlb_base", crate::ir::helper::imports::signature("ir_tlb_base"));
+            e.w.call_signature(
+                "ir_tlb_base",
+                crate::ir::helper::imports::signature("ir_tlb_base"),
+            );
             e.tlb = Some(e.w.set_new_local());
         }
         if needs_memory_base && !code_pages.is_empty() {
@@ -1847,10 +2242,12 @@ fn emit_inner_with_batches(
         if *ty == Type::V128 {
             e.w.simd_zero();
             e.locals.push(Local::V128(e.w.set_new_local_v128()));
-        } else if matches!(*ty, Type::I64 | Type::RmwTicket) {
+        }
+        else if matches!(*ty, Type::I64 | Type::RmwTicket) {
             e.w.const_i64(0);
             e.locals.push(Local::I64(e.w.set_new_local_i64()));
-        } else {
+        }
+        else {
             e.w.const_i32(0);
             e.locals.push(Local::I32(e.w.set_new_local()));
         }
@@ -1876,7 +2273,8 @@ fn emit_inner_with_batches(
             e.w.block_end();
         }
         e.emit_structured(&plan.roots, &remaining);
-    } else {
+    }
+    else {
         e.w.const_i32(-1);
         let pc_local = e.w.set_new_local();
         for (i, entry) in mir.control.entries.iter().enumerate() {
@@ -1901,7 +2299,7 @@ fn emit_inner_with_batches(
             e.w.const_i32(b as i32);
             e.w.eq_i32();
             e.w.if_void();
-            e.emit_block_body(BlockId(b as u32), &remaining);
+            e.emit_block_body(BlockId(b as u32), &remaining, true);
             match &block.terminator {
                 MirTerminator::Exit(state) => {
                     e.normal_exit(*state);
@@ -1945,7 +2343,10 @@ fn emit_inner_with_batches(
     if let Some(local) = e.interrupt_shadow {
         e.w.free_local(local);
     }
-    if let Some((base, active)) = e.diagnostic { e.w.free_local(base); e.w.free_local(active); }
+    if let Some((base, active)) = e.diagnostic {
+        e.w.free_local(base);
+        e.w.free_local(active);
+    }
     if let Some((address, epoch)) = e.fused_epoch {
         e.w.free_local(address);
         e.w.free_local_i64(epoch);
@@ -1977,7 +2378,9 @@ fn emit_inner_with_batches(
         // Duplication must not turn an otherwise compilable region into a stop.
         // Roll back at most once; no half-built artifact can be published.
         if e.budget_batch_blocks != 0 {
-            return emit_inner_with_batches(mir, layout, budget, cpu, entry, code_pages, fused, aliases, false);
+            return emit_inner_with_batches(
+                mir, layout, budget, cpu, entry, code_pages, fused, aliases, false,
+            );
         }
         return Err(CompileError::Budget("Wasm bytes"));
     }

@@ -1,7 +1,7 @@
-import fs from 'node:fs';
-import assert from 'node:assert/strict';
-import { V86 } from '../../../build/libv86.mjs';
-const wasm = process.argv[2] || 'build/v86-ir-runtime.wasm';
+import fs from "node:fs";
+import assert from "node:assert/strict";
+import { V86 } from "../../../build/libv86.mjs";
+const wasm = process.argv[2] || "build/v86-ir-runtime.wasm";
 const sleep = ms => new Promise(r=>setTimeout(r,ms));
 const delta=(a,b)=>(a-b)>>>0;
 // Synthetic cold-start diagnostic, not an XP or application benchmark.
@@ -10,10 +10,10 @@ const duration=Number(process.env.IR_BENCH_MS || 1200);
 assert(Number.isFinite(duration) && duration >= 100 && duration <= 10000);
 const recording=process.env.IR_BENCH_RECORD === "1";
 const results=[];
-for(const size of [2,256,1024]) for(const backend of ['ir','legacy']) {
- const vm = new V86({wasm_path:wasm,bios:{buffer:Uint8Array.from(fs.readFileSync('build/cpu-worker-test.bin')).buffer},memory_size:32<<20,disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:'none'},autostart:false,jit_backend:backend});
+for(const size of [2,256,1024]) for(const backend of ["ir","legacy"]) {
+ const vm = new V86({wasm_path:wasm,bios:{buffer:Uint8Array.from(fs.readFileSync("build/cpu-worker-test.bin")).buffer},memory_size:32<<20,disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false,jit_backend:backend});
  try {
- await new Promise((resolve,reject)=>{vm.add_listener('emulator-loaded',resolve);vm.add_listener('emulator-error',reject);});
+ await new Promise((resolve,reject)=>{vm.add_listener("emulator-loaded",resolve);vm.add_listener("emulator-error",reject);});
  const cpu=vm.v86.cpu, e=cpu.wm.exports;
  vm.run(); let end=performance.now()+15000;
  while(new DataView(cpu.mem8.buffer,cpu.mem8.byteOffset).getUint32(0x500,true)!==0xCAFE){assert(performance.now()<end);await sleep(5);}

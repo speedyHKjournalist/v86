@@ -503,9 +503,7 @@ unsafe fn get_tss_ss_esp(dpl: u8) -> OrPageFault<(i32, i32)> {
 pub unsafe fn iret16() { iret(true); }
 pub unsafe fn iret32() { iret(false); }
 
-pub unsafe fn iret(is_16: bool) {
-    iret_checked(is_16);
-}
+pub unsafe fn iret(is_16: bool) { iret_checked(is_16); }
 
 /// Reports whether the semantic body completed; delivered faults remain CPU-owned.
 pub unsafe fn iret_checked(is_16: bool) -> bool {
@@ -685,7 +683,8 @@ pub unsafe fn iret_checked(is_16: bool) -> bool {
         };
 
         let ss_selector = SegmentSelector::of_u16(temp_ss as u16);
-        let ss_descriptor = match return_on_pagefault!(lookup_segment_selector(ss_selector), false) {
+        let ss_descriptor = match return_on_pagefault!(lookup_segment_selector(ss_selector), false)
+        {
             Ok((desc, _)) => desc,
             Err(SelectorNullOrInvalid::IsNull) => {
                 dbg_log!("#GP for loading 0 in SS sel={:x}", temp_ss);
@@ -834,9 +833,10 @@ pub unsafe fn call_interrupt_vector_checked(
             panic!("Unimplemented: #GP handler");
         }
 
-        let descriptor_address = return_on_pagefault!(translate_address_system_read(
-            *idtr_offset + (interrupt_nr << 3)
-        ), false);
+        let descriptor_address = return_on_pagefault!(
+            translate_address_system_read(*idtr_offset + (interrupt_nr << 3)),
+            false
+        );
 
         let descriptor = InterruptDescriptor::of_u64(memory::read64s(descriptor_address) as u64);
 
@@ -896,9 +896,10 @@ pub unsafe fn call_interrupt_vector_checked(
             return do_task_switch_checked(selector, error_code, TaskSwitchSource::CallOrInt);
         }
 
-        let cs_segment_descriptor = match return_on_pagefault!(lookup_segment_selector(
-            SegmentSelector::of_u16(selector as u16)
-        ), false) {
+        let cs_segment_descriptor = match return_on_pagefault!(
+            lookup_segment_selector(SegmentSelector::of_u16(selector as u16)),
+            false
+        ) {
             Ok((desc, _)) => desc,
             Err(SelectorNullOrInvalid::IsNull) => {
                 dbg_log!("is null");
@@ -984,9 +985,10 @@ pub unsafe fn call_interrupt_vector_checked(
                 };
 
             return_on_pagefault!(translate_address_system_write(new_stack_pointer), false);
-            return_on_pagefault!(translate_address_system_write(
-                ss_segment_descriptor.base() + new_esp - 1
-            ), false);
+            return_on_pagefault!(
+                translate_address_system_write(ss_segment_descriptor.base() + new_esp - 1),
+                false
+            );
 
             // no exceptions below
             *cpl = cs_segment_descriptor.dpl();
@@ -1046,10 +1048,10 @@ pub unsafe fn call_interrupt_vector_checked(
             let stack_space = bytes_per_arg * (3 + error_code_space);
 
             // XXX: with current cpl or with cpl 0?
-            return_on_pagefault!(writable_or_pagefault(
-                get_stack_pointer(-stack_space),
-                stack_space
-            ), false);
+            return_on_pagefault!(
+                writable_or_pagefault(get_stack_pointer(-stack_space), stack_space),
+                false
+            );
 
         // no exceptions below
         }
@@ -1210,9 +1212,10 @@ pub unsafe fn far_jump_checked(eip: i32, selector: i32, is_call: bool, is_osize_
 
             let cs_selector = (info.raw >> 16) as i32;
 
-            let cs_info = match return_on_pagefault!(lookup_segment_selector(
-                SegmentSelector::of_u16(cs_selector as u16)
-            ), false) {
+            let cs_info = match return_on_pagefault!(
+                lookup_segment_selector(SegmentSelector::of_u16(cs_selector as u16)),
+                false
+            ) {
                 Ok((desc, _)) => desc,
                 Err(SelectorNullOrInvalid::IsNull) => {
                     dbg_log!("#gp null cs");
@@ -1260,15 +1263,16 @@ pub unsafe fn far_jump_checked(eip: i32, selector: i32, is_call: bool, is_osize_
                 let (new_ss, new_esp) = return_on_pagefault!(get_tss_ss_esp(cs_info.dpl()), false);
 
                 let ss_selector = SegmentSelector::of_u16(new_ss as u16);
-                let ss_info = match return_on_pagefault!(lookup_segment_selector(ss_selector), false) {
-                    Ok((desc, _)) => desc,
-                    Err(SelectorNullOrInvalid::IsNull) => {
-                        panic!("null ss: {}", new_ss);
-                    },
-                    Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
-                        panic!("invalid ss: {}", new_ss);
-                    },
-                };
+                let ss_info =
+                    match return_on_pagefault!(lookup_segment_selector(ss_selector), false) {
+                        Ok((desc, _)) => desc,
+                        Err(SelectorNullOrInvalid::IsNull) => {
+                            panic!("null ss: {}", new_ss);
+                        },
+                        Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
+                            panic!("invalid ss: {}", new_ss);
+                        },
+                    };
 
                 if ss_info.is_dc() {
                     dbg_assert!(new_esp as u32 > ss_info.effective_limit());
@@ -1297,18 +1301,24 @@ pub unsafe fn far_jump_checked(eip: i32, selector: i32, is_call: bool, is_osize_
                         if is_16 { 4 + 2 * parameter_count } else { 8 + 4 * parameter_count };
                 }
                 if ss_info.is_32() {
-                    return_on_pagefault!(writable_or_pagefault_cpl(
-                        cs_info.dpl(),
-                        ss_info.base() + new_esp - stack_space,
-                        stack_space
-                    ), false);
+                    return_on_pagefault!(
+                        writable_or_pagefault_cpl(
+                            cs_info.dpl(),
+                            ss_info.base() + new_esp - stack_space,
+                            stack_space
+                        ),
+                        false
+                    );
                 }
                 else {
-                    return_on_pagefault!(writable_or_pagefault_cpl(
-                        cs_info.dpl(),
-                        ss_info.base() + (new_esp - stack_space & 0xFFFF),
-                        stack_space
-                    ), false);
+                    return_on_pagefault!(
+                        writable_or_pagefault_cpl(
+                            cs_info.dpl(),
+                            ss_info.base() + (new_esp - stack_space & 0xFFFF),
+                            stack_space
+                        ),
+                        false
+                    );
                 }
 
                 let old_esp = read_reg32(ESP);
@@ -1376,13 +1386,19 @@ pub unsafe fn far_jump_checked(eip: i32, selector: i32, is_call: bool, is_osize_
 
                 if is_call {
                     if is_16 {
-                        return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-4), 4), false);
+                        return_on_pagefault!(
+                            writable_or_pagefault(get_stack_pointer(-4), 4),
+                            false
+                        );
 
                         push16(*sreg.offset(CS as isize) as i32).unwrap();
                         push16(get_real_eip()).unwrap();
                     }
                     else {
-                        return_on_pagefault!(writable_or_pagefault(get_stack_pointer(-8), 8), false);
+                        return_on_pagefault!(
+                            writable_or_pagefault(get_stack_pointer(-8), 8),
+                            false
+                        );
 
                         push32(*sreg.offset(CS as isize) as i32).unwrap();
                         push32(get_real_eip()).unwrap();
@@ -1534,7 +1550,12 @@ pub unsafe fn far_return(eip: i32, selector: i32, stack_adjust: i32, is_osize_32
 }
 
 /// Reports whether the semantic body completed; delivered faults remain CPU-owned.
-pub unsafe fn far_return_checked(eip: i32, selector: i32, stack_adjust: i32, is_osize_32: bool) -> bool {
+pub unsafe fn far_return_checked(
+    eip: i32,
+    selector: i32,
+    stack_adjust: i32,
+    is_osize_32: bool,
+) -> bool {
     let mut completed = true;
     dbg_assert!(selector < 0x10000 && selector >= 0);
 
@@ -1699,7 +1720,11 @@ pub unsafe fn do_task_switch(selector: i32, error_code: Option<i32>, source: Tas
 }
 
 /// Reports whether the semantic body completed; delivered faults remain CPU-owned.
-pub unsafe fn do_task_switch_checked(selector: i32, error_code: Option<i32>, source: TaskSwitchSource) -> bool {
+pub unsafe fn do_task_switch_checked(
+    selector: i32,
+    error_code: Option<i32>,
+    source: TaskSwitchSource,
+) -> bool {
     let mut completed = true;
     dbg_log!("do_task_switch sel={:x}", selector);
 
@@ -2741,9 +2766,7 @@ pub unsafe fn switch_seg(reg: i32, selector_raw: i32) -> bool {
     true
 }
 
-pub unsafe fn load_tr(selector: i32) {
-    let _ = load_tr_checked(selector);
-}
+pub unsafe fn load_tr(selector: i32) { let _ = load_tr_checked(selector); }
 
 // Explicit read-fault status for terminal IR callers. The legacy wrapper keeps
 // its original void ABI and all panic/partial-commit behavior is unchanged.
@@ -2751,16 +2774,15 @@ pub unsafe fn load_tr_checked(selector: i32) -> OrPageFault<()> {
     let selector = SegmentSelector::of_u16(selector as u16);
     dbg_assert!(selector.is_gdt(), "TODO: TR can only be loaded from GDT");
 
-    let (descriptor, descriptor_address) =
-        match lookup_segment_selector(selector)? {
-            Ok((desc, addr)) => (desc, addr),
-            Err(SelectorNullOrInvalid::IsNull) => {
-                panic!("TODO: null TR");
-            },
-            Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
-                panic!("TODO: TR selector outside of table limit");
-            },
-        };
+    let (descriptor, descriptor_address) = match lookup_segment_selector(selector)? {
+        Ok((desc, addr)) => (desc, addr),
+        Err(SelectorNullOrInvalid::IsNull) => {
+            panic!("TODO: null TR");
+        },
+        Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
+            panic!("TODO: TR selector outside of table limit");
+        },
+    };
 
     //dbg_log!(
     //    "load tr: {:x} offset={:x} limit={:x} is32={}",
@@ -3080,15 +3102,24 @@ pub unsafe fn cycle_internal() -> bool {
     {
         let submitted = {
             if crate::ir::runtime::diagnostics::enabled() {
-                let _scope = crate::ir::runtime::diagnostics::Scope::new(crate::ir::runtime::diagnostics::Stage::Scheduler);
+                let _scope = crate::ir::runtime::diagnostics::Scope::new(
+                    crate::ir::runtime::diagnostics::Stage::Scheduler,
+                );
                 crate::ir::runtime::schedule::visit()
-            } else { crate::ir::runtime::schedule::visit() }
+            }
+            else {
+                crate::ir::runtime::schedule::visit()
+            }
         };
         // Installation runs in a host Promise continuation, never on this CPU
         // stack. Avoid interpreting a full batch before that continuation can
         // run. This is an edge (new submission), not the level "pending != 0".
-        if submitted { return true; }
-        if crate::ir::runtime::cache::execute() { return false; }
+        if submitted {
+            return true;
+        }
+        if crate::ir::runtime::cache::execute() {
+            return false;
+        }
         crate::ir::runtime::schedule::note_interpreted();
         // The interpreter/legacy path can call devices and mutate raw RAM.
         crate::ir::runtime::entry::ir_admission_barrier();
@@ -3154,7 +3185,9 @@ pub unsafe fn cycle_internal() -> bool {
         }
         let function = wasm_table_index as i32 + WASM_TABLE_OFFSET as i32;
         #[cfg(feature = "ir-experimental")]
-        let legacy_scope = crate::ir::runtime::diagnostics::Scope::new(crate::ir::runtime::diagnostics::Stage::Legacy);
+        let legacy_scope = crate::ir::runtime::diagnostics::Scope::new(
+            crate::ir::runtime::diagnostics::Stage::Legacy,
+        );
         if profiler::performance_recording_enabled() {
             run_jit_recorded(function, initial_state, initial_eip);
         }
@@ -3164,7 +3197,10 @@ pub unsafe fn cycle_internal() -> bool {
         #[cfg(feature = "ir-experimental")]
         {
             drop(legacy_scope);
-            crate::ir::runtime::diagnostics::steps(true, (*instruction_counter).wrapping_sub(initial_instruction_counter));
+            crate::ir::runtime::diagnostics::steps(
+                true,
+                (*instruction_counter).wrapping_sub(initial_instruction_counter),
+            );
         }
         #[cfg(any(debug_assertions, feature = "ir-experimental"))]
         {
@@ -3236,16 +3272,23 @@ pub unsafe fn cycle_internal() -> bool {
 
         let initial_instruction_counter = *instruction_counter;
         let performance_sample = profiler::performance_chunk_start(
-            false, initial_eip as u32, *cr.offset(3) as u32, *cpl,
+            false,
+            initial_eip as u32,
+            *cr.offset(3) as u32,
+            *cpl,
         );
         #[cfg(feature = "ir-experimental")]
         if crate::ir::runtime::diagnostics::enabled() {
             jit_run_interpreted_diagnostic(phys_addr);
-        } else { jit_run_interpreted(phys_addr); }
+        }
+        else {
+            jit_run_interpreted(phys_addr);
+        }
         #[cfg(not(feature = "ir-experimental"))]
         jit_run_interpreted(phys_addr);
         profiler::performance_chunk_finish(
-            performance_sample, (*instruction_counter).wrapping_sub(initial_instruction_counter),
+            performance_sample,
+            (*instruction_counter).wrapping_sub(initial_instruction_counter),
         );
 
         jit::jit_increase_hotness_and_maybe_compile(
@@ -3303,7 +3346,9 @@ unsafe fn jit_run_interpreted_diagnostic(phys_addr: u32) {
     let before = *instruction_counter;
     let pc = *instruction_pointer as u32;
     let cr3 = *cr.offset(3) as u32;
-    let scope = crate::ir::runtime::diagnostics::Scope::new(crate::ir::runtime::diagnostics::Stage::Interpreter);
+    let scope = crate::ir::runtime::diagnostics::Scope::new(
+        crate::ir::runtime::diagnostics::Stage::Interpreter,
+    );
     jit_run_interpreted(phys_addr);
     let count = (*instruction_counter).wrapping_sub(before);
     crate::ir::runtime::diagnostics::steps(false, count);
@@ -3341,7 +3386,9 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
         dbg_assert!(*prefixes == 0);
 
         #[cfg(feature = "ir-experimental")]
-        if ir_dispatch && (i >= 64 || (*instruction_pointer as u32) <= start_eip as u32) { break; }
+        if ir_dispatch && (i >= 64 || (*instruction_pointer as u32) <= start_eip as u32) {
+            break;
+        }
 
         if jit_block_boundary
             || Page::page_of(start_eip as u32) != Page::page_of(*instruction_pointer as u32)
@@ -3391,7 +3438,11 @@ pub unsafe fn run_prefix_instruction() {
 
 pub unsafe fn segment_prefix_op(seg: i32) {
     dbg_assert!(seg <= 5 && seg >= 0);
-    *prefixes = crate::decode_rules::apply_prefix(*prefixes, [0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65][seg as usize]).unwrap();
+    *prefixes = crate::decode_rules::apply_prefix(
+        *prefixes,
+        [0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65][seg as usize],
+    )
+    .unwrap();
     run_prefix_instruction();
     *prefixes = 0
 }
@@ -3448,9 +3499,19 @@ pub unsafe fn main_loop() -> f64 {
 }
 
 #[derive(Clone, Copy)]
-struct LinkedTarget { epoch: u64, eip: u32, flags: u32, function: i32, state: u16 }
+struct LinkedTarget {
+    epoch: u64,
+    eip: u32,
+    flags: u32,
+    function: i32,
+    state: u16,
+}
 static mut LINKED_TARGETS: [LinkedTarget; 32] = [LinkedTarget {
-    epoch: 0, eip: 0, flags: 0, function: 0, state: 0,
+    epoch: 0,
+    eip: 0,
+    flags: 0,
+    function: 0,
+    state: 0,
 }; 32];
 static mut target_cache_hits: u32 = 0;
 #[no_mangle]
@@ -3461,18 +3522,33 @@ unsafe fn lookup_linked_target(eip: u32) -> Option<(i32, u16)> {
     let index = ((eip >> 1 ^ eip >> 12) & 31) as usize;
     if jit::JIT_TARGET_CACHE {
         let cached = LINKED_TARGETS[index];
-        if cached.epoch == jit::CODE_LOOKUP_EPOCH && cached.eip == eip && cached.flags == cached_flags {
-            if cfg!(debug_assertions) { target_cache_hits = target_cache_hits.wrapping_add(1); }
+        if cached.epoch == jit::CODE_LOOKUP_EPOCH
+            && cached.eip == eip
+            && cached.flags == cached_flags
+        {
+            if cfg!(debug_assertions) {
+                target_cache_hits = target_cache_hits.wrapping_add(1);
+            }
             return Some((cached.function, cached.state));
         }
     }
     let code = tlb_code[(eip >> 12) as usize]?.as_ref();
-    if code.state_flags != *state_flags { return None; }
+    if code.state_flags != *state_flags {
+        return None;
+    }
     let state = code.state_table[eip as usize & 0xFFF];
-    if state == u16::MAX { return None; }
+    if state == u16::MAX {
+        return None;
+    }
     let function = code.wasm_table_index.to_u16() as i32 + WASM_TABLE_OFFSET as i32;
     if jit::JIT_TARGET_CACHE {
-        LINKED_TARGETS[index] = LinkedTarget { epoch: jit::CODE_LOOKUP_EPOCH, eip, flags: cached_flags, function, state };
+        LINKED_TARGETS[index] = LinkedTarget {
+            epoch: jit::CODE_LOOKUP_EPOCH,
+            eip,
+            flags: cached_flags,
+            function,
+            state,
+        };
     }
     Some((function, state))
 }
@@ -3489,19 +3565,32 @@ static mut jit_link_batch: bool = false;
 static mut jit_link_batch_start: u32 = 0;
 #[cfg(feature = "ir-experimental")]
 pub unsafe fn ir_link_budget_available() -> bool {
-    jit_link_batch && (*instruction_counter).wrapping_sub(jit_link_batch_start) < LOOP_COUNTER as u32
+    jit_link_batch
+        && (*instruction_counter).wrapping_sub(jit_link_batch_start) < LOOP_COUNTER as u32
 }
 #[no_mangle]
 pub unsafe fn jit_link_once() {
-    if jit_link_active { jit_link_requested = true; return; }
-    if !jit_link_batch || !jit::JIT_LINK_EXITS || profiler::performance_recording_enabled() { return; }
+    if jit_link_active {
+        jit_link_requested = true;
+        return;
+    }
+    if !jit_link_batch || !jit::JIT_LINK_EXITS || profiler::performance_recording_enabled() {
+        return;
+    }
     let control = *flags & (FLAG_INTERRUPT | FLAG_TRAP | FLAG_VM);
     jit_link_active = true;
     for _ in 0..64 {
-        if *in_hlt || *flags & (FLAG_INTERRUPT | FLAG_TRAP | FLAG_VM) != control
-            || (*instruction_counter).wrapping_sub(jit_link_batch_start) >= LOOP_COUNTER as u32 { break; }
+        if *in_hlt
+            || *flags & (FLAG_INTERRUPT | FLAG_TRAP | FLAG_VM) != control
+            || (*instruction_counter).wrapping_sub(jit_link_batch_start) >= LOOP_COUNTER as u32
+        {
+            break;
+        }
         let eip = *instruction_pointer as u32;
-        let Some((function, state)) = lookup_linked_target(eip) else { break; };
+        let Some((function, state)) = lookup_linked_target(eip)
+        else {
+            break;
+        };
         #[cfg(feature = "ir-experimental")]
         crate::ir::runtime::schedule::note_legacy_link();
         // Epoch guards invalidate cached slots before any subsequent use.
@@ -3509,7 +3598,9 @@ pub unsafe fn jit_link_once() {
         jit_link_requested = false;
         jit_link_count = jit_link_count.wrapping_add(1);
         wasm::call_indirect1(function, state);
-        if !jit_link_requested || *instruction_counter == before { break; }
+        if !jit_link_requested || *instruction_counter == before {
+            break;
+        }
     }
     jit_link_active = false;
 }
@@ -4189,9 +4280,11 @@ pub unsafe fn safe_read_write16(addr: i32, instruction: &dyn Fn(i32) -> i32) {
     let _ = safe_read_write16_checked(addr, instruction);
 }
 
-pub unsafe fn safe_read_write16_checked(addr: i32, instruction: &dyn Fn(i32) -> i32) -> OrPageFault<()> {
-    let (phys_addr, can_skip_dirty_page) =
-        translate_address_write_and_can_skip_dirty(addr)?;
+pub unsafe fn safe_read_write16_checked(
+    addr: i32,
+    instruction: &dyn Fn(i32) -> i32,
+) -> OrPageFault<()> {
+    let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
     if phys_addr & 0xFFF == 0xFFF {
         let phys_addr_high = translate_address_write(addr + 1)?;
         let x = virt_boundary_read16(phys_addr, phys_addr_high);
@@ -4279,9 +4372,15 @@ pub unsafe fn write_reg32(index: i32, value: i32) {
     *reg32.offset(index as isize) = value;
 }
 
-pub unsafe fn read_mmx32s(r: i32) -> i32 { crate::cpu::fpu::fpu_sync_slot(r as u32); (*fpu_st.offset(r as isize)).mantissa as i32 }
+pub unsafe fn read_mmx32s(r: i32) -> i32 {
+    crate::cpu::fpu::fpu_sync_slot(r as u32);
+    (*fpu_st.offset(r as isize)).mantissa as i32
+}
 
-pub unsafe fn read_mmx64s(r: i32) -> u64 { crate::cpu::fpu::fpu_sync_slot(r as u32); (*fpu_st.offset(r as isize)).mantissa }
+pub unsafe fn read_mmx64s(r: i32) -> u64 {
+    crate::cpu::fpu::fpu_sync_slot(r as u32);
+    (*fpu_st.offset(r as isize)).mantissa
+}
 
 pub unsafe fn write_mmx_reg64(r: i32, data: u64) {
     crate::cpu::fpu::fpu_invalidate_slot(r as u32);

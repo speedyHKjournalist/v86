@@ -62,7 +62,8 @@ pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), Stri
                 removed.insert(id);
                 stats.commoned += 1;
                 stats.cross_commoned += usize::from(owner != b);
-            } else {
+            }
+            else {
                 choices.push((b, result));
             }
         }

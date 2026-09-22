@@ -33,7 +33,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         );
         b.effect = values[1];
         values[0]
-    } else {
+    }
+    else {
         b.node(
             Op::VectorShuffle(operation.lanes(immediate)),
             vec![destination, b.xmm[(i.modrm.unwrap() & 7) as usize]],

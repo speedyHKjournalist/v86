@@ -31,10 +31,12 @@ fn invalid_form_fixtures() {
                             | if memory {
                                 if mode {
                                     5
-                                } else {
+                                }
+                                else {
                                     6
                                 }
-                            } else {
+                            }
+                            else {
                                 0xC0
                             },
                     );
@@ -53,7 +55,8 @@ fn invalid_form_fixtures() {
                     ImmediateKind::Address => {
                         if mode {
                             4
-                        } else {
+                        }
+                        else {
                             2
                         }
                     },

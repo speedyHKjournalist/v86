@@ -47,9 +47,7 @@ fn state(
         rep_progress: None,
     })
 }
-fn edge(target: BlockId, args: Vec<ValueId>) -> Edge {
-    Edge { target, args }
-}
+fn edge(target: BlockId, args: Vec<ValueId>) -> Edge { Edge { target, args } }
 pub(super) fn loop_region() -> Region {
     let mut r = Region::default();
     let a = r.block(true);
@@ -410,8 +408,8 @@ fn dce_keeps_snapshot_only_values_and_ordered_helpers() {
     let stats = run(
         &mut r,
         PassConfig {
-        debug: Default::default(),
-        disabled: 0,
+            debug: Default::default(),
+            disabled: 0,
             prune: false,
             merge: false,
             phis: false,
@@ -426,7 +424,8 @@ fn dce_keeps_snapshot_only_values_and_ordered_helpers() {
     )
     .unwrap();
     assert_eq!(stats.removed, 0);
-    let Definition::Instruction(id, _) = r.values[snapshot_only.index()].definition else {
+    let Definition::Instruction(id, _) = r.values[snapshot_only.index()].definition
+    else {
         panic!()
     };
     assert!(r.blocks[0].instructions.contains(&id));

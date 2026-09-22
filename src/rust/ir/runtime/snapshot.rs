@@ -49,7 +49,8 @@ pub unsafe fn translate(linear: u32) -> Result<u32, CaptureError> {
             return Err(CaptureError::Unreadable);
         }
         (pdpte as u32 & !4095).wrapping_add((linear >> 21 & 511) * 8)
-    } else {
+    }
+    else {
         // Match the baseline's CR3 low-bit policy, including its unmasked addition.
         (*gp::cr.add(3) as u32).wrapping_add((linear >> 22) * 4)
     };
@@ -60,7 +61,8 @@ pub unsafe fn translate(linear: u32) -> Result<u32, CaptureError> {
     if pde & 128 != 0 && cr4 & cpu::CR4_PSE != 0 {
         return Ok(if pae {
             pde & 0xFFE00000 | linear & 0x1FFFFF
-        } else {
+        }
+        else {
             pde & 0xFFC00000 | linear & 0x3FFFFF
         });
     }
@@ -96,10 +98,7 @@ pub enum CachedMatch {
 /// but avoids allocating a new snapshot or walking page tables on a hot admission.
 /// A missing cached translation is not stale: callers may fall back to capture()
 /// before the architectural fetch, or simply decline admission afterward.
-pub unsafe fn cached_match(
-    linear: u32,
-    snapshot: &ImmutableCodeSnapshot,
-) -> CachedMatch {
+pub unsafe fn cached_match(linear: u32, snapshot: &ImmutableCodeSnapshot) -> CachedMatch {
     if !mappings_cached(snapshot) {
         return CachedMatch::Unavailable;
     }
@@ -107,11 +106,14 @@ pub unsafe fn cached_match(
     // that page directly without the generic chunk loop or per-owner metadata.
     if let [mapping] = snapshot.mappings.as_slice() {
         let page_offset = linear & 4095;
-        if snapshot.bytes.is_empty() || snapshot.bytes.len() > (4096 - page_offset) as usize
-            || mapping.linear.0 != linear & !4095 {
+        if snapshot.bytes.is_empty()
+            || snapshot.bytes.len() > (4096 - page_offset) as usize
+            || mapping.linear.0 != linear & !4095
+        {
             return CachedMatch::Stale;
         }
-        let Some(physical) = mapping.physical.0.checked_add(page_offset) else {
+        let Some(physical) = mapping.physical.0.checked_add(page_offset)
+        else {
             return CachedMatch::Stale;
         };
         return match ram(physical, snapshot.bytes.len()) {
@@ -130,10 +132,12 @@ pub unsafe fn cached_match(
         }
         let page_offset = (address & 4095) as usize;
         let chunk = (4096 - page_offset).min(snapshot.bytes.len() - offset);
-        let Some(physical) = mapping.physical.0.checked_add(page_offset as u32) else {
+        let Some(physical) = mapping.physical.0.checked_add(page_offset as u32)
+        else {
             return CachedMatch::Stale;
         };
-        let Ok(current) = ram(physical, chunk) else {
+        let Ok(current) = ram(physical, chunk)
+        else {
             return CachedMatch::Stale;
         };
         if current != &snapshot.bytes[offset..offset + chunk] {
@@ -143,7 +147,8 @@ pub unsafe fn cached_match(
     }
     if offset == snapshot.bytes.len() {
         CachedMatch::Match
-    } else {
+    }
+    else {
         CachedMatch::Stale
     }
 }

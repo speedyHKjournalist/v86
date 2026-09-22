@@ -24,7 +24,7 @@ try {
     await vm.stop();
     cpu.jit_clear_cache();
     const PC = 0x100000;
-    function reset(counter, a, b, flags, lazy, initialCount) {
+    function reset(counter, a, b, flags, lazy, initial_count) {
         cpu.segment_offsets.fill(0, 0, 6);
         cpu.segment_is_null.fill(0, 0, 6);
         cpu.segment_limits.fill(0xFFFFFFFF, 0, 6);
@@ -43,7 +43,7 @@ try {
         words[112 >> 2] = flags & 64 ? 0 : 0x80000000;
         cpu.instruction_pointer[0] = PC;
         words[560 >> 2] = 0x76543210;
-        words[664 >> 2] = initialCount;
+        words[664 >> 2] = initial_count;
         mem.set(bytes, PC);
         e.update_state_flags();
         e.full_clear_tlb();
@@ -59,18 +59,18 @@ try {
         for(const b of [1, 0x80000000])
         for(const flags of [2, 0x8D7])
         for(const lazy of [false, true])
-        for(const initialCount of [99, 0xFFFFFFFC]) {
+        for(const initial_count_local of [99, 0xFFFFFFFC]) {
             let baseline;
             for(const [index, instance] of instances.entries()) {
-                reset(counter, a, b, flags, lazy, initialCount);
+                reset(counter, a, b, flags, lazy, initial_count_local);
                 instance.exports.f(0);
                 const actual = state();
-                const retired = (words[664 >> 2] - initialCount) >>> 0;
+                const retired = (words[664 >> 2] - initial_count_local) >>> 0;
                 const observed = {...actual, retired, previous: words[560 >> 2]};
                 assert(retired <= budget, "bounded guest retirement");
                 if(index === 0) baseline = observed;
                 else assert.deepEqual(observed, baseline, "Tier 2 LICM preserves exact budget recovery");
-                reset(counter, a, b, flags, lazy, initialCount);
+                reset(counter, a, b, flags, lazy, initial_count_local);
                 for(let step = 0; step < retired; step++) e.ir_test_step();
                 assert.deepEqual(actual, state(), `interpreter equivalence: budget ${budget}, tier ${index + 1}`);
                 if(actual.ip === PC + bytes.length) {

@@ -5,10 +5,10 @@ export function transfer(c,before,data) {
     let output;
     if(store){
         const lane=[0x0F17,0x660F17].includes(op)?2:0;
-        if(!register)return {xmm,regs,memory:dst.slice(lane,lane+c[4]/4)};
+        if(!register) return {xmm,regs,memory:dst.slice(lane,lane+c[4]/4)};
         if(op===0x660F7E)regs[operand]=dst[0];
         else xmm.splice(operand*4,4,dst[0],dst[1],0,0);
-    }else{
+    } else {
         switch(op){
             case 0x0F12: output=register?[src[2],src[3],dst[2],dst[3]]:[src[0],src[1],dst[2],dst[3]];break;
             case 0x660F12: output=[src[0],src[1],dst[2],dst[3]];break;

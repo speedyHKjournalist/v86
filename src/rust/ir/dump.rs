@@ -57,13 +57,17 @@ pub fn mir(region: &super::mir::MirRegion) -> String {
             }
             if let Some(plan) = &region.control.polls[id.index()] {
                 writeln!(&mut out, "  i{}: {plan:#?}", id.0).unwrap();
-            } else if let Some(plan) = &region.memory[id.index()] {
+            }
+            else if let Some(plan) = &region.memory[id.index()] {
                 writeln!(&mut out, "  i{}: {plan:#?}", id.0).unwrap();
-            } else if let Some(plan) = &region.effects[id.index()] {
+            }
+            else if let Some(plan) = &region.effects[id.index()] {
                 writeln!(&mut out, "  i{}: {plan:#?}", id.0).unwrap();
-            } else if let Some(plan) = &region.calls[id.index()] {
+            }
+            else if let Some(plan) = &region.calls[id.index()] {
                 writeln!(&mut out, "  i{}: {plan:#?}", id.0).unwrap();
-            } else if let Some(plan) = &region.values[id.index()] {
+            }
+            else if let Some(plan) = &region.values[id.index()] {
                 writeln!(&mut out, "  i{}: {plan:#?}", id.0).unwrap();
             }
         }

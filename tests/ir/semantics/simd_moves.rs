@@ -36,9 +36,11 @@ fn simd_move_fixtures() {
                 let store = matches!(op & 255, 0x11 | 0x29 | 0x7F);
                 let width = if matches!(op, 0xF30F10 | 0xF30F11) {
                     4
-                } else if matches!(op, 0xF20F10 | 0xF20F11) {
+                }
+                else if matches!(op, 0xF20F10 | 0xF20F11) {
                     8
-                } else {
+                }
+                else {
                     16
                 };
                 for register in 0..8 {
@@ -60,9 +62,11 @@ fn simd_move_fixtures() {
                             (register << 3)
                                 | if operand < 8 {
                                     0xC0 | operand as u8
-                                } else if asize == 32 {
+                                }
+                                else if asize == 32 {
                                     0x86
-                                } else {
+                                }
+                                else {
                                     0x85
                                 },
                         ]);

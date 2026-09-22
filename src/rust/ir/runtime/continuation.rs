@@ -72,14 +72,22 @@ impl ScalarObserver {
     }
     pub(super) unsafe fn finish(self) -> u32 {
         #[cfg(feature = "ir-experimental")]
-        let current = self.0.is_some_and(|snapshot| no_pending_irq()
-            && snapshot.context.epoch != u64::MAX
-            && snapshot.context == ContinuationContext::capture()
-            && snapshot.xmm == std::array::from_fn(|i| *(gp::reg_xmm as *const u32).add(i))
-            && super::cache::observer_continuation());
+        let current = self.0.is_some_and(|snapshot| {
+            no_pending_irq()
+                && snapshot.context.epoch != u64::MAX
+                && snapshot.context == ContinuationContext::capture()
+                && snapshot.xmm == std::array::from_fn(|i| *(gp::reg_xmm as *const u32).add(i))
+                && super::cache::observer_continuation()
+        });
         #[cfg(not(feature = "ir-experimental"))]
-        let current = { let _ = self; false };
-        if current { Outcome::Normal as u32 } else {
+        let current = {
+            let _ = self;
+            false
+        };
+        if current {
+            Outcome::Normal as u32
+        }
+        else {
             // Completion has happened. A failed certificate returns CPU-owned
             // post-state and retires exactly once, never replays the observer.
             *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);
@@ -91,6 +99,7 @@ impl ScalarObserver {
 /// FLAGS here: STI's emitter may still carry IF in SSA. A masked request remains
 /// in IRR; an observer which unmasks it is checked again after completion.
 pub(super) unsafe fn no_pending_irq() -> bool {
-    !*gp::in_hlt && !crate::cpu::pic::has_pending_irq()
+    !*gp::in_hlt
+        && !crate::cpu::pic::has_pending_irq()
         && (!*gp::acpi_enabled || !crate::cpu::apic::has_pending_irq())
 }

@@ -50,10 +50,14 @@ impl PassConfig {
     pub fn enabled(&self, bit: u32) -> bool { self.disabled & (1 << bit) == 0 }
     pub fn disable(mut self, mask: u32) -> Self {
         self.disabled |= mask;
-        self.prune &= self.enabled(0); self.merge &= self.enabled(1);
-        self.phis &= self.enabled(2); self.copy &= self.enabled(3);
-        self.fold &= self.enabled(4); self.flags &= self.enabled(5);
-        self.helper_state &= self.enabled(6); self.gvn &= self.enabled(7);
+        self.prune &= self.enabled(0);
+        self.merge &= self.enabled(1);
+        self.phis &= self.enabled(2);
+        self.copy &= self.enabled(3);
+        self.fold &= self.enabled(4);
+        self.flags &= self.enabled(5);
+        self.helper_state &= self.enabled(6);
+        self.gvn &= self.enabled(7);
         self.dce &= self.enabled(8);
         self
     }
@@ -186,7 +190,9 @@ fn evaluate_integer(region: &Region, inst: &Instruction, args: &[u64]) -> Option
             Binary::And => args[0] & args[1],
             Binary::Or => args[0] | args[1],
             Binary::Xor => args[0] ^ args[1],
-            Binary::Shl => args[0].wrapping_shl((args[1] & if bits == 64 { 63 } else { 31 }) as u32),
+            Binary::Shl => {
+                args[0].wrapping_shl((args[1] & if bits == 64 { 63 } else { 31 }) as u32)
+            },
             Binary::Shr => args[0] >> (args[1] & if bits == 64 { 63 } else { 31 }),
             Binary::Sar => (signed(args[0]) >> (args[1] & if bits == 64 { 63 } else { 31 })) as u64,
             Binary::Eq => (args[0] == args[1]) as u64,
@@ -196,14 +202,16 @@ fn evaluate_integer(region: &Region, inst: &Instruction, args: &[u64]) -> Option
         Op::CountLeadingZeros => {
             if bits == 64 {
                 args[0].leading_zeros() as u64
-            } else {
+            }
+            else {
                 (args[0] as u32).leading_zeros() as u64
             }
         },
         Op::CountTrailingZeros => {
             if bits == 64 {
                 args[0].trailing_zeros() as u64
-            } else {
+            }
+            else {
                 (args[0] as u32).trailing_zeros() as u64
             }
         },
@@ -211,7 +219,8 @@ fn evaluate_integer(region: &Region, inst: &Instruction, args: &[u64]) -> Option
         Op::Select => {
             if args[0] != 0 {
                 args[1]
-            } else {
+            }
+            else {
                 args[2]
             }
         },
@@ -220,11 +229,7 @@ fn evaluate_integer(region: &Region, inst: &Instruction, args: &[u64]) -> Option
         Op::Extract { lsb } => args[0] >> lsb,
         Op::Insert { lsb } => {
             let width = region.values[inst.args[1].index()].ty.bits().unwrap();
-            let part = if width == 64 {
-                u64::MAX
-            } else {
-                ((1u64 << width) - 1) << lsb
-            };
+            let part = if width == 64 { u64::MAX } else { ((1u64 << width) - 1) << lsb };
             (args[0] & !part) | args[1] << lsb
         },
         _ => return None,
@@ -239,10 +244,12 @@ fn fold(region: &mut Region, stats: &mut PassStats) {
                 continue;
             }
             let args: Option<Vec<_>> = inst.args.iter().map(|&v| constant(region, v)).collect();
-            let Some(args) = args else {
+            let Some(args) = args
+            else {
                 continue;
             };
-            let Some(value) = evaluate_integer(region, inst, &args) else {
+            let Some(value) = evaluate_integer(region, inst, &args)
+            else {
                 continue;
             };
             let inst = &mut region.instructions[id.index()];
@@ -390,7 +397,8 @@ fn trivial_phis(region: &mut Region, stats: &mut PassStats) {
             if differs {
                 continue;
             }
-            let Some(value) = candidate else {
+            let Some(value) = candidate
+            else {
                 continue;
             };
             // Effect phis remain explicit chain roots until effect-aware CFG simplification.

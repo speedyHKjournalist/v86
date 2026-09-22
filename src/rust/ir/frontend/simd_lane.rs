@@ -33,7 +33,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             );
             b.effect = values[1];
             values[0]
-        } else {
+        }
+        else {
             let source = b.read(rm, 32);
             b.node(
                 Op::VectorReplace { bits: 16, lane },
@@ -42,11 +43,13 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             )
         };
         b.xmm[register as usize] = value;
-    } else {
+    }
+    else {
         let source = b.xmm[rm as usize];
         let op = if i.encoding.opcode == 0x660FC5 {
             Op::VectorExtract { bits: 16, lane }
-        } else {
+        }
+        else {
             Op::VectorBitmask {
                 bits: match i.encoding.opcode {
                     0x0F50 => 32,

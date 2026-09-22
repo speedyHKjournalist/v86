@@ -11,20 +11,20 @@ try {
     const cpu=vm.v86.cpu,e=cpu.wm.exports,mem=cpu.mem8,words=new Uint32Array(e.memory.buffer),raw=new Uint8Array(e.memory.buffer);
     const view=new DataView(mem.buffer,mem.byteOffset),set32=(a,n)=>view.setUint32(a,n,true);
     vm.run();const deadline=performance.now()+10000;
-    while(view.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);}await vm.stop();await sleep(20);cpu.jit_clear_cache();
+    while(view.getUint16(0x500,true)!==0xCAFE){assert(performance.now()<deadline);await sleep(1);} await vm.stop();await sleep(20);cpu.jit_clear_cache();
     const DATA=0x110000,STACK=0x90000,HANDLER=0x180000;
-    let calls=[],legacyContext=false;
+    let calls=[],legacy_context=false;
     const instances=modules.map(module=>{
         const imports={...e,m:e.memory};
-        for(const {name,kind} of WebAssembly.Module.imports(module))if(kind==="function"){
+        for(const {name,kind} of WebAssembly.Module.imports(module)) if(kind==="function"){
             assert.equal(typeof e[name],"function",name);
-            imports[name]=(...args)=>{calls.push(name);return name==="ir_enter_checked"&&legacyContext?e.ir_test_enter_checked_in_jit(...args):e[name](...args);};
+            imports[name]=(...args)=>{calls.push(name);return name==="ir_enter_checked"&&legacy_context?e.ir_test_enter_checked_in_jit(...args):e[name](...args);};
         }
         return new WebAssembly.Instance(module,{e:imports});
     });
     function reset(c,absent=false){
         const [kind,mode,pc,linear]=c;
-        legacyContext=false;
+        legacy_context=false;
         cpu.segment_offsets.fill(0,0,6);cpu.segment_offsets[1]=(linear-pc)>>>0;
         cpu.segment_is_null.fill(0,0,6);cpu.segment_limits.fill(0xFFFFFFFF,0,6);cpu.sreg.set([16,8,16,16,16,16]);
         cpu.segment_access_bytes.set([0x93,0x9B,0x93,0x93,0x93,0x93]);
@@ -63,7 +63,7 @@ try {
             if(mismatch==="alias"){const linear=c[3]===0x100000?0x800000:0x100000;cpu.instruction_pointer[0]=linear;cpu.segment_offsets[1]=(linear-c[2])>>>0;}
             if(mismatch==="prefix")raw[648]=1;
             if(mismatch==="halt")cpu.in_hlt[0]=1;
-            if(mismatch==="legacy")legacyContext=true;
+            if(mismatch==="legacy")legacy_context=true;
             if(mismatch==="index")entry=1;
             if(mismatch==="negative-index")entry=-1;
             if(mismatch==="high-index")entry=65536;
@@ -72,9 +72,9 @@ try {
             rejected++;
         }
         reset(c);assert.equal(e.ir_entry_matches(c[3],(c[3]-c[2])>>>0,+c[1]+256),0,"mode field is full width");
-        const beforeRejected=untouched();
+        const before_rejected=untouched();
         assert.equal(e.ir_enter_checked(c[3],(c[3]-c[2])>>>0,+c[1]+256),0);
-        assert.deepEqual(untouched(),beforeRejected,"full-width mode rejection leaves REP metadata and CPU untouched");
+        assert.deepEqual(untouched(),before_rejected,"full-width mode rejection leaves REP metadata and CPU untouched");
         f(0);assert.equal(calls[0],"ir_enter_checked");assert(!calls.includes("ir_enter"),"no duplicate initialization import");
         assert.equal(e.ir_rep_result(),0n);const actual=state(),count=(words[664>>2]-0xFFFFFFFC)>>>0;
         assert(count>0&&count<=32,`valid entry ${i} makes bounded progress`);
@@ -86,22 +86,22 @@ try {
         }
     }
     console.log(`PASS: ${wasm}: ${rejected} CPU entry rejections without guest/REP/helper effects, ${executed} actual CPU comparisons, ${faults} precise page faults; physical aliases, CS wrap, width, active prefixes, legacy frames, HLT and entry-index boundaries`);
-    let activeCounts;
+    let active_counts;
     cpu.io.register_write(0x501,null,()=>{
         assert.equal(raw[648],0);assert.equal(cpu.in_hlt[0],0);
         const admitted=e.ir_entry_matches(cpu.instruction_pointer[0],cpu.segment_offsets[1],cpu.is_32[0]);
-        activeCounts[admitted]++;
+        active_counts[admitted]++;
     });
     for(const recording of [0,1]){
         reset([0,true,0x100000,0x100000,false,false,[0x90]]);cpu.jit_clear_cache();
         // OUT/LOOP run long enough to become hot and resume through the actual
         // asynchronous JIT table. The callback supplies otherwise matching keys.
         vm.write_memory(Uint8Array.from([0xBA,1,5,0,0,0xB9,0x40,0x0D,3,0,0xEE,0xE2,0xFD,0xF4]),0x100000);
-        e.performance_recording_enable(recording);activeCounts=[0,0];vm.run();const until=performance.now()+10000;
-        while(!cpu.in_hlt[0]){assert(performance.now()<until,"real JIT callback loop timed out");await sleep(5);}await vm.stop();
-        assert.equal(activeCounts[0]+activeCounts[1],200000);assert(activeCounts[0]>0,"real legacy JIT frames must reject CPU entry admission");
-        assert(activeCounts[1]>0,"cold interpretation uses the same key without a legacy frame");
+        e.performance_recording_enable(recording);active_counts=[0,0];vm.run();const until=performance.now()+10000;
+        while(!cpu.in_hlt[0]){assert(performance.now()<until,"real JIT callback loop timed out");await sleep(5);} await vm.stop();
+        assert.equal(active_counts[0]+active_counts[1],200000);assert(active_counts[0]>0,"real legacy JIT frames must reject CPU entry admission");
+        assert(active_counts[1]>0,"cold interpretation uses the same key without a legacy frame");
         cpu.in_hlt[0]=0;assert.equal(e.ir_entry_matches(cpu.instruction_pointer[0],cpu.segment_offsets[1],cpu.is_32[0]),1,"legacy frame marker is cleared on return");
     }
     console.log(`PASS: ${wasm}: actual legacy JIT I/O callbacks reject otherwise matching CPU entries, with recording disabled/enabled and marker cleanup on return`);
-}finally{await vm.destroy();}
+} finally {await vm.destroy();}

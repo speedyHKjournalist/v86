@@ -47,7 +47,8 @@ fn misc_fixtures() {
                     for segment in [3, 4] {
                         for offset in if address == 32 {
                             vec![0u32, 0x40, 0xFFFF, 0xFFFFFFFF]
-                        } else {
+                        }
+                        else {
                             vec![0u32, 0x40, 0xFFFF]
                         } {
                             let mut bytes = Vec::new();

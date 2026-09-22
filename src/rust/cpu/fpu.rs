@@ -51,17 +51,26 @@ pub unsafe fn fpu_invalidate_slot(index: u32) {
 }
 #[no_mangle]
 pub unsafe fn fpu_sync_all() {
-    while X87_DIRTY != 0 { fpu_sync_slot(X87_DIRTY.trailing_zeros()); }
+    while X87_DIRTY != 0 {
+        fpu_sync_slot(X87_DIRTY.trailing_zeros());
+    }
 }
 #[no_mangle]
-pub unsafe fn fpu_discard_cache() { X87_VALID = 0; X87_DIRTY = 0; }
+pub unsafe fn fpu_discard_cache() {
+    X87_VALID = 0;
+    X87_DIRTY = 0;
+}
 #[no_mangle]
-pub unsafe fn fpu_cache_barrier() { fpu_sync_all(); fpu_discard_cache(); }
-
+pub unsafe fn fpu_cache_barrier() {
+    fpu_sync_all();
+    fpu_discard_cache();
+}
 
 #[no_mangle]
 pub unsafe fn set_x87_jit_cache(enabled: bool) {
-    if !enabled { fpu_cache_barrier(); }
+    if !enabled {
+        fpu_cache_barrier();
+    }
     X87_JIT_CACHE = enabled;
 }
 #[no_mangle]
@@ -70,18 +79,30 @@ pub unsafe fn get_x87_jit_cache() -> bool { X87_JIT_CACHE }
 // A host-side f64 helper shares exactly the same physical cache as emitted
 // Wasm. Legacy observers materialize only the slots they actually read.
 unsafe fn cached_value(r: u32) -> Option<f64> {
-    if !X87_JIT_CACHE || crate::softfloat::performance_recording_x87_state(2) == 0 { return None; }
+    if !X87_JIT_CACHE || crate::softfloat::performance_recording_x87_state(2) == 0 {
+        return None;
+    }
     let slot = (*fpu_stack_ptr as u32 + r) & 7;
-    if *fpu_stack_empty as u32 & (1 << slot) != 0 { return None; }
+    if *fpu_stack_empty as u32 & (1 << slot) != 0 {
+        return None;
+    }
     if X87_VALID & (1 << slot) == 0 {
         let f = *fpu_st.add(slot as usize);
         let exponent = f.sign_exponent & 0x7FFF;
-        if !((exponent == 0 && f.mantissa == 0) ||
-            ((0x3C01..=0x43FE).contains(&exponent) && f.mantissa >> 63 == 1 && f.mantissa & 0x7FF == 0)) { return None; }
+        if !((exponent == 0 && f.mantissa == 0)
+            || ((0x3C01..=0x43FE).contains(&exponent)
+                && f.mantissa >> 63 == 1
+                && f.mantissa & 0x7FF == 0))
+        {
+            return None;
+        }
         X87_VALUES[slot as usize] = f.to_f64();
         X87_VALID |= 1 << slot;
         crate::x87_profiler::cache_add(3, 1);
-    } else { crate::x87_profiler::cache_add(8, 1); }
+    }
+    else {
+        crate::x87_profiler::cache_add(8, 1);
+    }
     Some(f64::from_bits(X87_VALUES[slot as usize]))
 }
 unsafe fn write_cached(r: u32, value: f64) {
@@ -93,8 +114,12 @@ unsafe fn write_cached(r: u32, value: f64) {
 }
 unsafe fn push_cached(value: f64) -> bool {
     let next = (*fpu_stack_ptr + 7) & 7;
-    if !X87_JIT_CACHE || crate::softfloat::performance_recording_x87_state(2) == 0
-        || *fpu_stack_empty & (1 << next) == 0 { return false; }
+    if !X87_JIT_CACHE
+        || crate::softfloat::performance_recording_x87_state(2) == 0
+        || *fpu_stack_empty & (1 << next) == 0
+    {
+        return false;
+    }
     *fpu_stack_ptr = next;
     *fpu_stack_empty &= !(1 << next);
     *fpu_status_word &= !FPU_C1;
@@ -106,7 +131,9 @@ pub unsafe fn fpu_push_m64_bits(bits: u64) {
     let value = f64::from_bits(bits);
     if !value.is_nan() {
         F80::clear_exception_flags();
-        if push_cached(value) { return; }
+        if push_cached(value) {
+            return;
+        }
     }
     let value = f64_to_f80(bits);
     fpu_push(value);
@@ -116,7 +143,9 @@ pub unsafe fn fpu_push_m32_bits(bits: i32) {
     let value = f32::from_bits(bits as u32);
     if !value.is_nan() {
         F80::clear_exception_flags();
-        if push_cached(value as f64) { return; }
+        if push_cached(value as f64) {
+            return;
+        }
     }
     let value = f32_to_f80(bits);
     fpu_push(value);
@@ -124,7 +153,9 @@ pub unsafe fn fpu_push_m32_bits(bits: i32) {
 #[no_mangle]
 pub unsafe fn fpu_store_m64_bits() -> u64 {
     F80::clear_exception_flags();
-    if let Some(value) = cached_value(0) { return value.to_bits(); }
+    if let Some(value) = cached_value(0) {
+        return value.to_bits();
+    }
     f80_to_f64(fpu_get_st0())
 }
 
@@ -133,34 +164,52 @@ pub unsafe fn fpu_jit_cache_begin(full: u32, empty: u32) -> u32 {
     let top = *fpu_stack_ptr as u32;
     let tags = *fpu_stack_empty as u32;
     let relative_empty = ((tags >> top) | (tags << (8 - top))) & 255;
-    let mut valid = X87_JIT_CACHE && crate::softfloat::performance_recording_x87_state(2) != 0
-        && relative_empty & full == 0 && relative_empty & empty == empty;
+    let mut valid = X87_JIT_CACHE
+        && crate::softfloat::performance_recording_x87_state(2) != 0
+        && relative_empty & full == 0
+        && relative_empty & empty == empty;
     if valid {
         for r in 0..8 {
-            if full & (1 << r) == 0 { continue; }
-            if X87_VALID & (1 << ((top + r) & 7)) != 0 { continue; }
+            if full & (1 << r) == 0 {
+                continue;
+            }
+            if X87_VALID & (1 << ((top + r) & 7)) != 0 {
+                continue;
+            }
             let value = *fpu_st.add(((top + r) & 7) as usize);
             let exponent = value.sign_exponent & 0x7FFF;
             // Exact normal binary64 inputs and signed zero require no rounding
             // or flag updates. Wide, special and subnormal inputs use helpers.
-            if !((exponent == 0 && value.mantissa == 0) ||
-                ((0x3C01..=0x43FE).contains(&exponent) && value.mantissa >> 63 == 1
-                    && value.mantissa & 0x7FF == 0)) { valid = false; break; }
+            if !((exponent == 0 && value.mantissa == 0)
+                || ((0x3C01..=0x43FE).contains(&exponent)
+                    && value.mantissa >> 63 == 1
+                    && value.mantissa & 0x7FF == 0))
+            {
+                valid = false;
+                break;
+            }
         }
     }
-    if !valid { crate::x87_profiler::cache_add(1, 1); return 0; }
+    if !valid {
+        crate::x87_profiler::cache_add(1, 1);
+        return 0;
+    }
     for r in 0..8 {
         X87_JIT_VALUES[r] = if full & (1 << r) != 0 {
             let slot = (top as usize + r) & 7;
             if X87_VALID & (1 << slot) != 0 {
                 crate::x87_profiler::cache_add(8, 1);
-            } else {
+            }
+            else {
                 X87_VALUES[slot] = (*fpu_st.add(slot)).to_f64();
                 X87_VALID |= 1 << slot;
                 crate::x87_profiler::cache_add(3, 1);
             }
             X87_VALUES[slot]
-        } else { 0 };
+        }
+        else {
+            0
+        };
     }
     crate::x87_profiler::cache_add(0, 1);
     std::ptr::addr_of_mut!(X87_JIT_VALUES) as u32
@@ -173,7 +222,9 @@ pub unsafe fn fpu_jit_cache_commit(dirty: u32, metadata: u32, counts: u32) {
     let top = *fpu_stack_ptr as u32;
     // FADD/FDIV helpers clear sticky SoftFloat flags. Guarded inputs and all
     // f64 intermediates convert exactly, so these regions add no such flags.
-    if comparisons == 0 && counts & 0xFF0000FF != 0 { F80::clear_exception_flags(); }
+    if comparisons == 0 && counts & 0xFF0000FF != 0 {
+        F80::clear_exception_flags();
+    }
     for r in 0..8 {
         if dirty & (1 << r) != 0 {
             let slot = ((top + r) & 7) as usize;
@@ -187,11 +238,16 @@ pub unsafe fn fpu_jit_cache_commit(dirty: u32, metadata: u32, counts: u32) {
     let rotate = |mask: u32| ((mask << top) | (mask >> (8 - top))) as u8;
     *fpu_stack_empty = (*fpu_stack_empty | rotate(empty)) & !rotate(full);
     *fpu_stack_ptr = ((top + (metadata & 7)) & 7) as u8;
-    if metadata & 8 != 0 { *fpu_status_word &= !FPU_C1; }
+    if metadata & 8 != 0 {
+        *fpu_status_word &= !FPU_C1;
+    }
     crate::softfloat::record_x87_jit_arithmetic(counts);
     crate::x87_profiler::cache_add(6, comparisons as u64);
     crate::x87_profiler::cache_add(7, (comparisons != 0) as u64);
-    crate::x87_profiler::cache_add(2, (0..4).map(|op| ((counts >> (op * 8)) & 255) as u64).sum());
+    crate::x87_profiler::cache_add(
+        2,
+        (0..4).map(|op| ((counts >> (op * 8)) & 255) as u64).sum(),
+    );
     crate::x87_profiler::cache_add(9, dirty.count_ones() as u64);
     crate::x87_profiler::cache_add(5, ((metadata >> 20) & 255) as u64);
 }

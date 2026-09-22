@@ -44,10 +44,12 @@ fn simd_lane_fixtures() {
                         let immediates: Vec<u8> = if matches!(op, 0x660FC4 | 0x660FC5) {
                             if register == 0 && [0, 1, 8].contains(&operand) {
                                 (0..=255).collect()
-                            } else {
+                            }
+                            else {
                                 vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 255]
                             }
-                        } else {
+                        }
+                        else {
                             vec![0]
                         };
                         for immediate in immediates {
@@ -68,16 +70,19 @@ fn simd_lane_fixtures() {
                                 (register << 3)
                                     | if operand < 8 {
                                         0xC0 | operand as u8
-                                    } else if asize == 32 {
+                                    }
+                                    else if asize == 32 {
                                         0x86
-                                    } else {
+                                    }
+                                    else {
                                         0x85
                                     },
                             ]);
                             if operand >= 8 {
                                 bytes.extend(if asize == 32 {
                                     vec![0, 0, 0, 0]
-                                } else {
+                                }
+                                else {
                                     vec![0, 0]
                                 });
                             }
@@ -119,7 +124,8 @@ fn simd_lane_contracts() {
         let result = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true);
         if bytes[0] == 0xF0 {
             assert!(result.is_err());
-        } else {
+        }
+        else {
             assert!(result
                 .unwrap()
                 .helpers

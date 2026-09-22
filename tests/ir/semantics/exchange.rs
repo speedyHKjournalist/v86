@@ -36,18 +36,22 @@ fn exchange_fixtures() {
                             bytes.push(
                                 (if kind == 0 {
                                     0x86
-                                } else if kind == 1 {
+                                }
+                                else if kind == 1 {
                                     0xC0
-                                } else {
+                                }
+                                else {
                                     0xB0
                                 }) + (width != 8) as u8,
                             );
                             bytes.push(
                                 (if target < 8 {
                                     0xC0 | target
-                                } else if target == 9 {
+                                }
+                                else if target == 9 {
                                     4
-                                } else {
+                                }
+                                else {
                                     6
                                 }) | source << 3,
                             );
@@ -160,7 +164,8 @@ fn locked_pairs_and_illegal_forms_are_verified() {
             .iter_mut()
             .find(|i| matches!(i.op, Op::RmwStore { .. }))
             .unwrap();
-        let Op::RmwStore { order, .. } = &mut store.op else {
+        let Op::RmwStore { order, .. } = &mut store.op
+        else {
             unreachable!()
         };
         *order = RmwOrder::Plain;

@@ -134,7 +134,8 @@ pub fn lower(inst: &Instruction) -> Option<MemoryPlan> {
                         ticket,
                         read_value: RuntimeCall::i32("ir_rmw_value", vec![], WasmType::I32),
                     }
-                } else {
+                }
+                else {
                     SlowResult::Packed {
                         result,
                         trap_after_fault: inst.trap_after_fault,
@@ -152,7 +153,8 @@ pub fn lower(inst: &Instruction) -> Option<MemoryPlan> {
             RuntimeCall::i32(
                 if inst.unmasked_word_store {
                     "ir_memory_write_unmasked_word"
-                } else {
+                }
+                else {
                     "ir_memory_write"
                 },
                 vec![Value(inst.args[0]), Value(inst.args[1]), I32(bytes as i32)],

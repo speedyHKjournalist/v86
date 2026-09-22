@@ -78,7 +78,8 @@ pub unsafe fn ir_sti_check() -> u32 {
         || if cpu::vm86_mode() { cpu::getiopl() == 3 } else { cpu::getiopl() >= *gp::cpl as i32 }
     {
         Outcome::Normal as u32
-    } else {
+    }
+    else {
         gp_fault()
     }
 }
@@ -102,8 +103,10 @@ pub unsafe fn ir_sti_finish_link(depth: u32) {
     let flags = *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM);
     super::entry::ir_admission_barrier();
     ir_sti_finish(depth);
-    if super::entry::ir_entry_matches(ip, cs, mode) && *gp::cpl == cpl
-        && *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM) == flags {
+    if super::entry::ir_entry_matches(ip, cs, mode)
+        && *gp::cpl == cpl
+        && *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM) == flags
+    {
         super::entry::ir_request_observer_link();
     }
 }

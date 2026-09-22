@@ -218,9 +218,7 @@ impl PackedOp {
             value[..bytes].copy_from_slice(&v[index * bytes..(index + 1) * bytes]);
             u64::from_le_bytes(value)
         }
-        fn signed(value: u64, bits: usize) -> i64 {
-            ((value << (64 - bits)) as i64) >> (64 - bits)
-        }
+        fn signed(value: u64, bits: usize) -> i64 { ((value << (64 - bits)) as i64) >> (64 - bits) }
         if let Some((width, high)) = self.unpack() {
             let width = width as usize;
             let start = if high { 8 } else { 0 };
@@ -237,7 +235,8 @@ impl PackedOp {
             let width = if self == PackS32S16 { 2 } else { 1 };
             let (min, max) = if self == PackS16U8 {
                 (0, 255)
-            } else {
+            }
+            else {
                 (-(1i64 << (width * 8 - 1)), (1i64 << (width * 8 - 1)) - 1)
             };
             let mut result = [0; 16];
@@ -259,11 +258,14 @@ impl PackedOp {
                 let n = lane(&destination, width, i);
                 let n = if arithmetic {
                     (signed(n, bits) >> count.min((bits - 1) as u64)) as u64
-                } else if count >= bits as u64 {
+                }
+                else if count >= bits as u64 {
                     0
-                } else if left {
+                }
+                else if left {
                     n << count
-                } else {
+                }
+                else {
                     n >> count
                 };
                 result[i * width..(i + 1) * width].copy_from_slice(&n.to_le_bytes()[..width]);
@@ -299,14 +301,16 @@ impl PackedOp {
                 GtS8 | GtS16 | GtS32 => {
                     if sa > sb {
                         mask
-                    } else {
+                    }
+                    else {
                         0
                     }
                 },
                 Eq8 | Eq16 | Eq32 => {
                     if a == b {
                         mask
-                    } else {
+                    }
+                    else {
                         0
                     }
                 },
@@ -438,7 +442,8 @@ impl TransferOp {
     pub fn bytes(self) -> u8 {
         if matches!(self, Self::DuplicateLow32 | Self::DuplicateHigh32) {
             16
-        } else {
+        }
+        else {
             8
         }
     }
@@ -449,14 +454,16 @@ impl TransferOp {
                 Self::Low64 => {
                     if n < 8 {
                         16 + n
-                    } else {
+                    }
+                    else {
                         n
                     }
                 },
                 Self::High64 => {
                     if n < 8 {
                         n
-                    } else {
+                    }
+                    else {
                         16 + n - 8
                     }
                 },

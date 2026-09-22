@@ -214,7 +214,11 @@ pub unsafe fn performance_recording_hotspot_count() -> u32 { PERFORMANCE_ROWS.le
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub unsafe fn performance_recording_hotspot_get(row: u32, field: u32) -> f64 {
-    PERFORMANCE_ROWS.get(row as usize).and_then(|row| row.get(field as usize)).copied().unwrap_or(0.0)
+    PERFORMANCE_ROWS
+        .get(row as usize)
+        .and_then(|row| row.get(field as usize))
+        .copied()
+        .unwrap_or(0.0)
 }
 
 #[inline]
@@ -223,7 +227,9 @@ pub fn performance_recording_enabled() -> bool { unsafe { PERFORMANCE_RECORDING 
 #[inline]
 pub fn performance_execution_add(index: usize, value: f64) {
     unsafe {
-        if PERFORMANCE_RECORDING { PERFORMANCE_EXECUTION[index] += value; }
+        if PERFORMANCE_RECORDING {
+            PERFORMANCE_EXECUTION[index] += value;
+        }
     }
 }
 
@@ -234,10 +240,13 @@ pub fn performance_timer_finish(start: Option<f64>, index: usize) {
         performance_execution_add(index + 2, 1.0);
         if index == 0 {
             unsafe {
-                PERFORMANCE_PREVIOUS_CHUNKS = (PERFORMANCE_BATCH_CHUNKS[0] + PERFORMANCE_BATCH_CHUNKS[1]).max(1);
+                PERFORMANCE_PREVIOUS_CHUNKS =
+                    (PERFORMANCE_BATCH_CHUNKS[0] + PERFORMANCE_BATCH_CHUNKS[1]).max(1);
                 PERFORMANCE_EXECUTION[8] += PERFORMANCE_BATCH_CHUNKS[0] as f64;
                 PERFORMANCE_EXECUTION[9] += PERFORMANCE_BATCH_CHUNKS[1] as f64;
-                if PERFORMANCE_COUNTDOWN != 0 { PERFORMANCE_EXECUTION[15] += 1.0; }
+                if PERFORMANCE_COUNTDOWN != 0 {
+                    PERFORMANCE_EXECUTION[15] += 1.0;
+                }
                 PERFORMANCE_COUNTDOWN = 0;
             }
         }
@@ -246,7 +255,9 @@ pub fn performance_timer_finish(start: Option<f64>, index: usize) {
 
 pub fn performance_main_loop_exit(delay: f64, halted: bool) -> f64 {
     performance_execution_add(if delay > 0.0 { 6 } else { 5 }, 1.0);
-    if halted { performance_execution_add(7, 1.0); }
+    if halted {
+        performance_execution_add(7, 1.0);
+    }
     delay
 }
 
@@ -283,21 +294,38 @@ pub fn performance_batch_start() -> Option<f64> {
 #[inline]
 pub fn performance_chunk_start(jit: bool, eip: u32, cr3: u32, cpl: u8) -> bool {
     unsafe {
-        if !PERFORMANCE_RECORDING { return false; }
+        if !PERFORMANCE_RECORDING {
+            return false;
+        }
         PERFORMANCE_BATCH_CHUNKS[if jit { 0 } else { 1 }] += 1;
-        if PERFORMANCE_COUNTDOWN == 0 { return false; }
+        if PERFORMANCE_COUNTDOWN == 0 {
+            return false;
+        }
         PERFORMANCE_COUNTDOWN -= 1;
-        if PERFORMANCE_COUNTDOWN != 0 { return false; }
-        PERFORMANCE_PENDING_ROW = [cr3 as f64, (eip & !0xFFF) as f64, cpl as f64,
-            jit as u8 as f64, 1.0, 0.0, 0.0, PERFORMANCE_SAMPLE_TIME,
-            PERFORMANCE_SAMPLE_TIME, eip as f64];
+        if PERFORMANCE_COUNTDOWN != 0 {
+            return false;
+        }
+        PERFORMANCE_PENDING_ROW = [
+            cr3 as f64,
+            (eip & !0xFFF) as f64,
+            cpl as f64,
+            jit as u8 as f64,
+            1.0,
+            0.0,
+            0.0,
+            PERFORMANCE_SAMPLE_TIME,
+            PERFORMANCE_SAMPLE_TIME,
+            eip as f64,
+        ];
         true
     }
 }
 
 #[inline]
 pub fn performance_chunk_finish(selected: bool, steps: u32) {
-    if selected { performance_store_sample(steps); }
+    if selected {
+        performance_store_sample(steps);
+    }
 }
 
 // Reservoir sampling bounds memory without permanently excluding later pages.
@@ -316,7 +344,9 @@ fn performance_store_sample(steps: u32) {
             PERFORMANCE_EXECUTION[14] += 1.0;
             let total = (PERFORMANCE_EXECUTION[12] + PERFORMANCE_EXECUTION[13]) as u32;
             let index = (performance_random() % total) as usize;
-            if index < 8192 { PERFORMANCE_ROWS[index] = row; }
+            if index < 8192 {
+                PERFORMANCE_ROWS[index] = row;
+            }
         }
     }
 }
@@ -332,9 +362,7 @@ pub fn performance_recording_add(index: usize, count: u64) {
 
 // Timing only runs during an explicit recording and surrounds synchronous
 // analysis/code generation, not the later asynchronous WebAssembly compilation.
-pub fn performance_codegen_start() -> Option<f64> {
-    performance_timer_start()
-}
+pub fn performance_codegen_start() -> Option<f64> { performance_timer_start() }
 
 #[inline]
 pub fn performance_timer_start() -> Option<f64> {

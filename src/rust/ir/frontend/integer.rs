@@ -91,11 +91,11 @@ impl IntegerBuilder {
             last_op_size: Some(values[13]),
             backing_valid: Some(valid),
         };
-        if values.len() == 22 { self.xmm = values[14..].to_vec(); }
+        if values.len() == 22 {
+            self.xmm = values[14..].to_vec();
+        }
     }
-    pub fn ty(&self, value: ValueId) -> Type {
-        self.region.values[value.index()].ty
-    }
+    pub fn ty(&self, value: ValueId) -> Type { self.region.values[value.index()].ty }
     pub fn node(&mut self, op: Op, args: Vec<ValueId>, ty: Type) -> ValueId {
         self.region.append(self.block, op, args, &[ty], None)[0]
     }
@@ -107,7 +107,8 @@ impl IntegerBuilder {
     pub fn binary(&mut self, op: Binary, a: ValueId, b: ValueId) -> ValueId {
         let ty = if matches!(op, Binary::Eq | Binary::Ult | Binary::Slt) {
             Type::I1
-        } else {
+        }
+        else {
             self.ty(a)
         };
         self.node(Op::Binary(op), vec![a, b], ty)
@@ -118,7 +119,8 @@ impl IntegerBuilder {
     fn as_i32(&mut self, value: ValueId) -> ValueId {
         if self.ty(value) == Type::I32 {
             value
-        } else {
+        }
+        else {
             self.node(Op::Extend { signed: false }, vec![value], Type::I32)
         }
     }
@@ -132,7 +134,8 @@ impl IntegerBuilder {
         let value = self.node(Op::Extend { signed: false }, vec![value], Type::I32);
         let value = if bit == 0 {
             value
-        } else {
+        }
+        else {
             let shift = self.constant(bit as u32, Type::I32);
             self.binary(Binary::Shl, value, shift)
         };
@@ -155,7 +158,8 @@ impl IntegerBuilder {
             self.flags.lazy_mask,
             self.flags.last_result,
             self.flags.last_op_size,
-        ) else {
+        )
+        else {
             self.invalidate_flag_backing();
             return;
         };
@@ -176,7 +180,8 @@ impl IntegerBuilder {
         overflow: ValueId,
     ) {
         use crate::cpu::cpu::{FLAG_CARRY, FLAG_OVERFLOW};
-        let (Some(old_raw), Some(old_mask)) = (self.flags.raw_flags, self.flags.lazy_mask) else {
+        let (Some(old_raw), Some(old_mask)) = (self.flags.raw_flags, self.flags.lazy_mask)
+        else {
             self.invalidate_flag_backing();
             return;
         };
@@ -188,7 +193,8 @@ impl IntegerBuilder {
         self.flags.lazy_mask = Some(self.select_backing(unchanged, old_mask, mask));
     }
     pub fn preserve_raw_flag_bit(&mut self, value: ValueId, bit: u8) {
-        let Some(raw) = self.flags.raw_flags else {
+        let Some(raw) = self.flags.raw_flags
+        else {
             self.invalidate_flag_backing();
             return;
         };
@@ -196,7 +202,8 @@ impl IntegerBuilder {
     }
     pub fn preserve_cf_backing(&mut self, carry: ValueId) {
         use crate::cpu::cpu::FLAG_CARRY;
-        let (Some(raw), Some(mask)) = (self.flags.raw_flags, self.flags.lazy_mask) else {
+        let (Some(raw), Some(mask)) = (self.flags.raw_flags, self.flags.lazy_mask)
+        else {
             self.invalidate_flag_backing();
             return;
         };
@@ -206,7 +213,8 @@ impl IntegerBuilder {
     }
     pub fn preserve_mul_backing(&mut self, result: ValueId, overflow: ValueId, width: u8) {
         use crate::cpu::cpu::{FLAGS_ALL, FLAG_CARRY, FLAG_OVERFLOW};
-        let Some(mut raw) = self.flags.raw_flags else {
+        let Some(mut raw) = self.flags.raw_flags
+        else {
             self.invalidate_flag_backing();
             return;
         };
@@ -220,7 +228,8 @@ impl IntegerBuilder {
     }
     pub fn preserve_scan_backing(&mut self, result: ValueId, is_zero: ValueId, width: u8) {
         use crate::cpu::cpu::{FLAGS_ALL, FLAG_CARRY, FLAG_ZERO};
-        let Some(mut raw) = self.flags.raw_flags else {
+        let Some(mut raw) = self.flags.raw_flags
+        else {
             self.invalidate_flag_backing();
             return;
         };
@@ -235,7 +244,8 @@ impl IntegerBuilder {
     }
     pub fn preserve_popcnt_backing(&mut self, is_zero: ValueId) {
         use crate::cpu::cpu::FLAGS_ALL;
-        let Some(raw) = self.flags.raw_flags else {
+        let Some(raw) = self.flags.raw_flags
+        else {
             self.invalidate_flag_backing();
             return;
         };
@@ -246,7 +256,8 @@ impl IntegerBuilder {
     }
     pub fn preserve_incdec_backing(&mut self, carry: ValueId, dec: bool) {
         use crate::cpu::cpu::{FLAGS_ALL, FLAG_CARRY, FLAG_SUB};
-        let Some(raw) = self.flags.raw_flags else {
+        let Some(raw) = self.flags.raw_flags
+        else {
             self.invalidate_flag_backing();
             return;
         };
@@ -272,15 +283,19 @@ impl IntegerBuilder {
                 (FLAGS_ALL & !FLAG_CARRY & !FLAG_ADJUST & !FLAG_OVERFLOW) as u32,
                 Type::I32,
             ));
-        } else if matches!(group, 0 | 5 | 7) {
+        }
+        else if matches!(group, 0 | 5 | 7) {
             let mask = if matches!(group, 5 | 7) {
                 (FLAGS_ALL | FLAG_SUB) as u32
-            } else {
+            }
+            else {
                 FLAGS_ALL as u32
             };
             self.flags.lazy_mask = Some(self.constant(mask, Type::I32));
-        } else if matches!(group, 2 | 3) {
-            let Some(mut raw) = self.flags.raw_flags else {
+        }
+        else if matches!(group, 2 | 3) {
+            let Some(mut raw) = self.flags.raw_flags
+            else {
                 self.invalidate_flag_backing();
                 return;
             };
@@ -293,31 +308,36 @@ impl IntegerBuilder {
                 mask |= FLAG_SUB;
             }
             self.flags.lazy_mask = Some(self.constant(mask as u32, Type::I32));
-        } else {
+        }
+        else {
             self.invalidate_flag_backing();
         }
     }
     pub fn read(&mut self, register: u8, width: u8) -> ValueId {
         let (r, lsb) = if width == 8 {
             (register & 3, if register >= 4 { 8 } else { 0 })
-        } else {
+        }
+        else {
             (register, 0)
         };
         if width == 32 {
             self.gpr[r as usize]
-        } else {
+        }
+        else {
             self.extract(self.gpr[r as usize], lsb, width_type(width))
         }
     }
     pub fn write(&mut self, register: u8, width: u8, value: ValueId) {
         let (r, lsb) = if width == 8 {
             (register & 3, if register >= 4 { 8 } else { 0 })
-        } else {
+        }
+        else {
             (register, 0)
         };
         self.gpr[r as usize] = if width == 32 {
             value
-        } else {
+        }
+        else {
             self.node(
                 Op::Insert { lsb },
                 vec![self.gpr[r as usize], value],
@@ -340,7 +360,8 @@ impl IntegerBuilder {
         if !matches!(group, 1 | 4 | 6) {
             self.flags.last_op1 = Some(if ty == Type::I32 {
                 a
-            } else {
+            }
+            else {
                 self.node(Op::Extend { signed: false }, vec![a], Type::I32)
             });
         }
@@ -352,7 +373,8 @@ impl IntegerBuilder {
                 ty,
             );
             self.binary(op, first, carry)
-        } else {
+        }
+        else {
             first
         };
         let zero = self.constant(0, ty);
@@ -363,20 +385,24 @@ impl IntegerBuilder {
             cf = self.constant(0, Type::I1);
             of = cf;
             af = cf; // Baseline logical AF is zero.
-        } else {
+        }
+        else {
             let c1 = if sub {
                 self.binary(Binary::Ult, a, b)
-            } else {
+            }
+            else {
                 self.binary(Binary::Ult, first, a)
             };
             cf = if group == 2 || group == 3 {
                 let c2 = if sub {
                     self.binary(Binary::Ult, first, result)
-                } else {
+                }
+                else {
                     self.binary(Binary::Ult, result, first)
                 };
                 self.binary(Binary::Or, c1, c2)
-            } else {
+            }
+            else {
                 c1
             };
             let ab = self.binary(Binary::Xor, a, b);
@@ -419,7 +445,8 @@ impl IntegerBuilder {
         };
         if cc & 1 == 0 {
             value
-        } else {
+        }
+        else {
             let one = self.constant(1, Type::I1);
             self.binary(Binary::Xor, value, one)
         }

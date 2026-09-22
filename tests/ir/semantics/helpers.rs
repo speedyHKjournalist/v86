@@ -47,7 +47,8 @@ pub(super) fn fixture(owner: ExceptionOwner) -> Region {
         results: vec![Type::I32, Type::I8],
         effects: if owner == ExceptionOwner::CannotFault {
             Effects::pure()
-        } else {
+        }
+        else {
             Effects::conservative()
         },
         exception_owner: owner,
@@ -268,7 +269,8 @@ fn cpu_reload_contract_and_continuation_fixtures() {
             for variant in 0..4 {
                 let mut r = if kind == 5 || variant >= 2 {
                     lift_cpu_cfg(&bytes, GuestEip(0x8000), LinearAddress(0x8000), mode, 128)
-                } else {
+                }
+                else {
                     lift_cpu(&bytes, GuestEip(0x8000), LinearAddress(0x8000), mode)
                 }
                 .unwrap();

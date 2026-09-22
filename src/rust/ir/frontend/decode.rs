@@ -76,7 +76,8 @@ impl EffectiveAddress {
             );
         if self.address_size == 16 {
             result & 0xFFFF
-        } else {
+        }
+        else {
             result
         }
     }
@@ -147,9 +148,7 @@ impl Cursor<'_> {
     }
 }
 
-pub fn encodings() -> &'static [Encoding] {
-    generated::ENCODINGS
-}
+pub fn encodings() -> &'static [Encoding] { generated::ENCODINGS }
 fn candidates(opcode: u32) -> &'static [Encoding] {
     match generated::OPCODES.binary_search_by_key(&opcode, |&(key, _, _)| key) {
         Ok(i) => {
@@ -228,7 +227,8 @@ pub fn decode(
         && flags
             & if encoding.sse {
                 crate::prefix::PREFIX_66 | crate::prefix::PREFIX_F2 | crate::prefix::PREFIX_F3
-            } else {
+            }
+            else {
                 crate::prefix::PREFIX_F2 | crate::prefix::PREFIX_F3
             }
             != 0;
@@ -255,13 +255,17 @@ pub fn decode(
             conditional: encoding.conditional_jump,
             call: base_opcode == 0xE8,
         }
-    } else if encoding.custom_sti {
+    }
+    else if encoding.custom_sti {
         Flow::Sti
-    } else if encoding.no_next_instruction {
+    }
+    else if encoding.no_next_instruction {
         Flow::Stop
-    } else if encoding.block_boundary || !encoding.custom && encoding.e || baseline_ud {
+    }
+    else if encoding.block_boundary || !encoding.custom && encoding.e || baseline_ud {
         Flow::Boundary
-    } else {
+    }
+    else {
         Flow::Next
     };
     let mut raw = [0; 15];
@@ -297,7 +301,8 @@ fn decode_ea(
     let form = crate::decode_rules::address_form(modrm, size, sib);
     let displacement = if form.displacement_bytes == 1 {
         c.read()? as i8 as i32 as u32
-    } else {
+    }
+    else {
         c.integer(form.displacement_bytes)?
     };
     Ok(EffectiveAddress {

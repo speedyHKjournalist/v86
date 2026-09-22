@@ -37,38 +37,69 @@ fn stores(r: &crate::ir::hir::Region) -> Vec<InstId> {
 
 #[test]
 fn rmw_commit_seeds_only_exact_width_address_and_segment() {
-    for bytes in [vec![0xFE,0x06,0x8A,0x1E], vec![0x66,0xFF,0x06,0x66,0x8B,0x1E], vec![0xFF,0x06,0x8B,0x1E]] {
+    for bytes in [
+        vec![0xFE, 0x06, 0x8A, 0x1E],
+        vec![0x66, 0xFF, 0x06, 0x66, 0x8B, 0x1E],
+        vec![0xFF, 0x06, 0x8B, 0x1E],
+    ] {
         let r = region(&bytes);
-        let commit = r.blocks.iter().flat_map(|b| &b.instructions).copied()
-            .find(|id| matches!(r.instructions[id.index()].op, Op::RmwStore { .. })).unwrap();
+        let commit = r
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .copied()
+            .find(|id| matches!(r.instructions[id.index()].op, Op::RmwStore { .. }))
+            .unwrap();
         let load = loads(&r)[0];
-        let mut m = lower(&r).unwrap(); drop(r);
+        let mut m = lower(&r).unwrap();
+        drop(r);
         assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 1);
         assert_eq!(m.ram_forwarding(commit), Some(Forwarding::Begin));
-        assert_eq!(m.ram_forwarding(load), Some(Forwarding::Reuse { previous: commit }));
+        assert_eq!(
+            m.ram_forwarding(load),
+            Some(Forwarding::Reuse { previous: commit })
+        );
         emit_cpu(&m, 32).unwrap();
         let r = region(&bytes);
         let mut bad = lower_draft(&r).unwrap();
         bad.ram_forwarding = plan(&bad, DEFAULT_WORK_LIMIT).unwrap();
         bad.ram_forwarding[load.index()] = Some(Forwarding::Reuse { previous: load });
-        assert!(bad.finish().is_err(), "forged RMW witness must not become an emittable artifact");
+        assert!(
+            bad.finish().is_err(),
+            "forged RMW witness must not become an emittable artifact"
+        );
     }
-    for bytes in [vec![0xFE,0x06,0x8B,0x1E], vec![0xFF,0x06,0x8B,0x1F], vec![0xFF,0x06,0x64,0x8B,0x1E],
-        vec![0xFF,0x06,0x8B,0x07,0x8B,0x1E]] {
+    for bytes in [
+        vec![0xFE, 0x06, 0x8B, 0x1E],
+        vec![0xFF, 0x06, 0x8B, 0x1F],
+        vec![0xFF, 0x06, 0x64, 0x8B, 0x1E],
+        vec![0xFF, 0x06, 0x8B, 0x07, 0x8B, 0x1E],
+    ] {
         let r = region(&bytes);
-        assert_eq!(lower(&r).unwrap().forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 0);
+        assert_eq!(
+            lower(&r)
+                .unwrap()
+                .forward_ram_reads(DEFAULT_WORK_LIMIT)
+                .unwrap(),
+            0
+        );
     }
 }
 
 #[test]
 fn loop_optimization_does_not_enable_disabled_forwarding() {
-    let r = region(&[0xFF,0x06,0x8B,0x1E]);
+    let r = region(&[0xFF, 0x06, 0x8B, 0x1E]);
     let mut m = lower(&r).unwrap();
-    m.cache_loop_invariant_ram_reads(DEFAULT_WORK_LIMIT).unwrap();
+    m.cache_loop_invariant_ram_reads(DEFAULT_WORK_LIMIT)
+        .unwrap();
     assert!(!m.has_ram_forwarding());
     assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 1);
-    m.cache_loop_invariant_ram_reads(DEFAULT_WORK_LIMIT).unwrap();
-    assert!(m.has_ram_forwarding(), "an already enabled certificate remains valid after loop planning");
+    m.cache_loop_invariant_ram_reads(DEFAULT_WORK_LIMIT)
+        .unwrap();
+    assert!(
+        m.has_ram_forwarding(),
+        "an already enabled certificate remains valid after loop planning"
+    );
     emit_cpu(&m, 32).unwrap();
 }
 
@@ -187,7 +218,8 @@ fn widths_addresses_segments_and_runtime_barriers_are_not_alias_guesses() {
         let term = r.blocks[block.index()].terminator.take().unwrap();
         let mut args = if matches!(op, Op::GuestCheck { .. }) {
             vec![r.instructions[second.index()].args[0]]
-        } else {
+        }
+        else {
             vec![]
         };
         args.push(old_effect);
@@ -295,7 +327,10 @@ fn emits_guarded_forwarding_cpu_corpus_after_dropping_hir() {
             if forward {
                 if n == 3 {
                     assert_eq!(m.reuse_ram_guards(DEFAULT_WORK_LIMIT).unwrap(), 2);
-                } else { assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 2); }
+                }
+                else {
+                    assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 2);
+                }
             }
             assert_eq!(
                 m.memory
@@ -328,7 +363,10 @@ fn emits_guarded_forwarding_cpu_corpus_after_dropping_hir() {
                 if forward {
                     if n == 3 {
                         assert_eq!(m.reuse_ram_guards(DEFAULT_WORK_LIMIT).unwrap(), 2);
-                    } else { assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 2); }
+                    }
+                    else {
+                        assert_eq!(m.forward_ram_reads(DEFAULT_WORK_LIMIT).unwrap(), 2);
+                    }
                 }
                 std::fs::write(
                     format!("build/ir-forwarding/cfg-{n}-{budget}-{forward}.wasm"),
@@ -345,7 +383,6 @@ fn emits_guarded_forwarding_cpu_corpus_after_dropping_hir() {
     )
     .unwrap();
 }
-
 
 #[test]
 fn emits_guarded_loop_cache_cpu_corpus_after_dropping_hir() {
@@ -398,9 +435,7 @@ fn emits_guarded_loop_cache_cpu_corpus_after_dropping_hir() {
                 .unwrap();
             }
         }
-        programs.push(format!(
-            "{{\"address\":{address},\"bytes\":{bytes:?}}}"
-        ));
+        programs.push(format!("{{\"address\":{address},\"bytes\":{bytes:?}}}"));
     }
     std::fs::write(
         "build/ir-forwarding/loops.json",
@@ -420,8 +455,8 @@ fn disjoint_constant_store_preserves_an_existing_load_chain() {
     // alias the same physical page. Its slow path returns; only the proven
     // disjoint native continuation can reach the final load.
     let bytes = [
-        0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x10, 0x20, 0x00, 0x00, 0x8B, 0x0D,
-        0x00, 0x20, 0x00, 0x00,
+        0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x10, 0x20, 0x00, 0x00, 0x8B, 0x0D, 0x00,
+        0x20, 0x00, 0x00,
     ];
     let r = region(&bytes);
     let ids = loads(&r);
@@ -438,8 +473,8 @@ fn disjoint_constant_store_preserves_an_existing_load_chain() {
     // A different virtual page with the same page offset may physically alias
     // the first load, so it is deliberately MayAlias and kills the old proof.
     let page_alias = [
-        0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x00, 0x30, 0x00, 0x00, 0x8B, 0x0D,
-        0x00, 0x20, 0x00, 0x00,
+        0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x00, 0x30, 0x00, 0x00, 0x8B, 0x0D, 0x00,
+        0x20, 0x00, 0x00,
     ];
     let r = region(&page_alias);
     assert_eq!(
@@ -452,8 +487,8 @@ fn disjoint_constant_store_preserves_an_existing_load_chain() {
 
     // Overlap in the same page is also MayAlias.
     let overlapping = [
-        0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x02, 0x20, 0x00, 0x00, 0x8B, 0x0D,
-        0x00, 0x20, 0x00, 0x00,
+        0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x89, 0x1D, 0x02, 0x20, 0x00, 0x00, 0x8B, 0x0D, 0x00,
+        0x20, 0x00, 0x00,
     ];
     let r = region(&overlapping);
     assert_eq!(
@@ -473,9 +508,7 @@ fn loop_invariant_load_cache_keeps_first_fault_point_and_resets_at_preheader() {
     //   jnz loop
     // The load itself remains in place. Only after a successful native RAM
     // access may later iterations reuse its dedicated cache.
-    let bytes = [
-        0x90, 0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x49, 0x75, 0xF7,
-    ];
+    let bytes = [0x90, 0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x49, 0x75, 0xF7];
     let r = crate::ir::frontend::region::lift_cpu_cfg(
         &bytes,
         GuestEip(0x100000),
@@ -506,8 +539,7 @@ fn loop_invariant_load_cache_keeps_first_fault_point_and_resets_at_preheader() {
     // A guest store in the loop prevents loop caching rather than guessing
     // alias or mapping stability.
     let with_store = [
-        0x90, 0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0xA3, 0x00, 0x30, 0x00, 0x00, 0x49, 0x75,
-        0xF2,
+        0x90, 0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0xA3, 0x00, 0x30, 0x00, 0x00, 0x49, 0x75, 0xF2,
     ];
     let r = crate::ir::frontend::region::lift_cpu_cfg(
         &with_store,
@@ -525,12 +557,9 @@ fn loop_invariant_load_cache_keeps_first_fault_point_and_resets_at_preheader() {
     );
 }
 
-
 #[test]
 fn forged_loop_cache_certificate_is_rejected_atomically() {
-    let bytes = [
-        0x90, 0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x49, 0x75, 0xF7,
-    ];
+    let bytes = [0x90, 0x8B, 0x05, 0x00, 0x20, 0x00, 0x00, 0x49, 0x75, 0xF7];
     let r = crate::ir::frontend::region::lift_cpu_cfg(
         &bytes,
         GuestEip(0x100000),
@@ -556,15 +585,21 @@ fn forged_loop_cache_certificate_is_rejected_atomically() {
 #[test]
 fn guard_reuse_proves_range_permission_and_rejects_forgery() {
     for bytes in [
-        vec![0x8A,0x06,0x8B,0x1E], // narrow read does not prove wider access
-        vec![0x8B,0x06,0x89,0x1E], // read does not prove write permission
-        vec![0x8B,0x06,0x66,0x8B,0x1F], // different offset
-        vec![0x8B,0x06,0x64,0x66,0x8B,0x1E], // different segment
-        vec![0x8B,0x06,0x8B,0x17,0x66,0x8B,0x1E], // intervening possible MMIO
+        vec![0x8A, 0x06, 0x8B, 0x1E], // narrow read does not prove wider access
+        vec![0x8B, 0x06, 0x89, 0x1E], // read does not prove write permission
+        vec![0x8B, 0x06, 0x66, 0x8B, 0x1F], // different offset
+        vec![0x8B, 0x06, 0x64, 0x66, 0x8B, 0x1E], // different segment
+        vec![0x8B, 0x06, 0x8B, 0x17, 0x66, 0x8B, 0x1E], // intervening possible MMIO
     ] {
-        assert_eq!(lower(&region(&bytes)).unwrap().reuse_ram_guards(DEFAULT_WORK_LIMIT).unwrap(), 0);
+        assert_eq!(
+            lower(&region(&bytes))
+                .unwrap()
+                .reuse_ram_guards(DEFAULT_WORK_LIMIT)
+                .unwrap(),
+            0
+        );
     }
-    let r = region(&[0x89,0x06,0x66,0x8B,0x1E]);
+    let r = region(&[0x89, 0x06, 0x66, 0x8B, 0x1E]);
     let mut m = lower(&r).unwrap();
     assert!(m.reuse_ram_guards(0).is_err());
     assert_eq!(m.reuse_ram_guards(DEFAULT_WORK_LIMIT).unwrap(), 1);
@@ -575,9 +610,19 @@ fn guard_reuse_proves_range_permission_and_rejects_forgery() {
         let mut draft = lower_draft(&r).unwrap();
         draft.ram_guard_reuse = super::guard_plan(&draft, DEFAULT_WORK_LIMIT).unwrap();
         match mutation {
-            0 => draft.ram_guard_reuse[ids[0].index()] = Some(Forwarding::Reuse { previous: ids[0] }),
-            1 => { draft.ram_guard_reuse.pop(); },
-            _ => { for p in &mut draft.ram_guard_reuse { if *p == Some(Forwarding::Begin) { *p = None; } } },
+            0 => {
+                draft.ram_guard_reuse[ids[0].index()] = Some(Forwarding::Reuse { previous: ids[0] })
+            },
+            1 => {
+                draft.ram_guard_reuse.pop();
+            },
+            _ => {
+                for p in &mut draft.ram_guard_reuse {
+                    if *p == Some(Forwarding::Begin) {
+                        *p = None;
+                    }
+                }
+            },
         }
         assert!(draft.finish().is_err());
     }

@@ -55,16 +55,19 @@ fn simd_shuffle_fixtures() {
                                 register << 3
                                     | if operand < 8 {
                                         0xC0 | operand
-                                    } else if asize == 32 {
+                                    }
+                                    else if asize == 32 {
                                         0x86
-                                    } else {
+                                    }
+                                    else {
                                         0x85
                                     },
                             ]);
                             if operand >= 8 {
                                 bytes.extend(if asize == 32 {
                                     vec![0, 0, 0, 0]
-                                } else {
+                                }
+                                else {
                                     vec![0, 0]
                                 });
                             }

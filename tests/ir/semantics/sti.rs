@@ -46,7 +46,8 @@ fn sti_shadow_fixtures() {
                 for variant in 0..4 {
                     let mut r = if variant == 3 {
                         lift_cpu_cfg(&bytes, GuestEip(0x8000), LinearAddress(0x8000), mode, 128)
-                    } else {
+                    }
+                    else {
                         lift_cpu(&bytes, GuestEip(0x8000), LinearAddress(0x8000), mode)
                     }
                     .unwrap();

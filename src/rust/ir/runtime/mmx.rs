@@ -5,7 +5,8 @@ unsafe fn finish(success: bool) -> u32 {
     if success {
         *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);
         Outcome::Invalidated as u32
-    } else {
+    }
+    else {
         Outcome::ControlTransferred as u32
     }
 }
@@ -202,7 +203,8 @@ pub unsafe fn ir_mmx_mask(offset: u32, segment: u32, mask: i32, source: i32) -> 
     if !cpu::task_switch_test_mmx() {
         return finish(false);
     }
-    let Ok(base) = cpu::get_seg(segment as i32) else {
+    let Ok(base) = cpu::get_seg(segment as i32)
+    else {
         return finish(false);
     };
     let addr = offset.wrapping_add(base as u32) as i32;

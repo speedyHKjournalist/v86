@@ -28,25 +28,31 @@ fn multiply_divide_fixtures() {
                         }
                         if kind == 8 {
                             bytes.extend([0x0F, 0xAF]);
-                        } else {
+                        }
+                        else {
                             bytes.push(if kind < 8 {
                                 if width == 8 {
                                     0xF6
-                                } else {
+                                }
+                                else {
                                     0xF7
                                 }
-                            } else if kind == 9 {
+                            }
+                            else if kind == 9 {
                                 0x69
-                            } else {
+                            }
+                            else {
                                 0x6B
                             });
                         }
                         bytes.push(
                             (if src < 8 {
                                 0xC0 | src
-                            } else if src == 8 {
+                            }
+                            else if src == 8 {
                                 6
-                            } else {
+                            }
+                            else {
                                 4
                             }) | if kind < 8 { kind << 3 } else { dst << 3 },
                         );

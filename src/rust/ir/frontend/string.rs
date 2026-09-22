@@ -18,7 +18,8 @@ fn offset(b: &mut IntegerBuilder, register: u8, width: u8) -> ValueId {
     let value = b.read(register, width);
     if width == 16 {
         b.node(Op::Extend { signed: false }, vec![value], Type::I32)
-    } else {
+    }
+    else {
         value
     }
 }
@@ -28,9 +29,7 @@ pub fn lift(
     count: u32,
 ) -> Result<(), CompileError> {
     if i.prefixes.rep || i.prefixes.repne {
-        return Err(CompileError::Unsupported(
-            "REP must use batch frontend",
-        ));
+        return Err(CompileError::Unsupported("REP must use batch frontend"));
     }
     let family = i.encoding.opcode & !1;
     let width = if i.encoding.opcode & 1 == 0 { 8 } else { i.operand_size };
@@ -43,7 +42,8 @@ pub fn lift(
     let dst = if destination {
         let off = offset(b, 7, i.address_size);
         Some(segmented(b, off, 0, map))
-    } else {
+    }
+    else {
         None
     };
     let src = if source || family == 0xAE {
@@ -54,7 +54,8 @@ pub fn lift(
             if family == 0xAE { 0 } else { i.prefixes.segment.unwrap_or(3) },
             map,
         ))
-    } else {
+    }
+    else {
         None
     };
     let data =
@@ -62,7 +63,8 @@ pub fn lift(
     if matches!(family, 0xA6 | 0xAE) {
         let other = memory_read(b, dst.unwrap(), width, map, false).0;
         b.arithmetic(7, data, other);
-    } else if family == 0xAC {
+    }
+    else if family == 0xAC {
         b.write(0, width, data);
     }
     let ty = width_type(i.address_size);

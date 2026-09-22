@@ -17,7 +17,8 @@ fn bit_fixtures() {
                 for dst in if kind == 7 { (0..8).collect() } else { vec![0, 1, 2, 8, 9, 10] } {
                     for imm in if kind < 4 && matches!(dst, 0 | 8) {
                         vec![-1, 0, 7, 8, 15, 16, 31, 32, 255]
-                    } else {
+                    }
+                    else {
                         vec![-1]
                     } {
                         let mut bytes = Vec::new();
@@ -36,18 +37,22 @@ fn bit_fixtures() {
                         bytes.push(0x0F);
                         bytes.push(if kind == 7 {
                             0xC8 + dst
-                        } else if imm >= 0 {
+                        }
+                        else if imm >= 0 {
                             0xBA
-                        } else {
+                        }
+                        else {
                             [0xA3, 0xAB, 0xB3, 0xBB, 0xBC, 0xBD, 0xB8][kind]
                         });
                         if kind != 7 {
                             bytes.push(
                                 (if dst < 8 {
                                     0xC0 | dst
-                                } else if dst == 9 {
+                                }
+                                else if dst == 9 {
                                     4
-                                } else {
+                                }
+                                else {
                                     6
                                 }) | (if imm >= 0 { kind as u8 + 4 } else { 1 }) << 3,
                             );
@@ -110,7 +115,8 @@ fn bit_count_widths_folding_and_memory_access_contract() {
             if let Some(value) = sample { b.constant(value as u32, Type::I32) } else { b.gpr[0] };
         let wide = if let Some(value) = sample {
             b.node(Op::Const(value), vec![], Type::I64)
-        } else {
+        }
+        else {
             let low = b.node(Op::Extend { signed: false }, vec![low], Type::I64);
             b.node(Op::Insert { lsb: 32 }, vec![low, b.gpr[1]], Type::I64)
         };

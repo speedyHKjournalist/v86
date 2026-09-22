@@ -84,9 +84,9 @@ try {
     // Ordered compares must preserve all non-arithmetic EFLAGS, distinguish
     // status-word vs integer flags, pop correctly, and keep values cached.
     const observe=snapshot.slice(2); // do not overwrite the comparison under test
-    const compareForms=[[0xD8,0xD1],[0xD8,0xD9],[0xDC,0xD1],[0xDC,0xD9],
+    const compare_forms=[[0xD8,0xD1],[0xD8,0xD9],[0xDC,0xD1],[0xDC,0xD9],
         [0xDE,0xD9],[0xDB,0xF1],[0xDF,0xF1]];
-    for(const cmp of compareForms) for(const value of [0.0625,0.125,0.25,-0.125]) for(const rc of [0,1,2,3]) {
+    for(const cmp of compare_forms) for(const value of [0.0625,0.125,0.25,-0.125]) for(const rc of [0,1,2,3]) {
         d.setFloat64(0,1,true);d.setFloat64(8,value,true);d.setFloat64(16,2,true);
         const body=[...prefix(0x27F|rc<<10,7,false,8),0xD9,0xE5, // FXAM seeds C bits
             0xB8,...u32(0x7FFFFFFF),0x83,0xC0,1,0xF9, // deferred OF/SF/AF and CF
@@ -98,7 +98,7 @@ try {
     // Normal entry -> overflow -> NaN exercises signaling ordered comparisons,
     // including a later ADD clearing SoftFloat flags but retaining x87 invalid.
     d.setFloat64(0,Number.MAX_VALUE,true);d.setFloat64(8,2,true);d.setFloat64(16,3,true);
-    for(const cmp of compareForms) for(const tail of [[],[0xD8,0xC1],[0xD8,0xC9],[0xD8,0xE1],[0xD8,0xF1]]) {
+    for(const cmp of compare_forms) for(const tail of [[],[0xD8,0xC1],[0xD8,0xC9],[0xD8,0xE1],[0xD8,0xF1]]) {
         const body=[...prefix(0x27F,0,false,4),0xB8,...u32(0x7FFFFFFF),0x83,0xC0,1,0xF9,0xD8,0xC0,0xD8,0xE0,0xD8,0xC0,...cmp,...tail,...observe];
         const a=await run(reference,body,data,true),b=await run(cached,body,data);
         assert.deepEqual(b.bytes,a.bytes,`cached NaN compare ${cmp} and subsequent arithmetic ${tail}`);
@@ -109,9 +109,9 @@ try {
     // Compare then more arithmetic/stack moves stays in a single region.
     const joined=[...prefix(0x27F),...region,0xDF,0xF1,0xD9,0xC0,
         0xD8,0xC1,0xD8,0xC9,0xD8,0xE1,0xD8,0xD1,...observe];
-    const joinedRef=await run(reference,joined,data,true),joinedJit=await run(cached,joined,data);
-    assert.deepEqual(joinedJit.bytes,joinedRef.bytes,"comparison connects subsequent cached operations");
-    assert.equal(joinedJit.report.x87.jit_cache.comparison_ops,2*joinedJit.report.x87.jit_cache.comparison_regions);
+    const joined_ref=await run(reference,joined,data,true),joined_jit=await run(cached,joined,data);
+    assert.deepEqual(joined_jit.bytes,joined_ref.bytes,"comparison connects subsequent cached operations");
+    assert.equal(joined_jit.report.x87.jit_cache.comparison_ops,2*joined_jit.report.x87.jit_cache.comparison_regions);
     console.log("PASS: ordered compare forms/rounding, EFLAGS/status, pops, NaNs and cache continuity");
     // Conditional branches consume the EFLAGS produced by FCOMIP at a block
     // boundary. Cover ordered less/equal/greater and unordered parity branches.
@@ -151,13 +151,13 @@ try {
     d.setFloat64(0,1.234567890123,true);
     // Newly native stack/control operations, quiet compares and math helpers
     // must preserve the complete F80 image, including freed physical slots.
-    const extraOps = [
+    const extra_ops = [
         [0xD9,0xFC], [0xD9,0xD0], [0xD9,0xE0], [0xD9,0xE1], [0xD9,0xE8], [0xD9,0xEE],
         [0xD9,0xF6,0xD9,0xF7], [0xDD,0xC2], [0xDD,0xD2], [0xDD,0xDA],
         [0xDD,0xE1], [0xDD,0xE9], [0xDA,0xE9], [0xDB,0xE9], [0xDF,0xE9],
         [0xD9,0xFE], [0xD9,0xFF], [0xD9,0xFB], [0xD9,0xF2], [0xD9,0xF3],
     ];
-    for(const ops of extraOps) for(const rotation of [0,3,7]) for(const rc of [0,1,2,3]) {
+    for(const ops of extra_ops) for(const rotation of [0,3,7]) for(const rc of [0,1,2,3]) {
         const body=[...prefix(0x27F|rc<<10,rotation),0xD8,0xC1,0x31,0xC0,...ops,...observe];
         const a=await run(reference,body,data,true),b=await run(cached,body,data);
         assert.deepEqual(b.bytes,a.bytes,`extended operations ${ops},top=${rotation},rc=${rc}`);
@@ -209,21 +209,21 @@ try {
     // Consecutive regions separated by real branches reuse the shadow cache.
     // No F80 observer is needed until the final FNSAVE.
     const split=[...prefix(0x27F),0x31,0xC0,...Array.from({length:30},()=>[0xD8,0xC9,0xEB,0]).flat(),...observe];
-    const splitA=await run(reference,split,data,true),splitB=await run(cached,split,data);
-    assert.deepEqual(splitB.bytes,splitA.bytes,"persistent branch boundaries");
-    const stats=splitB.report.x87.jit_cache;
+    const split_a=await run(reference,split,data,true),split_b=await run(cached,split,data);
+    assert.deepEqual(split_b.bytes,split_a.bytes,"persistent branch boundaries");
+    const stats=split_b.report.x87.jit_cache;
     assert(stats.persistent_hits>stats.initial_conversions,"persistent values survive branch exits");
     assert(stats.cached_writes>stats.writebacks*2,"logical writes avoid repeated F80 materialization");
     console.log("PASS: persistent branch caching, MMX aliases and environment/full-state observers");
     // Observe the committed FPU state inside #PF and resume after the memory
     // instruction. #NM must instead trap before any cached operation executes.
     const IDT=0x220000,DESC=0x221000,HANDLER=0x222000;
-    for(const faultKind of ["read","store","load","nm"]) {
-        const nm=faultKind==="nm", faultLength=faultKind==="read"?5:6;
+    for(const fault_kind of ["read","store","load","nm"]) {
+        const nm=fault_kind==="nm", fault_length=fault_kind==="read"?5:6;
         const handler=nm ? [0x8B,0x04,0x24,0xA3,...u32(OUT+400),0x0F,0x06,0xCF] :
             [0xDD,0x35,...u32(OUT),0xDD,0x25,...u32(OUT),
                 0x8B,0x44,0x24,4,0xA3,...u32(OUT+400),
-                0x83,0x44,0x24,4,faultLength,0x83,0xC4,4,0xCF];
+                0x83,0x44,0x24,4,fault_length,0x83,0xC4,4,0xCF];
         for(const vm of machines) {
             vm.write_memory(Uint8Array.from([HANDLER&255,HANDLER>>>8&255,8,0,0,0x8E,HANDLER>>>16&255,HANDLER>>>24]),IDT+(nm?7:14)*8);
             vm.write_memory(Uint8Array.from([0xFF,7,...u32(IDT)]),DESC);
@@ -231,13 +231,13 @@ try {
         }
         const body=[...prefix(0x27F),0x0F,0x01,0x1D,...u32(DESC)];
         if(nm) body.push(0x0F,0x20,0xC0,0x83,0xC8,8,0x0F,0x22,0xC0);
-        const faultOps=[...region,0xDF,0xF1];
-        const fault=CODE+body.length+(nm?0:faultOps.length);
-        body.push(...faultOps);
+        const fault_ops=[...region,0xDF,0xF1];
+        const fault=CODE+body.length+(nm?0:fault_ops.length);
+        body.push(...fault_ops);
         if(nm) body.push(...snapshot);
-        else body.push(...(faultKind==="store"?[0xDD,0x1D]:faultKind==="load"?[0xDD,0x05]:[0xA1]),...u32(0xA00000));
+        else body.push(...(fault_kind==="store"?[0xDD,0x1D]:fault_kind==="load"?[0xDD,0x05]:[0xA1]),...u32(0xA00000));
         const a=await run(reference,body,data,true),b=await run(cached,body,data);
-        assert.deepEqual(b.bytes,a.bytes,nm?"#NM preserves first-instruction EIP and state":`#PF ${faultKind} sees precise cache and stack state`);
+        assert.deepEqual(b.bytes,a.bytes,nm?"#NM preserves first-instruction EIP and state":`#PF ${fault_kind} sees precise cache and stack state`);
         assert.equal(word(cached,OUT+400),fault,"precise fault EIP");
     }
     console.log("PASS: overflow/subnormal intermediates and precise #NM/#PF state");
@@ -248,8 +248,8 @@ try {
     helper.v86.cpu.wm.exports.set_x87_fast_math(false);
     const compatible=await run(helper,body,data);
     cached.v86.cpu.wm.exports.set_x87_fast_math(false);
-    let policyRecorder=new PerformanceRecorder(cached);policyRecorder.start();cached.run();await sleep(25);await cached.stop();
-    assert.equal(policyRecorder.stop().x87.jit_cache.accepted_regions,0,"warm native modules honor compatible arithmetic");
+    let policy_recorder=new PerformanceRecorder(cached);policy_recorder.start();cached.run();await sleep(25);await cached.stop();
+    assert.equal(policy_recorder.stop().x87.jit_cache.accepted_regions,0,"warm native modules honor compatible arithmetic");
     assert.deepEqual(Uint8Array.from(cached.read_memory(OUT,512)),compatible.bytes);
     helper.v86.cpu.wm.exports.set_x87_fast_math(true);
     cached.v86.cpu.wm.exports.set_x87_fast_math(true);
@@ -266,13 +266,13 @@ try {
     console.log("PASS: guard fallback, region bound, runtime switch, SMC between cases and save/restore");
     // Save while f64 is authoritative and no guest F80 observer has run.
     d.setFloat64(8,1,true);d.setFloat64(16,2,true);
-    const seedOnly=[...prefix(0x27F),0xD8,0xC1,0xFF,0x05,...u32(0x600),0xE9,...u32(-11)];
-    await run(cached,seedOnly,data);
-    const dirtySaved=await cached.save_state();
+    const seed_only=[...prefix(0x27F),0xD8,0xC1,0xFF,0x05,...u32(0x600),0xE9,...u32(-11)];
+    await run(cached,seed_only,data);
+    const dirty_saved=await cached.save_state();
     assert.equal(cached.v86.cpu.fpu_st[5*4+1]>>>0,0xC0000000,"save materializes 3.0 significand");
     assert.equal(cached.v86.cpu.fpu_st[5*4+2]&65535,0x4000,"save materializes 3.0 exponent");
     await run(cached,[...prefix(0x27F),0xD8,0xE0,...snapshot],data);
-    await cached.restore_state(dirtySaved);
+    await cached.restore_state(dirty_saved);
     assert.equal(BigInt.asUintN(64,cached.v86.cpu.wm.exports.fpu_store_m64_bits()),0x4008000000000000n,
         "restore discards newer shadow values and reads saved 3.0");
     console.log("PASS: host save materializes dirty f64 state and restore discards stale shadow values");
@@ -311,19 +311,19 @@ try {
             [0xD8,0xC1,0xD8,0xE1,0xD8,0xC9]).flat(),0xD8,0xD1,
             0xDD,0x15,...u32(OUT+256),0xFF,0x05,...u32(0x600)];
         loop.push(0xE9,...u32(-loop.length-5));
-        const persistentBody=[...seeded,...loop];
-        const oldPersistent=await run(baseline,persistentBody,data),newPersistent=await run(cached,persistentBody,data);
-        assert.deepEqual(newPersistent.bytes,oldPersistent.bytes,"persistent loop output agrees");
-        const persistentRates=[[],[]];
+        const persistent_body=[...seeded,...loop];
+        const old_persistent=await run(baseline,persistent_body,data),new_persistent=await run(cached,persistent_body,data);
+        assert.deepEqual(new_persistent.bytes,old_persistent.bytes,"persistent loop output agrees");
+        const persistent_rates=[[],[]];
         for(let round=0;round<7;round++) for(const mode of round&1?[1,0]:[0,1]) {
             const vm=vms[mode],start=performance.now(),count=word(vm,0x600);
             while(performance.now()-start<80) vm.v86.cpu.main_loop();
-            if(round>=2) persistentRates[mode].push(((word(vm,0x600)-count)>>>0)/(performance.now()-start));
+            if(round>=2) persistent_rates[mode].push(((word(vm,0x600)-count)>>>0)/(performance.now()-start));
         }
         console.log(JSON.stringify({benchmark:"persistent x87 backedge, unrecorded guest loop",
-            before_loops_per_ms:median(persistentRates[0]),after_loops_per_ms:median(persistentRates[1]),
-            speedup:median(persistentRates[1])/median(persistentRates[0]),
-            before_cache:oldPersistent.report.x87.jit_cache,after_cache:newPersistent.report.x87.jit_cache}));
+            before_loops_per_ms:median(persistent_rates[0]),after_loops_per_ms:median(persistent_rates[1]),
+            speedup:median(persistent_rates[1])/median(persistent_rates[0]),
+            before_cache:old_persistent.report.x87.jit_cache,after_cache:new_persistent.report.x87.jit_cache}));
 
     }
 } finally { for(const vm of machines) await vm.destroy(); }

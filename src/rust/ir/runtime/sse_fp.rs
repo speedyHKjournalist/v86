@@ -8,7 +8,8 @@ use super::continuation::ContinuationContext;
 unsafe fn finish(success: bool) -> u32 {
     if success {
         Outcome::Normal as u32
-    } else {
+    }
+    else {
         Outcome::ControlTransferred as u32
     }
 }
@@ -478,7 +479,8 @@ pub unsafe fn ir_sse_fp_mem_continue(
     }
     if before.epoch != u64::MAX && before == ContinuationContext::capture() {
         Outcome::Normal as u32
-    } else {
+    }
+    else {
         // A synchronous observer can reset the VM, remap code, alter execution
         // context or invalidate a compiled dependency. The completed operation
         // retires once, and the CPU remains authoritative at the cold boundary.
@@ -490,7 +492,8 @@ unsafe fn terminal(outcome: u32) -> u32 {
     if outcome == Outcome::Normal as u32 {
         *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);
         Outcome::Invalidated as u32
-    } else {
+    }
+    else {
         outcome
     }
 }

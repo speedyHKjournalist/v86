@@ -109,7 +109,8 @@ fn simd_immediate_contracts() {
         let result = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true);
         if bytes[0] == 0xF0 {
             assert!(result.is_err());
-        } else {
+        }
+        else {
             assert!(result
                 .unwrap()
                 .helpers

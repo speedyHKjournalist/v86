@@ -10,7 +10,8 @@ unsafe fn ring0() -> bool {
     if *gp::cpl != 0 {
         cpu::trigger_gp(0);
         false
-    } else {
+    }
+    else {
         true
     }
 }

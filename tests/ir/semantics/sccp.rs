@@ -39,7 +39,8 @@ fn diamond(a: u32, c: u32, forced: Option<bool>, parallel: bool) -> Region {
     let zero = b.constant(0, Type::I32);
     let condition = if let Some(value) = forced {
         b.constant(value as u32, Type::I1)
-    } else {
+    }
+    else {
         b.binary(Binary::Eq, input[7], zero)
     };
     let (taken, not_taken) = if parallel {
@@ -55,7 +56,8 @@ fn diamond(a: u32, c: u32, forced: Option<bool>, parallel: bool) -> Region {
                 args: vec![b.effect, y],
             },
         )
-    } else {
+    }
+    else {
         let left = b.region.block(false);
         let right = b.region.block(false);
         for (block, value) in [(left, a), (right, c)] {
@@ -246,7 +248,11 @@ fn equal_phi_literals_fold_flags_and_branch_without_rewriting_entry_state() {
     assert_eq!(stats.parameters, 1);
     assert_eq!(stats.branches, 1);
     assert_eq!(stats.unreachable, 1);
-    assert_eq!(conditions(&r), 1, "the input-dependent entry branch survives");
+    assert_eq!(
+        conditions(&r),
+        1,
+        "the input-dependent entry branch survives"
+    );
     let param = r.blocks[1].params[1];
     let state = r.blocks[1].entry_state.unwrap();
     assert_eq!(r.states[state.index()].gpr[0], param);
@@ -290,11 +296,7 @@ fn loop_carried_constants_widen_when_the_backedge_changes_them() {
         assert_eq!(analysis.values[count.index()], Lattice::Overdefined);
         assert_eq!(
             analysis.values[invariant.index()],
-            if changing {
-                Lattice::Overdefined
-            } else {
-                Lattice::Constant(7)
-            }
+            if changing { Lattice::Overdefined } else { Lattice::Constant(7) }
         );
         let stats = run(&mut r, DEFAULT_WORK_LIMIT).unwrap();
         assert_eq!(stats.branches, 0);
@@ -359,7 +361,8 @@ fn budget_exhaustion_is_atomic_even_at_the_commit_boundary() {
         let mut r = original.clone();
         if run(&mut r, limit).is_ok() {
             upper = limit;
-        } else {
+        }
+        else {
             assert_eq!(format!("{r:?}"), expected);
             lower = limit + 1;
         }
@@ -431,7 +434,10 @@ fn ordered_helpers_and_unused_arena_slots_remain_safe() {
             .find(|i| matches!(i.op, Op::CallHelper(_)))
             .unwrap();
         assert_eq!(format!("{after:?}"), format!("{call:?}"));
-        assert_eq!(format!("{:?}", r.states[after.state.unwrap().index()]), state);
+        assert_eq!(
+            format!("{:?}", r.states[after.state.unwrap().index()]),
+            state
+        );
         verify(&r).unwrap();
     }
 }
@@ -461,7 +467,8 @@ fn emit_conditional_constant_propagation_differentials() {
             let mut r = original.clone();
             if mode == "sccp" {
                 run(&mut r, DEFAULT_WORK_LIMIT).unwrap();
-            } else if mode == "pipeline" {
+            }
+            else if mode == "pipeline" {
                 passes::run(&mut r, PassConfig::default()).unwrap();
             }
             verify(&r).unwrap();
@@ -586,9 +593,7 @@ fn integer_phi_widths_emit_independent_arithmetic_oracles() {
         for op in ops {
             for (a, rhs) in [(0, 0), (1, 1), (mask, mask), (sign, 63 & mask)] {
                 let id = manifest.len();
-                manifest.push(format!(
-                    "[{},\"{:?}\",\"{}\",\"{}\"]", bits, op, a, rhs
-                ));
+                manifest.push(format!("[{},\"{:?}\",\"{}\",\"{}\"]", bits, op, a, rhs));
                 for optimized in [false, true] {
                     let mut r = width_phi(ty, a, rhs, op);
                     if optimized {
@@ -602,5 +607,9 @@ fn integer_phi_widths_emit_independent_arithmetic_oracles() {
         }
     }
     assert_eq!(manifest.len(), 240);
-    std::fs::write("build/ir-sccp/widths.json", format!("[{}]", manifest.join(","))).unwrap();
+    std::fs::write(
+        "build/ir-sccp/widths.json",
+        format!("[{}]", manifest.join(",")),
+    )
+    .unwrap();
 }

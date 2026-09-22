@@ -59,7 +59,11 @@ pub fn lift_cpu_with_rep_budget(
 /// Compact CFG fragments retain the original per-instruction budget checks,
 /// without materializing a separate phi frame and block for each instruction.
 pub(super) fn lift_cpu_with_polls(
-    bytes: &[u8], pc: GuestEip, linear: LinearAddress, default_32: bool, rep_budget: u32,
+    bytes: &[u8],
+    pc: GuestEip,
+    linear: LinearAddress,
+    default_32: bool,
+    rep_budget: u32,
 ) -> Result<Region, CompileError> {
     lift_inner(bytes, pc, linear, default_32, true, rep_budget, true)
 }
@@ -95,8 +99,13 @@ fn lift_inner(
         if instruction_polls && count != 0 {
             let state = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
             b.region.states[state.index()].resume = ResumeKind::BeforeInstruction;
-            b.effect = b.region.append(b.block, Op::PollBudget, vec![b.effect],
-                &[Type::Effect], Some(state))[0];
+            b.effect = b.region.append(
+                b.block,
+                Op::PollBudget,
+                vec![b.effect],
+                &[Type::Effect],
+                Some(state),
+            )[0];
         }
         offset += i.length as usize;
         count += 1;
@@ -126,7 +135,8 @@ fn lift_inner(
                     effective_offset(&mut b, &ea),
                     b.constant(ea.segment as u32, Type::I32),
                 )
-            } else {
+            }
+            else {
                 (b.constant(0, Type::I32), b.constant(u32::MAX, Type::I32))
             };
             super::adapters::call(
@@ -171,17 +181,23 @@ fn lift_inner(
             let moves = super::simd_moves::supports(&i);
             if moves {
                 super::simd_moves::lift(&mut b, &i, count);
-            } else if super::simd_masked::supports(&i) {
+            }
+            else if super::simd_masked::supports(&i) {
                 super::simd_masked::lift(&mut b, &i, count);
-            } else if super::simd_lane::supports(&i) {
+            }
+            else if super::simd_lane::supports(&i) {
                 super::simd_lane::lift(&mut b, &i, count);
-            } else if super::simd_transfer::supports(&i) {
+            }
+            else if super::simd_transfer::supports(&i) {
                 super::simd_transfer::lift(&mut b, &i, count);
-            } else if super::simd_shuffle::supports(&i) {
+            }
+            else if super::simd_shuffle::supports(&i) {
                 super::simd_shuffle::lift(&mut b, &i, count);
-            } else if super::simd_immediate::supports(&i) {
+            }
+            else if super::simd_immediate::supports(&i) {
                 super::simd_immediate::lift(&mut b, &i, count);
-            } else {
+            }
+            else {
                 super::simd_integer::lift(&mut b, &i, count);
             }
             // Native same-page vector stores may continue under the MIR RAM
@@ -351,7 +367,9 @@ fn lift_inner(
                 ));
             }
             super::cpu_system::lift(&mut b, &i, count);
-            if i.encoding.opcode != 0xFA { return Ok(b.region); }
+            if i.encoding.opcode != 0xFA {
+                return Ok(b.region);
+            }
             if offset == bytes.len() {
                 let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
                 b.region.terminate(b.block, Terminator::Exit(map));
@@ -366,7 +384,9 @@ fn lift_inner(
                 ));
             }
             super::cpu_info::lift(&mut b, &i, count);
-            if !continuing { return Ok(b.region); }
+            if !continuing {
+                return Ok(b.region);
+            }
             if offset == bytes.len() {
                 let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
                 b.region.terminate(b.block, Terminator::Exit(map));
@@ -390,7 +410,9 @@ fn lift_inner(
                 ));
             }
             super::io::lift(&mut b, &i, count)?;
-            if !continuing { return Ok(b.region); }
+            if !continuing {
+                return Ok(b.region);
+            }
             if offset == bytes.len() {
                 let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
                 b.region.terminate(b.block, Terminator::Exit(map));
@@ -564,7 +586,8 @@ fn lift_inner(
                 let value = b.read(rm, src_width);
                 let value = if src_width == i.operand_size {
                     value
-                } else {
+                }
+                else {
                     b.node(
                         Op::Extend {
                             signed: op & 8 != 0,
@@ -601,7 +624,8 @@ fn lift_inner(
             0x40..=0x4F | 0xFE | 0xFF if op < 0xFE || reg < 2 => {
                 let (dst, width, dec) = if op < 0xFE {
                     (op as u8 & 7, i.operand_size, op >= 0x48)
-                } else {
+                }
+                else {
                     (rm, width, reg == 1)
                 };
                 let carry = b.flags.arithmetic[0];
@@ -617,7 +641,8 @@ fn lift_inner(
                 let value = if reg == 2 {
                     let ones = b.constant(u32::MAX, width_type(width));
                     b.binary(Binary::Xor, a, ones)
-                } else {
+                }
+                else {
                     let zero = b.constant(0, width_type(width));
                     b.arithmetic(5, zero, a)
                 };
@@ -628,7 +653,8 @@ fn lift_inner(
                 let ty = width_type(width);
                 let (dst, a, source) = if op & 7 >= 4 {
                     (0, b.read(0, width), b.constant(i.immediate.unwrap(), ty))
-                } else {
+                }
+                else {
                     let (dst, src) = if op & 2 == 0 { (rm, reg) } else { (reg, rm) };
                     (dst, b.read(dst, width), b.read(src, width))
                 };
@@ -648,7 +674,8 @@ fn lift_inner(
             0x84 | 0x85 | 0xA8 | 0xA9 | 0xF6 | 0xF7 if op < 0xF6 || reg <= 1 => {
                 let (a, source) = if op == 0x84 || op == 0x85 {
                     (b.read(rm, width), b.read(reg, width))
-                } else {
+                }
+                else {
                     (
                         b.read(if op < 0xF6 { 0 } else { rm }, width),
                         b.constant(i.immediate.unwrap(), width_type(width)),
@@ -705,13 +732,17 @@ fn memory_instruction(
     let extended = matches!(op, 0x0FB6 | 0x0FB7 | 0x0FBE | 0x0FBF);
     let width = if (0x0F90..=0x0F9F).contains(&op) {
         8
-    } else if (0x0F40..=0x0F4F).contains(&op) {
+    }
+    else if (0x0F40..=0x0F4F).contains(&op) {
         i.operand_size
-    } else if op & 1 == 0 {
+    }
+    else if op & 1 == 0 {
         8
-    } else if extended {
+    }
+    else if extended {
         16
-    } else {
+    }
+    else {
         i.operand_size
     };
     let ty = width_type(width);
@@ -720,13 +751,16 @@ fn memory_instruction(
         let value = if op > 255 {
             let flag = b.condition(op as u8 & 15);
             b.node(Op::Extend { signed: false }, vec![flag], Type::I8)
-        } else if op >= 0xC6 {
+        }
+        else if op >= 0xC6 {
             b.constant(i.immediate.unwrap(), ty)
-        } else {
+        }
+        else {
             b.read(reg, width)
         };
         memory_store(b, address, value, width, map, i, count, false);
-    } else if matches!(op, 0x8A | 0x8B) || extended || (0x0F40..=0x0F4F).contains(&op) {
+    }
+    else if matches!(op, 0x8A | 0x8B) || extended || (0x0F40..=0x0F4F).contains(&op) {
         let (value, _) = memory_read(b, address, width, map, false);
         let value = if extended && width != i.operand_size {
             b.node(
@@ -736,15 +770,18 @@ fn memory_instruction(
                 vec![value],
                 width_type(i.operand_size),
             )
-        } else if (0x0F40..=0x0F4F).contains(&op) {
+        }
+        else if (0x0F40..=0x0F4F).contains(&op) {
             let condition = b.condition(op as u8 & 15);
             let old = b.read(reg, width);
             b.node(Op::Select, vec![condition, value, old], ty)
-        } else {
+        }
+        else {
             value
         };
         b.write(reg, if extended { i.operand_size } else { width }, value);
-    } else {
+    }
+    else {
         let immediate = matches!(op, 0x80 | 0x81 | 0x82 | 0x83);
         let alu_group = if alu { (op >> 3) as u8 } else { group };
         let memory_destination = unary || immediate || alu && op & 2 == 0;
@@ -758,17 +795,21 @@ fn memory_instruction(
                 b.flags.arithmetic[0] = carry;
                 b.preserve_incdec_backing(carry, group == 1);
                 value
-            } else if group == 2 {
+            }
+            else if group == 2 {
                 let ones = b.constant(u32::MAX, ty);
                 b.binary(Binary::Xor, memory, ones)
-            } else {
+            }
+            else {
                 let zero = b.constant(0, ty);
                 b.arithmetic(5, zero, memory)
             }
-        } else {
+        }
+        else {
             let other = if immediate || matches!(op, 0xF6 | 0xF7) {
                 b.constant(i.immediate.unwrap(), ty)
-            } else {
+            }
+            else {
                 b.read(reg, width)
             };
             let (a, source) =
@@ -777,7 +818,8 @@ fn memory_instruction(
         };
         if rmw {
             memory_store(b, ticket.unwrap(), result, width, map, i, count, true);
-        } else if !test && alu_group != 7 {
+        }
+        else if !test && alu_group != 7 {
             b.write(reg, width, result);
         }
     }
@@ -792,7 +834,8 @@ pub(super) fn memory_read(
 ) -> (ValueId, Option<ValueId>) {
     let types = if rmw {
         vec![width_type(width), Type::RmwTicket, Type::Effect]
-    } else {
+    }
+    else {
         vec![width_type(width), Type::Effect]
     };
     let values = b.region.append(
@@ -802,7 +845,8 @@ pub(super) fn memory_read(
                 bytes: width / 8,
                 order: RmwOrder::Plain,
             }
-        } else {
+        }
+        else {
             Op::GuestLoad { bytes: width / 8 }
         },
         vec![address, b.effect],
@@ -824,7 +868,8 @@ pub(super) fn memory_store(
 ) {
     let order = if i.prefixes.lock || matches!(i.encoding.opcode, 0x86 | 0x87) {
         RmwOrder::Locked
-    } else {
+    }
+    else {
         RmwOrder::Plain
     };
     if rmw {
@@ -847,7 +892,8 @@ pub(super) fn memory_store(
                 bytes: width / 8,
                 order,
             }
-        } else {
+        }
+        else {
             Op::GuestStore { bytes: width / 8 }
         },
         vec![address, value, b.effect],

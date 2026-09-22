@@ -15,7 +15,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     let op = i.encoding.opcode;
     let condition = if matches!(op, 0xE9 | 0xEB) {
         None
-    } else if matches!(op, 0xE0..=0xE3) {
+    }
+    else if matches!(op, 0xE0..=0xE3) {
         let mut counter = b.read(1, i.address_size);
         if op != 0xE3 {
             let one = b.constant(1, b.ty(counter));
@@ -27,22 +28,26 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         let is_zero = b.binary(Binary::Eq, counter, zero);
         let condition = if op == 0xE3 {
             is_zero
-        } else {
+        }
+        else {
             let one = b.constant(1, Type::I1);
             let nonzero = b.binary(Binary::Xor, is_zero, one);
             if op == 0xE2 {
                 nonzero
-            } else {
+            }
+            else {
                 let zf = if op == 0xE1 {
                     b.flags.arithmetic[3]
-                } else {
+                }
+                else {
                     b.binary(Binary::Xor, b.flags.arithmetic[3], one)
                 };
                 b.binary(Binary::And, nonzero, zf)
             }
         };
         Some(condition)
-    } else {
+    }
+    else {
         Some(b.condition(op as u8 & 15))
     };
     let target = i.next_pc.0.wrapping_add(i.immediate.unwrap());
@@ -72,7 +77,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
                 },
             },
         );
-    } else {
+    }
+    else {
         b.region.terminate(b.block, Terminator::Exit(taken));
     }
 }

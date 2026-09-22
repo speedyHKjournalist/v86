@@ -33,7 +33,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             vec![destination, zero],
             Type::V128,
         )
-    } else {
+    }
+    else {
         let opcode = match i.encoding.group {
             2 => 0xD1,
             4 => 0xE1,

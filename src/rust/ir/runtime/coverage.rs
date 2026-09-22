@@ -5,7 +5,8 @@ unsafe fn finish(success: bool) -> u32 {
     if success {
         *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);
         Outcome::Invalidated as u32
-    } else {
+    }
+    else {
         Outcome::ControlTransferred as u32
     }
 }
@@ -56,7 +57,8 @@ unsafe fn arpl_allowed() -> bool {
     if !*gp::protected_mode || cpu::vm86_mode() {
         cpu::trigger_ud();
         false
-    } else {
+    }
+    else {
         true
     }
 }
@@ -77,7 +79,8 @@ pub unsafe fn ir_arpl_reg(destination: u32, source: u32) -> u32 {
 pub unsafe fn ir_arpl_mem(offset: u32, segment: u32, source: u32) -> u32 {
     assert!(!cpu::in_jit && source < 8);
     // Baseline ModRM resolves a segment before ARPL checks protected/vm86 mode.
-    let Ok(addr) = address(offset, segment) else {
+    let Ok(addr) = address(offset, segment)
+    else {
         return finish(false);
     };
     if !arpl_allowed() {
@@ -93,7 +96,8 @@ pub unsafe fn ir_arpl_mem(offset: u32, segment: u32, source: u32) -> u32 {
 #[no_mangle]
 pub unsafe fn ir_movnti(offset: u32, segment: u32, source: u32) -> u32 {
     assert!(!cpu::in_jit && source < 8);
-    let Ok(addr) = address(offset, segment) else {
+    let Ok(addr) = address(offset, segment)
+    else {
         return finish(false);
     };
     finish(cpu::safe_write32(addr, cpu::read_reg32(source as i32)).is_ok())
@@ -103,7 +107,8 @@ pub unsafe fn ir_rdrand(destination: u32, width: u32) -> u32 {
     assert!(!cpu::in_jit && destination < 8 && matches!(width, 16 | 32));
     if width == 16 {
         instructions_0f::instr16_0FC7_6_reg(destination as i32);
-    } else {
+    }
+    else {
         instructions_0f::instr32_0FC7_6_reg(destination as i32);
     }
     finish(true)

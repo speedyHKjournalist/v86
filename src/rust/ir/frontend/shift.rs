@@ -20,13 +20,12 @@ pub fn supports(i: &DecodedInstruction) -> bool {
 fn wide(b: &mut IntegerBuilder, value: ValueId, signed: bool) -> ValueId {
     if b.ty(value) == Type::I32 {
         value
-    } else {
+    }
+    else {
         b.node(Op::Extend { signed }, vec![value], Type::I32)
     }
 }
-fn number(b: &mut IntegerBuilder, value: u32) -> ValueId {
-    b.constant(value, Type::I32)
-}
+fn number(b: &mut IntegerBuilder, value: u32) -> ValueId { b.constant(value, Type::I32) }
 fn with_constant(b: &mut IntegerBuilder, op: Binary, a: ValueId, c: u32) -> ValueId {
     let c = number(b, c);
     b.binary(op, a, c)
@@ -112,22 +111,26 @@ fn calculate(
             let inverse = from_constant(b, width as u32, Binary::Sub, rotate);
             raw = if group == 0 {
                 combine(b, a, rotate, a, inverse)
-            } else {
+            }
+            else {
                 combine(b, a, inverse, a, rotate)
             };
             cf = b.extract(raw, if group == 0 { 0 } else { width - 1 }, Type::I1);
-        } else if width < 32 {
+        }
+        else if width < 32 {
             let carry = wide(b, old[0], false);
             let carry = with_constant(b, Binary::Shl, carry, width as u32);
             let packed = b.binary(Binary::Or, a, carry);
             let inverse = from_constant(b, width as u32 + 1, Binary::Sub, n);
             raw = if group == 2 {
                 combine(b, packed, n, packed, inverse)
-            } else {
+            }
+            else {
                 combine(b, packed, inverse, packed, n)
             };
             cf = b.extract(raw, width, Type::I1);
-        } else {
+        }
+        else {
             let carry = wide(b, old[0], false);
             let inverse = from_constant(b, 32, Binary::Sub, n);
             let through = from_constant(b, 33, Binary::Sub, n);
@@ -154,14 +157,16 @@ fn calculate(
         of = b.binary(Binary::Xor, high, other);
         b.flags.arithmetic[0] = cf;
         b.flags.arithmetic[5] = of;
-    } else if double {
+    }
+    else if double {
         let source = b.read(group, width);
         let source = wide(b, source, false);
         let left = i.encoding.opcode & 8 == 0;
         let inverse = from_constant(b, width as u32, Binary::Sub, n);
         let first = if left {
             combine(b, a, n, source, inverse)
-        } else {
+        }
+        else {
             combine(b, source, inverse, a, n)
         };
         let carry = b.binary(Binary::Shr, a, if left { inverse } else { previous });
@@ -171,7 +176,8 @@ fn calculate(
             let inverse = from_constant(b, 32, Binary::Sub, n);
             let second = if left {
                 combine(b, source, excess, a, inverse)
-            } else {
+            }
+            else {
                 combine(b, a, inverse, source, excess)
             };
             let carry_count = if left { inverse } else { with_constant(b, Binary::Sub, n, 17) };
@@ -180,7 +186,8 @@ fn calculate(
             let large = from_constant(b, 16, Binary::Ult, n);
             raw = select(b, large, second, first);
             cf = select(b, large, second_cf, first_cf);
-        } else {
+        }
+        else {
             raw = first;
             cf = first_cf;
         }
@@ -191,14 +198,17 @@ fn calculate(
                 let one = number(b, 1);
                 let one = b.binary(Binary::Eq, n, one);
                 b.binary(Binary::And, one, overflow)
-            } else {
+            }
+            else {
                 overflow
             };
-        } else {
+        }
+        else {
             let old_high = b.extract(a, width - 1, Type::I1);
             of = b.binary(Binary::Xor, old_high, high);
         }
-    } else {
+    }
+    else {
         match group {
             4 | 6 => {
                 raw = b.binary(Binary::Shl, a, n);
@@ -206,7 +216,8 @@ fn calculate(
                     let inverse = from_constant(b, 32, Binary::Sub, n);
                     let carry = b.binary(Binary::Shr, a, inverse);
                     b.extract(carry, 0, Type::I1)
-                } else {
+                }
+                else {
                     b.extract(raw, width, Type::I1)
                 };
                 let high = b.extract(raw, width - 1, Type::I1);
@@ -220,7 +231,8 @@ fn calculate(
                 cf = b.extract(carry, 0, Type::I1);
                 of = if group == 7 {
                     b.constant(0, Type::I1)
-                } else {
+                }
+                else {
                     b.extract(a, width - 1, Type::I1)
                 };
             },
@@ -243,13 +255,15 @@ fn calculate(
     ));
     if !double && group < 4 {
         b.preserve_rotate_backing(unchanged, cf, of);
-    } else {
+    }
+    else {
         b.preserve_shift_backing(unchanged, raw, cf, of, width);
     }
     let result = select(b, unchanged, a, result);
     if width == 32 {
         result
-    } else {
+    }
+    else {
         b.node(Op::Truncate, vec![result], width_type(width))
     }
 }
@@ -258,9 +272,11 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, committed: u32) {
     let width = if op < 256 && op & 1 == 0 { 8 } else { i.operand_size };
     let count = if matches!(op, 0xD0 | 0xD1) {
         number(b, 1)
-    } else if let Some(count) = i.immediate {
+    }
+    else if let Some(count) = i.immediate {
         number(b, count)
-    } else {
+    }
+    else {
         let cl = b.read(1, 8);
         wide(b, cl, false)
     };
@@ -273,7 +289,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, committed: u32) {
         let (value, ticket) = memory_read(b, address, width, map, true);
         let result = calculate(b, i, value, count, width);
         memory_store(b, ticket.unwrap(), result, width, map, i, committed, true);
-    } else {
+    }
+    else {
         let reg = i.modrm.unwrap() & 7;
         let value = b.read(reg, width);
         let result = calculate(b, i, value, count, width);

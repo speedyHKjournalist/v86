@@ -135,7 +135,8 @@ fn identity(r: &Region, i: &Instruction) -> Option<ValueId> {
                 && scalar.args[0] == i.args[0]
             {
                 Some(i.args[0])
-            } else {
+            }
+            else {
                 None
             }
         },
@@ -143,7 +144,8 @@ fn identity(r: &Region, i: &Instruction) -> Option<ValueId> {
             let vector = definition(r, i.args[0])?;
             if pure(vector) && vector.op == (Op::VectorReplace { bits, lane }) {
                 Some(vector.args[1])
-            } else {
+            }
+            else {
                 None
             }
         },
@@ -167,7 +169,8 @@ fn shuffle(r: &Region, i: &Instruction, mask: [u8; 16]) -> Option<(Vec<ValueId>,
         }
         let position = if let Some(p) = leaves.iter().position(|&v| v == source) {
             p
-        } else {
+        }
+        else {
             leaves.push(source);
             leaves.len() - 1
         };
@@ -233,7 +236,8 @@ pub fn run(region: &mut Region, limit: usize) -> Result<Stats, String> {
                 if let Some((args, next)) = shuffle(&draft, &inst, mask) {
                     if next.iter().enumerate().all(|(n, &v)| usize::from(v) == n) {
                         replacement = Some(args[0]);
-                    } else if args != inst.args || next != mask {
+                    }
+                    else if args != inst.args || next != mask {
                         inst.args = args;
                         inst.op = Op::VectorShuffle(next);
                         draft.instructions[id.index()] = inst.clone();

@@ -58,7 +58,8 @@ fn memory_plans_capture_width_guard_abi_and_completion() {
                 plan.call.signature.results,
                 vec![if name == "ir_memory_read" || name == "ir_rmw_read" {
                     WasmType::I64
-                } else {
+                }
+                else {
                     WasmType::I32
                 }]
             );
@@ -125,7 +126,8 @@ fn emission_rejects_stale_or_weakened_memory_plans() {
             9 => {
                 plan.before = if let NativeMemory::VectorStore { commit, .. } = plan.native {
                     commit
-                } else {
+                }
+                else {
                     unreachable!()
                 };
             },

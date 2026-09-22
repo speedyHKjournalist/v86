@@ -19,7 +19,8 @@ pub fn supports(i: &DecodedInstruction) -> bool {
 fn wide(b: &mut IntegerBuilder, value: ValueId, signed: bool) -> ValueId {
     if b.ty(value) == Type::I32 {
         value
-    } else {
+    }
+    else {
         b.node(Op::Extend { signed }, vec![value], Type::I32)
     }
 }
@@ -49,18 +50,22 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
     let scan = matches!(op, 0x0FBC | 0x0FBD | 0xF30FB8);
     let operation = if scan {
         0
-    } else if op == 0x0FBA {
+    }
+    else if op == 0x0FBA {
         group - 4
-    } else {
+    }
+    else {
         ((op >> 3) & 3) as u8
     };
     // 0FA3/AB/B3/BB => test/set/reset/complement respectively.
     let modifies = !scan && operation != 0;
     let mut bit = if scan {
         b.constant(0, Type::I32)
-    } else if let Some(imm) = i.immediate {
+    }
+    else if let Some(imm) = i.immediate {
         b.constant(imm & (width as u32 - 1), Type::I32)
-    } else {
+    }
+    else {
         let index = b.read(group, width);
         wide(b, index, i.ea.is_some())
     };
@@ -80,7 +85,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         let (value, t) = memory_read(b, address, if scan { width } else { 8 }, map, modifies);
         ticket = t;
         wide(b, value, false)
-    } else {
+    }
+    else {
         if !scan {
             bit = constant_op(b, Binary::And, bit, width as u32 - 1);
         }
@@ -92,10 +98,12 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         let is_zero = b.binary(Binary::Eq, value, zero);
         let result = if op == 0xF30FB8 {
             b.node(Op::PopulationCount, vec![value], Type::I32)
-        } else {
+        }
+        else {
             let raw = if op == 0x0FBC {
                 b.node(Op::CountTrailingZeros, vec![value], Type::I32)
-            } else {
+            }
+            else {
                 let clz = b.node(Op::CountLeadingZeros, vec![value], Type::I32);
                 let high = b.constant(31, Type::I32);
                 b.binary(Binary::Sub, high, clz)
@@ -107,7 +115,8 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         if op == 0xF30FB8 {
             b.flags.arithmetic = [clear; 6];
             b.flags.arithmetic[3] = is_zero;
-        } else {
+        }
+        else {
             let last = b.flags.last_op1.unwrap();
             let other = b.binary(Binary::Sub, result, last);
             let a = b.binary(Binary::Xor, last, result);
@@ -120,19 +129,22 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
         b.flags.zero_is_lazy = Some(clear);
         if op == 0xF30FB8 {
             b.preserve_popcnt_backing(is_zero);
-        } else {
+        }
+        else {
             b.preserve_scan_backing(result, is_zero, width);
         }
         let result =
             if width == 32 { result } else { b.node(Op::Truncate, vec![result], Type::I16) };
         let result = if op == 0xF30FB8 {
             result
-        } else {
+        }
+        else {
             let old = b.read(group, width);
             b.node(Op::Select, vec![is_zero, old, result], width_type(width))
         };
         b.write(group, width, result);
-    } else {
+    }
+    else {
         let shifted = b.binary(Binary::Shr, value, bit);
         let carry = b.extract(shifted, 0, Type::I1);
         b.flags.arithmetic[0] = carry;
@@ -152,12 +164,14 @@ pub fn lift(b: &mut IntegerBuilder, i: &DecodedInstruction, count: u32) {
             let write_width = if i.ea.is_some() { 8 } else { width };
             let result = if write_width == 32 {
                 result
-            } else {
+            }
+            else {
                 b.node(Op::Truncate, vec![result], width_type(write_width))
             };
             if let Some(ticket) = ticket {
                 memory_store(b, ticket, result, 8, map, i, count, true);
-            } else {
+            }
+            else {
                 b.write(rm, width, result);
             }
         }

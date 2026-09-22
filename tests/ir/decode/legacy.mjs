@@ -9,7 +9,7 @@ try {
     const records = fs.readFileSync("build/ir-decode/legacy-forms.bin");
     const cpu = vm.v86.cpu, compare = cpu.wm.exports.ir_test_compare_analysis, address = 0x300040;
     assert.equal(typeof compare, "function"); assert.equal(records.length % 17, 0);
-    const savedIp = cpu.instruction_pointer[0];
+    const saved_ip = cpu.instruction_pointer[0];
     const snapshot = cpu.wm.exports.ir_test_snapshot_length;
     assert.equal(snapshot(address), 15);
     assert.equal(snapshot(0x300FFF), 1);
@@ -17,7 +17,7 @@ try {
     assert.equal(snapshot(32 << 20), 0, "unallocated physical RAM is never read");
     cpu.mem8[0x300FFF] = 0xB8;
     assert.equal(cpu.wm.exports.ir_test_snapshot_decode(0x300FFF), 2, "missing next page is compile stop");
-    assert.equal(cpu.instruction_pointer[0], savedIp, "snapshot/decode does not advance real CPU EIP");
+    assert.equal(cpu.instruction_pointer[0], saved_ip, "snapshot/decode does not advance real CPU EIP");
     for(let offset = 0; offset < records.length; offset += 17) {
         const mode = records[offset], length = records[offset + 1], bytes = records.subarray(offset + 2, offset + 17);
         cpu.mem8.set(bytes, address);
