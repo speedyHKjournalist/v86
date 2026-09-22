@@ -46,7 +46,7 @@ impl Default for PassConfig {
     }
 }
 impl PassConfig {
-    pub const MASK: u32 = (1 << 17) - 1;
+    pub const MASK: u32 = (1 << 18) - 1;
     pub fn enabled(&self, bit: u32) -> bool { self.disabled & (1 << bit) == 0 }
     pub fn disable(mut self, mask: u32) -> Self {
         self.disabled |= mask;
@@ -90,6 +90,7 @@ pub struct PassStats {
     pub loop_hoisted: usize,
     pub ram_forwarded: usize,
     pub ram_guards_reused: usize,
+    pub budget_batches: usize,
     pub state_writes_elided: usize,
     pub helper_states_elided: usize,
     pub cpu_values_elided: usize,

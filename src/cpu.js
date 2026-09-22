@@ -71,7 +71,7 @@ export function CPU(bus, wm, stop_idling)
     this.legacy_compile_requests = 0;
     this.ir_region_budget = null;
     this.ir_pass_names = ["prune", "merge", "phis", "copy", "fold", "flags", "helper_state", "gvn", "dce",
-        "licm", "mir_fold", "stack", "allocation", "state_elision", "ram_loop", "ram_forward", "ram_guard"];
+        "licm", "mir_fold", "stack", "allocation", "state_elision", "ram_loop", "ram_forward", "ram_guard", "budget_batch"];
     this.wasm_patch();
     this.create_jit_imports();
 

@@ -54,7 +54,7 @@ struct Scheduler {
     credit: bool,
     scan_credit: bool,
     interpreted_probe: bool,
-    stats: [u32; 22],
+    stats: [u32; 24],
 }
 static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
     debug: crate::ir::debug::Config { verify: crate::ir::debug::VerifyMode::Debug, dump: crate::ir::debug::DumpMode::Off },
@@ -80,7 +80,7 @@ static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
     credit: false,
     scan_credit: false,
     interpreted_probe: false,
-    stats: [0; 22],
+    stats: [0; 24],
 });
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -330,6 +330,15 @@ pub unsafe fn visit() -> bool {
         if !s.config.enabled || s.pending.is_some() {
             return false;
         }
+        // There is no work requiring a quiescence check once compilation or
+        // scan credit is exhausted. Ready artifacts have a separate publication
+        // budget and MUST bypass this rejection (including sibling entries).
+        // This is only a negative work hint, never execution/publication authority.
+        if s.ready.is_empty() && (!s.credit || !s.scan_credit && !s.interpreted_probe) {
+            s.stats[22] = s.stats[22].wrapping_add(1);
+            return false;
+        }
+        s.stats[23] = s.stats[23].wrapping_add(1);
     }
     if !cold() {
         return false;
@@ -637,6 +646,8 @@ pub fn ir_auto_stat(field: u32) -> u32 {
         24 => u32::from(s.hot_filter),
         25 => s.stats[20], // compiled shared functions (publication counted separately)
         26 => s.stats[21], // additional entries supplied by shared functions
+        27 => s.stats[22], // idle visits rejected before cache/jit quiescence checks
+        28 => s.stats[23], // visits requiring the original cold-work path
         _ => 0,
     }
 }

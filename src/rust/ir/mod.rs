@@ -233,3 +233,7 @@ mod sti_tests;
 mod invalid_tests;
 
 pub mod debug;
+
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/budget_batch.rs"]
+mod budget_batch_tests;

@@ -221,7 +221,7 @@ fn simd_move_state_and_types() {
     .unwrap();
     assert_eq!(
         r.states.last().unwrap().committed_instructions,
-        1,
-        "store truncates before following instruction"
+        2,
+        "vector store retains following instruction; runtime code proof controls continuation"
     );
 }

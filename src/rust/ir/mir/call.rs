@@ -82,6 +82,25 @@ pub struct Delivery {
     pub name: String,
     pub signature: Signature,
 }
+/// Audited ordinary IEEE arithmetic. This is a MIR choice, not an opcode
+/// decision in the emitter; memory operands and conversions keep their helpers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeFp {
+    pub opcode: u32,
+    pub double: bool,
+    pub scalar: bool,
+}
+impl NativeFp {
+    fn from_guest(opcode: u64) -> Option<Self> {
+        let (double, scalar) = match opcode >> 16 {
+            0 => (false, false), 0x66 => (true, false),
+            0xF3 => (false, true), 0xF2 => (true, true), _ => return None,
+        };
+        if opcode & 0xFF00 != 0x0F00 { return None; }
+        let operation = match opcode & 255 { 0x58 => 0, 0x5C => 1, 0x59 => 2, 0x5E => 3, _ => return None };
+        Some(Self { opcode: if double { 0xF0 } else { 0xE4 } + operation, double, scalar })
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallPlan {
     pub helper: HelperId,
@@ -93,8 +112,8 @@ pub struct CallPlan {
     pub staged: Vec<ResultSlot>,
     pub reload: Vec<(ValueId, super::value::Reading)>,
     pub xmm_observation: Option<(u8, u8)>,
-    /// Finite packed-single fast path; exceptional values retain scalar helper semantics.
-    pub native_fp: Option<u32>,
+    /// Non-NaN-result arithmetic; active NaN lanes retain scalar helper semantics.
+    pub native_fp: Option<NativeFp>,
     pub delivery: Option<Delivery>,
     pub exits: Vec<u32>,
     pub normal: Option<u32>,
@@ -125,8 +144,7 @@ pub fn lower(
     let native_fp = xmm_observation.and_then(|_| {
         let crate::ir::hir::Definition::Instruction(id, 0) = region.values[inst.args[0].index()].definition else { return None; };
         match region.instructions[id.index()].op {
-            Op::Const(0x0F58) => Some(0xE4), Op::Const(0x0F59) => Some(0xE6),
-            Op::Const(0x0F5C) => Some(0xE5), Op::Const(0x0F5E) => Some(0xE7), _ => None,
+            Op::Const(opcode) => NativeFp::from_guest(opcode), _ => None,
         }
     });
     Some(CallPlan {

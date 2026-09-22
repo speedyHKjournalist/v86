@@ -121,7 +121,7 @@ export async function backend_scenarios(V86, options, log = console.log)
         log("PASS: public dump/verify, each stage, bounded copied Wasm, clear, restore, verified Tier 1/2");
 
         for(const level of [0, 1, 2]) {
-            const disabledPasses = level === 2 ? ["licm", "mir_fold", "allocation", "ram_forward"] : [];
+            const disabledPasses = level === 2 ? ["licm", "mir_fold", "allocation", "ram_forward", "budget_batch"] : [];
             await create({jit_backend:"ir", ir_region_budget:budget, ir_opt_level:level, ir_passes_disabled:disabledPasses});
             const policy = await info();
             check(policy.ir_opt_level === level && JSON.stringify(policy.ir_passes_disabled) === JSON.stringify(disabledPasses), "optimization policy reached CPU");

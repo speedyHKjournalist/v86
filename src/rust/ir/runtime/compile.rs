@@ -407,6 +407,10 @@ fn compile_lifted(
         if config.passes.enabled(16) { let _clock = CompileScope::new(19); passes.ram_guards_reused =
             mir.reuse_ram_guards(crate::ir::mir::forwarding::DEFAULT_WORK_LIMIT)?; config.passes.debug.check(&mir, false)?; }
     }
+    if optimize_machine && cpu && config.passes.enabled(17) {
+        passes.budget_batches = mir.batch_pure_budget_polls(crate::ir::mir::budget::DEFAULT_WORK_LIMIT)?;
+        config.passes.debug.check(&mir, false)?;
+    }
     config.passes.debug.check(&mir, true)?;
     let mir_dump = if config.passes.debug.mir() { crate::ir::dump::mir(&mir) } else { String::new() };
     drop(machine_clock);
