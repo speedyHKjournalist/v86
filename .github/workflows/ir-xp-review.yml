@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       disk_url:
-        description: 'Authorized HTTPS URL of a zstd-compressed XP system disk'
+        description: 'Authorized public HTTPS URL of a zstd-compressed XP disk; do not include private credentials'
         required: true
         type: string
       disk_sha256:
@@ -72,7 +72,7 @@ jobs:
       - name: Fetch verified disk into ephemeral runner only
         run: |
           set -euo pipefail
-          # No guest data is uploaded. Signed/private URLs are not logged.
+          # Guest disk contents are not uploaded. Use public URLs: workflow inputs may appear in Actions logs.
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 2 --connect-timeout 20 --max-time 360 --max-filesize 8589934592 "$DISK_URL" -o /tmp/xp-system.img.zst
           zstd -d /tmp/xp-system.img.zst -o /tmp/xp-system.img
           test "$(stat -c%s /tmp/xp-system.img)" = "$DISK_SIZE"
