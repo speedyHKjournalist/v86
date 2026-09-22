@@ -2,11 +2,6 @@ name: IR reproducibility
 
 on:
   workflow_dispatch:
-    inputs:
-      offline_toolchain:
-        description: 'Include Linux x86_64 Rust and lint tools for offline reproduction'
-        type: boolean
-        default: false
   push:
     branches: ['chat/ir-review-throughput-20260922']
   pull_request:
@@ -45,31 +40,9 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add wasm32-unknown-unknown
-          rustup component add rustfmt
           sudo apt-get update -qq
           sudo apt-get install -y nasm clang lld
-      - name: Package offline tools
-        if: inputs.offline_toolchain || github.event_name == 'push'
-        run: |
-          mkdir -p build/offline-tools/bin
-          cp "$(command -v nasm)" build/offline-tools/bin/
-          npm install --prefix build/offline-tools eslint
-          rustc -Vv > build/offline-tools/rust-version.txt
-          node --version > build/offline-tools/node-version.txt
-          node build/offline-tools/node_modules/eslint/bin/eslint.js --version > build/offline-tools/eslint-version.txt
-          tar -C "$(rustc --print sysroot)" -czf build/rust-toolchain.tar.gz bin lib
-          tar -C build/offline-tools -czf build/offline-tools.tar.gz .
-      - name: Preserve optional offline tools
-        if: inputs.offline_toolchain || github.event_name == 'push'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ir-tools-${{ github.sha }}
-          retention-days: 1
-          compression-level: 0
-          path: |
-            build/rust-toolchain.tar.gz
-            build/offline-tools.tar.gz
-      - name: Build reproducible runtime and differential binaries
+      - name: Build reproduction inputs
         run: |
           set -o pipefail
           make build/v86-ir-runtime.wasm build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin 2>&1 | tee build/reproduce/build.log
