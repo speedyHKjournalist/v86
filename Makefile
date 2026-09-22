@@ -867,6 +867,9 @@ ir-cache-tests: ir-generated-check build/v86-ir-cache-test.wasm build/v86-ir-cac
 	node tests/ir/differential/missing_hint.mjs build/v86-ir-cache-test.wasm
 	node tests/ir/differential/missing_hint.mjs build/v86-ir-cache-test-release.wasm
 	node tests/ir/differential/missing_hint.mjs build/v86-ir-runtime.wasm
+	node tests/ir/differential/poll_reuse.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/poll_reuse.mjs build/v86-ir-cache-test-release.wasm
+	node tests/ir/differential/poll_reuse.mjs build/v86-ir-runtime.wasm
 	node tests/ir/performance/timing_test.mjs
 
 .PHONY: ir-auto-tests

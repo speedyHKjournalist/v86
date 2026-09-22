@@ -47,6 +47,7 @@ imports! {
     "ir_enter": [] -> [], Entry, "writes previous_ip and REP result; requires !in_jit";
     "ir_enter_checked": [I32,I32,I32] -> [I32], Entry, "exact context guard then entry initialization; false preserves all CPU/REP state; no source/mapping authority";
     "ir_request_link": [] -> [], Entry, "sets cold continuation request; no guest state change or dispatch";
+    "ir_request_poll_exit": [] -> [], Entry, "marks a recovered non-observing poll exit; never requests chaining or refreshes an epoch";
     "ir_request_observer_link": [] -> [], Entry, "requests cold admission after committed observation; never an SSA fusion edge";
     "ir_admission_barrier": [] -> [], Entry, "revokes synchronous entry-validation certificates before observers; no guest state change";
     "ir_admission_epoch_address": [] -> [I32], Pure, "address of non-shared admission epoch for fused-region recovery polls";

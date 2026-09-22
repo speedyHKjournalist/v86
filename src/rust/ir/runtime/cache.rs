@@ -26,6 +26,8 @@ type EntryIndexKey = (u32, u32, bool);
 static mut MISSING_ENTRY: Option<super::entry::CpuEntryKey> = None;
 static mut MISSING_HINT_ENABLED: bool = true;
 static mut MISSING_HINT_HITS: u32 = 0;
+// Single-CPU, quiescent-only A/B policy. Poll exits do not grant chaining.
+static mut POLL_REUSE_ENABLED: bool = true;
 #[inline(always)]
 fn clear_missing_hint() { unsafe { MISSING_ENTRY = None; } }
 fn index_key(entry: super::entry::CpuEntryKey) -> EntryIndexKey {
@@ -79,6 +81,7 @@ struct Cache {
     warm_admissions: u32,
     warm_chaining: bool,
     warm_handoffs: u32,
+    poll_barriers_avoided: u32,
     target_hits: u32,
     successor_hits: u32,
     fusion_enabled: bool,
@@ -124,6 +127,7 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     warm_admissions: 0,
     warm_chaining: true,
     warm_handoffs: 0,
+    poll_barriers_avoided: 0,
     target_hits: 0,
     successor_hits: 0,
     fusion_enabled: true,
@@ -248,6 +252,15 @@ pub unsafe fn ir_cache_set_warm_chaining(enabled: u32) -> bool {
     if enabled > 1 || !cold() { return false; }
     ir_admission_barrier();
     CACHE.try_lock().unwrap().warm_chaining = enabled != 0;
+    true
+}
+/// A/B control for preserving already-current certificates at plain poll exits.
+/// Turning it off restores the old conservative barrier at every budget exit.
+#[no_mangle]
+pub unsafe fn ir_cache_set_poll_reuse(enabled: u32) -> bool {
+    if enabled > 1 || !cold() { return false; }
+    ir_admission_barrier();
+    POLL_REUSE_ENABLED = enabled != 0;
     true
 }
 /// Startup/cold-point A/B control; absence hints never authorize guest code.
@@ -807,6 +820,8 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         36 => u32::from(cache.warm_chaining),
         37 => unsafe { MISSING_HINT_HITS },
         38 => unsafe { u32::from(MISSING_HINT_ENABLED) },
+        39 => cache.poll_barriers_avoided,
+        40 => unsafe { u32::from(POLL_REUSE_ENABLED) },
         _ => 0,
     }
 }
@@ -1243,8 +1258,13 @@ unsafe fn run_activation<const PROFILE: bool>(
     call_indirect1((slot + cpu::WASM_TABLE_OFFSET) as i32, 0);
     let duration = execution_scope.and_then(Scope::finish);
     // Terminal helpers/fault delivery can observe the host even when they do
-    // not pass through an emitted continuing-call barrier.
-    if !super::entry::link_requested() { ir_admission_barrier(); }
+    // not pass through an emitted continuing-call barrier. A plain recovered
+    // poll cannot: keep its existing certificate (never refresh it) until the
+    // next actual host/interpreter/batch/mapping/code barrier. Profiling imports
+    // are observations and deliberately keep the conservative path.
+    let poll_reuse = !PROFILE && sample.is_none() && POLL_REUSE_ENABLED
+        && super::entry::poll_exit();
+    if !super::entry::link_requested() && !poll_reuse { ir_admission_barrier(); }
     let steps = (*gp::instruction_counter).wrapping_sub(before);
     let observed_exit = if steps != 0 && super::entry::profile_link_requested() {
         let target = live::entry();
@@ -1259,6 +1279,7 @@ unsafe fn run_activation<const PROFILE: bool>(
         let mut cache = CACHE.try_lock().unwrap();
         cache.active = false;
         cache.active_owner = None;
+        if poll_reuse { cache.poll_barriers_avoided = cache.poll_barriers_avoided.wrapping_add(1); }
         cache.guest_steps = cache.guest_steps.wrapping_add(steps);
         cache.max_guest_steps = cache.max_guest_steps.max(steps);
         if steps == 0 {

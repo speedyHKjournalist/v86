@@ -316,21 +316,21 @@ impl Emitter<'_> {
         self.w.const_i32(edge.target.0 as i32);
         self.w.set_local(pc);
     }
-    fn emit_block_body(&mut self, id: BlockId, remaining: &WasmLocal) {
+    fn emit_block_body(&mut self, id: BlockId, remaining: &WasmLocal, allow_batch: bool) {
         let resets = self.mir.ram_loop_resets(id).to_vec();
         for slot in resets {
             self.cache_clear(MemoryCache::Loop(slot));
         }
         let block = self.mir.control.blocks[id.index()].clone();
         self.poll(block.recovery, block.budget_cost, remaining);
-        let batch = self.mir.budget_batch(id).filter(|_| self.cpu && self.batch_polls
+        let batch = self.mir.budget_batch(id).filter(|_| allow_batch && self.cpu && self.batch_polls
             && self.interrupt_shadow.is_none() && self.diagnostic.is_none());
         if let Some(batch) = batch {
             for &id in &block.instructions[..batch.start] { self.instruction(id, remaining); }
             let cost = batch.cost;
-            // The preceding mandatory poll already checked the active epoch and charged one unit.
-            // No observer or fault can occur in the proved body. Only skip the
-            // remaining checks when every original unit of credit is present.
+            // Reserve dispatcher work, not guest retirement. Every StateMap and
+            // fault/observer path is unchanged. Mixed bodies keep the original
+            // epoch checks, so a callback cannot execute stale subsequent code.
             self.w.get_local(remaining);
             self.w.const_i32(cost as i32);
             self.w.geu_i32();
@@ -338,7 +338,11 @@ impl Emitter<'_> {
             self.w.get_local(remaining); self.w.const_i32(cost as i32);
             self.w.sub_i32(); self.w.set_local(remaining);
             for &id in &block.instructions[batch.start..] {
-                if self.mir.control.polls[id.index()].is_none() {
+                if let Some(poll) = &self.mir.control.polls[id.index()] {
+                    if !batch.pure {
+                        self.check_poll(Some(poll.recovery), None);
+                    }
+                } else {
                     self.instruction(id, remaining);
                 }
             }
@@ -364,6 +368,106 @@ impl Emitter<'_> {
             .get(&edge.target)
             .expect("verified structure provides a branch label");
         self.w.br(label);
+    }
+    fn emit_structured_terminator(
+        &mut self, id: BlockId, next: &[BlockId], labels: &BTreeMap<BlockId, Label>,
+    ) {
+        match self.mir.control.blocks[id.index()].terminator.clone() {
+            MirTerminator::Exit(state) => self.normal_exit(state),
+            MirTerminator::Jump(edge) => self.emit_structured_edge(&edge, next, labels),
+            MirTerminator::Branch { condition, taken, not_taken } => {
+                self.get_local(condition);
+                self.w.if_void();
+                self.emit_structured_edge(&taken, next, labels);
+                self.w.else_();
+                self.emit_structured_edge(&not_taken, next, labels);
+                self.w.block_end();
+            },
+        }
+    }
+    /// Emit a body whose original dispatcher credits have already been reserved.
+    /// Epoch and fault checks still occur at their original recovery points.
+    fn emit_reserved_body(&mut self, id: BlockId, pure: bool, remaining: &WasmLocal) {
+        let block = self.mir.control.blocks[id.index()].clone();
+        for slot in self.mir.ram_loop_resets(id).to_vec() {
+            self.cache_clear(MemoryCache::Loop(slot));
+        }
+        self.check_poll(block.recovery, None);
+        for &inst in &block.instructions {
+            if let Some(poll) = &self.mir.control.polls[inst.index()] {
+                if !pure { self.check_poll(Some(poll.recovery), None); }
+            } else { self.instruction(inst, remaining); }
+        }
+    }
+    fn emit_prepaid_edge(
+        &mut self, edge: &MirEdge, header: BlockId,
+        backedge: crate::ir::mir::budget::LoopBackedge, hot: Label,
+        labels: &BTreeMap<BlockId, Label>, remaining: &WasmLocal,
+    ) {
+        if edge.target == backedge.target {
+            self.copy_edge_values(edge);
+            if backedge.target != header {
+                self.emit_reserved_body(backedge.target, true, remaining);
+                let MirTerminator::Jump(back) = self.mir.control.blocks[backedge.target.index()].terminator.clone()
+                    else { unreachable!("verified budget latch") };
+                self.copy_edge_values(&back);
+            }
+            self.w.br(hot);
+        } else {
+            // Only the loop-taking arm consumes the prepaid latch. Other normal
+            // successors must see precisely the original remaining budget.
+            if backedge.cost != 0 {
+                self.w.get_local(remaining); self.w.const_i32(backedge.cost as i32);
+                self.w.add_i32(); self.w.set_local(remaining);
+            }
+            self.emit_structured_edge(edge, &[], labels);
+        }
+    }
+    /// Keep the residual-budget body outside the hot backedge. Duplicating both
+    /// arms *inside* a loop increases host phi/register pressure even when the
+    /// residual arm is rarely taken. The original body is still the exact oracle
+    /// for every small budget, and every observer/epoch/fault check is retained.
+    fn emit_prepaid_loop(
+        &mut self, id: BlockId, remaining: &WasmLocal,
+        next: &[BlockId], labels: &BTreeMap<BlockId, Label>,
+    ) -> bool {
+        let block = &self.mir.control.blocks[id.index()];
+        let Some(batch) = self.mir.budget_batch(id).filter(|b| b.start == 0
+            && b.backedge.is_some() && self.cpu && self.batch_polls
+            && self.interrupt_shadow.is_none() && self.diagnostic.is_none()
+            && block.recovery.is_some()) else { return false; };
+        let block = block.clone();
+        let backedge = batch.backedge.unwrap();
+        let cost = batch.cost + block.budget_cost + backedge.cost;
+        let done = self.w.block_void();
+        let residual = self.w.block_void();
+        let hot = self.w.loop_void();
+        self.w.get_local(remaining); self.w.const_i32(cost as i32);
+        self.w.ltu_i32(); self.w.br_if(residual);
+        self.w.get_local(remaining); self.w.const_i32(cost as i32);
+        self.w.sub_i32(); self.w.set_local(remaining);
+        self.emit_reserved_body(id, batch.pure, remaining);
+        let mut hot_labels = labels.clone();
+        for target in next { hot_labels.insert(*target, done); }
+        // A normal loop exit must skip the residual body, including fallthrough.
+        match block.terminator {
+            MirTerminator::Jump(edge) => self.emit_prepaid_edge(&edge, id, backedge, hot, &hot_labels, remaining),
+            MirTerminator::Branch { condition, taken, not_taken } => {
+                self.get_local(condition); self.w.if_void();
+                self.emit_prepaid_edge(&taken, id, backedge, hot, &hot_labels, remaining);
+                self.w.else_();
+                self.emit_prepaid_edge(&not_taken, id, backedge, hot, &hot_labels, remaining);
+                self.w.block_end();
+            },
+            MirTerminator::Exit(_) => unreachable!("verified loop budget certificate"),
+        }
+        self.w.block_end(); // hot loop
+        self.w.block_end(); // residual entry
+        self.emit_block_body(id, remaining, false);
+        self.emit_structured_terminator(id, next, labels);
+        self.w.block_end(); // normal continuation
+        self.budget_batch_blocks += 1;
+        true
     }
     fn emit_structured(&mut self, roots: &[Structure], remaining: &WasmLocal) {
         #[derive(Clone)]
@@ -394,26 +498,9 @@ impl Emitter<'_> {
 
             match item {
                 Work::Node(Structure::BasicBlock(id)) => {
-                    self.emit_block_body(id, remaining);
-                    match self.mir.control.blocks[id.index()].terminator.clone() {
-                        MirTerminator::Exit(state) => {
-                            self.normal_exit(state);
-                        },
-                        MirTerminator::Jump(edge) => {
-                            self.emit_structured_edge(&edge, &next, &labels);
-                        },
-                        MirTerminator::Branch {
-                            condition,
-                            taken,
-                            not_taken,
-                        } => {
-                            self.get_local(condition);
-                            self.w.if_void();
-                            self.emit_structured_edge(&taken, &next, &labels);
-                            self.w.else_();
-                            self.emit_structured_edge(&not_taken, &next, &labels);
-                            self.w.block_end();
-                        },
+                    if !self.emit_prepaid_loop(id, remaining, &next, &labels) {
+                        self.emit_block_body(id, remaining, true);
+                        self.emit_structured_terminator(id, &next, &labels);
                     }
                 },
                 Work::Node(Structure::Loop(children)) => {
@@ -1445,16 +1532,20 @@ impl Emitter<'_> {
         self.value_steps(&plan.steps);
         self.set(plan.result);
     }
-    fn poll(&mut self, state: Option<StateId>, cost: u32, remaining: &WasmLocal) {
-        if let Some(state) = state {
-            self.w.get_local(remaining);
-            self.w.eqz_i32();
+    /// A prepaid body skips only the local budget test. Epoch invalidation is
+    /// still checked at exactly the original instruction boundary.
+    fn check_poll(&mut self, state: Option<StateId>, remaining: Option<&WasmLocal>) {
+        if let Some(state) = state.filter(|_| remaining.is_some() || self.fused_epoch.is_some()) {
+            if let Some(remaining) = remaining {
+                self.w.get_local(remaining);
+                self.w.eqz_i32();
+            }
             if let Some((address, epoch)) = &self.fused_epoch {
                 self.w.get_local(address);
                 self.w.load_unaligned_i64(0);
                 self.w.get_local_i64(epoch);
                 self.w.ne_i64();
-                self.w.or_i32();
+                if remaining.is_some() { self.w.or_i32(); }
             }
             if let Some(depth) = &self.interrupt_shadow {
                 self.w.get_local(depth);
@@ -1469,9 +1560,20 @@ impl Emitter<'_> {
                 self.diagnostic_exit(DiagnosticExit::Epoch); self.w.block_end();
             }
             self.state(state);
+            // Polls are distinct from opaque helper/fault exits. Do not revoke a
+            // still-current byte certificate solely because local credits ran
+            // out. No link is requested and no epoch is refreshed. Shadow and
+            // diagnostic exits retain the conservative observer treatment.
+            if self.linkable_entry && self.interrupt_shadow.is_none() && self.diagnostic.is_none() {
+                self.w.call_signature("ir_request_poll_exit",
+                    crate::ir::helper::imports::signature("ir_request_poll_exit"));
+            }
             self.return_to_cpu();
             self.w.block_end();
         }
+    }
+    fn poll(&mut self, state: Option<StateId>, cost: u32, remaining: &WasmLocal) {
+        self.check_poll(state, Some(remaining));
         self.w.get_local(remaining);
         self.w.const_i32(cost as i32);
         self.w.sub_i32();
@@ -1901,7 +2003,7 @@ fn emit_inner_with_batches(
             e.w.const_i32(b as i32);
             e.w.eq_i32();
             e.w.if_void();
-            e.emit_block_body(BlockId(b as u32), &remaining);
+            e.emit_block_body(BlockId(b as u32), &remaining, true);
             match &block.terminator {
                 MirTerminator::Exit(state) => {
                     e.normal_exit(*state);

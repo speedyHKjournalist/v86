@@ -23,8 +23,9 @@ pub enum EntryContract {
 
 // Normal edges and audited, committed observer exits can request a successor.
 // Fault, invalidation and budget exits never authorize unchecked continuation.
-static mut LINK_REQUESTED: bool = false;
-static mut OBSERVER_LINK: bool = false;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExitKind { None, Normal, Observer, Poll }
+static mut EXIT_KIND: ExitKind = ExitKind::None;
 // A byte-validation certificate is valid only in a synchronous CPU interval
 // without unobserved host writes. No certificate survives a new CPU batch,
 // interpretation, an observing import, or code/reset invalidation. Saturation
@@ -48,20 +49,26 @@ pub fn ir_admission_epoch_address() -> u32 { core::ptr::addr_of!(CONTINUATION_EP
 #[cfg(feature = "ir-experimental")]
 pub(super) fn admission_epoch() -> u64 { unsafe { ADMISSION_EPOCH } }
 #[cfg(feature = "ir-experimental")]
-pub(super) fn link_requested() -> bool { unsafe { LINK_REQUESTED } }
+pub(super) fn link_requested() -> bool { unsafe { matches!(EXIT_KIND, ExitKind::Normal | ExitKind::Observer) } }
 #[cfg(feature = "ir-experimental")]
-pub(super) fn profile_link_requested() -> bool { unsafe { LINK_REQUESTED && !OBSERVER_LINK } }
+pub(super) fn profile_link_requested() -> bool { unsafe { EXIT_KIND == ExitKind::Normal } }
+#[cfg(feature = "ir-experimental")]
+pub(super) fn poll_exit() -> bool { unsafe { EXIT_KIND == ExitKind::Poll } }
 #[no_mangle]
-pub unsafe fn ir_request_link() { LINK_REQUESTED = true; OBSERVER_LINK = false; }
+pub unsafe fn ir_request_link() { EXIT_KIND = ExitKind::Normal; }
 /// This successor starts from fully committed CPU state after an observer.
 /// It is not a normal SSA edge and must not seed a fusion prediction.
 #[no_mangle]
-pub unsafe fn ir_request_observer_link() { LINK_REQUESTED = true; OBSERVER_LINK = true; }
+pub unsafe fn ir_request_observer_link() { EXIT_KIND = ExitKind::Observer; }
+/// A recovered budget/epoch poll has no hidden observer of its own. This is NOT
+/// a successor request: control returns to the original CPU dispatcher and its
+/// batch/IRQ limits. Earlier barriers remain authoritative; no epoch is refreshed.
+#[no_mangle]
+pub unsafe fn ir_request_poll_exit() { EXIT_KIND = ExitKind::Poll; }
 #[cfg(feature = "ir-experimental")]
 pub unsafe fn take_link_request() -> bool {
-    let requested = LINK_REQUESTED;
-    LINK_REQUESTED = false;
-    OBSERVER_LINK = false;
+    let requested = matches!(EXIT_KIND, ExitKind::Normal | ExitKind::Observer);
+    EXIT_KIND = ExitKind::None;
     requested
 }
 

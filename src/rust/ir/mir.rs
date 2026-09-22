@@ -76,7 +76,8 @@ impl MirRegion {
         cpu_liveness::verify_owned(&self.data)
     }
 
-    /// Prove bounded, observer-free runs of unit-cost polls using owned MIR.
+    /// Prove bounded unit-cost reservations using owned MIR. Mixed loops
+    /// retain every epoch poll; only observer-free suffixes may omit them.
     pub fn batch_pure_budget_polls(&mut self, work_limit: usize) -> Result<usize, CompileError> {
         budget::enable(&mut self.data, work_limit)
     }

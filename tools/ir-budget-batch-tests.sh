@@ -6,3 +6,6 @@ RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo test ir::mir::budget
 RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo test ir::budget_batch_tests
 node tests/ir/differential/budget_batch.mjs
 node tests/ir/differential/budget_batch.mjs build/v86-ir-test-release.wasm
+
+node tests/ir/differential/budget_observers.mjs
+node tests/ir/differential/budget_observers.mjs build/v86-ir-test-release.wasm
