@@ -184,9 +184,10 @@ fn lift_inner(
             } else {
                 super::simd_integer::lift(&mut b, &i, count);
             }
-            let store = super::simd_masked::supports(&i)
-                || moves && super::simd_moves::is_store(&i) && i.ea.is_some();
-            if store || offset == bytes.len() {
+            // Native same-page vector stores may continue under the MIR RAM
+            // guard and immutable-code-page alias check. Slow paths still own
+            // their precise commit and exit; do not truncate the whole region.
+            if offset == bytes.len() {
                 let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
                 b.region.terminate(b.block, Terminator::Exit(map));
                 return Ok(b.region);

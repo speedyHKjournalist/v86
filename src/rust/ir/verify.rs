@@ -459,14 +459,11 @@ pub fn verify(region: &Region) -> Result<()> {
                             && inst.args[2] == map.xmm[*mask as usize],
                         "XMM masked store source/mask state mismatch",
                     )?;
-                    require(
-                        p + 1 == block.instructions.len()
-                            && matches!(block.terminator, Some(Terminator::Exit(_))),
-                        "XMM masked store must terminate",
-                    )?;
                     let commit = &region.states[inst.commit.unwrap().index()];
                     require(
-                        commit.instruction_pc == map.instruction_pc
+                        commit.gpr == map.gpr
+                            && commit.flags == map.flags && commit.xmm == map.xmm
+                            && commit.instruction_pc == map.instruction_pc
                             && commit.next_pc == map.next_pc
                             && commit.count_base == map.count_base
                             && map.committed_instructions.checked_add(1)
@@ -522,14 +519,11 @@ pub fn verify(region: &Region) -> Result<()> {
                             inst.args[1] == map.xmm[*register as usize],
                             "XMM store source/state mismatch",
                         )?;
-                        require(
-                            p + 1 == block.instructions.len()
-                                && matches!(block.terminator, Some(Terminator::Exit(_))),
-                            "XMM store must terminate",
-                        )?;
                         let commit = &region.states[inst.commit.unwrap().index()];
                         require(
-                            commit.instruction_pc == map.instruction_pc
+                            commit.gpr == map.gpr
+                            && commit.flags == map.flags && commit.xmm == map.xmm
+                            && commit.instruction_pc == map.instruction_pc
                                 && commit.next_pc == map.next_pc
                                 && commit.count_base == map.count_base
                                 && map.committed_instructions.checked_add(1)

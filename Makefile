@@ -993,3 +993,7 @@ ir-helper-audit: ir-generated-check
 
 # The pinned resolver is compiled into test cores via #[path].
 build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/v86-ir-test-fallback.wasm build/v86-control-reference.wasm build/v86-control-reference-release.wasm: tests/ir/decode/legacy_modrm.rs
+
+.PHONY: ir-budget-batch-tests
+ir-budget-batch-tests:
+	sh tools/ir-budget-batch-tests.sh

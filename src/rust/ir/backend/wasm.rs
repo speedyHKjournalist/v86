@@ -34,6 +34,8 @@ pub struct Artifact {
     /// Number of MIR control edges emitted directly rather than through the pc dispatcher.
     pub structured_edges: u32,
     pub generic_dispatch_edges: u32,
+    /// Emitted guarded poll batches (zero for diagnostic/STI/size fallback).
+    pub budget_batch_blocks: u32,
 }
 
 fn control_edge_count(mir: &MirRegion) -> u32 {
@@ -75,6 +77,8 @@ struct Emitter<'a> {
     interrupt_shadow: Option<WasmLocal>,
     fused_epoch: Option<(WasmLocal, WasmLocalI64)>,
     diagnostic: Option<(WasmLocal, WasmLocal)>,
+    batch_polls: bool,
+    budget_batch_blocks: u32,
 }
 impl Emitter<'_> {
     fn diagnostic_begin(&mut self, stage: DiagnosticStage) {
@@ -319,8 +323,31 @@ impl Emitter<'_> {
         }
         let block = self.mir.control.blocks[id.index()].clone();
         self.poll(block.recovery, block.budget_cost, remaining);
-        for id in block.instructions {
-            self.instruction(id, remaining);
+        let batch = self.mir.budget_batch(id).filter(|_| self.cpu && self.batch_polls
+            && self.interrupt_shadow.is_none() && self.diagnostic.is_none());
+        if let Some(batch) = batch {
+            for &id in &block.instructions[..batch.start] { self.instruction(id, remaining); }
+            let cost = batch.cost;
+            // The preceding mandatory poll already checked the active epoch and charged one unit.
+            // No observer or fault can occur in the proved body. Only skip the
+            // remaining checks when every original unit of credit is present.
+            self.w.get_local(remaining);
+            self.w.const_i32(cost as i32);
+            self.w.geu_i32();
+            self.w.if_void();
+            self.w.get_local(remaining); self.w.const_i32(cost as i32);
+            self.w.sub_i32(); self.w.set_local(remaining);
+            for &id in &block.instructions[batch.start..] {
+                if self.mir.control.polls[id.index()].is_none() {
+                    self.instruction(id, remaining);
+                }
+            }
+            self.w.else_();
+            for &id in &block.instructions[batch.start..] { self.instruction(id, remaining); }
+            self.w.block_end();
+            self.budget_batch_blocks += 1;
+        } else {
+            for id in block.instructions { self.instruction(id, remaining); }
         }
     }
     fn emit_structured_edge(
@@ -518,7 +545,7 @@ impl Emitter<'_> {
         self.w.and_i32();
         entry
     }
-    fn finish_scalar_store(&mut self, commit: StateId, pointer: &WasmLocal) {
+    fn finish_ram_store(&mut self, commit: StateId, pointer: &WasmLocal, fallback: DiagnosticExit) {
         // Native ordinary RAM has no observer. Keep architectural values in SSA
         // on continuation; later faults/polls/helpers materialize their own
         // verified StateMap, whose count already includes this completed store.
@@ -526,7 +553,7 @@ impl Emitter<'_> {
             // Standalone/test emitters without an immutable code snapshot keep
             // the historical conservative boundary.
             self.state(commit);
-            self.diagnostic_exit(DiagnosticExit::ScalarStore);
+            self.diagnostic_exit(fallback);
             self.return_to_cpu();
             return;
         }
@@ -855,7 +882,7 @@ impl Emitter<'_> {
                 }
                 if let Some(commit) = commit {
                     let pointer = pointer.unwrap();
-                    self.finish_scalar_store(*commit, &pointer);
+                    self.finish_ram_store(*commit, &pointer, DiagnosticExit::ScalarStore);
                     self.w.free_local(pointer);
                 }
             },
@@ -865,8 +892,8 @@ impl Emitter<'_> {
                 mask,
                 commit,
             } => {
+                let pointer = self.w.set_new_local();
                 if let Some(mask) = mask {
-                    let address = self.w.set_new_local();
                     self.get(*mask);
                     self.w.simd(0x64);
                     let mask = self.w.set_new_local();
@@ -875,15 +902,15 @@ impl Emitter<'_> {
                         self.w.const_i32(1 << lane);
                         self.w.and_i32();
                         self.w.if_void();
-                        self.w.get_local(&address);
+                        self.w.get_local(&pointer);
                         self.get(*value);
                         self.w.simd_lane(0x16, lane);
                         self.w.store_u8(lane as u32);
                         self.w.block_end();
                     }
                     self.w.free_local(mask);
-                    self.w.free_local(address);
                 } else {
+                    self.w.get_local(&pointer);
                     self.get(*value);
                     match bytes {
                         4 => {
@@ -898,9 +925,8 @@ impl Emitter<'_> {
                         _ => unreachable!(),
                     }
                 }
-                self.state(*commit);
-                self.diagnostic_exit(DiagnosticExit::VectorMemory);
-                self.return_to_cpu();
+                self.finish_ram_store(*commit, &pointer, DiagnosticExit::VectorMemory);
+                self.w.free_local(pointer);
             },
             NativeMemory::VectorLoad { result, combine } => {
                 if let VectorCombine::ReplaceWord { old, lane } = combine {
@@ -1130,7 +1156,7 @@ impl Emitter<'_> {
                     4 => self.w.store_unaligned_i32(0),
                     _ => unreachable!(),
                 }
-                self.finish_scalar_store(*commit, &pointer);
+                self.finish_ram_store(*commit, &pointer, DiagnosticExit::ScalarStore);
                 self.w.free_local(pointer);
                 self.w.block_end();
             },
@@ -1149,27 +1175,39 @@ impl Emitter<'_> {
             self.w.block_end();
             return;
         }
-        if let Some(opcode) = plan.native_fp.filter(|_| self.cpu) {
+        if let Some(fp) = plan.native_fp.filter(|_| self.cpu) {
             let (source, destination) = plan.xmm_observation.unwrap();
             let operand = |reg: u8| self.mir.states[plan.state.index()].cpu.writes.iter()
                 .find(|w| w.address == Address::Absolute(gp::get_reg_xmm_offset(reg as u32))).unwrap().expression.clone();
             let left_steps=operand(destination); let right_steps=operand(source);
             self.value_steps(&left_steps); let left=self.w.set_new_local_v128();
             self.value_steps(&right_steps); let right=self.w.set_new_local_v128();
-            self.w.get_local_v128(&left); self.w.get_local_v128(&right); self.w.simd(opcode);
+            self.w.get_local_v128(&left); self.w.get_local_v128(&right); self.w.simd(fp.opcode);
             let result=self.w.set_new_local_v128();
-            // The baseline uses scalar Wasm IEEE arithmetic and does not update
-            // MXCSR for these four operations. Finite inputs/results therefore
-            // match exactly; NaN payloads, infinities and invalid results use it.
+            // Scalar and ordinary SIMD add/sub/mul/div have the same IEEE
+            // result bits except for the permitted choice of NaN payload/sign.
+            // Test the result once: result != result detects every NaN lane,
+            // including invalid operations with non-NaN operands. Signed zero,
+            // subnormals, infinities and overflow remain exact, not fast-math.
+            // These baseline arithmetic forms do not update MXCSR. Keep the CR0
+            // task-fault and scalar-NaN paths, before any architectural write.
             self.w.load_fixed_i32(gp::cr as u32); self.w.const_i32(12); self.w.and_i32();
-            for value in [&left, &right, &result] {
-                self.w.get_local_v128(value);
-                self.w.const_i32(0x7F800000); self.w.simd(0x11); self.w.simd(0x4E);
-                self.w.const_i32(0x7F800000); self.w.simd(0x11); self.w.simd(0x37);
-                self.w.simd(0x53); self.w.or_i32();
-            }
+            self.w.get_local_v128(&result); self.w.get_local_v128(&result);
+            self.w.simd(if fp.double { 0x48 } else { 0x42 }); // f64x2.ne / f32x4.ne
+            if fp.scalar {
+                // Only lane zero is architecturally evaluated. Upper lanes may
+                // contain signalling NaNs and must neither reject nor change.
+                self.w.simd_lane(0x1B, 0); // i32x4.extract_lane (low mask word)
+            } else { self.w.simd(0x53); } // v128.any_true
+            self.w.or_i32();
             self.w.eqz_i32(); self.w.if_void();
-            self.w.get_local_v128(&result); self.set(plan.reload[0].0);
+            self.w.get_local_v128(&result);
+            if fp.scalar {
+                self.w.get_local_v128(&left);
+                let bytes = if fp.double { 8 } else { 4 };
+                self.w.simd_shuffle(std::array::from_fn(|i| if i < bytes { i as u8 } else { i as u8 + 16 }));
+            }
+            self.set(plan.reload[0].0);
             self.w.else_(); self.planned_call_slow(id, plan); self.w.block_end();
             self.w.free_local_v128(result); self.w.free_local_v128(right); self.w.free_local_v128(left);
         } else { self.planned_call_slow(id, plan); }
@@ -1561,6 +1599,19 @@ fn emit_inner(
     fused: bool,
     aliases: &[CpuEntryKey],
 ) -> Result<Artifact, CompileError> {
+    emit_inner_with_batches(mir, layout, budget, cpu, entry, code_pages, fused, aliases, true)
+}
+fn emit_inner_with_batches(
+    mir: &MirRegion,
+    layout: StateLayout,
+    budget: u32,
+    cpu: bool,
+    entry: Option<CpuEntryKey>,
+    code_pages: &[u32],
+    fused: bool,
+    aliases: &[CpuEntryKey],
+    batch_polls: bool,
+) -> Result<Artifact, CompileError> {
     #[cfg(test)]
     mir.verify()?;
     // MirRegion can only be constructed by the checked lowering transaction.
@@ -1673,6 +1724,8 @@ fn emit_inner(
         interrupt_shadow: None,
         fused_epoch: None,
         diagnostic: None,
+        batch_polls,
+        budget_batch_blocks: 0,
     };
     // Diagnostic policy is fixed at compilation; changing it invalidates all
     // artifacts. Ordinary builds emit no diagnostic instructions/imports.
@@ -1755,7 +1808,7 @@ fn emit_inner(
             || mir.effects.iter().flatten().any(|plan| matches!(plan,
                 EffectPlan::Arithmetic(ArithmeticPlan::CompareExchange(_))));
         let needs_memory_base = mir.memory.iter().flatten().any(|plan| matches!(
-            plan.native, NativeMemory::ScalarStore { commit: Some(_), .. }))
+            plan.native, NativeMemory::ScalarStore { commit: Some(_), .. } | NativeMemory::VectorStore { .. }))
             || mir.effects.iter().flatten().any(|plan| matches!(plan, EffectPlan::RmwCommit { .. }));
         if needs_tlb {
             e.w.call_signature("ir_tlb_base", crate::ir::helper::imports::signature("ir_tlb_base"));
@@ -1848,13 +1901,7 @@ fn emit_inner(
             e.w.const_i32(b as i32);
             e.w.eq_i32();
             e.w.if_void();
-            for &slot in mir.ram_loop_resets(BlockId(b as u32)) {
-                e.cache_clear(MemoryCache::Loop(slot));
-            }
-            e.poll(block.recovery, block.budget_cost, &remaining);
-            for id in &block.instructions {
-                e.instruction(*id, &remaining);
-            }
+            e.emit_block_body(BlockId(b as u32), &remaining);
             match &block.terminator {
                 MirTerminator::Exit(state) => {
                     e.normal_exit(*state);
@@ -1927,6 +1974,11 @@ fn emit_inner(
     e.w.finish();
     let bytes = e.w.output().to_vec();
     if bytes.len() > 256 * 1024 {
+        // Duplication must not turn an otherwise compilable region into a stop.
+        // Roll back at most once; no half-built artifact can be published.
+        if e.budget_batch_blocks != 0 {
+            return emit_inner_with_batches(mir, layout, budget, cpu, entry, code_pages, fused, aliases, false);
+        }
         return Err(CompileError::Budget("Wasm bytes"));
     }
     Ok(Artifact {
@@ -1936,6 +1988,7 @@ fn emit_inner(
         structured_backedges,
         structured_edges,
         generic_dispatch_edges,
+        budget_batch_blocks: e.budget_batch_blocks,
     })
 }
 

@@ -226,7 +226,7 @@ fn lift_cpu_cfg_sources_inner(
             default_32,
             rep_budget,
         )?;
-        // Scalar stores can continue through the backend's guarded RAM path.
+        // Scalar and vector stores can continue through the guarded RAM path.
         // Cold/MMIO writes and aliases of any immutable code dependency still
         // commit then exit there. Other commit-bearing adapters own their exit.
         let incomplete_tail = end < bytes.len()
@@ -239,7 +239,8 @@ fn lift_cpu_cfg_sources_inner(
         let stop = ir.instructions.iter().any(|i| {
                 (i.commit.is_some()
                     && (incomplete_tail
-                        || !matches!(i.op, Op::GuestStore { .. } | Op::RmwStore { .. })))
+                        || !matches!(i.op, Op::GuestStore { .. } | Op::RmwStore { .. }
+                            | Op::XmmStore { .. } | Op::XmmMaskedStore { .. })))
                     || matches!(i.op, Op::CompareExchange8B { .. })
                     || match i.op {
                         Op::CallHelper(id) => matches!(

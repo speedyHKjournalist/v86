@@ -6,7 +6,7 @@ pub enum ResumeKind {
     AfterInstruction,
     RepProgress,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FlagState {
     /// CF, PF, AF, ZF, SF, OF. Each source is an I1 SSA value (or an extracted input bit).
     pub arithmetic: [ValueId; 6],

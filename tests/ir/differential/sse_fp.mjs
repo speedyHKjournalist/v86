@@ -187,6 +187,71 @@ for(const release of [false,true]){
                 assert.equal(registerCalls,1,'task fault must use precise recovery');
             }
         }
+        // Each operation has a unique non-NaN IEEE result. Exercise cases the
+        // previous three finite-value guards rejected, plus invalid operations
+        // whose result (rather than an input) introduces a NaN. Compare full
+        // XMM/MXCSR/x87/FLAGS state, without canonicalising NaN bits.
+        let resultGuardCases=0;
+        const pairs32 = [[0x7F800000n,0x3F800000n], [0xFF800000n,0xBF800000n],
+            [0x3F800000n,0x7F800000n], [0xBF800000n,0xFF800000n],
+            [0x7F7FFFFFn,0x7F7FFFFFn], [0n,0n], [0x80000000n,0n],
+            [1n,0x40000000n], [0x80000001n,0x40000000n],
+            [0x7F800000n,0xFF800000n], [0x7F812345n,0x3F800000n],
+            [0x3F800000n,0xFFC12345n]];
+        const pairs64 = [[0x7FF0000000000000n,0x3FF0000000000000n],
+            [0xFFF0000000000000n,0xBFF0000000000000n],
+            [0x3FF0000000000000n,0x7FF0000000000000n],
+            [0xBFF0000000000000n,0xFFF0000000000000n],
+            [0x7FEFFFFFFFFFFFFFn,0x7FEFFFFFFFFFFFFFn], [0n,0n],
+            [0x8000000000000000n,0n], [1n,0x4000000000000000n],
+            [0x8000000000000001n,0x4000000000000000n],
+            [0x7FF0000000000000n,0xFFF0000000000000n],
+            [0x7FF0000012345678n,0x3FF0000000000000n],
+            [0x3FF0000000000000n,0xFFF8000012345678n]];
+        for(const prefix of [0,0x66,0xF3,0xF2]) for(const operation of [0x58,0x59,0x5C,0x5E]) {
+            const op=prefix*0x10000+0x0F00+operation;
+            const scalar=prefix===0xF2||prefix===0xF3, double=prefix===0x66||prefix===0xF2;
+            const words=double?2:1, lanes=scalar?1:4/words;
+            const i=cases.findIndex(c=>c[1]&&c[2]===op&&!c[3]&&!c[4]&&!c[0].includes(0x67));
+            assert(i>=0,`missing native FP form ${op.toString(16)}`);
+            for(const [a,b] of double?pairs64:pairs32) for(let rounding=0;rounding<4;rounding++) {
+                const configure=()=>{
+                    reset(i,{rounding});
+                    // Inactive scalar lanes contain signaling/quiet NaNs. They
+                    // must not force fallback or lose payload bits during merge.
+                    cpu.reg_xmm32s.set([0x7F812345,0xFFF01234,0x7FF12345,0xFF812345,
+                        0x7FC54321,0x7FF03456,0xFF812346,0x7FF05678]);
+                    for(let lane=0;lane<lanes;lane++) for(let word=0;word<words;word++) {
+                        cpu.reg_xmm32s[lane*words+word]=Number(b>>BigInt(word*32)&0xFFFFFFFFn);
+                        cpu.reg_xmm32s[4+lane*words+word]=Number(a>>BigInt(word*32)&0xFFFFFFFFn);
+                    }
+                };
+                configure();const expected=interpreter(i);
+                let nan=false;
+                for(let lane=0;lane<lanes;lane++) {
+                    const low=BigInt(expected.xmm[4+lane*words]>>>0);
+                    const bits=double?low|BigInt(expected.xmm[5+lane*words]>>>0)<<32n:low;
+                    nan ||= double ? (bits&0x7FFFFFFFFFFFFFFFn)>0x7FF0000000000000n
+                        : (bits&0x7FFFFFFFn)>0x7F800000n;
+                }
+                for(const opt of [0,1]) {
+                    configure();registerCalls=0;instances[i][opt].exports.f(0);
+                    assert.deepEqual(state(),expected,`result guard ${op}/${a}/${b}/${rounding}/${opt}`);
+                    assert.equal(registerCalls,Number(nan),'only active NaN results require the payload-preserving helper');
+                    assert.equal(linear32[664>>2],102);
+                    resultGuardCases++;
+                }
+            }
+            for(const task of [4,8,12]) for(const opt of [0,1]) {
+                reset(i,{task});const expected=interpreter(i);
+                reset(i,{task});registerCalls=0;instances[i][opt].exports.f(0);
+                assert.deepEqual(state(),expected,`native FP task guard ${op}/${task}/${opt}`);
+                assert.equal(registerCalls,1,'task fault must keep precise CPU helper recovery');
+                assert.equal(linear32[664>>2],101);
+                resultGuardCases++;
+            }
+        }
+        console.log(`PASS: ${resultGuardCases} exact PS/PD/SS/SD result guards, scalar lane preservation and task faults`);
         let comparisons=0;
         for(let i=0;i<cases.length;i++) {
             const [,mode,opcode,dirty,memory,width]=cases[i], before=dirty?102:101;

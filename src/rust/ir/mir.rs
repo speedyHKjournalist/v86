@@ -1,5 +1,6 @@
 //! Owned machine plans. HIR is borrowed only while checking the lowering boundary.
 pub mod allocation;
+pub mod budget;
 pub mod arithmetic;
 pub mod call;
 pub mod control;
@@ -42,6 +43,7 @@ pub struct MirData {
     pub effects: Vec<Option<effect::EffectPlan>>,
     pub calls: Vec<Option<call::CallPlan>>,
     pub control: control::ControlFlow,
+    pub(super) poll_batches: Vec<Option<budget::Batch>>,
     pub values: Vec<Option<value::ValuePlan>>,
     pub states: Vec<materialize::StatePlan>,
     pub(super) ram_forwarding: Vec<Option<forwarding::Forwarding>>,
@@ -70,7 +72,16 @@ impl MirRegion {
         super::helper::imports::verify(&self.data)?;
         forwarding::verify(&self.data)?;
         state_elision::verify_owned(&self.data)?;
+        budget::verify(&self.data)?;
         cpu_liveness::verify_owned(&self.data)
+    }
+
+    /// Prove bounded, observer-free runs of unit-cost polls using owned MIR.
+    pub fn batch_pure_budget_polls(&mut self, work_limit: usize) -> Result<usize, CompileError> {
+        budget::enable(&mut self.data, work_limit)
+    }
+    pub(crate) fn budget_batch(&self, block: super::ids::BlockId) -> Option<budget::Batch> {
+        self.data.poll_batches[block.index()]
     }
 
     pub fn reuse_ram_guards(&mut self, work_limit: usize) -> Result<usize, CompileError> {
@@ -250,6 +261,10 @@ impl<'a> Draft<'a> {
         state_elision::verify(self.hir, data)?;
         helper_state::verify(self.hir, data)?;
         cpu_liveness::verify(self.hir, data)?;
+        if data.poll_batches.iter().any(Option::is_some) {
+            return Err(CompileError::InvalidIr("initial budget batches must be disabled".into()));
+        }
+        budget::verify(data)?;
         Ok(MirRegion { data: self.data })
     }
 }

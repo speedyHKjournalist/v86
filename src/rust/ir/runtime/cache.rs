@@ -849,6 +849,7 @@ pub fn ir_cache_entry_stat(
         10 => 1 + record.job.artifact.fused_sources.len() as u32,
         11 => record.entries.len() as u32,
         12 => record.slot,
+        13 => record.job.artifact.code.budget_batch_blocks,
         _ => 0,
     }
 }

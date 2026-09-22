@@ -299,6 +299,8 @@ try{
     const stationary=e.ir_auto_stat(2);await sleep(80);assert.equal(e.ir_auto_stat(2),stationary,"evicted inactive entries do not recompile from historical heat");
     await vm.stop();configure(0);assert.equal(e.ir_cache_stat(0),capacity);cpu.instruction_pointer[0]=PC;cpu.in_hlt[0]=0;let hits=e.ir_cache_stat(2);vm.run();await until(()=>cpu.in_hlt[0],"retained explicit entry");await vm.stop();assert.equal(e.ir_cache_stat(2)-hits,1);
     assert(e.ir_auto_stat(9)<=128);cpu.jit_clear_cache();e.ir_cache_collect();assert.equal(e.jit_get_wasm_table_index_free_list_count(),899);
+    assert(e.ir_auto_stat(27)>0,"exhausted frame credit takes the idle negative hint");
+    assert(e.ir_auto_stat(28)>0,"work-bearing visits still reach cold publication checks");
     console.log(`PASS: ${wasm}: ${capacity+8} automatically compiled entries use bounded eviction while preserving an explicit entry; premature completion and cold publication guards (${coldPublications} publications)`);
     if(process.env.IR_DIAGNOSTICS) {
         const d=vm.get_jit_info().ir.diagnostics;

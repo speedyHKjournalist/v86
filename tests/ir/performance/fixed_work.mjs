@@ -7,7 +7,16 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const repetitions=Number(process.env.IR_COMPARE_RUNS||3);
 assert(Number.isInteger(repetitions)&&repetitions>=3);
 const PC=0x100000,PEER=0x102000,DATA=0x110000;
-const workloads=[
+const suite=process.env.IR_FIXED_SUITE||'core';
+assert(['core','vector'].includes(suite),'IR_FIXED_SUITE must be core or vector');
+const workloads=suite==='vector'?[
+ {name:'sse_packed_double',code:[0x66,0x0F,0x58,0xC1,0x49,0x75,0xF9,0xF4],iterations:2000000,per:3,source:[0,0x3FF00000,0,0x3FF00000]},
+ {name:'sse_scalar_single',code:[0xF3,0x0F,0x58,0xC1,0x49,0x75,0xF9,0xF4],iterations:2000000,per:3,destination:[0,0x7F812345,0xDEADBEEF,0x81234567]},
+ {name:'sse_scalar_double',code:[0xF2,0x0F,0x58,0xC1,0x49,0x75,0xF9,0xF4],iterations:2000000,per:3,source:[0,0x3FF00000,0x7FF12345,0xDEADBEEF],destination:[0,0,0x7FF12345,0xDEADBEEF]},
+ {name:'xmm_store',code:[0x0F,0x11,0x06,0x49,0x75,0xFA,0xF4],iterations:1000000,per:3,destination:[0x12345678,0x9ABCDEF0,0x3456789A,0xBCDEF012]},
+ {name:'xmm_high_store',code:[0x0F,0x17,0x06,0x49,0x75,0xFA,0xF4],iterations:1000000,per:3,destination:[0x12345678,0x9ABCDEF0,0x3456789A,0xBCDEF012]},
+ {name:'xmm_masked_store',code:[0x66,0x0F,0xF7,0xC1,0x49,0x75,0xF9,0xF4],iterations:1000000,per:3,edi:DATA,source:[0x80808080,0x80808080,0x80808080,0x80808080],destination:[0x12345678,0x9ABCDEF0,0x3456789A,0xBCDEF012]},
+]:[
  {name:'integer',code:[0x01,0xD8,0x31,0xD0,0x43,0x49,0x75,0xF8,0xF4],iterations:5000000,per:5},
  {name:'ram_rmw',code:[0xFF,0x06,0x8B,0x06,0x01,0xC3,0x49,0x75,0xF7,0xF4],iterations:3000000,per:5},
  {name:'indirect_regions',code:[0x40,0xFF,0xE2],peer:[0x49,0x74,0x02,0xFF,0xE3,0xF4],iterations:3000000,per:5},
@@ -35,8 +44,10 @@ for(const work of workloads) for(let round=0;round<repetitions;round++) for(cons
   vm.write_memory(Uint8Array.from(work.code),PC);if(work.peer)vm.write_memory(Uint8Array.from(work.peer),PEER);
   const prepare=n=>{
    cpu.segment_offsets.fill(0,0,6);cpu.segment_is_null.fill(0,0,6);cpu.is_32[0]=1;cpu.stack_size_32[0]=1;
-   cpu.reg32.set([0,n,work.peer?PEER:0x31415926,work.peer?PC:7,0x90000,0,DATA,0]);
+   cpu.reg32.set([0,n,work.peer?PEER:0x31415926,work.peer?PC:7,0x90000,0,DATA,work.edi||0]);
    cpu.reg_xmm32s.fill(0);for(let lane=0;lane<4;lane++)cpu.reg_xmm32s[4+lane]=0x3F800000;
+   if(work.source)cpu.reg_xmm32s.set(work.source,4);
+   if(work.destination)cpu.reg_xmm32s.set(work.destination);
    cpu.flags[0]=2;cpu.flags_changed[0]=0;cpu.in_hlt[0]=0;cpu.instruction_pointer[0]=PC;
    data().setUint32(DATA,0,true);new Uint32Array(e.memory.buffer)[664>>2]=0;e.update_state_flags();
   };
@@ -44,13 +55,14 @@ for(const work of workloads) for(let round=0;round<repetitions;round++) for(cons
    while(!cpu.in_hlt[0]){assert(performance.now()<until,`${work.name}/${backend} timeout`);await sleep(1);}
    const timing=await finish_halted_timing(vm,start),ms=timing.ms,steps=counter();
    assert.equal(steps,n*work.per+(work.peer?0:1),'identical exact retired guest work');
-   return {...timing,steps,mips:steps/ms/1000,state:{gpr:Array.from(cpu.reg32),flags:e.get_eflags(),xmm:Array.from(cpu.reg_xmm32s),data:data().getUint32(DATA,true),pc:cpu.instruction_pointer[0]}};
+   return {...timing,steps,mips:steps/ms/1000,state:{gpr:Array.from(cpu.reg32),flags:e.get_eflags(),xmm:Array.from(cpu.reg_xmm32s),data:data().getUint32(DATA,true),data16:Array.from(cpu.mem8.slice(DATA,DATA+16)),pc:cpu.instruction_pointer[0]}};
   };
   // Yield between bounded warm runs so asynchronous publications can finish.
   for(let n=0;n<20;n++){await run(20000);await sleep(1);}
   if(backend==='ir') assert.equal(e.ir_cache_entry_stat(PC,0,1,5),2,'fixed work must warm the measured entry to Tier 2');
   const irBefore=e.ir_cache_stat(10);
-  const row={workload:work.name,label,backend,round,wasm,scale,...await run(work.iterations)};
+  const row={workload:work.name,suite,label,backend,round,wasm,scale,...await run(work.iterations)};
+  row.budget_batch_blocks=e.ir_cache_entry_stat(PC,0,1,13);
   row.ir_steps=(e.ir_cache_stat(10)-irBefore)>>>0;
   row.ir_coverage=row.ir_steps/row.steps;
   if(backend==='ir') assert(row.ir_coverage>=0.95,'fixed work must actually execute through cached IR');
@@ -64,6 +76,6 @@ const matrixFor=label=>workloads.map(({name})=>{const ir=median(results.filter(r
 const matrix=matrixFor('current');
 const baseline=baselineWasm?matrixFor('baseline'):null;
 const geomean=Math.exp(matrix.reduce((sum,r)=>sum+Math.log(r.ratio),0)/matrix.length);
-console.log(JSON.stringify({event:'summary',timing_scope:'start-to-observed-halt',wasm:wasmPath,baseline_wasm:baselineWasm||null,scale,repetitions,matrix,baseline,comparison:baseline?matrix.map((r,i)=>({name:r.name,current_over_baseline:r.ir/baseline[i].ir})):null,geomean,pass:geomean>=1&&matrix.every(r=>r.ratio>=0.9)}));
+console.log(JSON.stringify({event:'summary',suite,timing_scope:'start-to-observed-halt',wasm:wasmPath,baseline_wasm:baselineWasm||null,scale,repetitions,matrix,baseline,comparison:baseline?matrix.map((r,i)=>({name:r.name,current_over_baseline:r.ir/baseline[i].ir})):null,geomean,pass:geomean>=1&&matrix.every(r=>r.ratio>=0.9)}));
 
 process.exitCode=geomean>=1&&matrix.every(r=>r.ratio>=0.9)?0:1;

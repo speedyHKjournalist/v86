@@ -224,6 +224,7 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
             memory,
             effects,
             calls,
+            poll_batches: vec![None; region.blocks.len()],
             control,
             values,
             states,
