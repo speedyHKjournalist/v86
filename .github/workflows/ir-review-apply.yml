@@ -31,8 +31,6 @@ jobs:
           python3 - <<'PY'
           import base64, hashlib, pathlib, subprocess, zlib
           encoded = pathlib.Path('.github/ir-review.patch.zlib.b64').read_bytes().strip()
-          # Correct one transport transcription; the complete decoded patch must
-          # still match the locally reviewed SHA-256 before any source is changed.
           encoded = encoded.replace(b'7PmdTn+T3w', b'7PmdTn+v3w')
           patch = zlib.decompress(base64.b64decode(encoded, validate=True))
           digest = hashlib.sha256(patch).hexdigest()
@@ -51,6 +49,15 @@ jobs:
           set -euo pipefail
           rustup toolchain install stable --profile minimal --component rustfmt
           rustup default stable
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('gen/generate_ir_decoder.js')
+          text = p.read_text()
+          old = r'\npub static ENCODINGS:'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, r'\n#[rustfmt::skip]\npub static ENCODINGS:'))
+          PY
+          node gen/generate_ir_decoder.js
           cargo fmt --all -- --config fn_single_line=true,control_brace_style=ClosingNextLine
           npm install --prefix /tmp/ir-review-lint eslint@10.11.0 espree eslint-scope
           IR_LINT_MODULES=/tmp/ir-review-lint/node_modules node .github/ir-review-lint.cjs
