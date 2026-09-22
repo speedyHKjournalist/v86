@@ -2,9 +2,19 @@ name: IR XP paired review
 
 on:
   workflow_dispatch:
-  push:
-    branches: ['chat/ir-review-throughput-20260922']
-    paths: ['.github/workflows/ir-xp-review.yml']
+    inputs:
+      disk_url:
+        description: 'Authorized HTTPS URL of a zstd-compressed XP system disk'
+        required: true
+        type: string
+      disk_sha256:
+        description: 'SHA-256 of the uncompressed disk'
+        required: true
+        type: string
+      disk_size:
+        description: 'Exact uncompressed disk size in bytes'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -18,6 +28,10 @@ jobs:
     if: github.repository == 'speedyHKjournalist/v86'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      DISK_URL: ${{ inputs.disk_url }}
+      DISK_SHA256: ${{ inputs.disk_sha256 }}
+      DISK_SIZE: ${{ inputs.disk_size }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -26,6 +40,13 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '24.17.0'
+      - name: Validate immutable image inputs
+        run: |
+          [[ "$DISK_URL" == https://* ]]
+          [[ "$DISK_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]
+          [[ "$DISK_SIZE" =~ ^[0-9]{1,11}$ ]]
+          test "$DISK_SIZE" -gt 0
+          test "$DISK_SIZE" -le 8589934592
       - name: Toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -48,17 +69,15 @@ jobs:
             lscpu
             sha256sum build/v86-ir-runtime.wasm /tmp/v86-ir-baseline/build/v86-ir-runtime.wasm build/libv86.mjs bios/seabios.bin bios/vgabios.bin
           } > build/xp-review/environment.txt
-      - name: Fetch public site system disk into ephemeral runner only
-        env:
-          DISK_URL: https://retrogamingsiteresource.dpdns.org/windowsxp/windowsxpmultidisk/windowsxp_multidisk_C_2G.img.zst
+      - name: Fetch verified disk into ephemeral runner only
         run: |
           set -euo pipefail
-          # app.js at 150f39493c2ad39b78b6d10bfa6a248a61e8f83b resolves
-          # hda.url as R2_URL_1 + game.systemDisk. Do not archive guest data.
-          curl --fail --location --retry 2 --connect-timeout 20 --max-time 360 "$DISK_URL" -o /tmp/xp-system.img.zst
+          # No guest data is uploaded. Signed/private URLs are not logged.
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 2 --connect-timeout 20 --max-time 360 --max-filesize 8589934592 "$DISK_URL" -o /tmp/xp-system.img.zst
           zstd -d /tmp/xp-system.img.zst -o /tmp/xp-system.img
-          test "$(stat -c%s /tmp/xp-system.img)" = 2147483648
-          { printf '%s\n' "$DISK_URL"; sha256sum /tmp/xp-system.img /tmp/xp-system.img.zst; } > build/xp-review/disk-manifest.txt
+          test "$(stat -c%s /tmp/xp-system.img)" = "$DISK_SIZE"
+          printf '%s  /tmp/xp-system.img\n' "$DISK_SHA256" | sha256sum -c -
+          { printf 'disk_size=%s\n' "$DISK_SIZE"; sha256sum /tmp/xp-system.img /tmp/xp-system.img.zst; } > build/xp-review/disk-manifest.txt
       - name: Three sequential paired cold boots
         env:
           IR_COMPARE_RUNS: '3'
