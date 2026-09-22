@@ -3,6 +3,7 @@
 // node tests/ir/performance/cold_publication.mjs [current.wasm] [baseline.wasm]
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { finish_halted_timing } from './timing.mjs';
 import { V86 } from '../../../build/libv86.mjs';
 const [current = 'build/v86-ir-runtime.wasm', baseline, ...extra] = process.argv.slice(2);
 assert.equal(extra.length, 0);
@@ -76,7 +77,7 @@ for(let round = 0; round < rounds; round++) {
                     });
                 };
             }
-            const fields = { guest_steps: 10, activations: 2, full_checks: 19, observer_checks: 32 };
+            const fields = { guest_steps: 10, activations: 2, full_checks: 19, observer_checks: 32, warm_handoffs: 35, missing_hint_hits: 37 };
             const stats = () => Object.fromEntries(Object.entries(fields).map(([k, f]) => [k, e.ir_cache_stat(f) >>> 0]));
             const before = vm.get_instruction_counter() >>> 0, beforeStats = stats(), start = performance.now();
             vm.run();
@@ -84,8 +85,8 @@ for(let round = 0; round < rounds; round++) {
                 assert(performance.now() - start < 60000, 'cold workload timeout');
                 await sleep(1);
             }
-            await vm.stop();
-            const ms = performance.now() - start;
+            const timing = await finish_halted_timing(vm, start);
+            const { ms } = timing;
             const steps = ((vm.get_instruction_counter() >>> 0) - before) >>> 0;
             const ir = Object.fromEntries(Object.entries(stats()).map(([k, v]) => [k, (v - beforeStats[k]) >>> 0]));
             assert.equal(steps, retired, 'exact retired work across all arms');
@@ -94,7 +95,7 @@ for(let round = 0; round < rounds; round++) {
             assert.equal(cpu.instruction_pointer[0] >>> 0, END + 3);
             assert.deepEqual([-4, 0, 4].map(x => memory().getUint32(DATA + x, true)),
                 [0x12345678, stages * iterations, 0x87654321]);
-            const row = { event: 'sample', ...arm, round, stages, iterations, probe, ms, steps,
+            const row = { event: 'sample', ...arm, round, stages, iterations, probe, ...timing, steps,
                 mips: steps / ms / 1000, ir, ir_coverage: ir.guest_steps / steps, publications };
             rows.push(row);
             console.log(JSON.stringify(row));

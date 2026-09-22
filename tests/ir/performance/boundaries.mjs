@@ -4,6 +4,7 @@
 // Set IR_FUSION=1 explicitly to measure how much fusion recovers instead.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { finish_halted_timing } from './timing.mjs';
 import { V86 } from '../../../build/libv86.mjs';
 
 const [currentWasm = 'build/v86-ir-runtime.wasm', baselineWasm, ...extra] = process.argv.slice(2);
@@ -24,8 +25,12 @@ assert.equal(updates % 16, 0, 'IR_BOUNDARY_UPDATES must be divisible by 16');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const PC = 0x100000, DATA = 0x120000, STACK = 0x90000, XOR = 0x31415926;
 const pages = [PC, PC + 0x9000, PC + 0x3000, PC + 0xC000];
-const bodies = [1, 4];
-const shapes = ['straight', 'compact_jumps', 'page_boundaries'];
+const bodies = process.env.IR_BOUNDARY_BODY
+    ? [positiveInteger('IR_BOUNDARY_BODY', 1)] : [1, 4];
+assert(bodies.every(body => [1, 4].includes(body)), 'IR_BOUNDARY_BODY must be 1 or 4');
+const allShapes = ['straight', 'compact_jumps', 'page_boundaries'];
+const shapes = process.env.IR_BOUNDARY_SHAPE ? [process.env.IR_BOUNDARY_SHAPE] : allShapes;
+assert(shapes.every(shape => allShapes.includes(shape)), 'invalid IR_BOUNDARY_SHAPE');
 const variants = [{ label: 'current', wasm: currentWasm }];
 if(baselineWasm) variants.push({ label: 'baseline', wasm: baselineWasm });
 const bios = Uint8Array.from(fs.readFileSync('build/jit-capacity.bin')).buffer;
@@ -105,7 +110,7 @@ function oracle(count) {
 
 const statFields = {
     guest_steps: 10, activations: 2, full_checks: 19, observer_checks: 32,
-    fast_checks: 18, target_hits: 21, successor_hits: 29, fused_steps: 25,
+    warm_handoffs: 35, fast_checks: 18, target_hits: 21, successor_hits: 29, fused_steps: 25,
 };
 const rows = [];
 const pairedStates = new Map();
@@ -167,8 +172,7 @@ for(const work of workloads) for(let round = 0; round < repetitions; round++) {
                     assert(performance.now() - start < timeout, `${context}: guest timeout`);
                     await sleep(1);
                 }
-                await vm.stop();
-                const ms = performance.now() - start;
+                const timing = await finish_halted_timing(vm, start);
                 const steps = ((vm.get_instruction_counter() >>> 0) - beforeSteps) >>> 0;
                 const ir = Object.fromEntries(Object.entries(readStats()).map(([name, value]) =>
                     [name, (value - beforeIr[name]) >>> 0]));
@@ -182,7 +186,7 @@ for(const work of workloads) for(let round = 0; round < repetitions; round++) {
                 assert.deepEqual(state.memory, [0x12345678, eax, ebx, 0x87654321], `${context}: stores/guards`);
                 assert.equal(state.flags & 0xCD5, 0x44, `${context}: final arithmetic/direction flags`);
                 assert.equal(cpu.instruction_pointer[0] >>> 0, work.end, `${context}: final EIP`);
-                return { ms, steps, ir, state, iterations, updates: count };
+                return { ...timing, steps, ir, state, iterations, updates: count };
             };
 
             // Bounded runs let async publication complete between runs. Require
@@ -254,7 +258,8 @@ const matrix = variants.flatMap(({ label }) => bodies.map(body => {
         // compact_jumps and page_boundaries have identical guest retirement;
         // this delta includes layout/compilation effects as well as admission.
         boundary_penalty_ns_per_iteration: Object.fromEntries(['ir', 'legacy'].map(backend => [backend,
-            byBackend[backend].page_boundaries.ns_per_iteration - byBackend[backend].compact_jumps.ns_per_iteration])),
+            shapes.includes('page_boundaries') && shapes.includes('compact_jumps')
+                ? byBackend[backend].page_boundaries.ns_per_iteration - byBackend[backend].compact_jumps.ns_per_iteration : null])),
     };
 }));
 const comparison = baselineWasm ? bodies.flatMap(body => ['ir', 'legacy'].flatMap(backend => shapes.map(shape => ({

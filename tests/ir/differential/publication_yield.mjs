@@ -45,7 +45,8 @@ try {
         assert(submittedSteps < 100003,
             `${completion}: handoff before wasting a full interpreter batch (${submittedSteps})`);
         assert.equal((count() - held.count) >>> 0, 0, `${completion}: no guest work after submission before host handoff`);
-        const beforePending = count(); e.main_loop();
+        const beforePending = count(), missingHits = e.ir_cache_stat(37); e.main_loop();
+        assert(e.ir_cache_stat(37) > missingHits, "held publication reuses exact missing-entry hint");
         assert(((count() - beforePending) >>> 0) >= 100003,
             `${completion}: a held Promise does not yield repeatedly or stop guest progress`);
         assert([PC, PC + 1].includes(cpu.instruction_pointer[0]));
@@ -60,7 +61,8 @@ try {
         await sleep(5);
         assert.equal(e.ir_auto_stat(10), 0, 'pending identity completed or cancelled');
         assert.equal(e.ir_cache_entry_stat(PC, 0, 1, 0) > 0, completion === 'success');
-        const before = count(); e.main_loop();
+        const before = count(), cacheHits = e.ir_cache_stat(2); e.main_loop();
+        if(completion === "success") assert(e.ir_cache_stat(2) > cacheHits, "publication clears absence hint before entry executes");
         assert(count() !== before, `${completion}: CPU continues after completion`);
         assert([PC, PC + 1].includes(cpu.instruction_pointer[0]));
         assert.equal(((count() - 0xFFFFFFFC) >>> 0), cpu.reg32[3] * 2 - (cpu.instruction_pointer[0] === PC + 1 ? 1 : 0));

@@ -17,6 +17,17 @@ use crate::{
 };
 use std::{collections::BTreeMap, sync::Mutex};
 type EntryIndexKey = (u32, u32, bool);
+// A missing entry is not an execution certificate: it only says to use the
+// ordinary interpreter/legacy path. Keep the last exact key outside admission
+// so a pending compiler does not repeatedly lock, collect and probe the same
+// absent loop header. This CPU owns non-shared Wasm memory; no reference to
+// these cells survives a host call. Publication and pending cache maintenance
+// always clear the hint; code/mapping changes cannot create a published key.
+static mut MISSING_ENTRY: Option<super::entry::CpuEntryKey> = None;
+static mut MISSING_HINT_ENABLED: bool = true;
+static mut MISSING_HINT_HITS: u32 = 0;
+#[inline(always)]
+fn clear_missing_hint() { unsafe { MISSING_ENTRY = None; } }
 fn index_key(entry: super::entry::CpuEntryKey) -> EntryIndexKey {
     (entry.linear.0, entry.pc.0, entry.default_32)
 }
@@ -66,6 +77,8 @@ struct Cache {
     full_checks: u32,
     post_fetch_reuses: u32,
     warm_admissions: u32,
+    warm_chaining: bool,
+    warm_handoffs: u32,
     target_hits: u32,
     successor_hits: u32,
     fusion_enabled: bool,
@@ -109,6 +122,8 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     full_checks: 0,
     post_fetch_reuses: 0,
     warm_admissions: 0,
+    warm_chaining: true,
+    warm_handoffs: 0,
     target_hits: 0,
     successor_hits: 0,
     fusion_enabled: true,
@@ -193,6 +208,7 @@ pub fn invalidate() {
     for record in &mut cache.records {
         record.phase = Phase::Retired;
     }
+    clear_missing_hint();
     cache.needs_collection = true;
 }
 pub fn dirty_page(page: u32) {
@@ -211,6 +227,7 @@ pub fn dirty_page(page: u32) {
             retired = true;
         }
     }
+    if retired { clear_missing_hint(); }
     cache.needs_collection |= retired;
 }
 unsafe fn cold() -> bool {
@@ -222,6 +239,23 @@ pub unsafe fn ir_cache_set_fast_validation(enabled: u32) -> bool {
     if enabled > 1 || !cold() { return false; }
     ir_admission_barrier();
     CACHE.try_lock().unwrap().fast_validation = enabled != 0;
+    true
+}
+/// A/B control for the already-validated successor handoff only. This does not
+/// change region formation, fusion, byte validation, or guest work budgets.
+#[no_mangle]
+pub unsafe fn ir_cache_set_warm_chaining(enabled: u32) -> bool {
+    if enabled > 1 || !cold() { return false; }
+    ir_admission_barrier();
+    CACHE.try_lock().unwrap().warm_chaining = enabled != 0;
+    true
+}
+/// Startup/cold-point A/B control; absence hints never authorize guest code.
+#[no_mangle]
+pub unsafe fn ir_cache_set_missing_hint(enabled: u32) -> bool {
+    if enabled > 1 || !cold() { return false; }
+    clear_missing_hint();
+    MISSING_HINT_ENABLED = enabled != 0;
     true
 }
 fn target(cache: &mut Cache, key: EntryIndexKey) -> Option<usize> {
@@ -301,8 +335,11 @@ pub(super) unsafe fn observer_continuation() -> bool {
 }
 #[inline(always)]
 unsafe fn mappings_current(job: &Job) -> bool {
-    mappings_cached(&job.source) && job.artifact.fused_sources.iter()
-        .all(|s| mappings_cached(&s.source))
+    if !mappings_cached(&job.source) { return false; }
+    for source in &job.artifact.fused_sources {
+        if !mappings_cached(&source.source) { return false; }
+    }
+    true
 }
 unsafe fn source_current(entry: super::entry::CpuEntryKey, source: &super::compile::ImmutableCodeSnapshot) -> bool {
     capture(entry.linear.0, source.bytes.len())
@@ -439,6 +476,7 @@ pub unsafe fn ir_cache_set_fusion(enabled: u32) -> bool {
         for r in &mut cache.records {
             if !r.job.artifact.fused_sources.is_empty() { r.phase = Phase::Retired; }
         }
+        clear_missing_hint();
         cache.needs_collection = true;
     }
     true
@@ -583,6 +621,7 @@ pub(super) unsafe fn make_room(entry: super::entry::CpuEntryKey) -> bool {
             r.phase = Phase::Retired;
             let entries = r.entries.clone();
             cache.evictions = cache.evictions.wrapping_add(1);
+            clear_missing_hint();
             cache.needs_collection = true;
             Some(entries)
         } else {
@@ -644,6 +683,7 @@ pub unsafe fn ir_cache_validate(id: u64, slot: u32) -> bool {
         false
     };
     if !valid {
+        clear_missing_hint();
         cache.needs_collection = true;
         cache.rejected = cache.rejected.wrapping_add(1);
     }
@@ -667,6 +707,7 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
     }
     if !unchanged_full(&cache.records[index].job) {
         cache.records[index].phase = Phase::Retired;
+        clear_missing_hint();
         cache.needs_collection = true;
         return false;
     }
@@ -678,6 +719,7 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
         }
     }
     cache.records[index].phase = Phase::Published;
+    clear_missing_hint();
     cache.needs_collection = true;
     for entry in &entries { cache.published.insert(index_key(*entry), index); }
     refresh_fusion_candidates(&mut cache);
@@ -713,6 +755,7 @@ pub unsafe fn ir_cache_cancel(id: u64, slot: u32) -> bool {
         return false;
     };
     r.phase = Phase::Retired;
+    clear_missing_hint();
     cache.needs_collection = true;
     cache.failed = cache.failed.wrapping_add(1);
     true
@@ -760,6 +803,10 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         32 => cache.observer_checks,
         33 => cache.observer_rejections,
         34 => cache.warm_admissions,
+        35 => cache.warm_handoffs,
+        36 => u32::from(cache.warm_chaining),
+        37 => unsafe { MISSING_HINT_HITS },
+        38 => unsafe { u32::from(MISSING_HINT_ENABLED) },
         _ => 0,
     }
 }
@@ -850,6 +897,7 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
     };
     if !valid {
         cache.records[index].phase = Phase::Retired;
+        clear_missing_hint();
         cache.needs_collection = true;
         cache.link_misses = cache.link_misses.wrapping_add(1);
         return None;
@@ -875,28 +923,49 @@ pub unsafe fn ir_cache_link_target() -> u64 {
 /// Called by the ordinary CPU dispatcher, before legacy cache lookup.
 /// No request means no IR entry; compilation policy/tier promotion remain separate.
 pub unsafe fn execute() -> bool {
-    if diag::enabled() { execute_mode::<true>() } else { execute_mode::<false>() }
+    if diag::enabled() { return execute_mode::<true>(); }
+    if MISSING_HINT_ENABLED && MISSING_ENTRY.is_some_and(|entry| entry == live::entry()) {
+        super::entry::take_link_request();
+        MISSING_HINT_HITS = MISSING_HINT_HITS.wrapping_add(1);
+        return false;
+    }
+    execute_mode::<false>()
 }
 unsafe fn execute_mode<const PROFILE: bool>() -> bool {
     use super::entry::take_link_request;
     take_link_request();
     let control = *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM);
-    let mut owner = None;
-    if !execute_one::<PROFILE>(false, None, &mut owner) { return false; }
-    // Iterative cold chaining keeps host stack bounded and retains full entry,
-    // source, mapping and post-fetch admission checks at each successor.
-    let mut limit = true;
-    for _ in 0..64 {
+    let mut activation = match admit_one::<PROFILE>(false, None) {
+        AdmissionResult::Ready(activation) => activation,
+        AdmissionResult::Miss => return false,
+        AdmissionResult::Fault => return true,
+    };
+    // One cold admission starts a bounded execution interval. Ordinary warm
+    // successors can hand off under the finishing activation's cache guard;
+    // no Rust reference/guard survives a generated-code call. This is still a
+    // CPU-state ABI, not cross-module SSA retention or unchecked table chaining.
+    for index in 0..=64 {
+        let previous = activation.owner;
+        if let Some(next) = run_activation::<PROFILE>(activation, control, index < 64) {
+            activation = next;
+            continue;
+        }
+        if index == 64 {
+            if PROFILE { diag::chain(5); }
+            break;
+        }
         let stop = if !take_link_request() { Some(0) }
             else if !cpu::ir_link_budget_available() { Some(1) }
             else if *gp::in_hlt { Some(2) }
             else if *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM) != control { Some(3) }
             else { None };
-        if let Some(reason) = stop { if PROFILE { diag::chain(reason); } limit = false; break; }
-        let previous = owner.take();
-        if !execute_one::<PROFILE>(true, previous, &mut owner) { if PROFILE { diag::chain(4); } limit = false; break; }
+        if let Some(reason) = stop { if PROFILE { diag::chain(reason); } break; }
+        match admit_one::<PROFILE>(true, Some(previous)) {
+            AdmissionResult::Ready(next) => activation = next,
+            AdmissionResult::Miss => { if PROFILE { diag::chain(4); } break; },
+            AdmissionResult::Fault => break,
+        }
     }
-    if limit { if PROFILE { diag::chain(5); } }
     take_link_request();
     true
 }
@@ -911,9 +980,16 @@ unsafe fn collect_if_needed() {
 /// A published owner admitted under a single cache guard. No guard/reference
 /// survives the subsequent generated-code call.
 struct Activation {
+    entry: super::entry::CpuEntryKey,
+    linked: bool,
     slot: u32,
     owner: Owner,
     needs_heat: bool,
+}
+enum AdmissionResult {
+    Ready(Activation),
+    Miss,
+    Fault,
 }
 enum Selected {
     Ready(Activation),
@@ -943,14 +1019,17 @@ fn activate<const PROFILE: bool>(
             r.successor = Some(Successor { key: index_key(entry), owner });
         }
     }
-    Activation { slot, owner, needs_heat }
+    Activation { entry, linked, slot, owner, needs_heat }
 }
-unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>, owner: &mut Option<Owner>) -> bool {
+// Keep the Activation return in SSA instead of materializing an aggregate
+// return slot on each budget-ended admission. No guards are removed.
+#[inline(always)]
+unsafe fn admit_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>) -> AdmissionResult {
     let admission_scope = PROFILE.then(|| Scope::new(Stage::Admission));
     if PROFILE { diag::admission(Admission::Attempt); }
     if !cold() {
         if PROFILE { diag::admission(Admission::Busy); }
-        return false;
+        return AdmissionResult::Miss;
     }
     collect_if_needed();
     let entry = live::entry();
@@ -958,7 +1037,10 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
         let mut cache = CACHE.try_lock().unwrap();
         let mut selected = None;
         let index = successor_target(&mut cache, index_key(entry), previous);
-        if index.is_none() { if PROFILE { diag::admission(Admission::Missing); super::schedule::diagnose_missing(entry); } }
+        if index.is_none() {
+            if !PROFILE && !cache.needs_collection { MISSING_ENTRY = Some(entry); }
+            if PROFILE { diag::admission(Admission::Missing); super::schedule::diagnose_missing(entry); }
+        }
         let index = index.filter(|_| {
             let valid = ir_entry_matches(entry.linear.0, entry.cs_base(), entry.default_32 as u32);
             if !valid { if PROFILE { diag::admission(Admission::Context); } }
@@ -994,6 +1076,7 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
             if !valid {
                 if PROFILE { diag::admission(Admission::StaleBefore); }
                 cache.records[index].phase = Phase::Retired;
+                clear_missing_hint();
                 cache.needs_collection = true;
             } else {
                 let warm = cache.fast_validation && cached == CachedMatch::Match
@@ -1027,7 +1110,7 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
     };
     let Some(selected) = selected else {
         collect_if_needed();
-        return false;
+        return AdmissionResult::Miss;
     };
     let activation = match selected {
         Selected::Ready(activation) => activation,
@@ -1041,7 +1124,7 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
             if fetch.is_err() {
                 if PROFILE { diag::admission(Admission::FetchFault); }
                 ir_admission_barrier();
-                return true;
+                return AdmissionResult::Fault;
             }
             let admitted = {
                 let mut cache = CACHE.try_lock().unwrap();
@@ -1073,6 +1156,7 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
                         CachedMatch::Stale => {
                             if PROFILE { diag::admission(Admission::StaleAfter); }
                             cache.records[index].phase = Phase::Retired;
+                            clear_missing_hint();
                             cache.needs_collection = true;
                             false
                         },
@@ -1087,16 +1171,58 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
             };
             let Some(activation) = admitted else {
                 collect_if_needed();
-                return false;
+                return AdmissionResult::Miss;
             };
             debug_assert_eq!(activation.slot, slot);
             activation
         },
     };
-    let Activation { slot, owner: current, needs_heat } = activation;
-    let Owner { index: admitted_index, id } = current;
-    *owner = Some(current);
     drop(admission_scope);
+    AdmissionResult::Ready(activation)
+}
+
+/// Only an exact, previously admitted successor is eligible. A predecessor's
+/// cached index is a hint, not authority: validate both non-repeating owners,
+/// the live alias, entry context, generation, synchronous byte certificate and
+/// ALL current TLB mappings. Any miss uses the unchanged full admission path.
+/// The actual fetch still runs after the mapping proof and cannot invoke the
+/// host or walk page tables while the cache guard is held.
+#[inline(always)]
+unsafe fn warm_handoff(cache: &mut Cache, previous: Owner) -> Option<Activation> {
+    if !cache.warm_chaining || !cache.fast_validation || cache.needs_collection
+        || cache.active || cpu::in_jit { return None; }
+    let epoch = admission_epoch();
+    if epoch == u64::MAX { return None; }
+    let entry = live::entry();
+    let predecessor = cache.records.get(previous.index)?;
+    if predecessor.phase != Phase::Published
+        || predecessor.job.artifact.key.job != previous.id { return None; }
+    let successor = predecessor.successor?;
+    if successor.key != index_key(entry) { return None; }
+    let target = cache.records.get(successor.owner.index)?;
+    if target.phase != Phase::Published || target.job.artifact.key.job != successor.owner.id
+        || target.validated_epoch != epoch
+        || !target.entries.contains(&entry)
+        || !ir_entry_matches(entry.linear.0, entry.cs_base(), entry.default_32 as u32)
+        || !live::generation_current(target.job.artifact.key)
+        || !mappings_current(&target.job) { return None; }
+    *gp::previous_ip = *gp::instruction_pointer;
+    cpu::get_phys_eip().expect("certified IR handoff must hit the CPU TLB");
+    cache.fast_checks = cache.fast_checks.wrapping_add(1);
+    cache.cached_checks = cache.cached_checks.wrapping_add(2);
+    cache.post_fetch_reuses = cache.post_fetch_reuses.wrapping_add(1);
+    cache.warm_admissions = cache.warm_admissions.wrapping_add(1);
+    cache.warm_handoffs = cache.warm_handoffs.wrapping_add(1);
+    cache.successor_hits = cache.successor_hits.wrapping_add(1);
+    Some(activate::<false>(cache, successor.owner.index, entry, Some(previous), true))
+}
+
+#[inline(always)]
+unsafe fn run_activation<const PROFILE: bool>(
+    activation: Activation, control: i32, allow_handoff: bool,
+) -> Option<Activation> {
+    let Activation { entry, linked, slot, owner: current, needs_heat } = activation;
+    let Owner { index: admitted_index, id } = current;
     let before = *gp::instruction_counter;
     let diagnostic_cr3 = if PROFILE { diag::cr3() } else { 0 };
     super::entry::take_link_request();
@@ -1128,7 +1254,7 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
         profiler::performance_chunk_finish(sample, steps);
         profiler::performance_recording_add(1, steps as u64);
     }
-    {
+    let next = {
         let mut cache = CACHE.try_lock().unwrap();
         cache.active = false;
         cache.active_owner = None;
@@ -1176,9 +1302,24 @@ unsafe fn execute_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>
             {
                 r.phase = Phase::Retired;
             }
+            clear_missing_hint();
             cache.needs_collection = true;
         }
+        // A normal completed edge may reuse an admission certificate. Timing
+        // imports are observable, so diagnostics/recording retain full admission.
+        // IRQ/control and batch/chain limits are identical to the outer loop.
+        if !PROFILE && allow_handoff && steps != 0 && !profiler::performance_recording_enabled()
+            && super::entry::profile_link_requested()
+            && cpu::ir_link_budget_available() && !*gp::in_hlt
+            && *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM) == control
+        {
+            warm_handoff(&mut cache, current)
+        } else { None }
+    };
+    if next.is_some() {
+        super::entry::take_link_request();
+    } else {
+        collect_if_needed();
     }
-    collect_if_needed();
-    true
+    next
 }
