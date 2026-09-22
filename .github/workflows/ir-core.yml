@@ -101,10 +101,14 @@ jobs:
           set -o pipefail
           make build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
           node tests/ir/differential/simd_integer.mjs 2>&1 | tee build/ir-state-elision-simd.log
-      - name: Guarded scalar store continuation and recovery
+      - name: Guarded scalar/vector store continuation and recovery
         run: |
           set -o pipefail
           sh tools/ir-store-continuation-tests.sh 2>&1 | tee build/ir-store-continuation-cpu.log
+      - name: Exact-budget pure MIR batching
+        run: |
+          set -o pipefail
+          make ir-budget-batch-tests 2>&1 | tee build/ir-budget-batch.log
       - name: IR-12 cache, publication and scheduling lifecycle
         run: |
           set -o pipefail
