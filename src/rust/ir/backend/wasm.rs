@@ -1706,10 +1706,11 @@ fn emit_inner(
         e.w.const_i32(entry.linear.0 as i32);
         e.w.const_i32(entry.cs_base() as i32);
         e.w.const_i32(i32::from(entry.default_32));
-        e.w.call_signature(
-            "ir_entry_matches",
-            crate::ir::helper::imports::signature("ir_entry_matches"),
-        );
+        // Single-entry modules need only one opaque Wasm-to-Wasm import for
+        // context validation plus REP/previous-IP initialization. Rejections
+        // must remain effect-free; shared aliases retain their separate guard.
+        let guard = if aliases.is_empty() { "ir_enter_checked" } else { "ir_entry_matches" };
+        e.w.call_signature(guard, crate::ir::helper::imports::signature(guard));
         for alias in aliases {
             e.w.const_i32(alias.linear.0 as i32);
             e.w.const_i32(alias.cs_base() as i32);
@@ -1725,10 +1726,9 @@ fn emit_inner(
         e.w.block_end();
     }
     if cpu {
-        e.w.call_signature(
-            "ir_enter",
-            crate::ir::helper::imports::signature("ir_enter"),
-        );
+        if entry.is_none() || !aliases.is_empty() {
+            e.w.call_signature("ir_enter", crate::ir::helper::imports::signature("ir_enter"));
+        }
         if fused {
             e.w.call_signature("ir_admission_epoch_address",
                 crate::ir::helper::imports::signature("ir_admission_epoch_address"));

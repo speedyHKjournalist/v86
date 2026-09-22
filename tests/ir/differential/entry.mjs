@@ -18,7 +18,7 @@ try {
         const imports={...e,m:e.memory};
         for(const {name,kind} of WebAssembly.Module.imports(module))if(kind==="function"){
             assert.equal(typeof e[name],"function",name);
-            imports[name]=(...args)=>{calls.push(name);return name==="ir_entry_matches"&&legacyContext?e.ir_test_entry_in_jit(...args):e[name](...args);};
+            imports[name]=(...args)=>{calls.push(name);return name==="ir_enter_checked"&&legacyContext?e.ir_test_enter_checked_in_jit(...args):e[name](...args);};
         }
         return new WebAssembly.Instance(module,{e:imports});
     });
@@ -68,11 +68,14 @@ try {
             if(mismatch==="negative-index")entry=-1;
             if(mismatch==="high-index")entry=65536;
             const before=untouched();f(entry);assert.deepEqual(untouched(),before,`entry ${i}: ${mismatch} must not change state`);
-            assert.deepEqual(calls,mismatch.includes("index")?[]:["ir_entry_matches"],"reject before all state/access/helper imports");
+            assert.deepEqual(calls,mismatch.includes("index")?[]:["ir_enter_checked"],"reject before all state/access/helper imports");
             rejected++;
         }
         reset(c);assert.equal(e.ir_entry_matches(c[3],(c[3]-c[2])>>>0,+c[1]+256),0,"mode field is full width");
-        f(0);assert.equal(calls[0],"ir_entry_matches");assert.equal(calls[1],"ir_enter");
+        const beforeRejected=untouched();
+        assert.equal(e.ir_enter_checked(c[3],(c[3]-c[2])>>>0,+c[1]+256),0);
+        assert.deepEqual(untouched(),beforeRejected,"full-width mode rejection leaves REP metadata and CPU untouched");
+        f(0);assert.equal(calls[0],"ir_enter_checked");assert(!calls.includes("ir_enter"),"no duplicate initialization import");
         assert.equal(e.ir_rep_result(),0n);const actual=state(),count=(words[664>>2]-0xFFFFFFFC)>>>0;
         assert(count>0&&count<=32,`valid entry ${i} makes bounded progress`);
         reset(c);for(let n=0;n<count;n++)e.ir_test_step();assert.deepEqual(actual,state(),`matching entry ${i} vs interpreter`);executed++;

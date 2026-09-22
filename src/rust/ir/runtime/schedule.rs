@@ -278,6 +278,7 @@ unsafe fn record(entry: CpuEntryKey, interpreted: bool) {
 }
 /// Admission already knows whether this entry can benefit from more heat.
 /// Finished Tier-2 traces must not evict unpublished PCs from the small hot ring.
+#[inline(always)]
 pub unsafe fn note_cached(entry: CpuEntryKey, linked: bool, needs_heat: bool) {
     if linked {
         let mut s = SCHEDULER.try_lock().unwrap();

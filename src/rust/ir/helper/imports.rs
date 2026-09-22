@@ -45,6 +45,7 @@ imports! {
     "ir_diagnostic_begin": [I32] -> [], Entry, "sampled exclusive timing scope; no guest state or admission epoch changes";
     "ir_diagnostic_end": [] -> [], Entry, "close sampled timing scope; no guest state or admission epoch changes";
     "ir_enter": [] -> [], Entry, "writes previous_ip and REP result; requires !in_jit";
+    "ir_enter_checked": [I32,I32,I32] -> [I32], Entry, "exact context guard then entry initialization; false preserves all CPU/REP state; no source/mapping authority";
     "ir_request_link": [] -> [], Entry, "sets cold continuation request; no guest state change or dispatch";
     "ir_request_observer_link": [] -> [], Entry, "requests cold admission after committed observation; never an SSA fusion edge";
     "ir_admission_barrier": [] -> [], Entry, "revokes synchronous entry-validation certificates before observers; no guest state change";

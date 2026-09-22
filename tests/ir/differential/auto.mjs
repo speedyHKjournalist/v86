@@ -205,7 +205,7 @@ try{
     console.log(`PASS: ${wasm}: unchanged unsupported lowering is not repeatedly compiled; host code writes enable recompilation`);
     // Browser rejection of an upgrade retains the working Tier 1 entry.
     const original=WebAssembly.instantiate;
-    const isIR=code=>WebAssembly.Module.imports(new WebAssembly.Module(code)).some(i=>i.name==="ir_entry_matches");
+    const isIR=code=>WebAssembly.Module.imports(new WebAssembly.Module(code)).some(i=>i.module==="e" && ["ir_entry_matches","ir_enter_checked"].includes(i.name));
     for(const invalidate of ["peer-write","disabled"]) {
         let held;
         const other=PC+0x2000;

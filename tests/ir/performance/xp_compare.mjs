@@ -32,6 +32,8 @@ for(let round=0;round<runs;round++) for(const variant of round%2?[...variants].r
             full_checks_per_million:work.full_checks*1e6/result.instructions,
             observer_checks_per_million:work.observer_checks*1e6/result.instructions,
             validation_attempts_per_million:(work.full_checks+work.observer_checks)*1e6/result.instructions,
+            warm_handoffs_per_million:result.boundary_counters?.warm_handoff_supported?work.warm_handoffs*1e6/result.instructions:null,
+            missing_hint_hits_per_million:result.boundary_counters?.missing_hint_supported?work.missing_hint_hits*1e6/result.instructions:null,
             publications:ir.tier1_published+ir.tier2_published,evictions:ir.cache_evictions,
             ...result.boundary_counters}:null};
     rows.push(row);console.log(JSON.stringify(row));

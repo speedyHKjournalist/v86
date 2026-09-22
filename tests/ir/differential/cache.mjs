@@ -51,16 +51,19 @@ try {
     }
     e.performance_recording_enable(0);
     console.log(`PASS: ${wasm}: ${programs} published CFG/store modules executed by normal CPU dispatch, both tier requests, optimization and recording modes`);
-    prepare([0x40,0xF4]);
-    const negatives=e.ir_cache_stat(28);
-    for(let n=0;n<3;n++)await run();
-    assert(e.ir_cache_stat(28)>negatives,"repeated unpublished entry uses a negative lookup witness");
-    cpu.instruction_pointer[0]=PC;cpu.in_hlt[0]=0;assert(await request(1));
-    const afterMissing=e.ir_cache_stat(2);await run();
-    assert.equal(e.ir_cache_stat(2)-afterMissing,1,"publication invalidates a previous negative lookup");
-    clear();const afterRetire=e.ir_cache_stat(2);await run();
-    assert.equal(e.ir_cache_stat(2),afterRetire,"retired owners cannot survive in positive hints");
-    console.log(`PASS: ${wasm}: negative lookup reuse, publication invalidation and retirement`);
+    for(const hint of [0,1]) {
+        prepare([0x40,0xF4]);
+        assert.equal(e.ir_cache_set_missing_hint(hint),1);
+        const field=hint?37:28,negatives=e.ir_cache_stat(field);
+        for(let n=0;n<3;n++)await run();
+        assert(e.ir_cache_stat(field)>negatives,"repeated unpublished entry uses the selected negative witness");
+        cpu.instruction_pointer[0]=PC;cpu.in_hlt[0]=0;assert(await request(1));
+        const afterMissing=e.ir_cache_stat(2);await run();
+        assert.equal(e.ir_cache_stat(2)-afterMissing,1,"publication invalidates a previous negative lookup");
+        clear();const afterRetire=e.ir_cache_stat(2);await run();
+        assert.equal(e.ir_cache_stat(2),afterRetire,"retired owners cannot survive in positive hints");
+    }
+    console.log(`PASS: ${wasm}: both negative-witness paths, publication invalidation and retirement`);
     // Only completed ordinary exits may bypass the outer dispatcher. Budget,
     // slow memory exits yield. Completed observer calls may request cold admission.
     for(const spec of [

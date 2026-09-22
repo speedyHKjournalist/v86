@@ -62,6 +62,25 @@ pub unsafe fn ir_enter() {
     *gp::previous_ip = *gp::instruction_pointer;
 }
 
+/// Combine the single-entry module's context guard and entry initialization.
+/// A rejected key has NO architectural/REP effects. Code identity, bytes and
+/// mappings remain the caller's admission obligation, just as for ir_enter.
+#[no_mangle]
+pub unsafe fn ir_enter_checked(linear: u32, cs_base: u32, default_32: u32) -> bool {
+    if !super::entry::matches_current(linear, cs_base, default_32) { return false; }
+    ir_enter();
+    true
+}
+#[cfg(feature = "ir-test-hooks")]
+#[no_mangle]
+pub unsafe fn ir_test_enter_checked_in_jit(linear: u32, cs_base: u32, mode: u32) -> bool {
+    let saved = cpu::in_jit;
+    cpu::in_jit = true;
+    let result = ir_enter_checked(linear, cs_base, mode);
+    cpu::in_jit = saved;
+    result
+}
+
 #[cfg(feature = "ir-test-hooks")]
 #[no_mangle]
 pub unsafe fn ir_test_step() {

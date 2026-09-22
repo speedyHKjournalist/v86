@@ -50,6 +50,13 @@ try {
         assert(['0', '1'].includes(process.env.IR_FUSION));
         assert.equal(e.ir_cache_set_fusion(Number(process.env.IR_FUSION)),1);
     }
+    for(const [option, setter] of [['IR_WARM_CHAINING', 'ir_cache_set_warm_chaining'], ['IR_MISSING_HINT', 'ir_cache_set_missing_hint']]) {
+        if(process.env[option] !== undefined) {
+            assert(['0', '1'].includes(process.env[option]), option);
+            assert.equal(typeof e[setter], 'function', `${option} is unsupported by this core`);
+            assert.equal(e[setter](Number(process.env[option])), 1);
+        }
+    }
     if(process.env.IR_DIAGNOSTICS !== undefined) {
         assert.equal(await vm.configure_ir_diagnostics(Number(process.env.IR_DIAGNOSTICS)), true);
     }
@@ -75,9 +82,9 @@ try {
     if(recording) e.performance_recording_enable(1);
     started = previous = performance.now();
     count = vm.get_instruction_counter() >>> 0;
-    const readIr = () => [10,2,19,32].map(field=>e.ir_cache_stat(field)>>>0);
+    const readIr = () => [10,2,19,32,35,37].map(field=>e.ir_cache_stat(field)>>>0);
     let priorIr = readIr();
-    const totalIr = [0,0,0,0];
+    const totalIr = Array(priorIr.length).fill(0);
     const sampleIr = () => {
         const current = readIr(), delta = current.map((value,i)=>(value-priorIr[i])>>>0);
         delta.forEach((value,i)=>totalIr[i]+=value);priorIr=current;return delta;
@@ -92,6 +99,7 @@ try {
         console.log(JSON.stringify({ backend, wasm, ms: now - started,
             phase, instructions: total,
             interval_ir: {steps:delta[0], activations:delta[1], full_checks:delta[2], observer_checks:delta[3],
+                warm_handoffs:delta[4], missing_hint_hits:delta[5],
                 coverage:steps ? delta[0]/steps : 0,
                 activations_per_million:steps ? delta[1]*1e6/steps : 0,
                 full_checks_per_million:steps ? delta[2]*1e6/steps : 0,
@@ -109,8 +117,10 @@ try {
     console.log(JSON.stringify({event:'result', backend, target, completed:target === 'time' || !!milestone,
         ms:performance.now()-started, instructions:total, milestone, jit:vm.get_jit_info(),
         // Accumulate wrapping counters per interval; long boots can exceed 2^32.
-        ir_work:{guest_steps:totalIr[0],activations:totalIr[1],full_checks:totalIr[2],observer_checks:totalIr[3]},
-        boundary_counters:{entry_aliases:e.ir_cache_stat(30)>>>0,shared_publications:e.ir_cache_stat(31)>>>0,
+        ir_work:{guest_steps:totalIr[0],activations:totalIr[1],full_checks:totalIr[2],observer_checks:totalIr[3],
+            warm_handoffs:totalIr[4],missing_hint_hits:totalIr[5]},
+        boundary_counters:{warm_handoff_supported:typeof e.ir_cache_set_warm_chaining === 'function',
+            missing_hint_supported:typeof e.ir_cache_set_missing_hint === 'function',entry_aliases:e.ir_cache_stat(30)>>>0,shared_publications:e.ir_cache_stat(31)>>>0,
             observer_rejections:e.ir_cache_stat(33)>>>0,shared_compilations:e.ir_auto_stat(25)>>>0,
             shared_extra_entries:e.ir_auto_stat(26)>>>0}}));
     if(recording) {
