@@ -3,7 +3,7 @@ import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 const cases = JSON.parse(fs.readFileSync("build/ir-cfg/cases.json"));
 const modules = cases.map((_, i) => new WebAssembly.Module(fs.readFileSync(`build/ir-cfg/${i}.wasm`)));
-const vm = new V86({wasm_path:"build/v86-ir-test.wasm", memory_size:32<<20,
+const vm = new V86({wasm_path:process.argv[2] || "build/v86-ir-test.wasm", memory_size:32<<20,
     bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},
     disable_keyboard:true, disable_mouse:true, disable_speaker:true, net_device:{type:"none"}, autostart:false});
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -24,6 +24,9 @@ try {
         cpu.reg32.set([0x7FFFFFFF,counter,0x11223344,0x80000000,STACK,0x99AABBCC,DATA,0xFEDCBA98]);
         // CPUID leaf 0 also exercises an adapter after the entry prologue.
         if(c[0]===11) cpu.reg32[0]=0;
+        // These semantic fixtures must execute SSE instead of taking the debug
+        // OSFXSR observer deferral. Fault/disabled-SSE paths have separate tests.
+        cpu.cr[4] |= 0x600; cpu.cr[0] &= ~12;
         cpu.is_32[0]=+mode; cpu.flags[0]=flags; cpu.flags_changed[0]=lazy?0x8D5:0;
         words[96>>2]=31; words[104>>2]=0x7FFFFFFF; words[112>>2]=flags&64?0:0x80000000;
         cpu.instruction_pointer[0]=PC; cpu.in_hlt[0]=0; words[664>>2]=initial_count;
@@ -57,6 +60,9 @@ try {
             else baseline.push(observed);
             trial++;
             assert(count<=budget,`unbounded guest count: ${i}, ${count}/${budget}`);
+            if([2,13,18].includes(program) && budget>=2) {
+                assert(count>0,`SSE CFG ${i} must execute rather than defer`);
+            }
             if(program===3 && pc===0x1000) assert.equal(count,budget-1,"self-jump retirement count");
             if(program===4 && pc===0x1000 && (before.flags&64)) assert.equal(count,Math.floor(budget/2),"conditional self-jump retirement count");
             reset(c,counter,flags,lazy,initial_count_local,cold);

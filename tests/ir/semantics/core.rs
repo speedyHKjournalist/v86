@@ -415,6 +415,7 @@ fn dce_keeps_snapshot_only_values_and_ordered_helpers() {
             phis: false,
             copy: false,
             flags: false,
+            state_sync: false,
             helper_state: false,
             fold: false,
             gvn: false,

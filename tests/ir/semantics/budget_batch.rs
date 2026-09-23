@@ -48,14 +48,14 @@ fn budget_batch_fixtures() {
                 if batch {
                     assert_eq!(
                         mir.batch_pure_budget_polls(262_144).unwrap() > 0,
-                        program != 5,
+                        true,
                         "program {program}/{mode}"
                     );
                 }
                 mir.verify().unwrap();
                 for budget in (1..=36).chain([63, 64, 65, 127, 128, 129, 255, 256, 257]) {
                     let a = emit_cpu_with_code_pages(&mir, budget, &[PC]).unwrap();
-                    assert_eq!(a.budget_batch_blocks > 0, batch && program != 5);
+                    assert_eq!(a.budget_batch_blocks > 0, batch);
                     std::fs::write(
                         format!("build/ir-budget-batch/{}.wasm", cases.len()),
                         &a.bytes,

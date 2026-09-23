@@ -8,15 +8,18 @@ pub struct Allocation {
     pub local_types: Vec<Type>,
 }
 /// Incremental cliques: pairs already present in the preceding live set are
-/// already connected. Dense rows avoid repeated tree insertion of the same edge.
-/// This constructs exactly the conservative graph used by both allocators.
-pub(crate) struct Interference {
+/// already connected. Both allocators color ascending SSA IDs, so only the
+/// lower-ID endpoint of each undirected edge can already own a local. Store
+/// that edge once, in its higher-ID row, without allocating future-ID tails.
+/// The symmetric representation is retained as a test oracle.
+pub(crate) type Interference = InterferenceRows<true>;
+pub(crate) struct InterferenceRows<const TRIANGULAR: bool> {
     rows: Vec<Vec<u64>>,
     last: Vec<usize>,
     generation: usize,
     words: usize,
 }
-impl Interference {
+impl<const TRIANGULAR: bool> InterferenceRows<TRIANGULAR> {
     pub(crate) fn new(values: usize) -> Self {
         Self {
             rows: vec![vec![]; values],
@@ -43,7 +46,7 @@ impl Interference {
     }
     fn insert(&mut self, a: usize, b: usize) {
         if self.rows[a].is_empty() {
-            self.rows[a].resize(self.words, 0);
+            self.rows[a].resize(if TRIANGULAR { a.div_ceil(64) } else { self.words }, 0);
         }
         self.rows[a][b / 64] |= 1u64 << (b % 64);
     }
@@ -62,8 +65,13 @@ impl Interference {
             }
             for b in live.clone() {
                 if a != b && ty(a) == ty(b) {
-                    self.insert(a.index(), b.index());
-                    self.insert(b.index(), a.index());
+                    if TRIANGULAR {
+                        self.insert(a.index().max(b.index()), a.index().min(b.index()));
+                    }
+                    else {
+                        self.insert(a.index(), b.index());
+                        self.insert(b.index(), a.index());
+                    }
                 }
             }
         }
@@ -72,6 +80,9 @@ impl Interference {
             self.last[a.index()] = self.generation;
         }
     }
+    /// Private ascending-color query: only values below `value` may already
+    /// have locals. HIR enumerates its value arena; owned MIR iterates LiveBits
+    /// in ascending order. Do not use this triangular graph for another order.
     pub(crate) fn occupied(&self, value: usize, allocation: &Allocation) -> Vec<bool> {
         let mut occupied = vec![false; allocation.local_types.len()];
         for (word, &bits) in self.rows[value].iter().enumerate() {
@@ -243,6 +254,12 @@ fn allocate_graph(region: &Region, remaining: usize) -> Result<Allocation, &'sta
 }
 fn allocate_graph_with<S: LiveValues>(
     region: &Region,
+    remaining: usize,
+) -> Result<Allocation, &'static str> {
+    allocate_graph_rows::<S, true>(region, remaining)
+}
+fn allocate_graph_rows<S: LiveValues, const TRIANGULAR: bool>(
+    region: &Region,
     mut remaining: usize,
 ) -> Result<Allocation, &'static str> {
     let mut spend = |amount: usize| -> Result<(), &'static str> {
@@ -314,7 +331,7 @@ fn allocate_graph_with<S: LiveValues>(
             break;
         }
     }
-    let mut interference = Interference::new(region.values.len());
+    let mut interference = InterferenceRows::<TRIANGULAR>::new(region.values.len());
     let mut work = 0usize;
     let mut connect = |live: &S| -> Result<(), &'static str> {
         work = work.saturating_add(interference.connection_work_iter(
@@ -572,8 +589,10 @@ mod tests {
                         crate::ir::passes::run(&mut region, pass).unwrap();
                     }
                     let dense = allocate_graph_with::<LiveBits>(&region, 4_000_000);
-                    let reference = allocate_graph_with::<BTreeSet<ValueId>>(&region, 4_000_000);
+                    let reference = allocate_graph_rows::<BTreeSet<ValueId>, false>(&region, 4_000_000);
+                    let symmetric = allocate_graph_rows::<LiveBits, false>(&region, 4_000_000);
                     assert_eq!(dense, reference, "mode={mode}, bytes={bytes:x?}");
+                    assert_eq!(dense, symmetric, "triangular/symmetric: mode={mode}, bytes={bytes:x?}");
                     assert_eq!(
                         allocate_graph_with::<LiveBits>(&region, 1),
                         allocate_graph_with::<BTreeSet<ValueId>>(&region, 1)
@@ -604,7 +623,7 @@ mod tests {
                     let start = std::time::Instant::now();
                     for _ in 0..20 {
                         let result = if which == 0 {
-                            allocate_graph_with::<BTreeSet<ValueId>>(&region, 4_000_000)
+                            allocate_graph_rows::<LiveBits, false>(&region, 4_000_000)
                         } else {
                             allocate_graph_with::<LiveBits>(&region, 4_000_000)
                         };
@@ -617,7 +636,7 @@ mod tests {
                 sample.sort_by(f64::total_cmp);
             }
             println!(
-                "{size} instructions: tree {:.1} us, dense {:.1} us",
+                "{size} instructions: symmetric {:.1} us, triangular {:.1} us",
                 samples[0][3], samples[1][3]
             );
         }
@@ -702,6 +721,35 @@ mod tests {
         }
     }
     #[test]
+    fn triangular_rows_preserve_far_values_types_and_reentry() {
+        let n = 16_384;
+        let mut triangular = Interference::new(n);
+        let mut symmetric = InterferenceRows::<false>::new(n);
+        let types: Vec<_> = (0..n).map(|i| if i % 3 == 0 { Type::I64 } else { Type::I32 }).collect();
+        let cases: &[&[u32]] = &[
+            &[0, 1, 63, 64, 65, 4095, 4096, 8192, 16383],
+            &[0, 1, 64, 4095, 8192], &[1, 63, 65, 4096, 16383], &[],
+            &[1, 4095, 4096], &[0, 1, 63, 64, 65, 4095, 4096, 8192, 16383],
+        ];
+        for case in cases.iter().cycle().take(48) {
+            let live: BTreeSet<_> = case.iter().copied().map(ValueId).collect();
+            triangular.connect(&live, |v| types[v.index()]);
+            symmetric.connect(&live, |v| types[v.index()]);
+            let mut allocation = Allocation { value_local: vec![None; n], local_types: types.clone() };
+            for &value in cases[0] {
+                assert_eq!(triangular.occupied(value as usize, &allocation), symmetric.occupied(value as usize, &allocation));
+                allocation.value_local[value as usize] = Some(value as usize);
+            }
+        }
+        for (value, row) in triangular.rows.iter().enumerate() {
+            assert!(row.len() <= value.div_ceil(64));
+        }
+        assert!(triangular.rows[0].is_empty());
+        let triangular_words: usize = triangular.rows.iter().map(Vec::len).sum();
+        let symmetric_words: usize = symmetric.rows.iter().map(Vec::len).sum();
+        assert!(triangular_words * 2 < symmetric_words);
+    }
+    #[test]
     fn incremental_interference_matches_full_cliques() {
         let n = 137;
         let mut graph = Interference::new(n);
@@ -733,8 +781,8 @@ mod tests {
                 }
             }
         }
-        let allocation = Allocation {
-            value_local: (0..n).map(Some).collect(),
+        let mut allocation = Allocation {
+            value_local: vec![None; n],
             local_types: types,
         };
         for i in 0..n {
@@ -742,10 +790,14 @@ mod tests {
             for j in 0..n {
                 assert_eq!(
                     actual[j],
-                    reference[i].contains(&ValueId(j as u32)),
+                    j < i && reference[i].contains(&ValueId(j as u32)),
                     "{i}/{j}"
                 );
+                let (row, bit) = (i.max(j), i.min(j));
+                let edge = graph.rows[row].get(bit / 64).is_some_and(|word| word & (1u64 << (bit % 64)) != 0);
+                assert_eq!(edge, reference[i].contains(&ValueId(j as u32)), "undirected edge {i}/{j}");
             }
+            allocation.value_local[i] = Some(i);
         }
     }
 }

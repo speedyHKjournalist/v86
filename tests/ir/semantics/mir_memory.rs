@@ -152,7 +152,7 @@ fn emission_rejects_stale_or_weakened_memory_plans() {
 #[test]
 fn memory_imports_participate_in_helper_signature_validation() {
     let mut r = lift_cpu(
-        &[0x8B, 0x00, 0x0F, 0xA2],
+        &[0x8B, 0x00, 0x0F, 0x30],
         GuestEip(0),
         LinearAddress(0),
         true,

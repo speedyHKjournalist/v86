@@ -32,6 +32,7 @@ enum Initial {
     Gpr(u8),
     Xmm(u8),
     FlagSystem,
+    SystemBits,
     FlagBit(u8),
     FlagOperand,
     RawFlags,
@@ -98,6 +99,12 @@ fn special_origin(region: &Region, value: ValueId, origins: &[Origin]) -> Origin
         Op::ReadGpr(reg) => Origin::Initial(Initial::Gpr(reg)),
         Op::ReadXmm(reg) => Origin::Initial(Initial::Xmm(reg)),
         Op::ReadFlags => Origin::Initial(Initial::FlagSystem),
+        Op::ReadSystemFlags => Origin::Initial(Initial::SystemBits),
+        Op::ReadFlag(bit) => [0u8, 2, 4, 6, 7, 11]
+            .iter()
+            .position(|&candidate| candidate == bit)
+            .map(|index| Origin::Initial(Initial::FlagBit(index as u8)))
+            .unwrap_or(Origin::Other),
         Op::ReadRawFlags => Origin::Initial(Initial::RawFlags),
         Op::ReadFlagOperand => Origin::Initial(Initial::FlagOperand),
         Op::ReadFlagChanges => Origin::Initial(Initial::FlagChanges),
@@ -269,7 +276,10 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
             .enumerate()
             .all(|(bit, &value)| is_initial(&origins, value, Initial::FlagBit(bit as u8)));
         let backing_clean = arithmetic_clean
-            && is_initial(&origins, state.flags.system, Initial::FlagSystem)
+            && matches!(
+                origins[state.flags.system.index()],
+                Origin::Initial(Initial::FlagSystem | Initial::SystemBits)
+            )
             && state
                 .flags
                 .last_op1
@@ -373,7 +383,7 @@ pub(super) fn verify_owned(data: &MirData) -> Result<(), CompileError> {
     Ok(())
 }
 
-pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
+fn check_enable_work(data: &MirData, work_limit: usize) -> Result<(), CompileError> {
     let work = data
         .state_elision
         .masks
@@ -385,6 +395,24 @@ pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, Com
     if work > work_limit {
         return Err(CompileError::Budget("MIR state elision work"));
     }
+    Ok(())
+}
+
+pub(super) fn enable_entry(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
+    check_enable_work(data, work_limit)?;
+    let count = data
+        .state_elision
+        .masks
+        .iter()
+        .flatten()
+        .filter(|&&skip| skip)
+        .count();
+    data.state_elision.enabled = true;
+    Ok(count)
+}
+
+pub(super) fn enable(data: &mut MirData, work_limit: usize) -> Result<usize, CompileError> {
+    check_enable_work(data, work_limit)?;
     let sync = match super::allocation::backing_sync(data, work_limit) {
         Ok(sync) => Some(sync),
         Err(CompileError::Budget(_)) => None,
@@ -444,6 +472,80 @@ mod tests {
             lift_cpu_cfg(bytes, GuestEip(0x1000), LinearAddress(0x100000), true, 8).unwrap();
         run(&mut region, PassConfig::default()).unwrap();
         lower(&region).unwrap()
+    }
+
+    #[test]
+    fn entry_only_enable_is_transactional_and_does_not_analyze_observer_backing() {
+        let mut pure = optimized(&[0x40, 0x49, 0x75, 0xFC]);
+        let original = pure.state_elision.clone();
+        assert!(pure.elide_entry_cpu_state_writes(0).is_err());
+        assert_eq!(pure.state_elision, original);
+        assert!(
+            pure.elide_entry_cpu_state_writes(DEFAULT_WORK_LIMIT)
+                .unwrap()
+                > 0
+        );
+        assert!(pure.state_elision.sync.is_none());
+        pure.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
+        pure.verify().unwrap();
+
+        let mut observer = optimized(&[0x40, 0xFA, 0x48]);
+        assert_eq!(
+            observer
+                .elide_entry_cpu_state_writes(DEFAULT_WORK_LIMIT)
+                .unwrap(),
+            0
+        );
+        assert!(observer.state_elision.sync.is_none());
+        observer.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
+        observer.verify().unwrap();
+    }
+
+    #[test]
+    fn incoming_system_and_raw_flags_remain_distinct_cfg_roots() {
+        use crate::ir::{frontend::integer::IntegerBuilder, verify::verify};
+        let seed = IntegerBuilder::new();
+        assert_ne!(seed.flags.system, seed.flags.raw_flags.unwrap());
+        assert!(seed.flags.arithmetic.iter().all(|&value| {
+            let Definition::Instruction(id, _) = seed.region.values[value.index()].definition
+            else {
+                return false;
+            };
+            matches!(seed.region.instructions[id.index()].op, Op::ReadFlag(_))
+        }));
+        let mut mir = optimized(&[0xFD, 0x40, 0x74, 0x02, 0xFC, 0x49, 0x90]);
+        mir.elide_entry_cpu_state_writes(DEFAULT_WORK_LIMIT).unwrap();
+        mir.elide_dead_cpu_values(DEFAULT_WORK_LIMIT).unwrap();
+        mir.verify().unwrap();
+
+        let mut invalid = lift_cpu_cfg(&[0x90], GuestEip(0), LinearAddress(0), true, 8).unwrap();
+        invalid.instructions.iter_mut()
+            .find(|instruction| matches!(instruction.op, Op::ReadFlag(_)))
+            .unwrap().op = Op::ReadFlag(10);
+        assert!(verify(&invalid).is_err(), "system bit cannot use arithmetic getter");
+    }
+
+    #[test]
+    fn extracting_arithmetic_bits_from_system_only_flags_is_not_entry_equivalent() {
+        use crate::ir::{frontend::lift::lift_cpu, hir::Terminator, types::Type};
+        let mut hir = lift_cpu(&[0x90], GuestEip(0), LinearAddress(0), true).unwrap();
+        let block = hir.entries[0];
+        let Terminator::Exit(state) = hir.blocks[block.index()].terminator.take().unwrap()
+        else {
+            panic!("linear exit");
+        };
+        let system = hir.states[state.index()].flags.system;
+        let zero_cf = hir.append(block, Op::Extract { lsb: 0 }, vec![system], &[Type::I1], None)[0];
+        let invalid = hir.append(block, Op::Const(0), vec![], &[Type::I1], None)[0];
+        hir.states[state.index()].flags.arithmetic[0] = zero_cf;
+        hir.states[state.index()].flags.backing_valid = Some(invalid);
+        hir.terminate(block, Terminator::Exit(state));
+        let mut mir = lower(&hir).unwrap();
+        mir.elide_entry_cpu_state_writes(DEFAULT_WORK_LIMIT).unwrap();
+        let flag_write = mir.states[state.index()].cpu.writes.iter()
+            .position(|write| write.address == Address::Flags).unwrap();
+        assert!(!elided(&mir, state, flag_write), "masked CF zero differs from incoming CF");
+        mir.verify().unwrap();
     }
 
     #[test]

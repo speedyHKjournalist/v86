@@ -123,6 +123,51 @@ fn capacity_modules() {
 }
 
 #[test]
+fn fresh_zeroed_locals_do_not_reuse_runtime_values() {
+    let mut w = WasmBuilder::new();
+    w.const_i32(0x12345678);
+    let old = w.set_new_local();
+    let old_index = old.0;
+    w.free_local(old);
+    w.const_i64(-1);
+    let old = w.set_new_local_i64();
+    let old_i64_index = old.0;
+    w.free_local_i64(old);
+    w.const_i32(0);
+    w.simd_memory(0, 4);
+    let old = w.set_new_local_v128();
+    let old_v128_index = old.0;
+    w.free_local_v128(old);
+
+    let length = w.instruction_body_length();
+    let ints: Vec<_> = (0..256).map(|_| w.declare_zeroed_local()).collect();
+    let wide = w.declare_zeroed_local_i64();
+    let vector = w.declare_zeroed_local_v128();
+    assert_eq!(length, w.instruction_body_length(), "declarations emit no initialization");
+    assert!(ints.iter().all(|local| local.0 != old_index));
+    assert_ne!(wide.0, old_i64_index);
+    assert_ne!(vector.0, old_v128_index);
+    assert_eq!(w.declared_local_count(), 261);
+    for (index, local) in ints.iter().enumerate() {
+        w.const_i32(32 + index as i32 * 4);
+        w.get_local(local);
+        w.store_aligned_i32(0);
+    }
+    w.const_i32(1056);
+    w.get_local_i64(&wide);
+    w.store_aligned_i64(0);
+    w.const_i32(1072);
+    w.get_local_v128(&vector);
+    w.simd_memory(0x0B, 4);
+    for local in ints {
+        w.free_local(local);
+    }
+    w.free_local_i64(wide);
+    w.free_local_v128(vector);
+    save(&mut w, "fresh-zeroed-locals");
+}
+
+#[test]
 #[should_panic(expected = "signature mismatch")]
 fn incompatible_import_is_rejected() {
     let mut w = WasmBuilder::new();

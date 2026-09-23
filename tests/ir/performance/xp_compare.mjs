@@ -21,9 +21,19 @@ for(let round=0;round<runs;round++) for(const variant of round%2?[...variants].r
     if(variant==="baseline_ir") for(const option of ["HOT_THRESHOLD","PROMOTION_THRESHOLD"]) {
         if(process.env[`IR_BASELINE_${option}`]!==undefined) policy[`IR_${option}`]=process.env[`IR_BASELINE_${option}`];
     }
+    // Resident promotion is experimental and absent from historical cores.
+    // Scope the opt-in to its explicit arm, never silently apply it to legacy.
+    const env={...process.env,...policy};
+    delete env.IR_RESIDENT_PROMOTION;
+    const resident_option=variant==="ir"?"IR_RESIDENT_PROMOTION"
+        :variant==="baseline_ir"?"IR_BASELINE_RESIDENT_PROMOTION"
+        :variant==="reference_ir"?"IR_REFERENCE_RESIDENT_PROMOTION":null;
+    if(resident_option && process.env[resident_option]!==undefined) {
+        env.IR_RESIDENT_PROMOTION=process.env[resident_option];
+    }
     const file=`${prefix}-${round}-${variant}.jsonl`, fd=fs.openSync(file,"w");
     const child=spawnSync(process.execPath,["tests/ir/performance/xp_boot.mjs",disk,backend,wasm],{
-        env:{...process.env,...policy,IR_BOOT_MS:process.env.IR_BOOT_MS||"180000",IR_BOOT_TARGET:"desktop",IR_DIAGNOSTICS:"0",IR_BENCH_RECORD:"0"},
+        env:{...env,IR_BOOT_MS:process.env.IR_BOOT_MS||"180000",IR_BOOT_TARGET:"desktop",IR_DIAGNOSTICS:"0",IR_BENCH_RECORD:"0"},
         stdio:["ignore",fd,fd],timeout:300000,
     });
     fs.closeSync(fd);

@@ -69,14 +69,30 @@ try {
     assert(e.ir_cache_stat(37) > misses);
     assert.equal(e.ir_cache_stat(38), 1);
     // Cross-page edges force a real dispatch at all eight headers. Consecutive
-    // pages occupy distinct hints; 64-page strides deliberately collide. Keep
+    // pages and formerly colliding 64-page strides now use distinct hints. Keep
     // the interpreter and compilation heat policy identical in the A/B arms.
     const iterations = 512, blocks = 8;
     const displacement = value => Array.from({length: 4}, (_, i) => value >>> (8 * i) & 255);
+    const old_slot = pc => (pc >>> 1 ^ pc >>> 12 ^ pc) & 63;
+    const slot = (linear, pc = linear, mode = 1) =>
+        Math.imul(linear ^ (pc << 13 | pc >>> 19) ^ mode, 0x9E3779B1) >>> 26;
     let multi = 0;
-    for(const kind of ["distinct", "collision", "diagnostics"]) {
-        const pages = Array.from({length: blocks}, (_, i) =>
-            (kind === "collision" ? 0x200000 : 0x100000) + i * (kind === "collision" ? 0x40000 : 4096));
+    for(const kind of ["distinct", "aligned", "collision", "diagnostics"]) {
+        const pages = [];
+        if(kind === "collision") {
+            // Construct actual collisions for the current hash instead of
+            // assuming that an old low-bit stride still collides.
+            for(let pc = 0x200000; pages.length < blocks; pc += 4096) {
+                assert(pc < 16 << 20, "bounded collision fixture");
+                if(slot(pc) === slot(0x200000)) pages.push(pc);
+            }
+        } else {
+            for(let i = 0; i < blocks; i++) pages.push(
+                (kind === "aligned" ? 0x200000 : 0x100000) + i * (kind === "aligned" ? 0x40000 : 4096));
+            assert.equal(new Set(pages.map(pc => slot(pc))).size, blocks);
+            if(kind === "aligned") assert.equal(new Set(pages.map(old_slot)).size, 1,
+                "old hash aliases every aligned 64-page-stride header");
+        }
         const chunks = pages.map((pc, i) => i + 1 === blocks
             ? [0x43, 0x49, 0x0F, 0x85, ...displacement(pages[0] - pc - 8), 0xF4]
             : [0x43, 0xE9, ...displacement(pages[i + 1] - pc - 6)]);
@@ -102,9 +118,9 @@ try {
             const misses = e.ir_cache_stat(37), hits = e.ir_cache_stat(2);
             pairs.push(run_multi());
             assert.equal(e.ir_cache_stat(2), hits, `${kind}: no unpublished execution`);
-            if(enabled && kind === "distinct") {
+            if(enabled && ["distinct", "aligned"].includes(kind)) {
                 assert(e.ir_cache_stat(37) - misses >= (iterations - 2) * blocks,
-                    "all recurrent headers bypass admission, not only the last key");
+                    `${kind}: all recurrent headers bypass admission; ${e.ir_cache_stat(37) - misses} hits`);
             }
             else {
                 assert.equal(e.ir_cache_stat(37), misses,
@@ -138,5 +154,29 @@ try {
         assert.equal(e.ir_cache_stat(2), hits, `${kind}: reset executes only current interpreter bytes`);
     }
     assert.equal(await vm.configure_ir_diagnostics(0), true);
-    console.log(`PASS: ${wasm}: single-key and ${multi} multi-PC A/B cases; 64-slot collisions, diagnostics bypass, wrapped retirement, immediate publication, mode/CS, reset and raw/notified code`);
+    // Published 16-byte-aligned entries in one page exercise the positive hint
+    // table independently of predecessor links: each HLT returns to the host.
+    cpu.jit_clear_cache(); e.ir_cache_collect();
+    assert.equal(e.ir_auto_config(0, 1000000, 1000000, 192, 256, 64), 1);
+    prepare();
+    const aligned = Array.from({length: 32}, (_, i) => 0x100000 + i * 16);
+    assert.equal(new Set(aligned.map(old_slot)).size, 8);
+    assert(new Set(aligned.map(pc => slot(pc))).size >= 30);
+    for(const pc of aligned) vm.write_memory(Uint8Array.of(0x43, 0xF4), pc);
+    for(const pc of aligned) {
+        cpu.instruction_pointer[0] = pc;
+        assert(await cpu.ir_compile_cached(2, 2, 1, 1, 256, 64));
+    }
+    prepare();
+    const target_hits = e.ir_cache_stat(21), activations = e.ir_cache_stat(2), rounds = 8;
+    for(let round = 0; round < rounds; round++) for(const pc of aligned) {
+        cpu.in_hlt[0] = 0; cpu.instruction_pointer[0] = pc;
+        e.main_loop(); assert(cpu.in_hlt[0]); assert.equal(cpu.instruction_pointer[0], pc + 2);
+    }
+    assert.equal(e.ir_cache_stat(2) - activations, aligned.length * rounds);
+    assert.equal(cpu.reg32[3], aligned.length * rounds);
+    assert.equal(count(), (initial + aligned.length * rounds * 2) >>> 0);
+    assert(e.ir_cache_stat(21) - target_hits > aligned.length * (rounds - 2),
+        "aligned published entries reuse positive hints without predecessor links");
+    console.log(`PASS: ${wasm}: single-key and ${multi} multi-PC A/B cases; aligned positive/negative hint distribution, deliberate 64-slot collisions, diagnostics bypass, wrapped retirement, publication, mode/CS, reset and raw/notified code`);
 } finally { await vm.destroy(); }

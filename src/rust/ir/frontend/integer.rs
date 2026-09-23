@@ -16,7 +16,9 @@ impl IntegerBuilder {
         let gpr = std::array::from_fn(|r| {
             region.append(block, Op::ReadGpr(r as u8), vec![], &[Type::I32], None)[0]
         });
-        let flags = region.append(block, Op::ReadFlags, vec![], &[Type::I32], None)[0];
+        // Keep system/raw roots distinct: CFG grafting maps them to different
+        // block parameters, which may diverge after guest FLAGS changes.
+        let flags = region.append(block, Op::ReadSystemFlags, vec![], &[Type::I32], None)[0];
         let raw_flags = region.append(block, Op::ReadRawFlags, vec![], &[Type::I32], None)[0];
         let raw_zero = region.append(
             block,
@@ -40,10 +42,8 @@ impl IntegerBuilder {
         let bits = std::array::from_fn(|i| {
             region.append(
                 block,
-                Op::Extract {
-                    lsb: [0, 2, 4, 6, 7, 11][i],
-                },
-                vec![flags],
+                Op::ReadFlag([0, 2, 4, 6, 7, 11][i]),
+                vec![],
                 &[Type::I1],
                 None,
             )[0]
@@ -81,7 +81,7 @@ impl IntegerBuilder {
         let valid = self.constant(1, Type::I1);
         self.flags = FlagState {
             arithmetic,
-            system: flags,
+            system: raw,
             last_op1: Some(values[11]),
             raw_zero: Some(raw_zero),
             zero_is_lazy: Some(zero_is_lazy),

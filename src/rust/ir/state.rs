@@ -10,6 +10,8 @@ pub enum ResumeKind {
 pub struct FlagState {
     /// CF, PF, AF, ZF, SF, OF. Each source is an I1 SSA value (or an extracted input bit).
     pub arithmetic: [ValueId; 6],
+    /// Only non-arithmetic bits are significant. Consumers must mask/rebuild
+    /// arithmetic bits from their independent sources above.
     pub system: ValueId,
     /// Pinned CPU provenance read by undefined AF after shifts.
     pub last_op1: Option<ValueId>,

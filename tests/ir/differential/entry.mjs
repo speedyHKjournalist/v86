@@ -79,10 +79,11 @@ try {
         assert.equal(e.ir_rep_result(),0n);const actual=state(),count=(words[664>>2]-0xFFFFFFFC)>>>0;
         assert(count>0&&count<=32,`valid entry ${i} makes bounded progress`);
         reset(c);for(let n=0;n<count;n++)e.ir_test_step();assert.deepEqual(actual,state(),`matching entry ${i} vs interpreter`);executed++;
-        if(c[0]===1){
+        if(c[0]===1||c[0]===7){
             reset(c,true);f(0);const fault={...state(),previous:words[560>>2]};
-            assert.equal(fault.ip,HANDLER);assert.equal(words[664>>2],0xFFFFFFFC);assert.equal(fault.cr2,DATA+(c[1]?0:4096));
-            reset(c,true);e.ir_test_step();assert.deepEqual(fault,{...state(),previous:words[560>>2]},`matching entry ${i}: fault ownership`);faults++;
+            const retired=c[0]===7?1:0;
+            assert.equal(fault.ip,HANDLER);assert.equal(words[664>>2],(0xFFFFFFFC+retired)>>>0);assert.equal(fault.cr2,DATA+(c[1]?0:4096));
+            reset(c,true);for(let n=0;n<=retired;n++)e.ir_test_step();assert.deepEqual(fault,{...state(),previous:words[560>>2]},`matching entry ${i}: fault ownership`);faults++;
         }
     }
     console.log(`PASS: ${wasm}: ${rejected} CPU entry rejections without guest/REP/helper effects, ${executed} actual CPU comparisons, ${faults} precise page faults; physical aliases, CS wrap, width, active prefixes, legacy frames, HLT and entry-index boundaries`);

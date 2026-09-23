@@ -59,6 +59,7 @@ fn copy_propagates_identity_chains_into_state_maps() {
             phis: false,
             dce: true,
             flags: false,
+            state_sync: false,
             helper_state: false,
             rounds: 1,
         },

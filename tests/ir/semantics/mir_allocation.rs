@@ -80,6 +80,87 @@ fn dense_machine_allocation_preserves_colors_and_generated_code() {
     }
 }
 
+fn wide_phi_forwarding(parameters: usize) -> crate::ir::mir::MirRegion {
+    use crate::ir::{
+        frontend::integer::IntegerBuilder,
+        hir::{Edge, Terminator},
+        state::{ResumeKind, StateMap},
+    };
+    let mut b = IntegerBuilder::new();
+    let middle = b.region.block(false);
+    let exit = b.region.block(false);
+    let middle_effect = b.region.param(middle, Type::Effect);
+    let exit_effect = b.region.param(exit, Type::Effect);
+    let middle_values: Vec<_> = (0..parameters)
+        .map(|_| b.region.param(middle, Type::I32)).collect();
+    let exit_values: Vec<_> = (0..parameters)
+        .map(|_| b.region.param(exit, Type::I32)).collect();
+    b.region.terminate(b.block, Terminator::Branch(Edge {
+        target: middle,
+        args: std::iter::once(b.effect)
+            .chain((0..parameters).map(|n| b.gpr[n % 8])).collect(),
+    }));
+    b.region.terminate(middle, Terminator::Branch(Edge {
+        target: exit,
+        args: std::iter::once(middle_effect).chain(middle_values).collect(),
+    }));
+    let state = b.region.state(StateMap {
+        instruction_pc: GuestEip(0x1000), next_pc: GuestEip(0x1001),
+        next_value: None, resume: ResumeKind::AfterInstruction,
+        gpr: std::array::from_fn(|n| exit_values[n]), flags: b.flags,
+        xmm: vec![], x87: vec![], committed_instructions: 1,
+        count_base: None, rep_progress: None,
+    });
+    b.region.terminate(exit, Terminator::Exit(state));
+    // The effect parameter is a valid ordering root even with no effects in
+    // this terminal block. Every data parameter is still a real edge assignment.
+    let _ = exit_effect;
+    lower(&b.region).unwrap()
+}
+
+#[test]
+fn machine_verifier_bounds_wide_phi_edge_searches() {
+    // These are cheap forwarding blocks, with no scalar instruction chains.
+    // Almost every live value is filtered out at the incoming edge, but finding
+    // each parameter in its Vec still performs a quadratic membership search.
+    let mir = wide_phi_forwarding(128);
+    assert!(matches!(verify(&mir, 12_000), Err(CompileError::Budget(_))),
+        "small survivor sets must not hide wide-phi edge work");
+    verify(&mir, 4_000_000).unwrap();
+}
+
+#[test]
+fn machine_edge_work_budget_failure_preserves_executable_allocation() {
+    let mut mir = wide_phi_forwarding(128);
+    let allocation = mir.allocation.clone();
+    let control = mir.control.clone();
+    let wasm = emit_cpu(&mir, 8).unwrap().bytes;
+    // Find the actual complete-pass boundary, without duplicating its work
+    // formula. Failure immediately below it must keep the usable old plan.
+    let mut low = 0;
+    let mut high = 4_000_000;
+    reallocate(&mut mir.data, high).unwrap();
+    while low + 1 < high {
+        mir.data.allocation = allocation.clone();
+        mir.data.control = control.clone();
+        let budget = low + (high - low) / 2;
+        match reallocate(&mut mir.data, budget) {
+            Ok(_) => high = budget,
+            Err(CompileError::Budget(_)) => low = budget,
+            Err(error) => panic!("unexpected allocation failure: {error:?}"),
+        }
+    }
+    mir.data.allocation = allocation.clone();
+    mir.data.control = control.clone();
+    assert!(matches!(mir.allocate_machine_locals(low), Err(CompileError::Budget(_))));
+    assert_eq!(mir.allocation, allocation);
+    assert_eq!(mir.control, control);
+    mir.verify().unwrap();
+    assert_eq!(emit_cpu(&mir, 8).unwrap().bytes, wasm);
+    mir.allocate_machine_locals(high).unwrap();
+    mir.verify().unwrap();
+}
+
 #[test]
 #[ignore = "allocator timing only, not an XP performance gate"]
 fn machine_allocation_paired_benchmark() {

@@ -178,6 +178,34 @@ pub fn lower(region: &Region, inst: &Instruction) -> Option<ValuePlan> {
             Load::V128,
         ),
         Op::ReadRawFlags => read(&mut steps, Address::Flags, Load::I32),
+        Op::ReadSystemFlags => {
+            read(&mut steps, Address::Flags, Load::I32);
+            steps.extend([Step::I32(!0x8D5), Step::Scalar(Scalar::I32And)]);
+        },
+        Op::ReadFlag(bit) => {
+            let name = match bit {
+                0 => "ir_read_cf",
+                2 => "ir_read_pf",
+                4 => "ir_read_af",
+                6 => "ir_read_zf",
+                7 => "ir_read_sf",
+                11 => "ir_read_of",
+                _ => return None,
+            };
+            steps.push(Step::Read {
+                cpu: Reading::Call {
+                    name,
+                    signature: Signature::new(&[], &[WasmType::I32]),
+                },
+                standalone: Reading::Memory {
+                    address: Address::Flags,
+                    load: Load::I32,
+                },
+            });
+            // The tiny CPU adapters return the flag in its architectural bit
+            // position, so both ABIs share extraction and I1 normalization.
+            steps.extend([Step::I32(bit as i32), Step::Scalar(Scalar::I32Shr)]);
+        },
         Op::ReadFlagOperand => read(&mut steps, Address::FlagOperand, Load::I32),
         Op::ReadFlagChanges => steps.push(Step::Read {
             cpu: Reading::Memory {

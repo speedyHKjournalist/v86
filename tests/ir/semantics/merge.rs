@@ -22,6 +22,7 @@ fn only_merge() -> PassConfig {
         phis: false,
         copy: false,
         flags: false,
+        state_sync: false,
         helper_state: false,
         fold: false,
         gvn: false,

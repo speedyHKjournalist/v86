@@ -722,6 +722,7 @@ ir-cpu-system-tests: ir-generated-check build/v86-ir-test.wasm build/libv86.mjs 
 ir-control-regs-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
 	cargo test ir::control_regs_tests
 	node tests/ir/differential/control_regs.mjs
+	node tests/ir/differential/system_read_continuation.mjs
 
 .PHONY: ir-descriptor-tests
 ir-descriptor-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin
@@ -894,6 +895,15 @@ ir-auto-tests: ir-generated-check build/v86-ir-cache-test.wasm build/v86-ir-cach
 	node tests/ir/differential/publication_yield.mjs build/v86-ir-cache-test.wasm
 	node tests/ir/differential/publication_yield.mjs build/v86-ir-cache-test-release.wasm
 	node tests/ir/differential/publication_yield.mjs build/v86-ir-runtime.wasm
+	node tests/ir/differential/scheduler_ready.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/scheduler_ready.mjs build/v86-ir-cache-test-release.wasm
+	node tests/ir/differential/scheduler_ready.mjs build/v86-ir-runtime.wasm
+	node tests/ir/differential/observed_entries.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/observed_entries.mjs build/v86-ir-cache-test-release.wasm
+	node tests/ir/differential/observed_entries.mjs build/v86-ir-runtime.wasm
+	node tests/ir/differential/resident_promotion.mjs build/v86-ir-cache-test.wasm
+	node tests/ir/differential/resident_promotion.mjs build/v86-ir-cache-test-release.wasm
+	node tests/ir/differential/resident_promotion.mjs build/v86-ir-runtime.wasm
 
 .PHONY: ir-backend-integration-tests ir-backend-browser-tests
 ir-backend-integration-tests: build/v86-ir-cache-test.wasm build/v86-ir-runtime.wasm build/v86.wasm build/libv86.mjs build/cpu-worker-test.bin

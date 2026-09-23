@@ -126,7 +126,7 @@ enum MemoryCache {
 struct Emitter<'a> {
     w: WasmBuilder,
     mir: &'a MirRegion,
-    locals: Vec<Local>,
+    locals: Vec<Option<Local>>,
     layout: StateLayout,
     cpu: bool,
     linkable_entry: bool,
@@ -230,8 +230,23 @@ impl Emitter<'_> {
     fn get(&mut self, value: ValueId) {
         self.get_local(self.mir.allocation.value_local[value.index()].unwrap());
     }
+    fn declare_local(&mut self, slot: usize) {
+        if self.locals[slot].is_none() {
+            let ty = self.mir.allocation.local_types[slot];
+            self.locals[slot] = Some(if ty == Type::V128 {
+                Local::V128(self.w.declare_zeroed_local_v128())
+            }
+            else if matches!(ty, Type::I64 | Type::RmwTicket) {
+                Local::I64(self.w.declare_zeroed_local_i64())
+            }
+            else {
+                Local::I32(self.w.declare_zeroed_local())
+            });
+        }
+    }
     fn get_local(&mut self, slot: usize) {
-        match &self.locals[slot] {
+        self.declare_local(slot);
+        match self.locals[slot].as_ref().unwrap() {
             Local::I32(local) => self.w.get_local(local),
             Local::I64(local) => self.w.get_local_i64(local),
             Local::V128(local) => self.w.get_local_v128(local),
@@ -241,7 +256,8 @@ impl Emitter<'_> {
         self.set_local(self.mir.allocation.value_local[value.index()].unwrap());
     }
     fn set_local(&mut self, slot: usize) {
-        match &self.locals[slot] {
+        self.declare_local(slot);
+        match self.locals[slot].as_ref().unwrap() {
             Local::I32(local) => self.w.set_local(local),
             Local::I64(local) => self.w.set_local_i64(local),
             Local::V128(local) => self.w.set_local_v128(local),
@@ -374,6 +390,14 @@ impl Emitter<'_> {
         self.diagnostic_end();
     }
     fn state(&mut self, state: StateId) { self.observe_state(state, state, false); }
+    fn terminator(&self, id: BlockId) -> &MirTerminator {
+        if self.cpu {
+            self.mir.cpu_terminator(id)
+        }
+        else {
+            &self.mir.control.blocks[id.index()].terminator
+        }
+    }
     fn copy_edge_values(&mut self, edge: &MirEdge) {
         let mut scratch = Vec::new();
         for copy in &edge.copies {
@@ -485,7 +509,7 @@ impl Emitter<'_> {
         next: &[BlockId],
         labels: &BTreeMap<BlockId, Label>,
     ) {
-        match self.mir.control.blocks[id.index()].terminator.clone() {
+        match self.terminator(id).clone() {
             MirTerminator::Exit(state) => self.normal_exit(state),
             MirTerminator::Jump(edge) => self.emit_structured_edge(&edge, next, labels),
             MirTerminator::Branch {
@@ -534,9 +558,7 @@ impl Emitter<'_> {
             self.copy_edge_values(edge);
             if backedge.target != header {
                 self.emit_reserved_body(backedge.target, true, remaining);
-                let MirTerminator::Jump(back) = self.mir.control.blocks[backedge.target.index()]
-                    .terminator
-                    .clone()
+                let MirTerminator::Jump(back) = self.terminator(backedge.target).clone()
                 else {
                     unreachable!("verified budget latch")
                 };
@@ -600,7 +622,7 @@ impl Emitter<'_> {
             hot_labels.insert(*target, done);
         }
         // A normal loop exit must skip the residual body, including fallthrough.
-        match block.terminator {
+        match self.terminator(id).clone() {
             MirTerminator::Jump(edge) => {
                 self.emit_prepaid_edge(&edge, id, backedge, hot, &hot_labels, remaining)
             },
@@ -2220,7 +2242,7 @@ fn emit_inner_with_batches(
     let mut e = Emitter {
         w: WasmBuilder::new(),
         mir,
-        locals: vec![],
+        locals: (0..mir.allocation.local_types.len()).map(|_| None).collect(),
         layout,
         cpu,
         linkable_entry: entry.is_some(),
@@ -2411,20 +2433,6 @@ fn emit_inner_with_batches(
         let value = e.w.set_new_local();
         e.loop_read_caches.push((valid, value));
     }
-    for ty in &mir.allocation.local_types {
-        if *ty == Type::V128 {
-            e.w.simd_zero();
-            e.locals.push(Local::V128(e.w.set_new_local_v128()));
-        }
-        else if matches!(*ty, Type::I64 | Type::RmwTicket) {
-            e.w.const_i64(0);
-            e.locals.push(Local::I64(e.w.set_new_local_i64()));
-        }
-        else {
-            e.w.const_i32(0);
-            e.locals.push(Local::I32(e.w.set_new_local()));
-        }
-    }
     let structured = structure::structure(&mir.control);
     let structured_cfg = structured.is_some();
     let structured_backedges = structured.as_ref().map_or(0, |plan| plan.backedges);
@@ -2467,13 +2475,14 @@ fn emit_inner_with_batches(
         e.return_to_cpu();
         e.w.block_end();
         let dispatch = e.w.loop_void();
-        for (b, block) in mir.control.blocks.iter().enumerate() {
+        for b in 0..mir.control.blocks.len() {
             e.w.get_local(&pc_local);
             e.w.const_i32(b as i32);
             e.w.eq_i32();
             e.w.if_void();
             e.emit_block_body(BlockId(b as u32), &remaining, true);
-            match &block.terminator {
+            let terminator = e.terminator(BlockId(b as u32)).clone();
+            match &terminator {
                 MirTerminator::Exit(state) => {
                     e.normal_exit(*state);
                 },
@@ -2502,7 +2511,7 @@ fn emit_inner_with_batches(
         pc = Some(pc_local);
     }
     let locals = e.w.declared_local_count();
-    for local in e.locals {
+    for local in e.locals.into_iter().flatten() {
         match local {
             Local::I32(local) => e.w.free_local(local),
             Local::I64(local) => e.w.free_local_i64(local),

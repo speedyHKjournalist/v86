@@ -417,6 +417,13 @@ impl WasmBuilder {
             WasmLocal(self.new_local_index(WasmType::I32))
         }
     }
+    /// A fresh declaration starts at zero on every function entry. Never reuse
+    /// a freed local: its previous runtime value may survive on this CFG path.
+    #[cfg(any(test, feature = "ir-experimental"))]
+    #[must_use]
+    pub fn declare_zeroed_local(&mut self) -> WasmLocal {
+        WasmLocal(self.new_local_index(WasmType::I32))
+    }
     pub fn free_local(&mut self, local: WasmLocal) {
         self.release_local_index(local.0, WasmType::I32);
         self.free_locals_i32.push(local);
@@ -454,6 +461,11 @@ impl WasmBuilder {
         else {
             WasmLocalI64(self.new_local_index(WasmType::I64))
         }
+    }
+    #[cfg(any(test, feature = "ir-experimental"))]
+    #[must_use]
+    pub fn declare_zeroed_local_i64(&mut self) -> WasmLocalI64 {
+        WasmLocalI64(self.new_local_index(WasmType::I64))
     }
     pub fn free_local_i64(&mut self, local: WasmLocalI64) {
         self.release_local_index(local.0, WasmType::I64);
@@ -547,6 +559,11 @@ impl WasmBuilder {
         else {
             WasmLocalV128(self.new_local_index(WasmType::V128))
         }
+    }
+    #[cfg(any(test, feature = "ir-experimental"))]
+    #[must_use]
+    pub fn declare_zeroed_local_v128(&mut self) -> WasmLocalV128 {
+        WasmLocalV128(self.new_local_index(WasmType::V128))
     }
     pub fn free_local_v128(&mut self, local: WasmLocalV128) {
         self.release_local_index(local.0, WasmType::V128);

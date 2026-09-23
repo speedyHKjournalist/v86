@@ -512,16 +512,26 @@ fn compile_lifted(
             config.passes.debug.check(&mir, false)?;
         }
     }
-    if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
+    if config.optimize && config.passes.rounds != 0 {
         if cpu {
             if config.passes.enabled(13) {
                 let _clock = CompileScope::new(14);
-                passes.state_writes_elided = mir.elide_redundant_cpu_state_writes(
-                    crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
-                )?;
+                passes.state_writes_elided =
+                    if request.tier == Tier::One || !config.passes.state_sync {
+                        // Lowering already proves unchanged entry backing. Cold
+                        // code can use that result without a second dataflow pass.
+                        mir.elide_entry_cpu_state_writes(
+                            crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
+                        )?
+                    }
+                    else {
+                        mir.elide_redundant_cpu_state_writes(
+                            crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
+                        )?
+                    };
                 config.passes.debug.check(&mir, false)?;
             }
-            if config.passes.helper_state {
+            if request.tier == Tier::Two && config.passes.helper_state {
                 {
                     let _clock = CompileScope::new(15);
                     passes.helper_states_elided = mir.elide_helper_state_observations(
@@ -530,7 +540,7 @@ fn compile_lifted(
                     config.passes.debug.check(&mir, false)?;
                 }
             }
-            if config.passes.flags {
+            if config.passes.flags && config.passes.enabled(5) {
                 {
                     let _clock = CompileScope::new(16);
                     passes.cpu_values_elided = mir
@@ -539,6 +549,8 @@ fn compile_lifted(
                 }
             }
         }
+    }
+    if config.optimize && request.tier == Tier::Two && config.passes.rounds != 0 {
         // Loop certificates are installed first so ordinary forwarding can
         // derive a non-overlapping intra-block certificate around them.
         if config.passes.enabled(14) {

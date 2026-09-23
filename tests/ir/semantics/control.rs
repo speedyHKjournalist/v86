@@ -116,6 +116,7 @@ fn dynamic_eip_is_verified_and_kept_alive_by_state_maps() {
             phis: false,
             copy: false,
             flags: false,
+            state_sync: false,
             helper_state: false,
             fold: false,
             gvn: false,

@@ -18,8 +18,26 @@ unsafe fn ring0() -> bool {
 #[no_mangle]
 pub unsafe fn ir_cpuid() -> u32 {
     assert!(!cpu::in_jit);
+    // The pinned debug body logs most leaves through the host. Revoke before
+    // observing it, even for callers using the legacy terminal adapter.
+    #[cfg(debug_assertions)]
+    if !matches!(*gp::reg32 as u32, 0 | 2 | 0x80000000) {
+        super::entry::ir_admission_barrier();
+    }
     instructions_0f::instr_0FA2();
     commit()
+}
+/// CPUID preserves execution context and XMM state when it cannot log. The
+/// debug observer path owns completed post-state and never returns to SSA.
+#[no_mangle]
+pub unsafe fn ir_cpuid_continue() -> u32 {
+    assert!(!cpu::in_jit);
+    #[cfg(debug_assertions)]
+    if !matches!(*gp::reg32 as u32, 0 | 2 | 0x80000000) {
+        return ir_cpuid();
+    }
+    instructions_0f::instr_0FA2();
+    Outcome::Normal as u32
 }
 #[no_mangle]
 pub unsafe fn ir_rdtsc() -> u32 {

@@ -31,6 +31,20 @@ for(const n of [127, 128, 255, 256, 1023, 1024]) {
     }
 }
 console.log("PASS: 24 Wasm modules: locals, mixed type groups, signatures/imports, branch depths; boundaries 127/128, 255/256, 1023/1024");
+{
+    const m = new WebAssembly.Memory({initial: 64});
+    const bytes = new Uint8Array(m.buffer);
+    const module = new WebAssembly.Module(fs.readFileSync("build/ir-wasm/fresh-zeroed-locals.wasm"));
+    const instance = new WebAssembly.Instance(module, {e: {m}});
+    for(let run = 0; run < 2; run++) {
+        bytes.fill(0xA5, 0, 1088);
+        instance.exports.f(0);
+        assert(bytes.slice(32, 1064).every(value => value === 0));
+        assert(bytes.slice(1072, 1088).every(value => value === 0));
+        assert(bytes.slice(0, 32).every(value => value === 0xA5));
+    }
+}
+console.log("PASS: fresh I32/I64/V128 local declarations remain zero across calls and skip freed nonzero slots");
 for(const budget of [3, 100]) {
     const module = new WebAssembly.Module(fs.readFileSync(`build/ir-wasm/ssa-loop-${budget}.wasm`));
     for(const entry of [0, 1, -1, 2]) {

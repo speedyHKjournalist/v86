@@ -8,6 +8,7 @@ use super::{
         admission_epoch, ir_admission_barrier, matches_current as ir_entry_matches, EntryContract,
     },
     live::{self, Job},
+    promotion::{self, Alias, Ticket},
     snapshot::{cached_match, capture, mappings_cached, CachedMatch, MergedValidation},
 };
 use crate::ir::frontend::{decode::GuestEip, region::PredictedEdge};
@@ -26,9 +27,9 @@ type EntryIndexKey = (u32, u32, bool);
 // This CPU owns non-shared Wasm memory; no reference to
 // these cells survives a host call. Publication and pending cache maintenance
 // always clear the hints; code/mapping changes cannot create a published key.
-const MISSING_HINT_CAPACITY: usize = 64;
-static mut MISSING_ENTRIES: [Option<super::entry::CpuEntryKey>; MISSING_HINT_CAPACITY] =
-    [None; MISSING_HINT_CAPACITY];
+const ENTRY_HINT_CAPACITY: usize = 64;
+static mut MISSING_ENTRIES: [Option<super::entry::CpuEntryKey>; ENTRY_HINT_CAPACITY] =
+    [None; ENTRY_HINT_CAPACITY];
 static mut MISSING_HINT_ENABLED: bool = true;
 static mut MISSING_HINT_HITS: u32 = 0;
 // Single-CPU, quiescent-only A/B policy. Poll exits do not grant chaining.
@@ -37,16 +38,21 @@ static mut MERGED_VALIDATION_ENABLED: bool = true;
 #[inline(always)]
 fn clear_missing_hint() {
     unsafe {
-        MISSING_ENTRIES = [None; MISSING_HINT_CAPACITY];
+        MISSING_ENTRIES = [None; ENTRY_HINT_CAPACITY];
     }
 }
 #[inline(always)]
-fn missing_hint_slot(entry: super::entry::CpuEntryKey) -> usize {
-    ((entry.linear.0 >> 1 ^ entry.linear.0 >> 12 ^ entry.pc.0) as usize)
-        & (MISSING_HINT_CAPACITY - 1)
-}
+fn missing_hint_slot(entry: super::entry::CpuEntryKey) -> usize { entry_hint_slot(index_key(entry)) }
 fn index_key(entry: super::entry::CpuEntryKey) -> EntryIndexKey {
     (entry.linear.0, entry.pc.0, entry.default_32)
+}
+#[inline(always)]
+fn entry_hint_slot(key: EntryIndexKey) -> usize {
+    // Low-bit indexing collapses aligned headers within a page into a handful
+    // of slots, and aliases 64-page strides. Mix all address bits before taking
+    // the high product bits. The saved full key remains the sole lookup witness.
+    let bits = key.0 ^ key.1.rotate_left(13) ^ u32::from(key.2);
+    (bits.wrapping_mul(0x9E3779B1) >> (32 - ENTRY_HINT_CAPACITY.trailing_zeros())) as usize
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -92,6 +98,8 @@ struct Record {
     /// Active index aliases. A replacement may supersede one entry without
     /// destroying a shared owner still serving its other entries.
     entries: Vec<super::entry::CpuEntryKey>,
+    promotion: Vec<Alias>,
+    promotion_parent: Option<Ticket>,
     job: Job,
     /// Allocated only when overlapping fused windows save byte comparisons.
     validation: Option<Box<MergedValidation>>,
@@ -114,11 +122,16 @@ struct Record {
 }
 struct Cache {
     records: Vec<Record>,
+    resident_promotion: bool,
+    promotion_enabled: bool,
+    promotion_threshold: u32,
+    promotion_cursor: promotion::Cursor,
+    promotion_stats: [u32; 4],
     capacity: usize,
     evictions: u32,
     published: BTreeMap<EntryIndexKey, usize>,
-    targets: [Option<(EntryIndexKey, usize)>; 64],
-    missing_targets: [Option<EntryIndexKey>; 64],
+    targets: [Option<(EntryIndexKey, usize)>; ENTRY_HINT_CAPACITY],
+    missing_targets: [Option<EntryIndexKey>; ENTRY_HINT_CAPACITY],
     negative_hits: u32,
     fast_validation: bool,
     fast_checks: u32,
@@ -160,11 +173,16 @@ struct Cache {
 }
 static CACHE: Mutex<Cache> = Mutex::new(Cache {
     records: Vec::new(),
+    resident_promotion: false,
+    promotion_enabled: false,
+    promotion_threshold: 256,
+    promotion_cursor: promotion::Cursor::new(),
+    promotion_stats: [0; 4],
     capacity: 256,
     evictions: 0,
     published: BTreeMap::new(),
-    targets: [None; 64],
-    missing_targets: [None; 64],
+    targets: [None; ENTRY_HINT_CAPACITY],
+    missing_targets: [None; ENTRY_HINT_CAPACITY],
     negative_hits: 0,
     fast_validation: true,
     fast_checks: 0,
@@ -206,6 +224,121 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
 });
 #[no_mangle]
 pub fn ir_cache_capacity() -> u32 { CACHE.try_lock().unwrap().capacity as u32 }
+/// Opt-in startup policy. A disabled scheduler and empty cache prevent changing
+/// ownership of existing heat or pending promotion attempts.
+#[no_mangle]
+pub unsafe fn ir_cache_set_resident_promotion(enabled: u32) -> bool {
+    if enabled > 1 || !cold() {
+        return false;
+    }
+    super::schedule::set_resident_promotion(enabled != 0)
+}
+/// Called while the cold scheduler owns its guard. No cache guard calls back
+/// into the scheduler; either both policy copies change or neither does.
+pub(super) fn set_resident_promotion(enabled: bool) -> bool {
+    let mut cache = CACHE.try_lock().unwrap();
+    if !cache.records.is_empty() {
+        return false;
+    }
+    cache.resident_promotion = enabled;
+    cache.promotion_cursor = promotion::Cursor::new();
+    true
+}
+pub(super) fn configure_promotion(enabled: bool, threshold: u32) {
+    let mut cache = CACHE.try_lock().unwrap();
+    cache.promotion_enabled = enabled;
+    cache.promotion_threshold = threshold;
+    cache.promotion_cursor = promotion::Cursor::new();
+    for record in &mut cache.records {
+        for alias in &mut record.promotion {
+            alias.reset();
+        }
+    }
+}
+fn promotion_index(cache: &Cache, ticket: Ticket) -> Option<(usize, usize)> {
+    let index = *cache.published.get(&index_key(ticket.entry))?;
+    let record = cache.records.get(index)?;
+    if record.phase != Phase::Published || record.job.artifact.key.job != ticket.owner {
+        return None;
+    }
+    let alias = record
+        .promotion
+        .iter()
+        .position(|a| a.entry == ticket.entry)?;
+    Some((index, alias))
+}
+pub(super) fn promotion_current(ticket: Ticket) -> bool {
+    promotion_index(&CACHE.try_lock().unwrap(), ticket).is_some()
+}
+pub(super) fn next_promotion(limit: usize) -> Option<Ticket> {
+    let mut cache = CACHE.try_lock().unwrap();
+    if !cache.resident_promotion || !cache.promotion_enabled {
+        return None;
+    }
+    // Visit positions directly: no allocation or full-cache pre-scan. Inactive
+    // records consume one position too, so they cannot defeat the scan bound.
+    let mut first = None;
+    for _ in 0..limit {
+        let saved = cache.promotion_cursor;
+        let position = {
+            let Cache { records, promotion_cursor, .. } = &mut *cache;
+            promotion_cursor.next(records.len(), |index| {
+                let record = &records[index];
+                if record.phase == Phase::Published { record.promotion.len() } else { 0 }
+            })
+        };
+        let Some((record, alias)) = position
+        else {
+            break;
+        };
+        if first == position {
+            // A short cache has completed one full turn. Leave its next cursor
+            // at the first unscanned position instead of skipping it next frame.
+            cache.promotion_cursor = saved;
+            break;
+        }
+        first.get_or_insert((record, alias));
+        cache.promotion_stats[0] = cache.promotion_stats[0].wrapping_add(1);
+        let r = &cache.records[record];
+        if r.phase != Phase::Published {
+            continue;
+        }
+        let Some(a) = r.promotion.get(alias)
+        else {
+            continue;
+        };
+        if a.hits >= cache.promotion_threshold {
+            let ticket = Ticket {
+                entry: a.entry,
+                owner: r.job.artifact.key.job,
+            };
+            cache.promotion_stats[1] = cache.promotion_stats[1].wrapping_add(1);
+            return Some(ticket);
+        }
+    }
+    None
+}
+pub(super) fn promotion_suppressed(
+    ticket: Ticket,
+    source: &Option<super::compile::ImmutableCodeSnapshot>,
+) -> bool {
+    let mut cache = CACHE.try_lock().unwrap();
+    let suppressed = promotion_index(&cache, ticket)
+        .is_some_and(|(r, a)| cache.records[r].promotion[a].suppressed(source));
+    if suppressed {
+        cache.promotion_stats[3] = cache.promotion_stats[3].wrapping_add(1);
+    }
+    suppressed
+}
+pub(super) fn promotion_failed(
+    ticket: Ticket,
+    source: Option<super::compile::ImmutableCodeSnapshot>,
+) {
+    let mut cache = CACHE.try_lock().unwrap();
+    if let Some((r, a)) = promotion_index(&cache, ticket) {
+        cache.records[r].promotion[a].failed = Some(source);
+    }
+}
 /// Offline compiler replay inspection. The publication bridge copies these
 /// immutable inputs synchronously; no pointer may survive a cache mutation.
 /// This API never captures guest memory or grants execution authority.
@@ -271,14 +404,7 @@ pub fn ir_cache_replay_info(id: u64, group: u32, index: u32, field: u32) -> u32 
         }),
         4 => source((index >> 16) as usize)
             .and_then(|(_, s)| s.mappings.get((index & 65535) as usize))
-            .map_or(0, |m| {
-                if field == 0 {
-                    m.linear.0
-                }
-                else {
-                    m.physical.0
-                }
-            }),
+            .map_or(0, |m| if field == 0 { m.linear.0 } else { m.physical.0 }),
         _ => 0,
     }
 }
@@ -302,6 +428,7 @@ pub fn busy() -> bool { CACHE.try_lock().unwrap().active }
 pub fn invalidate() {
     ir_admission_barrier();
     let mut cache = CACHE.try_lock().unwrap();
+    cache.promotion_cursor = promotion::Cursor::new();
     for record in &mut cache.records {
         record.phase = Phase::Retired;
     }
@@ -384,7 +511,7 @@ pub unsafe fn ir_cache_set_missing_hint(enabled: u32) -> bool {
     true
 }
 fn target(cache: &mut Cache, key: EntryIndexKey) -> Option<usize> {
-    let slot = ((key.0 >> 1 ^ key.0 >> 12 ^ key.1) & 63) as usize;
+    let slot = entry_hint_slot(key);
     if let Some((saved, index)) = cache.targets[slot] {
         if saved == key
             && cache.records.get(index).is_some_and(|r| {
@@ -804,7 +931,17 @@ pub unsafe fn ir_cache_reserve(id: u64) -> u32 {
     };
     reserve_job(job, false)
 }
-pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
+pub(super) unsafe fn reserve_job(job: Job, automatic: bool) -> u32 {
+    reserve_with_promotion(job, automatic, None)
+}
+pub(super) unsafe fn reserve_with_promotion(
+    mut job: Job,
+    automatic: bool,
+    promotion_parent: Option<Ticket>,
+) -> u32 {
+    if promotion_parent.is_some_and(|ticket| !promotion_current(ticket)) {
+        return 0;
+    }
     if !job.artifact.fused_sources.is_empty() && !CACHE.try_lock().unwrap().fusion_enabled {
         return 0;
     }
@@ -855,9 +992,17 @@ pub(super) unsafe fn reserve_job(mut job: Job, automatic: bool) -> u32 {
     let mut cache = CACHE.try_lock().unwrap();
     cache.clock = cache.clock.wrapping_add(1);
     let last_used = cache.clock;
-    let entries = job.artifact.cpu_entries().collect();
+    let entries: Vec<_> = job.artifact.cpu_entries().collect();
+    let promotion = if cache.resident_promotion && job.artifact.tier == super::compile::Tier::One {
+        entries.iter().copied().map(Alias::new).collect()
+    }
+    else {
+        Vec::new()
+    };
     cache.records.push(Record {
         entries,
+        promotion,
+        promotion_parent,
         job,
         validation,
         slot,
@@ -935,14 +1080,16 @@ pub(super) fn tier(entry: super::entry::CpuEntryKey) -> u32 {
         .get(&index_key(entry))
         .map(|&index| &cache.records[index])
         .filter(|r| r.phase == Phase::Published)
-        .map(|r| {
-            if r.job.artifact.tier == super::compile::Tier::One {
-                1
-            }
-            else {
-                2
-            }
-        })
+        .map(
+            |r| {
+                if r.job.artifact.tier == super::compile::Tier::One {
+                    1
+                }
+                else {
+                    2
+                }
+            },
+        )
         .unwrap_or(0)
 }
 /// Pending/validated results have not completed the publication transaction.
@@ -968,12 +1115,16 @@ pub unsafe fn ir_cache_validate(id: u64, slot: u32) -> bool {
         return false;
     }
     let mut cache = CACHE.try_lock().unwrap();
-    let valid = if let Some(r) = cache
+    let index = cache
         .records
-        .iter_mut()
-        .find(|r| r.job.artifact.key.job == id && r.slot == slot)
-    {
-        if r.phase == Phase::Pending && unchanged_full(&r.job) {
+        .iter()
+        .position(|r| r.job.artifact.key.job == id && r.slot == slot);
+    let valid = if let Some(index) = index {
+        let parent_current = cache.records[index]
+            .promotion_parent
+            .is_none_or(|ticket| promotion_index(&cache, ticket).is_some());
+        let r = &mut cache.records[index];
+        if r.phase == Phase::Pending && parent_current && unchanged_full(&r.job) {
             r.phase = Phase::Validated;
             true
         }
@@ -1004,13 +1155,17 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
         .records
         .iter()
         .position(|r| r.job.artifact.key.job == id && r.slot == slot)
-    else {
+  else {
         return false;
     };
     if cache.records[index].phase != Phase::Validated {
         return false;
     }
-    if !unchanged_full(&cache.records[index].job) {
+    if !unchanged_full(&cache.records[index].job)
+        || cache.records[index]
+            .promotion_parent
+            .is_some_and(|ticket| promotion_index(&cache, ticket).is_none())
+    {
         cache.records[index].phase = Phase::Retired;
         clear_missing_hint();
         cache.needs_collection = true;
@@ -1020,6 +1175,9 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
     for (i, record) in cache.records.iter_mut().enumerate() {
         if i != index && record.phase == Phase::Published {
             record.entries.retain(|entry| !entries.contains(entry));
+            record
+                .promotion
+                .retain(|alias| !entries.contains(&alias.entry));
             if record.entries.is_empty() {
                 record.phase = Phase::Retired;
             }
@@ -1067,7 +1225,7 @@ pub unsafe fn ir_cache_cancel(id: u64, slot: u32) -> bool {
         .records
         .iter_mut()
         .find(|r| r.job.artifact.key.job == id && r.slot == slot && r.phase != Phase::Retired)
-    else {
+  else {
         return false;
     };
     r.phase = Phase::Retired;
@@ -1130,6 +1288,8 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         38 => unsafe { u32::from(MISSING_HINT_ENABLED) },
         39 => cache.poll_barriers_avoided,
         40 => unsafe { u32::from(POLL_REUSE_ENABLED) },
+        41 => u32::from(cache.resident_promotion),
+        42..=45 => cache.promotion_stats[(field - 42) as usize],
         _ => 0,
     }
 }
@@ -1176,6 +1336,21 @@ pub fn ir_cache_entry_stat(linear: u32, cs_base: u32, default_32: u32, field: u3
             .validation
             .as_ref()
             .map_or(0, |validation| validation.saved_bytes),
+        15..=17 => record
+            .promotion
+            .iter()
+            .find(|a| {
+                a.entry.linear.0 == linear
+                    && a.entry.cs_base() == cs_base
+                    && u32::from(a.entry.default_32) == default_32
+            })
+            .map_or(0, |a| match field {
+                15 => a.hits,
+                16 => u32::from(a.failed.is_some()),
+                _ => u32::from(cache.promotion_enabled && a.hits >= cache.promotion_threshold),
+            }),
+        18 => record.job.artifact.key.job as u32,
+        19 => (record.job.artifact.key.job >> 32) as u32,
         _ => 0,
     }
 }
@@ -1224,7 +1399,7 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
         .records
         .iter()
         .position(|r| r.job.artifact.key.job == id && r.phase == Phase::Published)
-    else {
+  else {
         cache.link_misses = cache.link_misses.wrapping_add(1);
         return None;
     };
@@ -1382,8 +1557,18 @@ fn activate<const PROFILE: bool>(
         index,
         id: record.job.artifact.key.job,
     };
-    let needs_heat = record.job.artifact.tier == super::compile::Tier::One
-        || record.fusion_candidate && record.job.artifact.entry == EntryContract::Cpu(entry);
+    let tier_one = record.job.artifact.tier == super::compile::Tier::One;
+    let resident = cache.resident_promotion && tier_one;
+    if resident && cache.promotion_enabled {
+        if let Some(alias) = record.promotion.iter_mut().find(|a| a.entry == entry) {
+            alias.visit();
+            cache.promotion_stats[2] = cache.promotion_stats[2].wrapping_add(1);
+        }
+    }
+    let needs_heat = !resident && tier_one
+        || !tier_one
+            && record.fusion_candidate
+            && record.job.artifact.entry == EntryContract::Cpu(entry);
     let slot = record.slot;
     cache.active = true;
     cache.active_owner = Some(owner);
@@ -1635,10 +1820,12 @@ unsafe fn admit_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>) 
     AdmissionResult::Ready(activation)
 }
 
-/// Only an exact, previously admitted successor is eligible. A predecessor's
-/// cached index is a hint, not authority: validate both non-repeating owners,
-/// the live alias, entry context, generation, synchronous byte certificate and
-/// ALL current TLB mappings. Any miss uses the unchanged full admission path.
+/// Resolve the exact successor while the finishing activation already owns the
+/// cache guard. A saved index is a hint, not authority: validate both owners,
+/// the live alias, entry context, generation and ALL current TLB mappings. An
+/// expired byte certificate can be refreshed by the same complete comparison
+/// used by cold admission; it does not require another dispatch/lock round trip.
+/// Missing translations and stale sources retain the full admission fallback.
 /// The actual fetch still runs after the mapping proof and cannot invoke the
 /// host or walk page tables while the cache guard is held.
 #[inline(always)]
@@ -1660,33 +1847,31 @@ unsafe fn warm_handoff(cache: &mut Cache, previous: Owner) -> Option<Activation>
     if predecessor.phase != Phase::Published || predecessor.job.artifact.key.job != previous.id {
         return None;
     }
-    let successor = predecessor.successors.get(index_key(entry))?;
-    let target = cache.records.get(successor.owner.index)?;
-    if target.phase != Phase::Published
-        || target.job.artifact.key.job != successor.owner.id
-        || target.validated_epoch != epoch
-        || !target.entries.contains(&entry)
-        || !ir_entry_matches(entry.linear.0, entry.cs_base(), entry.default_32 as u32)
-        || !live::generation_current(target.job.artifact.key)
-        || !mappings_current(&target.job)
-    {
+    if !ir_entry_matches(entry.linear.0, entry.cs_base(), entry.default_32 as u32) {
         return None;
+    }
+    let index = successor_target(cache, index_key(entry), Some(previous))?;
+    let target = &cache.records[index];
+    let reuse = target.validated_epoch == epoch
+        && live::generation_current(target.job.artifact.key)
+        && mappings_current(&target.job);
+    if reuse {
+        cache.fast_checks = cache.fast_checks.wrapping_add(1);
+    }
+    else {
+        cache.full_checks = cache.full_checks.wrapping_add(1);
+        if cached_current(target) != CachedMatch::Match {
+            return None;
+        }
+        cache.records[index].validated_epoch = epoch;
     }
     *gp::previous_ip = *gp::instruction_pointer;
     cpu::get_phys_eip().expect("certified IR handoff must hit the CPU TLB");
-    cache.fast_checks = cache.fast_checks.wrapping_add(1);
     cache.cached_checks = cache.cached_checks.wrapping_add(2);
     cache.post_fetch_reuses = cache.post_fetch_reuses.wrapping_add(1);
     cache.warm_admissions = cache.warm_admissions.wrapping_add(1);
     cache.warm_handoffs = cache.warm_handoffs.wrapping_add(1);
-    cache.successor_hits = cache.successor_hits.wrapping_add(1);
-    Some(activate::<false>(
-        cache,
-        successor.owner.index,
-        entry,
-        Some(previous),
-        true,
-    ))
+    Some(activate::<false>(cache, index, entry, Some(previous), true))
 }
 
 #[inline(always)]

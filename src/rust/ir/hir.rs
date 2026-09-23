@@ -90,6 +90,10 @@ pub enum Op {
         register: u8,
     },
     ReadFlags,
+    /// Only non-arithmetic FLAGS bits; separate from the raw backing SSA root.
+    ReadSystemFlags,
+    /// One architectural arithmetic flag, evaluated only when CPU demand needs it.
+    ReadFlag(u8),
     /// CPU backing flags without evaluating lazy arithmetic flags.
     ReadRawFlags,
     ReadFlagChanges,

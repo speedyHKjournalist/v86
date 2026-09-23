@@ -85,7 +85,7 @@ pub fn reachable_length(
             Flow::Next | Flow::Boundary
                 if !instruction.baseline_ud
                     && (!instruction.encoding.block_boundary
-                        || matches!(instruction.encoding.opcode, 0x8E | 0xFA | 0x0F31 | 0xE4..=0xE7 | 0xEC..=0xEF)) =>
+                        || matches!(instruction.encoding.opcode, 0x8E | 0xFA | 0x0F20 | 0x0F21 | 0x0F31 | 0x0FA2 | 0xE4..=0xE7 | 0xEC..=0xEF)) =>
             {
                 if end < bytes.len() {
                     pending.insert(end);
@@ -293,6 +293,22 @@ mod tests {
             default_32,
             Policy { max_bytes: bytes.len(), max_instructions: 32 },
         )
+    }
+
+    #[test]
+    fn read_only_system_helpers_keep_automatic_suffixes() {
+        for default_32 in [false, true] {
+            for op in [0x20, 0x21] {
+                for index in 0..8 {
+                    let bytes = [0x0F, op, 0xC0 | index << 3, 0x40];
+                    assert_eq!(selected_length(&bytes, default_32), bytes.len());
+                }
+            }
+            assert_eq!(selected_length(&[0x0F, 0xA2, 0x40], default_32), 3);
+            for op in [0x22, 0x23] {
+                assert_eq!(selected_length(&[0x0F, op, 0xC0, 0x40], default_32), 3);
+            }
+        }
     }
 
     #[test]

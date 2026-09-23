@@ -46,9 +46,16 @@ for(let test = 0; test < layout.cases; test++) {
         assert(WebAssembly.validate(bytes));
         // Real compiler output with a deterministic CPU-ABI host, not a full
         // boot/system test. The same harness is used by other MIR unit suites.
+        const get_eflags = () => words[layout.flags / 4];
         const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {e: {
             m: memory, ir_enter: () => {}, ir_tlb_base: () => 0,
-            get_eflags: () => words[layout.flags / 4],
+            get_eflags,
+            ir_read_cf: () => get_eflags() & 1,
+            ir_read_pf: () => get_eflags() & 4,
+            ir_read_af: () => get_eflags() & 16,
+            ir_read_zf: () => get_eflags() & 64,
+            ir_read_sf: () => get_eflags() & 128,
+            ir_read_of: () => get_eflags() & 2048,
         }});
         return {instance, size: bytes.length};
     });

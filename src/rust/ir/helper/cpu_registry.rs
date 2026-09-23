@@ -12,6 +12,7 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_cli"
         | "ir_clts"
         | "ir_cpuid"
+        | "ir_cpuid_continue"
         | "ir_far_control_ud"
         | "ir_flags_stack_check"
         | "ir_hlt"
@@ -50,7 +51,9 @@ pub fn arity(name: &str) -> Option<usize> {
         | "ir_ltr_reg"
         | "ir_pop_flags"
         | "ir_read_cr"
+        | "ir_read_cr_continue"
         | "ir_read_dr"
+        | "ir_read_dr_continue"
         | "ir_sgdt"
         | "ir_sidt"
         | "ir_sldt_mem"
@@ -288,8 +291,11 @@ pub fn preserves_code_on_success(name: &str) -> bool {
             | "ir_cli_check"
             | "ir_clts"
             | "ir_cpuid"
+            | "ir_cpuid_continue"
             | "ir_read_cr"
+            | "ir_read_cr_continue"
             | "ir_read_dr"
+            | "ir_read_dr_continue"
             | "ir_mmx_reg_continue"
             | "ir_mmx_xmm_continue"
             | "ir_x87_reg_continue"
@@ -313,10 +319,17 @@ pub fn reload_types(name: &str) -> Vec<Type> {
     }
 }
 
-/// x87/MMX register helpers preserve XMMs without observers or memory access.
+/// Register helpers preserve XMMs without observers or memory access on Normal.
 /// Keep this separate from checked observers: only those must refresh the
 /// admission epoch after revalidating an active code owner.
 fn scalar_reload(name: &str) -> bool {
     checked_scalar_continuation(name)
-        || matches!(name, "ir_x87_reg_continue" | "ir_mmx_reg_continue")
+        || matches!(
+            name,
+            "ir_x87_reg_continue"
+                | "ir_mmx_reg_continue"
+                | "ir_read_cr_continue"
+                | "ir_read_dr_continue"
+                | "ir_cpuid_continue"
+        )
 }

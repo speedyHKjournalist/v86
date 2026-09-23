@@ -7,6 +7,7 @@ use super::{
     compile::*,
     entry::CpuEntryKey,
     live::{self, Job},
+    promotion::{Attempt, Ticket},
     region,
 };
 use crate::{
@@ -35,11 +36,16 @@ struct Hot {
     failed: u32,
     discovered: Option<f64>,
 }
+struct Queued {
+    job: Job,
+    promotion: Option<Attempt>,
+}
 struct Pending {
     id: u64,
     slot: u32,
     entries: Vec<(CpuEntryKey, Option<f64>)>,
     tier: u32,
+    promotion: Option<Attempt>,
 }
 struct Scheduler {
     debug: crate::ir::debug::Config,
@@ -55,10 +61,12 @@ struct Scheduler {
     cursor: usize,
     replacement: usize,
     pending: Option<Pending>,
-    ready: VecDeque<Job>,
+    ready: VecDeque<Queued>,
+    prefer_promotion: bool,
+    resident_promotion: bool,
     credit: bool,
     scan_credit: bool,
-    interpreted_probe: bool,
+    interpreted_ready: Option<CpuEntryKey>,
     stats: [u32; 24],
 }
 static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
@@ -86,9 +94,11 @@ static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
     replacement: 0,
     pending: None,
     ready: VecDeque::new(),
+    prefer_promotion: true,
+    resident_promotion: false,
     credit: false,
     scan_credit: false,
-    interpreted_probe: false,
+    interpreted_ready: None,
     stats: [0; 24],
 });
 #[link(wasm_import_module = "env")]
@@ -104,15 +114,21 @@ pub fn invalidate() {
     s.replacement = 0;
     s.pending = None;
     s.ready.clear();
+    s.prefer_promotion = true;
     s.credit = false;
     s.scan_credit = false;
-    s.interpreted_probe = false;
+    s.interpreted_ready = None;
 }
 pub fn dirty_page(page: u32) {
     let mut s = SCHEDULER.try_lock().unwrap();
     let previous_len = s.hot.len();
-    s.ready
-        .retain(|job| !job.artifact.dependencies.iter().any(|d| d.page.0 == page));
+    s.ready.retain(|job| {
+        !job.job
+            .artifact
+            .dependencies
+            .iter()
+            .any(|d| d.page.0 == page)
+    });
     s.hot.retain(|h| {
         !h.source
             .as_ref()
@@ -131,6 +147,19 @@ fn rebuild_hot_index(s: &mut Scheduler) {
     s.replacement = 0;
 }
 pub fn enabled() -> bool { SCHEDULER.try_lock().unwrap().config.enabled }
+/// Startup-only mirror for cold scheduling, never an execution certificate.
+/// Keeping it under this existing guard makes the default-off scan cost zero
+/// additional cache locks. Reset/configuration preserve the chosen policy.
+pub(super) fn set_resident_promotion(enabled: bool) -> bool {
+    let mut s = SCHEDULER.try_lock().unwrap();
+    if s.config.enabled || !s.hot.is_empty() || s.pending.is_some() || !s.ready.is_empty()
+        || !cache::set_resident_promotion(enabled)
+    {
+        return false;
+    }
+    s.resident_promotion = enabled;
+    true
+}
 /// Startup-only bounded working-set experiment. Reset/restore keep the chosen
 /// policy; changing it requires a disabled, empty scheduler and no IR artifacts.
 #[no_mangle]
@@ -217,7 +246,7 @@ pub fn begin_frame() {
     let mut s = SCHEDULER.try_lock().unwrap();
     s.credit = true;
     s.scan_credit = true;
-    s.interpreted_probe = false;
+    s.interpreted_ready = None;
 }
 /// An evicted region must earn fresh heat. Historical visits must not make a
 /// working set larger than the cache continually recompile inactive entries.
@@ -270,9 +299,11 @@ pub unsafe fn ir_auto_config(
         s.replacement = 0;
         s.credit = false;
         s.scan_credit = false;
-        s.interpreted_probe = false;
+        s.interpreted_ready = None;
+        s.prefer_promotion = true;
         s.pending.take()
     };
+    cache::configure_promotion(enabled != 0, promote);
     if let Some(p) = pending {
         cache::ir_cache_cancel(p.id, p.slot);
         cache::ir_cache_collect();
@@ -284,9 +315,6 @@ unsafe fn record(entry: CpuEntryKey, interpreted: bool) {
     if !s.config.enabled || *gp::prefixes != 0 || *gp::in_hlt {
         return;
     }
-    // Only new interpreted work can justify another current-entry probe after
-    // the frame's bounded ring scan. Cached Tier-2 activations must stay cheap.
-    s.interpreted_probe |= interpreted;
     // Profile the exact same visits, but bypass tree lookup for stable hot PCs.
     // Replacement/compaction cannot give the hint authority: compare full entry.
     let hint = ((entry.linear.0 >> 1 ^ entry.pc.0 >> 12) & 255) as usize;
@@ -297,10 +325,11 @@ unsafe fn record(entry: CpuEntryKey, interpreted: bool) {
     else {
         s.hot_index.get(entry)
     };
-    if let Some(index) = index {
+    let recorded_index = if let Some(index) = index {
         s.hot_hints[hint] = index as u16;
         let h = &mut s.hot[index];
         h.hits = h.hits.saturating_add(1);
+        index
     }
     else {
         // A single-use PC does not displace a recurrent entry. The witness owns
@@ -337,6 +366,19 @@ unsafe fn record(entry: CpuEntryKey, interpreted: bool) {
         };
         s.hot_index.insert(entry, index);
         s.hot_hints[hint] = index as u16;
+        index
+    };
+    // Record the PC that actually earned compilation, not merely that some
+    // interpreted work happened. A cross-page edge can leave it before visit(),
+    // while the next (cold) PC has no useful heat. This hint only selects work:
+    // visit rechecks the full key, heat, failure state and current cache tier.
+    let hot = &s.hot[recorded_index];
+    if interpreted
+        && s.interpreted_ready.is_none()
+        && hot.hits >= s.config.threshold
+        && hot.failed == 0
+    {
+        s.interpreted_ready = Some(entry);
     }
 }
 /// Admission already knows whether this entry can benefit from more heat.
@@ -360,7 +402,7 @@ pub(super) fn diagnose_missing(entry: CpuEntryKey) {
         .pending
         .as_ref()
         .is_some_and(|p| p.entries.iter().any(|(key, _)| *key == entry))
-        || s.ready.iter().any(|j| j.artifact.accepts_entry(entry))
+        || s.ready.iter().any(|j| j.job.artifact.accepts_entry(entry))
     {
         3
     }
@@ -387,7 +429,15 @@ unsafe fn source(entry: CpuEntryKey, window: u32, tier: u32) -> Option<Immutable
 fn same(a: &ImmutableCodeSnapshot, b: &ImmutableCodeSnapshot) -> bool {
     a.bytes == b.bytes && a.mappings == b.mappings
 }
-fn failed(entry: CpuEntryKey, tier: u32, source: Option<ImmutableCodeSnapshot>) {
+fn failed(
+    entry: CpuEntryKey,
+    tier: u32,
+    source: Option<ImmutableCodeSnapshot>,
+    ticket: Option<Ticket>,
+) {
+    if let Some(ticket) = ticket {
+        cache::promotion_failed(ticket, source.clone());
+    }
     let mut s = SCHEDULER.try_lock().unwrap();
     s.stats[6] = s.stats[6].wrapping_add(1);
     if let Some(h) = s.hot.iter_mut().find(|h| h.entry == entry) {
@@ -411,7 +461,7 @@ pub unsafe fn visit() -> bool {
         // scan credit is exhausted. Ready artifacts have a separate publication
         // budget and MUST bypass this rejection (including sibling entries).
         // This is only a negative work hint, never execution/publication authority.
-        if s.ready.is_empty() && (!s.credit || !s.scan_credit && !s.interpreted_probe) {
+        if s.ready.is_empty() && (!s.credit || !s.scan_credit && s.interpreted_ready.is_none()) {
             s.stats[22] = s.stats[22].wrapping_add(1);
             return false;
         }
@@ -434,38 +484,57 @@ pub unsafe fn visit() -> bool {
         if !s.config.enabled
             || !s.credit
             || s.pending.is_some()
-            || !s.scan_credit && !s.interpreted_probe
+            || !s.scan_credit && s.interpreted_ready.is_none()
         {
             return false;
         }
-        s.interpreted_probe = false;
+        let earned = s.interpreted_ready.take();
         // A fruitless scan must not consume the frame's compilation credit.
         // Bound full-ring scans separately, but still admit the currently
         // interpreted entry as soon as it actually reaches its heat threshold.
         let config = s.config;
         let current = live::entry();
-        let mut selected = s.hot_index.get(current).and_then(|index| {
-            let hot = &s.hot[index];
-            (hot.hits >= config.threshold && hot.failed == 0 && cache::tier(current) == 0)
-                .then_some((current, 1, config))
-        });
+        let mut selected = earned
+            .into_iter()
+            .chain(std::iter::once(current))
+            .find_map(|entry| {
+                let index = s.hot_index.get(entry)?;
+                let hot = &s.hot[index];
+                (hot.hits >= config.threshold && hot.failed == 0 && cache::tier(entry) == 0)
+                    .then_some((entry, 1, config, None))
+            });
         if selected.is_none() && s.scan_credit {
             s.scan_credit = false;
-            for _ in 0..s.hot.len().min(MAX_FRAME_SCAN) {
-                let index = s.cursor;
-                s.cursor = (s.cursor + 1) % s.hot.len();
-                let h = &s.hot[index];
-                let tier = cache::tier(h.entry);
-                let needed = if tier == 0 { config.threshold } else { config.promote };
-                if selected.is_none()
-                    && h.hits >= needed
-                    && (tier < 2 || cache::fusion_ready(h.entry))
-                {
-                    selected = Some((h.entry, (tier + 1).min(2), config));
+            // Earned interpreted Tier 1 retains priority. Alternate the two
+            // persistent scan domains so ready Tier 1 owners cannot starve
+            // existing Tier 2 fusion; each domain examines at most 128 positions.
+            let resident = s.resident_promotion;
+            if resident && s.prefer_promotion {
+                selected = cache::next_promotion(MAX_FRAME_SCAN)
+                    .map(|ticket| (ticket.entry, 2, config, Some(ticket)));
+            }
+            if selected.is_none() {
+                for _ in 0..s.hot.len().min(MAX_FRAME_SCAN) {
+                    let index = s.cursor;
+                    s.cursor = (s.cursor + 1) % s.hot.len();
+                    let h = &s.hot[index];
+                    let tier = cache::tier(h.entry);
+                    let needed = if tier == 0 { config.threshold } else { config.promote };
+                    if h.hits >= needed
+                        && !(resident && tier == 1)
+                        && (tier < 2 || cache::fusion_ready(h.entry))
+                    {
+                        selected = Some((h.entry, (tier + 1).min(2), config, None));
+                        break;
+                    }
                 }
-                if selected.is_some() {
-                    break;
-                }
+            }
+            if selected.is_none() && resident && !s.prefer_promotion {
+                selected = cache::next_promotion(MAX_FRAME_SCAN)
+                    .map(|ticket| (ticket.entry, 2, config, Some(ticket)));
+            }
+            if let Some((_, _, _, ticket)) = &selected {
+                s.prefer_promotion = ticket.is_none();
             }
         }
         if selected.is_some() {
@@ -473,23 +542,31 @@ pub unsafe fn visit() -> bool {
         }
         selected
     };
-    let Some((entry, tier, config)) = selected
+    let Some((entry, tier, config, ticket)) = selected
     else {
         return false;
     };
+    if ticket.is_some_and(|ticket| !cache::promotion_current(ticket)) {
+        return false;
+    }
     let _compile_context = super::diagnostics::CompileContext::new(entry.linear.0, tier);
     let fusion_only = cache::tier(entry) == 2;
     let snapshot = source(entry, config.window, tier);
     let suppressed = {
         let mut s = SCHEDULER.try_lock().unwrap();
-        let same = s.hot.iter().find(|h| h.entry == entry).is_some_and(|h| {
-            h.failed == tier
-                && match (&h.source, &snapshot) {
-                    (Some(a), Some(b)) => same(a, b),
-                    (None, None) => true,
-                    _ => false,
-                }
-        });
+        let same = if let Some(ticket) = ticket {
+            cache::promotion_suppressed(ticket, &snapshot)
+        }
+        else {
+            s.hot.iter().find(|h| h.entry == entry).is_some_and(|h| {
+                h.failed == tier
+                    && match (&h.source, &snapshot) {
+                        (Some(a), Some(b)) => same(a, b),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            })
+        };
         if same {
             s.stats[8] = s.stats[8].wrapping_add(1);
         }
@@ -500,7 +577,7 @@ pub unsafe fn visit() -> bool {
     }
     let Some(snapshot) = snapshot
     else {
-        failed(entry, tier, None);
+        failed(entry, tier, None, ticket);
         return false;
     };
     if !cache::can_make_room(entry) {
@@ -508,7 +585,7 @@ pub unsafe fn visit() -> bool {
     }
     let Some(key) = live::publication_key()
     else {
-        failed(entry, tier, Some(snapshot));
+        failed(entry, tier, Some(snapshot), ticket);
         return false;
     };
     {
@@ -524,12 +601,13 @@ pub unsafe fn visit() -> bool {
         default_32: entry.default_32,
         tier: compile_tier,
     };
-    // Tier 1 can share capture across four hot entries; total sibling source
-    // bytes stay within one window, no more aggregate input than the old pair.
-    // Tier 2 retains the two-entry limit for its more expensive machine passes.
+    // Tier 1 may expose three already-observed side entries in the same shared
+    // body, even before they independently become hot. A failed shared attempt
+    // must retain the old heat and aggregate suffix-byte budget for fallback.
+    // Tier 2 keeps its original hot-peer policy.
     let peers = {
         let s = SCHEDULER.try_lock().unwrap();
-        let mut candidates: Vec<_> = s
+        let candidates: Vec<_> = s
             .hot
             .iter()
             .filter(|h| {
@@ -538,37 +616,33 @@ pub unsafe fn visit() -> bool {
                     && h.entry.linear.0.wrapping_sub(entry.linear.0) > 0
                     && (h.entry.linear.0.wrapping_sub(entry.linear.0) as usize)
                         < snapshot.bytes.len()
-                    && h.hits >= if tier == 1 { config.threshold } else { config.promote }
+                    && h.hits > 0
                     && h.failed != tier
                     && cache::tier(h.entry) + 1 == tier
             })
             .map(|h| (h.entry, h.hits))
             .collect();
-        candidates.sort_by_key(|(entry, hits)| (std::cmp::Reverse(*hits), entry.linear.0));
-        let mut bytes = 0;
-        candidates
-            .into_iter()
-            .filter_map(|(peer, _)| {
-                let length =
-                    snapshot.bytes.len() - peer.linear.0.wrapping_sub(entry.linear.0) as usize;
-                if bytes + length > snapshot.bytes.len() {
-                    return None;
-                }
-                bytes += length;
-                Some(peer)
-            })
-            .take(if tier == 1 { 3 } else { 1 })
-            .collect::<Vec<_>>()
+        super::peers::select(
+            entry,
+            snapshot.bytes.len(),
+            compile_tier,
+            if tier == 1 { config.threshold } else { config.promote },
+            candidates,
+        )
     };
-    let mut entries = vec![CpuEntryRequest { offset: 0, key }];
-    for peer in peers {
-        if let Some(key) = live::publication_key() {
-            entries.push(CpuEntryRequest {
-                offset: peer.linear.0.wrapping_sub(entry.linear.0) as usize,
-                key,
-            });
+    let entry_requests = |peers: &[CpuEntryKey]| {
+        let mut entries = vec![CpuEntryRequest { offset: 0, key }];
+        for peer in peers {
+            if let Some(key) = live::publication_key() {
+                entries.push(CpuEntryRequest {
+                    offset: peer.linear.0.wrapping_sub(entry.linear.0) as usize,
+                    key,
+                });
+            }
         }
-    }
+        entries
+    };
+    let entries = entry_requests(&peers.shared);
     let (opt_level, disabled, debug) = {
         let s = SCHEDULER.try_lock().unwrap();
         (s.opt_level, s.passes_disabled, s.debug)
@@ -626,9 +700,23 @@ pub unsafe fn visit() -> bool {
     else if entries.len() > 1 {
         match compile_cpu_shared_entries(&request, &snapshot, &entries, &config) {
             Ok(artifact) => Ok(vec![(artifact, snapshot.clone(), 0)]),
-            // Overlapping x86 streams, graph budgets and unsupported side
-            // entries retain independent, fully validated suffix artifacts.
-            Err(_) => compile_cpu_entries_available(&request, &snapshot, &entries, &config),
+            Err(_) => {
+                // Never turn speculative shared aliases into independent cold
+                // modules. Only peers that earned the original threshold and
+                // aggregate suffix budget may accompany the primary fallback.
+                let fallback = if peers.shared == peers.fallback {
+                    entries
+                }
+                else {
+                    entry_requests(&peers.fallback)
+                };
+                if fallback.len() > 1 {
+                    compile_cpu_entries_available(&request, &snapshot, &fallback, &config)
+                }
+                else {
+                    compile_cpu_cfg_bounded(&request, &snapshot, &config).map(|a| vec![a])
+                }
+            },
         }
     }
     else {
@@ -650,7 +738,7 @@ pub unsafe fn visit() -> bool {
                 let mut s = SCHEDULER.try_lock().unwrap();
                 s.stats[field] = s.stats[field].wrapping_add(1);
             }
-            failed(entry, tier, Some(snapshot));
+            failed(entry, tier, Some(snapshot), ticket);
             return false;
         },
     };
@@ -671,11 +759,20 @@ pub unsafe fn visit() -> bool {
                     h.failed = 0;
                 }
             }
-            s.ready.push_back(Job {
-                observed: artifact.dependencies.clone(),
-                artifact,
-                source,
-                stale: false,
+            let promotion = ticket
+                .filter(|t| artifact.entry == super::entry::EntryContract::Cpu(t.entry))
+                .map(|ticket| Attempt {
+                    ticket,
+                    source: snapshot.clone(),
+                });
+            s.ready.push_back(Queued {
+                job: Job {
+                    observed: artifact.dependencies.clone(),
+                    artifact,
+                    source,
+                    stale: false,
+                },
+                promotion,
             });
         }
         if let Some(h) = s.hot.iter_mut().find(|h| h.entry == entry) {
@@ -686,7 +783,12 @@ pub unsafe fn visit() -> bool {
     let job = SCHEDULER.try_lock().unwrap().ready.pop_front().unwrap();
     publish(job)
 }
-unsafe fn publish(job: Job) -> bool {
+unsafe fn publish(queued: Queued) -> bool {
+    let Queued { job, promotion } = queued;
+    let ticket = promotion.as_ref().map(|p| p.ticket);
+    if ticket.is_some_and(|ticket| !cache::promotion_current(ticket)) {
+        return false;
+    }
     let super::entry::EntryContract::Cpu(entry) = job.artifact.entry
     else {
         return false;
@@ -704,17 +806,22 @@ unsafe fn publish(job: Job) -> bool {
     let len = job.artifact.code.bytes.len() as u32;
     // Keep the original capture fingerprint for bounded-prefix compilation:
     // a browser rejection must not retry just because the artifact is shorter.
-    let snapshot = SCHEDULER
-        .try_lock()
-        .unwrap()
-        .hot
-        .iter()
-        .find(|h| h.entry == entry)
-        .and_then(|h| h.source.clone())
+    let snapshot = promotion
+        .as_ref()
+        .map(|p| p.source.clone())
+        .or_else(|| {
+            SCHEDULER
+                .try_lock()
+                .unwrap()
+                .hot
+                .iter()
+                .find(|h| h.entry == entry)
+                .and_then(|h| h.source.clone())
+        })
         .unwrap_or_else(|| job.source.clone());
-    let slot = cache::reserve_job(job, true);
+    let slot = cache::reserve_with_promotion(job, true, ticket);
     if slot == 0 {
-        failed(entry, tier, Some(snapshot));
+        failed(entry, tier, Some(snapshot), ticket);
         return false;
     }
     {
@@ -730,6 +837,7 @@ unsafe fn publish(job: Job) -> bool {
                 })
                 .collect(),
             tier,
+            promotion,
         });
     }
     // JS copies bytes now; all Rust locks have been released. Completion is a
@@ -750,6 +858,11 @@ pub fn ir_auto_complete(id: u64, success: u32) {
         return;
     }
     let p = s.pending.take().unwrap();
+    if !success {
+        if let Some(attempt) = p.promotion {
+            cache::promotion_failed(attempt.ticket, Some(attempt.source));
+        }
+    }
     if success {
         for (_, discovered) in &p.entries {
             super::diagnostics::discovery_complete(*discovered, p.tier);

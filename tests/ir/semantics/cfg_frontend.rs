@@ -23,7 +23,7 @@ fn reachable_cfg_fixtures() {
         vec![0x66, 0x40, 0x67, 0xE2, 0xFB],
         vec![0x8C, 0xD8, 0x49, 0x75, 0xFB],
         vec![0x89, 0x06, 0x0F], // Store owns completion; trailing byte isn't decoded.
-        vec![0x0F, 0xA2, 0x0F], // CPUID boundary.
+        vec![0x0F, 0xA2, 0x40], // CPUID result and following SSA continuation.
         vec![0x40, 0x03, 0x06, 0x81, 0xC6, 0, 0x10, 0, 0, 0xE2, 0xF5],
         vec![
             0x66, 0x0F, 0xEF, 0xC1, 0xF3, 0x0F, 0x6F, 0x16, 0x81, 0xC6, 0, 0x10, 0, 0, 0xE2, 0xF0,
@@ -61,8 +61,18 @@ fn reachable_cfg_fixtures() {
         vec![0x74, 0x02, 0xEB, 0x02, 0xEB, 0xFC, 0xEB, 0xFC],
         // Nested reducible loops: reset EDX for each outer ECX iteration.
         vec![0xBA, 2, 0, 0, 0, 0x4A, 0x75, 0xFD, 0x49, 0x75, 0xF5, 0x90],
+        // System/raw FLAGS must remain distinct through a conditional join.
+        vec![0xFD, 0x74, 0x01, 0xFC, 0x90],
+        // LAHF plus SETO demand all six incoming flags through separate roots.
+        vec![0x9F, 0x0F, 0x90, 0xC0],
+        // Register rotations cross a backedge while concrete FLAGS phis are dead.
+        vec![0x93, 0x92, 0x49, 0x75, 0xFB, 0x90],
     ];
     let mut cases = vec![];
+    // A terminal write keeps its undecodable suffix outside the CFG. CPUID
+    // now has a reachable fallthrough and must reject that same malformed tail.
+    assert!(lift_cpu_cfg(&[0x0F, 0x30, 0x0F], GuestEip(0), LinearAddress(0), true, 64).is_ok());
+    assert!(lift_cpu_cfg(&[0x0F, 0xA2, 0x0F], GuestEip(0), LinearAddress(0), true, 64).is_err());
     for (n, bytes) in programs.iter().enumerate() {
         for mode in [false, true] {
             // Memory fixture uses [ESI] and the vector prefix requires 32-bit default.
@@ -290,13 +300,13 @@ fn cfg_boundaries_and_immutable_compile() {
         tier_one.code.structured_cfg,
         "Tier 1 and Tier 2 must share the structured IR backend"
     );
-    assert_eq!(
-        tier_one.passes.state_writes_elided, 0,
-        "Tier 1 must not enable state-write elision"
+    assert!(
+        tier_one.passes.state_writes_elided > 0,
+        "Tier 1 should use entry-equivalent state writes already proved by lowering"
     );
-    assert_eq!(
-        tier_one.passes.cpu_values_elided, 0,
-        "Tier 1 must not enable CPU-only value liveness"
+    assert!(
+        tier_one.passes.cpu_values_elided > 0,
+        "Tier 1 should omit concrete FLAGS unused by exact lazy recovery"
     );
     assert_eq!(tier_one.passes.loop_hoisted, 0, "Tier 1 must not run LICM");
     assert_eq!(

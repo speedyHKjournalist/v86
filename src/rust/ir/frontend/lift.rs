@@ -348,13 +348,21 @@ fn lift_inner(
             return Ok(b.region);
         }
         if super::control_regs::supports(&i) {
-            if !cpu || offset != bytes.len() {
+            let terminal = super::control_regs::terminal(&i);
+            if !cpu || terminal && offset != bytes.len() {
                 return Err(CompileError::Unsupported(
-                    "CR/DR transfer requires terminal CPU region",
+                    "CR/DR write requires terminal CPU region",
                 ));
             }
             super::control_regs::lift(&mut b, &i, count);
-            return Ok(b.region);
+            if terminal {
+                return Ok(b.region);
+            }
+            if offset == bytes.len() {
+                let map = snapshot(&mut b, i.instruction_pc, i.next_pc, count);
+                b.region.terminate(b.block, Terminator::Exit(map));
+            }
+            continue;
         }
         if super::fp_state::supports(&i) {
             if !cpu || offset != bytes.len() {
@@ -391,7 +399,7 @@ fn lift_inner(
             continue;
         }
         if super::cpu_info::supports(&i) {
-            let continuing = i.encoding.opcode == 0x0F31;
+            let continuing = !super::cpu_info::terminal(&i);
             if !cpu || !continuing && offset != bytes.len() {
                 return Err(CompileError::Unsupported(
                     "CPU information helper requires terminal CPU region",

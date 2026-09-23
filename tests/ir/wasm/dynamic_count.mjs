@@ -28,8 +28,15 @@ for(const opt of [0, 1]) for(const budget of [1, 2, 3, 4, 5, 9, 16, 100]) {
         assert.equal(w[139], (cs + (decoded ? 0x8001 : 0x8000)) >>> 0, "observer/recovery PC");
         assert.equal(w[30], 0x8D7);
     };
+    const get_eflags = () => 0x8D7;
     const f = new WebAssembly.Instance(new WebAssembly.Module(bytes), {e: {
-        m, ir_enter: () => {}, ir_tlb_base: () => 0, get_eflags: () => 0x8D7,
+        m, ir_enter: () => {}, ir_tlb_base: () => 0, get_eflags,
+        ir_read_cf: () => get_eflags() & 1,
+        ir_read_pf: () => get_eflags() & 4,
+        ir_read_af: () => get_eflags() & 16,
+        ir_read_zf: () => get_eflags() & 64,
+        ir_read_sf: () => get_eflags() & 128,
+        ir_read_of: () => get_eflags() & 2048,
         audit_count: x => {
             before(true); observations++; calls++;
             assert.equal(x >>> 0, (start_x + completed) >>> 0);

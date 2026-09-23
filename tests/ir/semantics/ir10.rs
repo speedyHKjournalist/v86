@@ -35,6 +35,7 @@ fn config_none() -> PassConfig {
         copy: false,
         fold: false,
         flags: false,
+        state_sync: false,
         helper_state: false,
         gvn: false,
         dce: false,

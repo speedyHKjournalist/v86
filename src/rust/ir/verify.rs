@@ -551,6 +551,7 @@ pub fn verify(region: &Region) -> Result<()> {
                 )?,
                 Op::ReadEntryLinear
                 | Op::ReadFlags
+                | Op::ReadSystemFlags
                 | Op::ReadRawFlags
                 | Op::ReadFlagChanges
                 | Op::ReadFlagOperand
@@ -560,6 +561,13 @@ pub fn verify(region: &Region) -> Result<()> {
                         && results == [Type::I32]
                         && region.entries.contains(&BlockId(b as u32)),
                     "flags initialization outside entry",
+                )?,
+                Op::ReadFlag(bit) => require(
+                    matches!(bit, 0 | 2 | 4 | 6 | 7 | 11)
+                        && args.is_empty()
+                        && results == [Type::I1]
+                        && region.entries.contains(&BlockId(b as u32)),
+                    "arithmetic flag initialization outside entry",
                 )?,
                 Op::ReadSegment(segment) => require(
                     *segment < 6

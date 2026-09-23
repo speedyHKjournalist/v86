@@ -186,7 +186,7 @@ fn stale_effect_plans_and_cpu_import_shadowing_are_rejected() {
     m.effects.clear();
     assert!(m.finish().is_err());
     for name in CPU_IMPORTS {
-        let mut r = lift_cpu(&[0x0F, 0xA2], GuestEip(0), LinearAddress(0), true).unwrap();
+        let mut r = lift_cpu(&[0x0F, 0x30], GuestEip(0), LinearAddress(0), true).unwrap();
         r.helpers[0].name = (*name).into();
         let m = lower(&r).unwrap();
         assert!(
@@ -195,7 +195,7 @@ fn stale_effect_plans_and_cpu_import_shadowing_are_rejected() {
         );
     }
     let mut r = lift_cpu(
-        &[0x8B, 0x00, 0x0F, 0xA2],
+        &[0x8B, 0x00, 0x0F, 0x30],
         GuestEip(0),
         LinearAddress(0),
         true,

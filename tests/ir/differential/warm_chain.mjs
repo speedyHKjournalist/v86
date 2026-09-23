@@ -45,7 +45,7 @@ try {
         guard: memory().getUint32(0x160000, true),
     });
     let compared = 0, observed_handoffs = 0;
-    for(const kind of ["ordinary", "guest_smc", "raw_code", "notified_code", "mapping", "reset", "xmm",
+    for(const kind of ["ordinary", "observer_epoch", "guest_smc", "raw_code", "notified_code", "mapping", "reset", "xmm",
         "recording", "diagnostics", "full_validation", "between_batches", "replacement"]) {
         const states = [];
         for(const enabled of [0, 1]) {
@@ -61,7 +61,7 @@ try {
             write32(0x12000, 0x13003);
             for(let page = 0; page < 1024; page++) write32(0x13000 + page * 4, page * 4096 | 3);
             write32(0x160000, 0x12345678); e.full_clear_tlb(); e.update_state_flags();
-            const observer = ["raw_code", "notified_code", "mapping", "reset", "xmm"].includes(kind);
+            const observer = ["observer_epoch", "raw_code", "notified_code", "mapping", "reset", "xmm"].includes(kind);
             const chunks = [
                 [0x43, ...jump(pages[0] + 1, pages[1])],
                 kind === "guest_smc"
@@ -100,12 +100,24 @@ try {
             });
             reset_registers(); e.full_clear_tlb();
             const before_handoffs = e.ir_cache_stat(35);
+            const before_full_checks = e.ir_cache_stat(19);
             run();
             const handoffs = (e.ir_cache_stat(35) - before_handoffs) >>> 0;
+            const full_checks = (e.ir_cache_stat(19) - before_full_checks) >>> 0;
             if(!enabled || ["recording", "diagnostics", "full_validation"].includes(kind)) {
                 assert.equal(handoffs, 0, `${kind}: conservative path selected`);
             } else if(!observer) {
                 assert(handoffs > (kind === "guest_smc" ? 0 : 100), `${kind}: actually exercise warm handoff`);
+                observed_handoffs += handoffs;
+            } else if(kind === "observer_epoch") {
+                // Every port callback invalidates the other three owners' byte
+                // certificates. They must be fully revalidated, but may still
+                // hand off directly once all their existing TLB mappings match.
+                // Epoch-only handoff managed fewer than one edge per iteration.
+                assert(handoffs > iterations * 3.5,
+                    `${kind}: refreshed successor certificates hand off; ${handoffs}`);
+                assert(full_checks >= iterations * 3 - 3,
+                    `${kind}: observer-invalidated successors still compare their complete sources; ${full_checks}`);
                 observed_handoffs += handoffs;
             }
             assert.equal(count(), (initial_count + run_count) >>> 0, `${kind}: wrapped retirement`);

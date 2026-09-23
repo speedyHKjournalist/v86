@@ -14,11 +14,14 @@ assert(["time", "desktop"].includes(target));
 const region_budget = {};
 if(process.env.IR_HOT_THRESHOLD !== undefined) region_budget.hot_threshold = Number(process.env.IR_HOT_THRESHOLD);
 if(process.env.IR_PROMOTION_THRESHOLD !== undefined) region_budget.promotion_threshold = Number(process.env.IR_PROMOTION_THRESHOLD);
+if(process.env.IR_SOURCE_WINDOW !== undefined) region_budget.max_source_bytes = Number(process.env.IR_SOURCE_WINDOW);
 let milestone = null;
 let phase = "bios";
 const vm = new V86({
     wasm_path: wasm, jit_backend: backend,
     ...(backend === "ir" ? {ir_region_budget: region_budget} : {}),
+    ...(backend === "ir" && process.env.IR_OPT_LEVEL !== undefined
+        ? {ir_opt_level: Number(process.env.IR_OPT_LEVEL)} : {}),
     memory_size: 2048 * 1024 * 1024, vga_memory_size: 16 * 1024 * 1024,
     bios: { url: "bios/seabios.bin" }, vga_bios: { url: "bios/vgabios.bin" },
     hda: { url: disk, size: fs.statSync(disk).size, async: true },
@@ -44,6 +47,19 @@ try {
         vm.add_listener("emulator-error", reject);
     });
     const cpu = vm.v86.cpu, e = cpu.wm.exports;
+    if(process.env.IR_RESIDENT_PROMOTION !== undefined) {
+        assert.equal(backend, "ir", "IR_RESIDENT_PROMOTION requires the IR backend");
+        assert(["0", "1"].includes(process.env.IR_RESIDENT_PROMOTION));
+        assert.equal(typeof e.ir_cache_set_resident_promotion, "function",
+            "core does not support IR_RESIDENT_PROMOTION");
+        const budget = vm.get_jit_info().ir_region_budget;
+        const args = [budget.hot_threshold, budget.promotion_threshold, budget.max_source_bytes,
+            budget.execution_budget, budget.rep_iterations];
+        const enabled = e.ir_auto_stat(11);
+        assert.equal(e.ir_auto_config(0, ...args), 1);
+        assert.equal(e.ir_cache_set_resident_promotion(Number(process.env.IR_RESIDENT_PROMOTION)), 1);
+        assert.equal(e.ir_auto_config(enabled, ...args), 1);
+    }
     if(process.env.IR_HOT_CAPACITY !== undefined) {
         assert.equal(backend, "ir", "IR_HOT_CAPACITY requires the IR backend");
         const capacity = Number(process.env.IR_HOT_CAPACITY);
@@ -138,6 +154,11 @@ try {
         ir_work:{guest_steps:total_ir[0],activations:total_ir[1],full_checks:total_ir[2],observer_checks:total_ir[3],
             warm_handoffs:total_ir[4],missing_hint_hits:total_ir[5]},
         boundary_counters:{warm_handoff_supported:typeof e.ir_cache_set_warm_chaining === "function",
+            resident_promotion:typeof e.ir_cache_set_resident_promotion === "function" ? e.ir_cache_stat(41) : null,
+            promotion_positions_scanned:typeof e.ir_cache_set_resident_promotion === "function" ? e.ir_cache_stat(42)>>>0 : null,
+            promotion_candidates:typeof e.ir_cache_set_resident_promotion === "function" ? e.ir_cache_stat(43)>>>0 : null,
+            promotion_heat_updates:typeof e.ir_cache_set_resident_promotion === "function" ? e.ir_cache_stat(44)>>>0 : null,
+            promotion_failures_suppressed:typeof e.ir_cache_set_resident_promotion === "function" ? e.ir_cache_stat(45)>>>0 : null,
             hot_capacity:typeof e.ir_auto_set_hot_capacity === "function" ? e.ir_auto_stat(29) : 128,
             missing_hint_supported:typeof e.ir_cache_set_missing_hint === "function",entry_aliases:e.ir_cache_stat(30)>>>0,shared_publications:e.ir_cache_stat(31)>>>0,
             observer_rejections:e.ir_cache_stat(33)>>>0,shared_compilations:e.ir_auto_stat(25)>>>0,

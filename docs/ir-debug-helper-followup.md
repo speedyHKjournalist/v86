@@ -5,8 +5,10 @@
 
 ## 实现
 
-- `ir_verify=off|debug|every_pass`：必要 lowering/proof/发布检查始终保留；debug
-  在断言构建检查 MIR 边界，every_pass 在 release 也检查每个机器优化阶段。
+- `ir_verify=off|debug|every_pass`：必要 HIR 管线入口/出口、lowering/proof/发布检查
+  始终保留；debug 在断言构建检查 HIR 中间阶段及 MIR 边界，every_pass 在
+  release 也检查每个 HIR/机器优化阶段。正常 release 不再重复执行外层 HIR
+  每 pass 的整图诊断扫描；标量/SIMD/SCCP 公共入口与事务验证仍保留。
 - `ir_dump=off|hir|mir|wasm|all`：16 条有界编译记录，文本各 64 KiB、Wasm 256 KiB，
   UTF-8 安全截断与截断标志。`get_ir_dumps(clear)` 复制读取，Worker 不暴露活指针。
 - `ir_stats=off|sampled|debug`：默认关闭，分别对应采样周期 0/128/1；已有动态

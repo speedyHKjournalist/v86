@@ -44,6 +44,17 @@ impl Config {
     pub fn hir(self) -> bool { matches!(self.dump, DumpMode::Hir | DumpMode::All) }
     pub fn mir(self) -> bool { matches!(self.dump, DumpMode::Mir | DumpMode::All) }
     pub fn wasm(self) -> bool { matches!(self.dump, DumpMode::Wasm | DumpMode::All) }
+    /// HIR pipeline boundaries are correctness checks in every mode. Only
+    /// diagnostic rescans between trusted, bounded passes are optional.
+    pub fn check_hir(self, region: &super::hir::Region, boundary: bool) -> Result<(), String> {
+        if boundary
+            || self.verify == VerifyMode::EveryPass
+            || self.verify == VerifyMode::Debug && cfg!(debug_assertions)
+        {
+            super::verify::verify(region).map_err(|error| error.0)?;
+        }
+        Ok(())
+    }
     pub fn check(
         self,
         mir: &super::mir::MirRegion,
@@ -55,6 +66,89 @@ impl Config {
             mir.verify()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hir_tests {
+    use super::*;
+    use crate::ir::{
+        backend::wasm::emit_cpu,
+        frontend::{
+            decode::{GuestEip, LinearAddress},
+            region::lift_cpu_cfg,
+        },
+        lowering::lower,
+        passes::{run, PassConfig},
+    };
+
+    fn region(bytes: &[u8]) -> crate::ir::hir::Region {
+        lift_cpu_cfg(bytes, GuestEip(0x1000), LinearAddress(0x100000), true, 8).unwrap()
+    }
+
+    #[test]
+    fn hir_boundaries_reject_invalid_inputs_in_every_diagnostic_mode() {
+        for mode in [VerifyMode::Off, VerifyMode::Debug, VerifyMode::EveryPass] {
+            let debug = Config {
+                verify: mode,
+                dump: DumpMode::Off,
+            };
+            let mut broken = region(&[0x40, 0x49, 0x75, 0xFC]);
+            broken.blocks[0].terminator = None;
+            assert!(debug.check_hir(&broken, true).is_err());
+            assert_eq!(
+                debug.check_hir(&broken, false).is_err(),
+                mode == VerifyMode::EveryPass
+                    || mode == VerifyMode::Debug && cfg!(debug_assertions)
+            );
+            let before = crate::ir::dump::text(&broken);
+            for rounds in [0, 2] {
+                assert!(run(
+                    &mut broken,
+                    PassConfig {
+                        debug,
+                        rounds,
+                        ..PassConfig::default()
+                    },
+                ).is_err());
+                assert_eq!(crate::ir::dump::text(&broken), before);
+            }
+        }
+    }
+
+    #[test]
+    fn hir_verification_modes_preserve_optimized_programs_and_recovery() {
+        for bytes in [
+            &[0x40, 0x49, 0x75, 0xFC][..],
+            &[0x31, 0xC0, 0x74, 0x02, 0x8B, 0x06, 0x43][..],
+            &[0x40, 0x89, 0x06, 0x49, 0x8B, 0x06][..],
+            &[0x66, 0x0F, 0xEF, 0xC0, 0x66, 0x0F, 0xEB, 0xC1][..],
+        ] {
+            let mut baseline = None;
+            for mode in [VerifyMode::EveryPass, VerifyMode::Debug, VerifyMode::Off] {
+                let mut hir = region(bytes);
+                run(
+                    &mut hir,
+                    PassConfig {
+                        debug: Config {
+                            verify: mode,
+                            dump: DumpMode::Off,
+                        },
+                        ..PassConfig::default()
+                    },
+                ).unwrap();
+                let observed = (
+                    crate::ir::dump::text(&hir),
+                    emit_cpu(&lower(&hir).unwrap(), 32).unwrap().bytes,
+                );
+                if let Some(expected) = &baseline {
+                    assert_eq!(&observed, expected);
+                }
+                else {
+                    baseline = Some(observed);
+                }
+            }
+        }
     }
 }
 struct Record {

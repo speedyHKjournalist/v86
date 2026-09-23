@@ -14,9 +14,16 @@ for(const [index, [mode, xmm, backing]] of cases.entries()) for(const opt of [0,
         const gpr = (cpu ? 64 : 256) / 4, flags = (cpu ? 120 : 288) / 4;
         const eip = (cpu ? 556 : 292) / 4, counter = (cpu ? 664 : 296) / 4, operand = (cpu ? 104 : 300) / 4;
         let computed = 0;
+        const get_eflags = () => words[flags] & ~64 | computed << 6;
         const f = new WebAssembly.Instance(new WebAssembly.Module(bytes), {e: {
             m, ir_enter: () => {}, ir_tlb_base: () => 0,
-            get_eflags: () => words[flags] & ~64 | computed << 6,
+            get_eflags,
+            ir_read_cf: () => get_eflags() & 1,
+            ir_read_pf: () => get_eflags() & 4,
+            ir_read_af: () => get_eflags() & 16,
+            ir_read_zf: () => get_eflags() & 64,
+            ir_read_sf: () => get_eflags() & 128,
+            ir_read_of: () => get_eflags() & 2048,
         }}).exports.f;
         for(const cs of cpu ? [0, 0x7000, 0xFFFFF000, 0xFFFFFFFF] : [0]) {
             for(const count of [0, 0xFFFFFFFE]) for(const lazy of [0, 1]) for(const raw of [0, 1]) {

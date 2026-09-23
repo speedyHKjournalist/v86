@@ -63,6 +63,7 @@ fn config() -> PassConfig {
         phis: false,
         copy: true,
         flags: false,
+        state_sync: false,
         helper_state: false,
         fold: true,
         gvn: false,

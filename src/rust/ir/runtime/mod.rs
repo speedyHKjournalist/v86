@@ -5,6 +5,7 @@ pub mod far_control;
 pub mod memory;
 pub mod region;
 pub mod system;
+mod flags;
 
 pub mod io;
 
@@ -30,6 +31,10 @@ pub mod x87;
 pub mod cache;
 #[cfg(any(feature = "ir-experimental", test))]
 mod hot_index;
+#[cfg(any(feature = "ir-experimental", test))]
+mod peers;
+#[cfg(any(feature = "ir-experimental", test))]
+mod promotion;
 pub mod live;
 #[cfg(feature = "ir-experimental")]
 pub mod schedule;

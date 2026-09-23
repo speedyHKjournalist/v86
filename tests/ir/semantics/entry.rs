@@ -61,6 +61,40 @@ fn optimization_policy_disables_all_optional_stages_and_caps_level_one() {
         );
     }
 }
+
+#[test]
+fn tier_one_cpu_demand_preserves_switches_and_precise_recovery() {
+    use crate::ir::passes::PassConfig;
+    // Arithmetic, conditional CFG, faulting memory and continuing helper cases
+    // all retain their recovery maps; only CPU-dead value programs disappear.
+    for bytes in [
+        vec![0x01, 0xD8, 0x01, 0xD1, 0x90],
+        vec![0x40, 0x49, 0x75, 0xFC],
+        vec![0x40, 0x8B, 0x06, 0x49],
+        vec![0x40, 0xFA, 0x49],
+    ] {
+        let req = request(0x100000, 0x100000, true);
+        let snapshot = snapshot(bytes, req.linear.0);
+        let mut cfg = config(true);
+        cfg.passes = PassConfig::tier1();
+        let optimized = compile_cpu_cfg_region(&req, &snapshot, &cfg).unwrap();
+        assert!(optimized.passes.cpu_values_elided > 0);
+        cfg.passes = cfg.passes.disable((1 << 5) | (1 << 13));
+        let untrimmed = compile_cpu_cfg_region(&req, &snapshot, &cfg).unwrap();
+        assert_eq!(untrimmed.passes.cpu_values_elided, 0);
+        assert_eq!(untrimmed.passes.state_writes_elided, 0);
+        assert!(optimized.code.bytes.len() < untrimmed.code.bytes.len());
+
+        cfg.passes = PassConfig::tier1();
+        cfg.passes.rounds = 0;
+        let no_rounds = compile_cpu_cfg_region(&req, &snapshot, &cfg).unwrap();
+        assert_eq!(no_rounds.passes.cpu_values_elided, 0);
+        assert_eq!(no_rounds.passes.state_writes_elided, 0);
+        cfg.optimize = false;
+        let disabled = compile_cpu_cfg_region(&req, &snapshot, &cfg).unwrap();
+        assert_eq!(disabled.code.bytes, no_rounds.code.bytes);
+    }
+}
 fn request(pc: u32, linear: u32, mode: bool) -> CompileRequest {
     CompileRequest {
         key: PublicationKey {
@@ -218,6 +252,8 @@ fn entry_execution_fixtures() {
         load.extend([0x8B, 0x06]);
         let mut store = address_prefix;
         store.extend([0x89, 0x06]);
+        let mut dirty_load = vec![0x40];
+        dirty_load.extend(&load);
         let programs = [
             vec![0x40],
             load,
@@ -225,6 +261,8 @@ fn entry_execution_fixtures() {
             vec![0x0F, 0xA2],
             vec![0x40, 0x49, 0x75, 0xFC],
             vec![0x66, 0x0F, 0xEF, 0xC1],
+            vec![0x01, 0xD8, 0x11, 0xC8, 0x83, 0xE0, 0x03, 0x49],
+            dirty_load,
         ];
         for (kind, bytes) in programs.iter().enumerate() {
             for cfg in [false, true] {
@@ -236,11 +274,13 @@ fn entry_execution_fixtures() {
                         for opt in [false, true] {
                             let req = request(pc, linear, mode);
                             let source = snapshot(bytes.clone(), linear);
+                            let mut options = config(opt);
+                            options.passes = crate::ir::passes::PassConfig::tier1();
                             let artifact = if cfg {
-                                compile_cpu_cfg_region(&req, &source, &config(opt))
+                                compile_cpu_cfg_region(&req, &source, &options)
                             }
                             else {
-                                compile_cpu_region(&req, &source, &config(opt))
+                                compile_cpu_region(&req, &source, &options)
                             }
                             .unwrap();
                             assert_eq!(artifact.entry, EntryContract::Cpu(req.cpu_entry()));

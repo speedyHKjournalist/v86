@@ -135,6 +135,14 @@ impl MirRegion {
     ) -> Result<usize, CompileError> {
         state_elision::enable(&mut self.data, work_limit)
     }
+    /// Cold Tier 1 reuses the lowering certificate without deriving additional
+    /// post-observer facts. No SSA, memory or recovery point is rewritten.
+    pub fn elide_entry_cpu_state_writes(
+        &mut self,
+        work_limit: usize,
+    ) -> Result<usize, CompileError> {
+        state_elision::enable_entry(&mut self.data, work_limit)
+    }
     pub(crate) fn cpu_state_write_elided(&self, state: super::ids::StateId, write: usize) -> bool {
         state_elision::elided(&self.data, state, write)
     }
@@ -160,6 +168,9 @@ impl MirRegion {
     pub(crate) fn cpu_instruction_live(&self, id: super::ids::InstId) -> bool {
         cpu_liveness::instruction_live(&self.data, id)
     }
+    pub(crate) fn cpu_terminator(&self, id: super::ids::BlockId) -> &control::Terminator {
+        cpu_liveness::terminator(&self.data, id)
+    }
 
     /// Fuse adjacent single-use scalar programs after HIR has been discarded.
     pub fn schedule_operand_stack(&mut self, work_limit: usize) -> Result<usize, CompileError> {
@@ -167,7 +178,9 @@ impl MirRegion {
     }
     /// Recompute typed interference and phi-copy schedules from owned MIR facts.
     pub fn allocate_machine_locals(&mut self, work_limit: usize) -> Result<usize, CompileError> {
-        allocation::reallocate(&mut self.data, work_limit)
+        let saved = allocation::reallocate(&mut self.data, work_limit)?;
+        cpu_liveness::invalidate_control(&mut self.data);
+        Ok(saved)
     }
     pub(crate) fn stack_instruction_elided(&self, id: super::ids::InstId) -> bool {
         self.data.stack_elided[id.index()]

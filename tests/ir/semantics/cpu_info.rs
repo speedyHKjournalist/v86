@@ -66,11 +66,11 @@ fn cpu_info_observer_and_terminal_contracts() {
         assert!(lift_cpu(&[0xF0, 0x0F, op], GuestEip(0), LinearAddress(0), true).is_err());
         assert_eq!(
             lift_cpu(&[0x0F, op, 0x90], GuestEip(0), LinearAddress(0), true).is_ok(),
-            op == 0x31
+            matches!(op, 0x31 | 0xA2)
         );
         let r = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).unwrap();
         assert_eq!(r.helpers.len(), 1);
-        if op == 0x31 {
+        if matches!(op, 0x31 | 0xA2) {
             assert!(matches!(r.helpers[0].abi, HelperAbi::CpuReload));
             assert_eq!(r.helpers[0].results, vec![crate::ir::types::Type::I32; 14]);
             lower(&r).unwrap().verify().unwrap();

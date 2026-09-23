@@ -58,6 +58,12 @@ imports! {
     "ir_tlb_base": [] -> [I32], Pure, "TLB array address";
     "ir_memory_base": [] -> [I32], Pure, "RAM base address";
     "get_eflags": [] -> [I32], Pure, "reads concrete and lazy flag backing; no writes";
+    "ir_read_cf": [] -> [I32], Pure, "reads CF backing; returns bit 0; no writes or callbacks";
+    "ir_read_pf": [] -> [I32], Pure, "reads PF backing; returns bit 2; no writes or callbacks";
+    "ir_read_af": [] -> [I32], Pure, "reads AF backing; returns bit 4; no writes or callbacks";
+    "ir_read_zf": [] -> [I32], Pure, "reads ZF backing; returns bit 6; no writes or callbacks";
+    "ir_read_sf": [] -> [I32], Pure, "reads SF backing; returns bit 7; no writes or callbacks";
+    "ir_read_of": [] -> [I32], Pure, "reads OF backing; returns bit 11; no writes or callbacks";
     "ir_divide_fault": [] -> [], Fault, "CPU owns #DE delivery; no success continuation";
     "ir_segment_address": [I32,I32] -> [I64], Packed, "segment/null check; high32=0 or 2; CPU owns fault";
     "ir_pop_address": [I32,I32,I32] -> [I64], Packed, "segment/null check; fault also unwinds temporary SP";

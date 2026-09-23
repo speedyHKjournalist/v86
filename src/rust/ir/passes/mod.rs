@@ -1,5 +1,5 @@
 //! Bounded, verifier-checked pure dataflow passes. Memory and helpers never enter GVN.
-use super::{hir::*, ids::*, verify::verify};
+use super::{hir::*, ids::*};
 use std::collections::HashSet;
 pub mod copy;
 mod gvn;
@@ -21,6 +21,9 @@ pub struct PassConfig {
     pub fold: bool,
     /// CPU-only per-flag demand/liveness after exact backing lowering.
     pub flags: bool,
+    /// Allow post-observer backing-state analysis; cold policy only enables
+    /// entry-equivalence certificates already derived during lowering.
+    pub state_sync: bool,
     /// Trim pre-call CPU StateMap observations for audited pure helpers.
     pub helper_state: bool,
     pub gvn: bool,
@@ -38,6 +41,7 @@ impl Default for PassConfig {
             copy: true,
             fold: true,
             flags: true,
+            state_sync: true,
             helper_state: true,
             gvn: true,
             dce: true,
@@ -61,18 +65,20 @@ impl PassConfig {
         self.dce &= self.enabled(8);
         self
     }
-    /// Low-latency Tier-1 canonicalization. This may rewrite only local CFG/SSA
-    /// shape; Tier-2 dataflow/state optimizations remain disabled.
+    /// Low-latency Tier-1 canonicalization plus CPU demand from exact recovery
+    /// plans. State trimming only enables certificates already checked during
+    /// lowering; global dataflow and post-observer analysis remain Tier 2.
     pub fn tier1() -> Self {
         Self {
             debug: Default::default(),
-            disabled: Self::MASK & !((1 << 9) - 1),
+            disabled: Self::MASK & !(((1 << 9) - 1) | (1 << 13)),
             prune: true,
             merge: true,
             phis: true,
             copy: true,
             fold: false,
-            flags: false,
+            flags: true,
+            state_sync: false,
             helper_state: false,
             gvn: false,
             dce: false,
@@ -107,7 +113,7 @@ pub struct PassStats {
 }
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     let config = config.disable(config.disabled);
-    verify(region).map_err(|e| e.0)?;
+    config.debug.check_hir(region, true)?;
     if config.rounds > 8 {
         return Err("pass iteration budget exceeded".into());
     }
@@ -115,27 +121,27 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
     for _ in 0..config.rounds {
         if config.merge {
             merge::run(region, &mut stats)?;
-            verify(region).map_err(|e| e.0)?;
+            config.debug.check_hir(region, false)?;
         }
         if config.phis {
             trivial_phis(region, &mut stats);
-            verify(region).map_err(|e| e.0)?;
+            config.debug.check_hir(region, false)?;
         }
         if config.copy {
             let copies = copy::run(region, copy::DEFAULT_WORK_LIMIT)?;
             stats.copied += copies.propagated;
             stats.scalar_aliases += copies.propagated;
-            verify(region).map_err(|e| e.0)?;
+            config.debug.check_hir(region, false)?;
         }
         if config.fold {
             let scalar = scalar::run_constants(region, scalar::DEFAULT_WORK_LIMIT)?;
             stats.scalar_constants += scalar.constants;
-            verify(region).map_err(|e| e.0)?;
+            config.debug.check_hir(region, false)?;
             fold(region, &mut stats);
             let vector = simd::run(region, simd::DEFAULT_WORK_LIMIT)?;
             stats.simd_eliminated += vector.eliminated;
             stats.simd_shuffled += vector.shuffled;
-            verify(region).map_err(|e| e.0)?;
+            config.debug.check_hir(region, false)?;
         }
         // Executable-edge facts require folding, phi analysis AND permission
         // to prune control flow. Do not silently bypass a disabled pass family.
@@ -148,17 +154,18 @@ pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String>
         }
         if config.prune {
             prune::run(region, &mut stats)?;
-            verify(region).map_err(|e| e.0)?;
+            config.debug.check_hir(region, false)?;
         }
         if config.gvn {
             gvn::run(region, &mut stats)?;
-            verify(region).map_err(|e| e.0)?;
+            config.debug.check_hir(region, false)?;
         }
         if config.dce {
             dce(region, &mut stats);
-            verify(region).map_err(|e| e.0)?;
+            config.debug.check_hir(region, false)?;
         }
     }
+    config.debug.check_hir(region, true)?;
     Ok(stats)
 }
 fn constant(region: &Region, value: ValueId) -> Option<u64> {

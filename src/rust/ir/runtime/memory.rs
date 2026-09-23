@@ -48,8 +48,8 @@ pub unsafe fn ir_memory_write(address: u32, value: u32, bytes: u32) -> u32 {
         Err(()) => Outcome::ControlTransferred as u32,
     }
 }
-/// Runtime entry invariant: flags are read through get_eflags, and every CPU
-/// materialization preserves raw ZF/laziness separately. Also an entry guard.
+/// Runtime entry invariant: arithmetic FLAGS use the canonical CPU getters;
+/// materialization preserves raw FLAGS and lazy backing separately. Also an entry guard.
 #[no_mangle]
 pub unsafe fn ir_enter() {
     assert!(!cpu::in_jit);

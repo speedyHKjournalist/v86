@@ -203,11 +203,18 @@ fn reallocate_with<S: LiveValues>(
             live.extend(term_uses(b));
             for edge in edges(&b.terminator) {
                 let target = &graph.blocks[edge.target.index()];
-                spend(&mut left, inputs[edge.target.index()].scan_words())?;
+                let incoming = &inputs[edge.target.index()];
+                // Vec::contains may compare every target parameter for each
+                // incoming value. Charge before filtering, including values
+                // removed by the edge; the resulting live set can be tiny.
+                spend(
+                    &mut left,
+                    incoming.len()
+                        .saturating_mul(target.params.len().saturating_add(1))
+                        .saturating_add(incoming.scan_words()),
+                )?;
                 live.extend(
-                    inputs[edge.target.index()]
-                        .values()
-                        .filter(|v| !target.params.contains(v)),
+                    incoming.values().filter(|v| !target.params.contains(v)),
                 );
             }
             spend(&mut left, live.len() + 1)?;
@@ -746,6 +753,14 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
         for (b, block) in graph.blocks.iter().enumerate().rev() {
             let mut live: BTreeSet<_> = term_uses(block).into_iter().collect();
             for e in edges(&block.terminator) {
+                // The independent tree solver also performs a linear parameter
+                // membership search. Do not meter only surviving live values.
+                spend(
+                    &mut left,
+                    inputs[e.target.index()].len().saturating_mul(
+                        graph.blocks[e.target.index()].params.len().saturating_add(1),
+                    ),
+                )?;
                 live.extend(
                     inputs[e.target.index()]
                         .iter()
@@ -1042,9 +1057,13 @@ fn cpu_state_demand(
     Ok(())
 }
 /// CPU roots come from the actual machine materializations after optional write
-/// trimming. Derive demand once, at Tier 2, instead of precomputing alternative
+/// trimming. Derive demand once, after trimming, instead of precomputing alternative
 /// HIR masks twice during every Tier-1 lowering and lowering verification.
-pub(super) fn cpu_demand(data: &MirData, work_limit: usize) -> Result<Vec<bool>, CompileError> {
+pub(super) struct CpuDemand {
+    pub instructions: Vec<bool>,
+    pub values: Vec<bool>,
+}
+pub(super) fn cpu_demand(data: &MirData, work_limit: usize) -> Result<CpuDemand, CompileError> {
     let graph = &data.allocation_graph;
     let mut left = work_limit;
     spend(
@@ -1133,7 +1152,49 @@ pub(super) fn cpu_demand(data: &MirData, work_limit: usize) -> Result<Vec<bool>,
             }
         }
     }
-    Ok(live)
+    Ok(CpuDemand { instructions: live, values: seen })
+}
+
+/// Rebuild simultaneous CPU edge assignments from SSA pairs. Filtering the
+/// already scheduled moves would break cycles and scratch dependencies.
+pub(super) fn cpu_copy_control(
+    data: &MirData,
+    demanded: &[bool],
+    work_limit: usize,
+) -> Result<Vec<control::Terminator>, CompileError> {
+    let invalid = || CompileError::InvalidIr("invalid CPU edge demand".into());
+    if demanded.len() != data.value_types.len() {
+        return Err(invalid());
+    }
+    let graph = &data.allocation_graph;
+    let mut left = work_limit;
+    spend(&mut left, graph.blocks.len() + demanded.len())?;
+    let local = |value: ValueId| data.allocation.value_local[value.index()].ok_or_else(invalid);
+    let mut edge = |edge: &Edge| -> Result<control::Edge, CompileError> {
+        let params = &graph.blocks[edge.target.index()].params;
+        if params.len() != edge.arguments.len() {
+            return Err(invalid());
+        }
+        spend(&mut left, params.len() + data.allocation.local_types.len())?;
+        let mut pairs = Vec::new();
+        for (&arg, &param) in edge.arguments.iter().zip(params) {
+            if data.value_types[param.index()] != Type::Effect && demanded[param.index()] {
+                pairs.push((local(arg)?, local(param)?));
+            }
+        }
+        // Parallel-copy scheduling has bounded quadratic cycle/sink searches.
+        spend(&mut left, pairs.len().saturating_mul(pairs.len() + 1))?;
+        control::schedule(edge.target, &pairs, &data.allocation.local_types)
+    };
+    graph.blocks.iter().map(|block| Ok(match &block.terminator {
+        Terminator::Exit(state) => control::Terminator::Exit(*state),
+        Terminator::Jump(next) => control::Terminator::Jump(edge(next)?),
+        Terminator::Branch(condition, taken, not_taken) => control::Terminator::Branch {
+            condition: local(*condition)?,
+            taken: edge(taken)?,
+            not_taken: edge(not_taken)?,
+        },
+    })).collect()
 }
 
 /// Same-block CPU backing knowledge. Calls and memory effects discard it;

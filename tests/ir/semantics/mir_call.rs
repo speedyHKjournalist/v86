@@ -80,7 +80,7 @@ fn call_sites_legalize_observation_staging_and_outcome_edges() {
     );
     standalone(&m).unwrap();
     for (bytes, exits) in [
-        (vec![0x0F, 0xA2], vec![2, 4]),
+        (vec![0x0F, 0x30], vec![2, 4]),
         (vec![0xF3, 0xA4], vec![2, 3, 4]),
     ] {
         let r = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).unwrap();
@@ -128,7 +128,7 @@ fn stale_helper_tables_and_call_sites_are_rejected() {
 }
 #[test]
 fn arena_tombstones_do_not_require_live_calls() {
-    let mut r = lift_cpu(&[0x0F, 0xA2], GuestEip(0), LinearAddress(0), true).unwrap();
+    let mut r = lift_cpu(&[0x0F, 0x30], GuestEip(0), LinearAddress(0), true).unwrap();
     for b in &mut r.blocks {
         b.instructions
             .retain(|id| !matches!(r.instructions[id.index()].op, Op::CallHelper(_)));
