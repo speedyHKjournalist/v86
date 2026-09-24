@@ -33,6 +33,8 @@ pub mod cache;
 mod hot_index;
 #[cfg(any(feature = "ir-experimental", test))]
 mod peers;
+#[cfg(feature = "ir-experimental")]
+mod pages;
 #[cfg(any(feature = "ir-experimental", test))]
 mod promotion;
 pub mod live;

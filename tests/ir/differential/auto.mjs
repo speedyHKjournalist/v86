@@ -11,6 +11,8 @@ try {
     vm.run();await until(()=>(word(0x500)&65535)===0xCAFE,"boot");await vm.stop();await sleep(20);
     if(process.env.IR_DIAGNOSTICS) assert.equal(await vm.configure_ir_diagnostics(Number(process.env.IR_DIAGNOSTICS)),true);
     assert.equal(e.ir_auto_set_hot_filter(2),0);
+    // Hot-region fusion is off by default; these cases cover its automatic pipeline.
+    assert.equal(e.ir_cache_stat(26),0);assert.equal(e.ir_cache_set_fusion(1),1);
     if(process.env.IR_HOT_FILTER !== undefined) assert.equal(e.ir_auto_set_hot_filter(Number(process.env.IR_HOT_FILTER)),1);
     const configure=(enabled=1,threshold=2,promote=4)=>assert.equal(e.ir_auto_config(enabled,threshold,promote,192,256,64),1);
     const stats=()=>Array.from({length:12},(_,i)=>e.ir_auto_stat(i));
@@ -290,6 +292,8 @@ try {
     }
     // Automatic eviction preserves manually published entries and the shared pool bound.
     await prepare([0x40,0xF4]);assert(await cpu.ir_compile_cached(1,1,1,1,64,8));configure(1,1,1000000);
+    // The default holds a whole XP working set; bound the smallest pool here.
+    assert.equal(e.ir_cache_capacity(),768);assert.equal(e.ir_cache_set_capacity(256),1);
     const capacity=e.ir_cache_capacity();assert.equal(capacity,256);
     for(let i=1;i<=capacity+8;i++){
         await vm.stop();const address=PC+i*4096;vm.write_memory(Uint8Array.of(0x40,0xEB,0xFD),address);cpu.instruction_pointer[0]=address;cpu.in_hlt[0]=0;

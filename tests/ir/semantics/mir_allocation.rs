@@ -93,6 +93,13 @@ fn wide_phi_forwarding(parameters: usize) -> crate::ir::mir::MirRegion {
     let exit_effect = b.region.param(exit, Type::Effect);
     let middle_values: Vec<_> = (0..parameters)
         .map(|_| b.region.param(middle, Type::I32)).collect();
+    let middle_state = b.region.state(StateMap {
+        instruction_pc: GuestEip(0x1000), next_pc: GuestEip(0x1001),
+        next_value: None, resume: ResumeKind::BeforeInstruction,
+        gpr: std::array::from_fn(|n| middle_values[n]), flags: b.flags.clone(),
+        xmm: vec![], x87: vec![], committed_instructions: 0,
+        count_base: None, rep_progress: None,
+    });
     let exit_values: Vec<_> = (0..parameters)
         .map(|_| b.region.param(exit, Type::I32)).collect();
     b.region.terminate(b.block, Terminator::Branch(Edge {
@@ -112,6 +119,10 @@ fn wide_phi_forwarding(parameters: usize) -> crate::ir::mir::MirRegion {
         count_base: None, rep_progress: None,
     });
     b.region.terminate(exit, Terminator::Exit(state));
+    // Every non-cold guest block owns a budget recovery map (the lowered CFG
+    // contract); the forwarding blocks recover at the same exit state.
+    b.region.blocks[middle.index()].entry_state = Some(middle_state);
+    b.region.blocks[exit.index()].entry_state = Some(state);
     // The effect parameter is a valid ordering root even with no effects in
     // this terminal block. Every data parameter is still a real edge assignment.
     let _ = exit_effect;

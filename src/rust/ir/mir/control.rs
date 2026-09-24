@@ -60,6 +60,10 @@ pub struct ControlFlow {
     /// Every live recovery/observer count has an SSA base, including cycle exits.
     pub dynamic_counts: bool,
     pub polls: Vec<Option<Poll>>,
+    /// Page functions poll the execution budget only at loop headers (every
+    /// cycle contains one); acyclic paths between them are bounded by the
+    /// page. Instruction counts remain exact through the SSA count bases.
+    pub sparse_polls: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Poll {
@@ -131,6 +135,131 @@ pub(crate) fn schedule(
 }
 
 pub fn lower(region: &Region, allocation: &Allocation) -> Result<ControlFlow, CompileError> {
+    lower_with(region, allocation, false)
+}
+/// Longest sum of block budgets from each block to the next loop header or
+/// exit. Non-header edges form an acyclic graph (every cycle has a header);
+/// None if they do not. Shared by HIR sparse stripping and MIR lowering.
+pub(crate) fn longest_guest_paths(
+    n: usize,
+    headers: &[bool],
+    successors: impl Fn(usize) -> Vec<usize>,
+    budget: impl Fn(usize) -> u32,
+) -> Option<Vec<u32>> {
+    let mut longest = vec![0u32; n];
+    let mut state = vec![0u8; n]; // 0 new, 1 on stack, 2 done
+    for root in 0..n {
+        if state[root] != 0 {
+            continue;
+        }
+        let mut stack = vec![(root, 0usize, successors(root))];
+        state[root] = 1;
+        while let Some((b, next, edges)) = stack.last_mut() {
+            if let Some(&t) = edges.get(*next) {
+                *next += 1;
+                if headers[t] || state[t] == 2 {
+                    continue;
+                }
+                if state[t] == 1 {
+                    return None;
+                }
+                state[t] = 1;
+                stack.push((t, 0, successors(t)));
+            }
+            else {
+                let b = *b;
+                let tail = edges
+                    .iter()
+                    .filter(|&&t| !headers[t])
+                    .map(|&t| longest[t])
+                    .max()
+                    .unwrap_or(0);
+                longest[b] = budget(b).saturating_add(tail);
+                state[b] = 2;
+                stack.pop();
+            }
+        }
+    }
+    Some(longest)
+}
+/// Blocks where sparse accounting charges an entry path: the first weighted
+/// non-header block on each path from an entry through weightless blocks.
+pub(crate) fn entry_frontier(
+    entries: &[BlockId],
+    n: usize,
+    headers: &[bool],
+    successors: impl Fn(usize) -> Vec<usize>,
+    weight: impl Fn(usize) -> u32,
+) -> Vec<bool> {
+    let mut frontier = vec![false; n];
+    let mut seen = vec![false; n];
+    let mut queue: Vec<usize> = entries.iter().map(|e| e.index()).collect();
+    while let Some(b) = queue.pop() {
+        if std::mem::replace(&mut seen[b], true) || headers[b] {
+            continue;
+        }
+        if weight(b) != 0 {
+            frontier[b] = true;
+        }
+        else {
+            queue.extend(successors(b));
+        }
+    }
+    frontier
+}
+fn hir_successors(region: &Region, b: usize) -> Vec<usize> {
+    region.blocks[b]
+        .terminator
+        .as_ref()
+        .map(|t| t.edges().iter().map(|e| e.target.index()).collect())
+        .unwrap_or_default()
+}
+/// Targets of depth-first back edges from every entry: each cycle has one.
+/// HIR sparse-poll stripping and MIR lowering share this exact traversal (the
+/// two graphs have the same blocks and edge order), so they agree on headers.
+pub(crate) fn back_edge_targets(
+    entries: &[BlockId],
+    n: usize,
+    successors: impl Fn(usize) -> Vec<usize>,
+) -> Vec<bool> {
+    let mut headers = vec![false; n];
+    let mut state = vec![0u8; n]; // 0 new, 1 on stack, 2 done
+    for entry in entries {
+        if state[entry.index()] != 0 {
+            continue;
+        }
+        let mut stack = vec![(entry.index(), 0usize, successors(entry.index()))];
+        state[entry.index()] = 1;
+        while let Some((b, next, edges)) = stack.last_mut() {
+            if let Some(&t) = edges.get(*next) {
+                *next += 1;
+                match state[t] {
+                    0 => {
+                        state[t] = 1;
+                        stack.push((t, 0, successors(t)));
+                    },
+                    1 => headers[t] = true,
+                    _ => {},
+                }
+            }
+            else {
+                state[*b] = 2;
+                stack.pop();
+            }
+        }
+    }
+    headers
+}
+fn loop_headers(entries: &[BlockId], blocks: &[Block]) -> Vec<bool> {
+    back_edge_targets(entries, blocks.len(), |b| {
+        blocks[b].terminator.edges().iter().map(|e| e.target.index()).collect()
+    })
+}
+pub fn lower_with(
+    region: &Region,
+    allocation: &Allocation,
+    sparse_polls: bool,
+) -> Result<ControlFlow, CompileError> {
     let local = |value: ValueId| -> Result<usize, CompileError> {
         let slot = allocation
             .value_local
@@ -209,23 +338,64 @@ pub fn lower(region: &Region, allocation: &Allocation) -> Result<ControlFlow, Co
             .iter()
             .all(|id| region.states[id.index()].count_base.is_some());
     let cold = cold_dispatch(&region.entries, &blocks)?;
+    let headers = if sparse_polls {
+        loop_headers(&region.entries, &blocks)
+    }
+    else {
+        vec![true; blocks.len()]
+    };
+    // Sparse accounting charges each poll point (loop header or entry
+    // frontier block) with the longest weighted path through unpolled blocks,
+    // so an activation never retires more than its budget. Page functions
+    // record no weights and keep one credit per header.
+    let n = region.blocks.len();
+    let (longest, frontier) = if sparse_polls {
+        let weight = |b: usize| region.blocks[b].budget;
+        (
+            longest_guest_paths(n, &headers, |b| hir_successors(region, b), weight)
+                .ok_or_else(invalid)?,
+            entry_frontier(&region.entries, n, &headers, |b| hir_successors(region, b), weight),
+        )
+    }
+    else {
+        (vec![], vec![])
+    };
     for (index, block) in blocks.iter_mut().enumerate() {
-        if cold[index] {
+        // A frontier block with a recovery map is checked at its start; one
+        // without (an entry) keeps its first PollBudget as the check.
+        let polled = headers[index]
+            || sparse_polls && frontier[index] && region.blocks[index].entry_state.is_some();
+        if cold[index] || !polled {
             block.budget_cost = 0;
+        }
+        else if sparse_polls {
+            block.budget_cost = longest[index].max(1);
+        }
+    }
+    // A poll retained by sparse stripping precedes every guest instruction of
+    // its (recovery-free frontier) block and charges its longest path.
+    let mut poll_cost = vec![1u32; region.instructions.len()];
+    if sparse_polls {
+        for (b, block) in region.blocks.iter().enumerate() {
+            for id in &block.instructions {
+                poll_cost[id.index()] = longest[b].max(1);
+            }
         }
     }
     Ok(ControlFlow {
         entries: region.entries.clone(),
         blocks,
         dynamic_counts,
+        sparse_polls,
         polls: region
             .instructions
             .iter()
-            .map(|inst| {
+            .enumerate()
+            .map(|(id, inst)| {
                 if inst.op == hir::Op::PollBudget {
                     Some(Poll {
                         recovery: inst.state.unwrap(),
-                        cost: 1,
+                        cost: poll_cost[id],
                     })
                 }
                 else {
@@ -241,7 +411,7 @@ pub fn verify(
     allocation: &Allocation,
     graph: &ControlFlow,
 ) -> Result<(), CompileError> {
-    if lower(region, allocation)? != *graph {
+    if lower_with(region, allocation, graph.sparse_polls)? != *graph {
         return Err(invalid());
     }
     Ok(())
@@ -303,8 +473,41 @@ impl ControlFlow {
             }
         }
         let cold = self.cold_dispatch()?;
+        if self.sparse_polls {
+            // Unpolled blocks must form an acyclic subgraph: every cycle
+            // passes a loop-header poll, so each activation stays bounded.
+            let mut indegree = vec![0usize; self.blocks.len()];
+            for block in self.blocks.iter().filter(|b| b.budget_cost == 0) {
+                for edge in block.terminator.edges() {
+                    if self.blocks[edge.target.index()].budget_cost == 0 {
+                        indegree[edge.target.index()] += 1;
+                    }
+                }
+            }
+            let mut queue: Vec<_> = (0..self.blocks.len())
+                .filter(|&b| self.blocks[b].budget_cost == 0 && indegree[b] == 0)
+                .collect();
+            let mut seen = 0;
+            while let Some(b) = queue.pop() {
+                seen += 1;
+                for edge in self.blocks[b].terminator.edges() {
+                    let t = edge.target.index();
+                    if self.blocks[t].budget_cost == 0 {
+                        indegree[t] -= 1;
+                        if indegree[t] == 0 {
+                            queue.push(t);
+                        }
+                    }
+                }
+            }
+            if seen != self.blocks.iter().filter(|b| b.budget_cost == 0).count() {
+                return Err(invalid());
+            }
+        }
         for (index, block) in self.blocks.iter().enumerate() {
-            if block.budget_cost != if cold[index] { 0 } else { 1 } {
+            if !self.sparse_polls && block.budget_cost != if cold[index] { 0 } else { 1 }
+                || cold[index] && block.budget_cost != 0
+            {
                 return Err(invalid());
             }
             if self.entries.contains(&BlockId(index as u32)) {
@@ -386,6 +589,7 @@ mod cold_dispatch_tests {
             blocks: vec![entry, cold, guest],
             dynamic_counts: true,
             polls: vec![],
+            sparse_polls: false,
         };
         assert_eq!(graph.cold_dispatch().unwrap(), vec![false, true, false]);
         graph.check_target(true).unwrap();

@@ -71,7 +71,7 @@ export function CPU(bus, wm, stop_idling)
     this.legacy_compile_requests = 0;
     this.ir_region_budget = null;
     this.ir_pass_names = ["prune", "merge", "phis", "copy", "fold", "flags", "helper_state", "gvn", "dce",
-        "licm", "mir_fold", "stack", "allocation", "state_elision", "ram_loop", "ram_forward", "ram_guard", "budget_batch"];
+        "licm", "mir_fold", "stack", "allocation", "state_elision", "ram_loop", "ram_forward", "ram_guard", "budget_batch", "sparse_polls"];
     this.wasm_patch();
     this.create_jit_imports();
 
@@ -1035,7 +1035,7 @@ CPU.prototype.configure_jit_backend = function(settings)
     if(requested !== undefined && (backend !== "ir" || !requested || typeof requested !== "object" || Array.isArray(requested)))
         throw new Error("ir_region_budget requires jit_backend ir and an object");
     const limits = {
-        "hot_threshold": [64, 1, 1000000], "promotion_threshold": [256, 1, 1000000],
+        "hot_threshold": [32, 1, 1000000], "promotion_threshold": [65536, 1, 1000000],
         "max_source_bytes": [192, 15, 960], "execution_budget": [256, 1, 4096],
         "rep_iterations": [64, 1, 4096],
     };
@@ -1066,6 +1066,7 @@ CPU.prototype.configure_jit_backend = function(settings)
         throw new Error("Cannot configure IR while a CPU compilation or execution is active");
     this.set_jit_config(0, backend === "ir" || settings.disable_jit ? 1 : 0);
     this.jit_backend = backend;
+    this.ir_sync_publication = settings["ir_sync_publication"] === true;
     this.ir_region_budget = backend === "ir" ? budget : null;
 };
 
@@ -2021,22 +2022,48 @@ CPU.prototype.ir_publish_cached = function(owner, id, slot, code, automatic)
         if(current()) { exports["ir_cache_cancel"](id, slot); exports["ir_cache_collect"](); }
         return false;
     };
-    const diagnostic = exports["ir_diagnostic_get"];
-    const diagnostic_session = diagnostic && diagnostic(0,0,0) ? diagnostic(0,1,0) : 0;
-    const diagnostic_start = diagnostic_session ? performance.now() : 0;
-    let task;
-    try { task = WebAssembly.instantiate(code, { "e": this.jit_imports }); }
-    catch(error) { task = Promise.reject(error); }
-    return task.then(result => {
+    const install = instance => {
         if(!current()) return false;
-        const f = result.instance.exports["f"];
+        const f = instance.exports["f"];
         if(typeof f !== "function") return failed();
         if(!exports["ir_cache_validate"](id, slot)) return failed();
         table.set(slot + WASM_TABLE_OFFSET, f);
         if(!exports["ir_cache_finish"](id, slot)) return failed();
         exports["ir_cache_collect"]();
         return true;
-    }).catch(failed).then(success => {
+    };
+    const diagnostic = exports["ir_diagnostic_get"];
+    const diagnostic_session = diagnostic && diagnostic(0,0,0) ? diagnostic(0,1,0) : 0;
+    const diagnostic_start = diagnostic_session ? performance.now() : 0;
+    // Automatic publication is synchronous where the host allows it: the core
+    // is at a cold scheduling point with no Rust lock held, so validation,
+    // table installation and completion run before the guest continues. V8
+    // compiles functions lazily on first call, so this costs validation only.
+    // A host that refuses synchronous compilation (for example a browser main
+    // thread limit) permanently falls back to the asynchronous bridge.
+    if(automatic && this.ir_sync_publication && !diagnostic_session)
+    {
+        let instance = null, rejected = false;
+        try
+        {
+            instance = new WebAssembly.Instance(new WebAssembly.Module(code), { "e": this.jit_imports });
+        }
+        catch(error)
+        {
+            if(error instanceof WebAssembly.CompileError || error instanceof WebAssembly.LinkError) rejected = true;
+            else this.ir_sync_publication = false;
+        }
+        if(instance || rejected)
+        {
+            const success = instance ? install(instance) : failed();
+            if(current()) exports["ir_auto_complete"](id, success ? 1 : 0);
+            return Promise.resolve(success);
+        }
+    }
+    let task;
+    try { task = WebAssembly.instantiate(code, { "e": this.jit_imports }); }
+    catch(error) { task = Promise.reject(error); }
+    return task.then(result => install(result.instance)).catch(failed).then(success => {
         if(diagnostic_session && current()) exports["ir_diagnostic_publication"](diagnostic_session, performance.now() - diagnostic_start, success ? 1 : 0);
         if(automatic && current()) exports["ir_auto_complete"](id, success ? 1 : 0);
         return success;

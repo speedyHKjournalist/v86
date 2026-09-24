@@ -436,7 +436,10 @@ impl Emitter<'_> {
             self.cache_clear(MemoryCache::Loop(slot));
         }
         let block = self.mir.control.blocks[id.index()].clone();
-        self.poll(block.recovery, block.budget_cost, remaining);
+        // Sparse (page) functions charge the budget only at loop headers.
+        if block.budget_cost != 0 || !self.mir.control.sparse_polls {
+            self.poll(block.recovery, block.budget_cost, remaining);
+        }
         let batch = self.mir.budget_batch(id).filter(|_| {
             allow_batch
                 && self.cpu
@@ -1907,6 +1910,16 @@ impl Emitter<'_> {
         remaining: Option<&WasmLocal>,
         check_epoch: bool,
     ) {
+        self.check_poll_cost(state, remaining, 1, check_epoch)
+    }
+    /// A poll charging `cost` credits exits first when fewer remain.
+    fn check_poll_cost(
+        &mut self,
+        state: Option<StateId>,
+        remaining: Option<&WasmLocal>,
+        cost: u32,
+        check_epoch: bool,
+    ) {
         // Diagnostic callbacks and deferred interrupt-shadow checks are kept
         // conservative. Their observation/deferral is not part of the local
         // straight-line proof above.
@@ -1916,7 +1929,13 @@ impl Emitter<'_> {
         if let Some(state) = state.filter(|_| remaining.is_some() || epoch.is_some()) {
             if let Some(remaining) = remaining {
                 self.w.get_local(remaining);
-                self.w.eqz_i32();
+                if cost > 1 {
+                    self.w.const_i32(cost as i32);
+                    self.w.ltu_i32();
+                }
+                else {
+                    self.w.eqz_i32();
+                }
             }
             if let Some((address, epoch)) = epoch {
                 self.w.get_local(address);
@@ -1972,7 +1991,7 @@ impl Emitter<'_> {
         remaining: &WasmLocal,
         check_epoch: bool,
     ) {
-        self.check_poll(state, Some(remaining), check_epoch);
+        self.check_poll_cost(state, Some(remaining), cost, check_epoch);
         self.w.get_local(remaining);
         self.w.const_i32(cost as i32);
         self.w.sub_i32();
@@ -2027,11 +2046,11 @@ impl Emitter<'_> {
 }
 
 pub fn emit(mir: &MirRegion, layout: StateLayout, budget: u32) -> Result<Artifact, CompileError> {
-    emit_inner(mir, layout, budget, false, None, &[], false, &[])
+    emit_inner(mir, layout, budget, false, None, &[], false, &[], false)
 }
 /// Cold CPU entry, outside the legacy JIT frame. Uses actual CPU globals and MMU.
 pub fn emit_cpu(mir: &MirRegion, budget: u32) -> Result<Artifact, CompileError> {
-    emit_cpu_inner(mir, budget, None, &[], false, &[])
+    emit_cpu_inner(mir, budget, None, &[], false, &[], false)
 }
 /// CPU ABI fixture with an explicit immutable physical code dependency set.
 pub(crate) fn emit_cpu_with_code_pages(
@@ -2039,7 +2058,7 @@ pub(crate) fn emit_cpu_with_code_pages(
     budget: u32,
     code_pages: &[u32],
 ) -> Result<Artifact, CompileError> {
-    emit_cpu_inner(mir, budget, None, code_pages, false, &[])
+    emit_cpu_inner(mir, budget, None, code_pages, false, &[], false)
 }
 /// CompileRequest owns the association between this key and the lifted guest bytes.
 pub(crate) fn emit_cpu_entry(
@@ -2053,7 +2072,7 @@ pub(crate) fn emit_cpu_entry(
             "CPU entry key requires a single external entry",
         ));
     }
-    emit_cpu_inner(mir, budget, Some(entry), code_pages, false, &[])
+    emit_cpu_inner(mir, budget, Some(entry), code_pages, false, &[], false)
 }
 pub(crate) fn emit_cpu_fused_entry(
     mir: &MirRegion,
@@ -2066,7 +2085,7 @@ pub(crate) fn emit_cpu_fused_entry(
             "fused entry requires one cold root",
         ));
     }
-    emit_cpu_inner(mir, budget, Some(entry), code_pages, true, &[])
+    emit_cpu_inner(mir, budget, Some(entry), code_pages, true, &[], false)
 }
 /// A single function/table owner for several instruction-aligned cold entries.
 /// The runtime still validates the whole immutable code snapshot on admission.
@@ -2092,7 +2111,34 @@ pub(crate) fn emit_cpu_shared_entry(
             ));
         }
     }
-    emit_cpu_inner(mir, budget, Some(entry), code_pages, fused, aliases)
+    emit_cpu_inner(mir, budget, Some(entry), code_pages, fused, aliases, false)
+}
+/// A page function: one exact-PC membership test over every served entry and
+/// a single context guard, instead of one guarded import call per alias.
+pub(crate) fn emit_cpu_page_entry(
+    mir: &MirRegion,
+    budget: u32,
+    entry: CpuEntryKey,
+    aliases: &[CpuEntryKey],
+    code_pages: &[u32],
+) -> Result<Artifact, CompileError> {
+    if aliases.len() >= crate::ir::frontend::region::CfgLimits::PAGE.entries
+        || mir.control.entries.len() != 1
+    {
+        return Err(CompileError::Budget("page CPU entry count"));
+    }
+    for (i, alias) in aliases.iter().enumerate() {
+        if *alias == entry
+            || aliases[..i].contains(alias)
+            || alias.cs_base() != entry.cs_base()
+            || alias.default_32 != entry.default_32
+        {
+            return Err(CompileError::InvalidIr(
+                "incompatible page CPU entry".into(),
+            ));
+        }
+    }
+    emit_cpu_inner(mir, budget, Some(entry), code_pages, false, aliases, true)
 }
 fn emit_cpu_inner(
     mir: &MirRegion,
@@ -2101,6 +2147,7 @@ fn emit_cpu_inner(
     code_pages: &[u32],
     fused: bool,
     aliases: &[CpuEntryKey],
+    page: bool,
 ) -> Result<Artifact, CompileError> {
     emit_inner(
         mir,
@@ -2117,6 +2164,7 @@ fn emit_cpu_inner(
         code_pages,
         fused,
         aliases,
+        page,
     )
 }
 fn emit_inner(
@@ -2128,9 +2176,10 @@ fn emit_inner(
     code_pages: &[u32],
     fused: bool,
     aliases: &[CpuEntryKey],
+    page: bool,
 ) -> Result<Artifact, CompileError> {
     emit_inner_with_batches(
-        mir, layout, budget, cpu, entry, code_pages, fused, aliases, true, true,
+        mir, layout, budget, cpu, entry, code_pages, fused, aliases, page, true, true,
     )
 }
 fn emit_inner_with_batches(
@@ -2142,11 +2191,14 @@ fn emit_inner_with_batches(
     code_pages: &[u32],
     fused: bool,
     aliases: &[CpuEntryKey],
+    page: bool,
     batch_polls: bool,
     elide_epoch_polls: bool,
 ) -> Result<Artifact, CompileError> {
     #[cfg(test)]
-    mir.verify()?;
+    if crate::ir::debug::audit() {
+        mir.verify()?;
+    }
     // MirRegion can only be constructed by the checked lowering transaction.
     // Its machine plans and allocation are immutable across this boundary.
     require_features(
@@ -2322,6 +2374,39 @@ fn emit_inner_with_batches(
         e.diagnostic_exit(DiagnosticExit::EntryGuard);
         e.return_to_cpu();
         e.w.block_end();
+        if page {
+            // Exact-PC membership over every served entry, then one import for
+            // the remaining context and entry initialization. Both rejections
+            // happen before any state load and leave CPU/REP state untouched.
+            e.w.load_fixed_i32(gp::instruction_pointer as u32);
+            let eip = e.w.set_new_local();
+            for (i, key) in std::iter::once(&entry).chain(aliases).enumerate() {
+                e.w.get_local(&eip);
+                e.w.const_i32(key.linear.0 as i32);
+                e.w.eq_i32();
+                if i != 0 {
+                    e.w.or_i32();
+                }
+            }
+            e.w.free_local(eip);
+            e.w.eqz_i32();
+            e.w.if_void();
+            e.diagnostic_exit(DiagnosticExit::EntryGuard);
+            e.return_to_cpu();
+            e.w.block_end();
+            e.w.const_i32(entry.cs_base() as i32);
+            e.w.const_i32(i32::from(entry.default_32));
+            e.w.call_signature(
+                "ir_enter_page",
+                crate::ir::helper::imports::signature("ir_enter_page"),
+            );
+            e.w.eqz_i32();
+            e.w.if_void();
+            e.diagnostic_exit(DiagnosticExit::EntryGuard);
+            e.return_to_cpu();
+            e.w.block_end();
+        }
+        else {
         e.w.const_i32(entry.linear.0 as i32);
         e.w.const_i32(entry.cs_base() as i32);
         e.w.const_i32(i32::from(entry.default_32));
@@ -2345,9 +2430,10 @@ fn emit_inner_with_batches(
         e.diagnostic_exit(DiagnosticExit::EntryGuard);
         e.return_to_cpu();
         e.w.block_end();
+        }
     }
     if cpu {
-        if entry.is_none() || !aliases.is_empty() {
+        if entry.is_none() || !aliases.is_empty() && !page {
             e.w.call_signature(
                 "ir_enter",
                 crate::ir::helper::imports::signature("ir_enter"),
@@ -2398,10 +2484,9 @@ fn emit_inner_with_batches(
             .flatten()
             .any(|plan| matches!(plan, EffectPlan::RmwCommit { .. }));
         if needs_tlb {
-            e.w.call_signature(
-                "ir_tlb_base",
-                crate::ir::helper::imports::signature("ir_tlb_base"),
-            );
+            // One load from a fixed CPU slot instead of an import call: code
+            // generated by another build of the core stays position-independent.
+            e.w.load_fixed_i32(gp::ir_tlb_base as u32);
             e.tlb = Some(e.w.set_new_local());
         }
         if needs_memory_base && !code_pages.is_empty() {
@@ -2474,12 +2559,20 @@ fn emit_inner_with_batches(
         e.diagnostic_exit(DiagnosticExit::EntryGuard);
         e.return_to_cpu();
         e.w.block_end();
+        // O(1) dispatch: a br_table jump table over nested blocks, each block
+        // body placed after its block's end. Every body ends in a branch back
+        // to the dispatcher or a return, so bodies never fall through.
         let dispatch = e.w.loop_void();
-        for b in 0..mir.control.blocks.len() {
-            e.w.get_local(&pc_local);
-            e.w.const_i32(b as i32);
-            e.w.eq_i32();
-            e.w.if_void();
+        let n = mir.control.blocks.len();
+        let mut labels: Vec<_> = (0..n).map(|_| e.w.block_void()).collect();
+        labels.reverse();
+        let invalid = e.w.block_void();
+        e.w.get_local(&pc_local);
+        e.w.brtable(invalid, &mut labels.iter());
+        e.w.block_end();
+        e.w.unreachable();
+        for b in 0..n {
+            e.w.block_end();
             e.emit_block_body(BlockId(b as u32), &remaining, true);
             let terminator = e.terminator(BlockId(b as u32)).clone();
             match &terminator {
@@ -2504,10 +2597,9 @@ fn emit_inner_with_batches(
                     e.w.br(dispatch);
                 },
             }
-            e.w.block_end();
         }
-        e.w.unreachable();
         e.w.block_end();
+        e.w.unreachable();
         pc = Some(pc_local);
     }
     let locals = e.w.declared_local_count();
@@ -2556,12 +2648,13 @@ fn emit_inner_with_batches(
     }
     e.w.finish();
     let bytes = e.w.output().to_vec();
-    if bytes.len() > 256 * 1024 {
+    // Page functions cover a whole code page; hot-window regions stay small.
+    if bytes.len() > if page { 1024 * 1024 } else { 256 * 1024 } {
         // Duplication must not turn an otherwise compilable region into a stop.
         // Roll back at most once; no half-built artifact can be published.
         if e.budget_batch_blocks != 0 {
             return emit_inner_with_batches(
-                mir, layout, budget, cpu, entry, code_pages, fused, aliases, false,
+                mir, layout, budget, cpu, entry, code_pages, fused, aliases, page, false,
                 elide_epoch_polls,
             );
         }

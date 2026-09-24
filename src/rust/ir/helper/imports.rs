@@ -46,6 +46,7 @@ imports! {
     "ir_diagnostic_end": [] -> [], Entry, "close sampled timing scope; no guest state or admission epoch changes";
     "ir_enter": [] -> [], Entry, "writes previous_ip and REP result; requires !in_jit";
     "ir_enter_checked": [I32,I32,I32] -> [I32], Entry, "exact context guard then entry initialization; false preserves all CPU/REP state; no source/mapping authority";
+    "ir_enter_page": [I32,I32] -> [I32], Entry, "context guard except the PC (checked inline against every page entry) then entry initialization; false preserves all CPU/REP state";
     "ir_request_link": [] -> [], Entry, "sets cold continuation request; no guest state change or dispatch";
     "ir_request_poll_exit": [] -> [], Entry, "marks a recovered non-observing poll exit; never requests chaining or refreshes an epoch";
     "ir_request_observer_link": [] -> [], Entry, "requests cold admission after committed observation; never an SSA fusion edge";

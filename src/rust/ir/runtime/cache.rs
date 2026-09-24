@@ -35,11 +35,204 @@ static mut MISSING_HINT_HITS: u32 = 0;
 // Single-CPU, quiescent-only A/B policy. Poll exits do not grant chaining.
 static mut POLL_REUSE_ENABLED: bool = true;
 static mut MERGED_VALIDATION_ENABLED: bool = true;
+// Code-validity contract. Notified (the default) is the legacy JIT contract:
+// every guest store into a registered code page takes the slow path and calls
+// jit_dirty_page, and every host RAM writer (write_blob, DMA, zero_memory, the
+// graphics reply ring) calls jit_dirty_cache. dirty_page retires each dependent
+// owner synchronously, so admission needs only generation and mapping identity.
+// Strict additionally compares every source byte at admission and after each
+// continuing observer, detecting raw host writes that bypass both notifications.
+static mut STRICT_VALIDATION: bool = false;
+#[inline(always)]
+pub(super) fn strict_validation() -> bool { unsafe { STRICT_VALIDATION } }
 #[inline(always)]
 fn clear_missing_hint() {
     unsafe {
         MISSING_ENTRIES = [None; ENTRY_HINT_CAPACITY];
     }
+    fast_invalidate();
+}
+
+// Direct-mapped admission table for the notified contract. An entry is only a
+// witness that, at `stamp`, the exact CpuEntryKey belonged to a Published owner
+// in `index`/`slot` with these source mappings. Every retirement, publication,
+// compaction, eviction and reset changes FAST_STAMP before the next admission,
+// so a hit re-checks only the live CPU context and TLB mapping identity. No
+// page walk, A-bit write, callback or byte comparison can happen on this path.
+const FAST_CAPACITY: usize = 8192;
+const FAST_MAPPINGS: usize = 4;
+#[derive(Clone, Copy)]
+struct FastEntry {
+    stamp: u32,
+    linear: u32,
+    cs_base: u32,
+    default_32: bool,
+    tier_one: bool,
+    primary: bool,
+    /// Witness that no published owner has this exact key at `stamp`.
+    negative: bool,
+    map_count: u8,
+    slot: u32,
+    index: u32,
+    id: u64,
+    maps: [(u32, u32); FAST_MAPPINGS],
+}
+const EMPTY_FAST: FastEntry = FastEntry {
+    stamp: 0,
+    linear: 0,
+    cs_base: 0,
+    default_32: false,
+    tier_one: false,
+    primary: false,
+    negative: false,
+    map_count: 0,
+    slot: 0,
+    index: 0,
+    id: 0,
+    maps: [(0, 0); FAST_MAPPINGS],
+};
+static mut FAST: [FastEntry; FAST_CAPACITY] = [EMPTY_FAST; FAST_CAPACITY];
+static mut FAST_STAMP: u32 = 1;
+// Negative witnesses only become wrong when their own key is published, so
+// publication clears exactly those slots; this stamp changes only on a full
+// reset (generation change, contract switch).
+static mut NEG_STAMP: u32 = 1;
+static mut FAST_HITS: u32 = 0;
+// The running activation. Owned by this single CPU thread; set immediately
+// before a generated call and cleared after it, never across a host yield.
+static mut ACTIVE: Option<Owner> = None;
+static mut FAST_CHAINS: u32 = 0;
+#[inline(always)]
+fn fast_invalidate() {
+    unsafe {
+        FAST_STAMP = FAST_STAMP.wrapping_add(1);
+        if FAST_STAMP == 0 {
+            // Never let a wrapped stamp revalidate an ancient witness.
+            fast_reset();
+        }
+    }
+}
+/// Full reset of both witness kinds (reset/restore, contract switch).
+fn fast_reset() {
+    unsafe {
+        FAST = [EMPTY_FAST; FAST_CAPACITY];
+        FAST_STAMP = 1;
+        NEG_STAMP = 1;
+    }
+}
+/// A key becomes present: drop its negative witness (a positive one for the
+/// key is already stale through FAST_STAMP).
+fn fast_clear_key(entry: super::entry::CpuEntryKey) {
+    let cs_base = entry.cs_base();
+    unsafe {
+        let slot = fast_slot(entry.linear.0, cs_base, entry.default_32);
+        let e = FAST[slot];
+        if e.linear == entry.linear.0 && e.cs_base == cs_base && e.default_32 == entry.default_32 {
+            FAST[slot] = EMPTY_FAST;
+        }
+    }
+}
+#[inline(always)]
+fn fast_slot(linear: u32, cs_base: u32, default_32: bool) -> usize {
+    let bits = linear ^ cs_base.rotate_left(7) ^ u32::from(default_32) << 31;
+    (bits.wrapping_mul(0x9E3779B1) >> (32 - FAST_CAPACITY.trailing_zeros())) as usize
+}
+/// Fill a witness after a complete admission under the cache guard.
+fn fast_fill(cache: &Cache, index: usize, entry: super::entry::CpuEntryKey) {
+    if strict_validation() || cache.resident_promotion {
+        return;
+    }
+    let record = &cache.records[index];
+    let mut maps = [(0, 0); FAST_MAPPINGS];
+    let mut count = 0;
+    let sources = std::iter::once(&record.job.source)
+        .chain(record.job.artifact.fused_sources.iter().map(|s| &s.source));
+    for source in sources {
+        for mapping in &source.mappings {
+            let pair = (mapping.linear.0, mapping.physical.0);
+            if maps[..count].contains(&pair) {
+                continue;
+            }
+            if count == FAST_MAPPINGS {
+                return;
+            }
+            maps[count] = pair;
+            count += 1;
+        }
+    }
+    let cs_base = entry.cs_base();
+    unsafe {
+        FAST[fast_slot(entry.linear.0, cs_base, entry.default_32)] = FastEntry {
+            stamp: FAST_STAMP,
+            linear: entry.linear.0,
+            cs_base,
+            default_32: entry.default_32,
+            // Page functions are promoted from their own activation count.
+            tier_one: record.job.artifact.tier == super::compile::Tier::One
+                && record.job.artifact.source_origin.is_none(),
+            primary: record.job.artifact.entry == EntryContract::Cpu(entry),
+            negative: false,
+            map_count: count as u8,
+            slot: record.slot,
+            index: index as u32,
+            id: record.job.artifact.key.job,
+            maps,
+        };
+    }
+}
+/// An exact key had no published owner. Only its own publication (which
+/// clears this slot) or a full reset can make that stale.
+fn fast_fill_negative(entry: super::entry::CpuEntryKey) {
+    if strict_validation() {
+        return;
+    }
+    let cs_base = entry.cs_base();
+    unsafe {
+        FAST[fast_slot(entry.linear.0, cs_base, entry.default_32)] = FastEntry {
+            stamp: NEG_STAMP,
+            linear: entry.linear.0,
+            cs_base,
+            default_32: entry.default_32,
+            negative: true,
+            ..EMPTY_FAST
+        };
+    }
+}
+enum Probe {
+    Hit(FastEntry),
+    Absent,
+    Unknown,
+}
+/// Side-effect-free classification of the current CPU entry.
+#[inline(always)]
+unsafe fn fast_probe() -> Probe {
+    let linear = *gp::instruction_pointer as u32;
+    let cs_base = cpu::get_seg_cs() as u32;
+    let default_32 = *gp::is_32;
+    let e = FAST[fast_slot(linear, cs_base, default_32)];
+    if e.stamp != if e.negative { NEG_STAMP } else { FAST_STAMP }
+        || e.linear != linear
+        || e.cs_base != cs_base
+        || e.default_32 != default_32
+        || *gp::prefixes != 0
+        || *gp::in_hlt
+    {
+        return Probe::Unknown;
+    }
+    if e.negative {
+        return Probe::Absent;
+    }
+    let mask = cpu::TLB_VALID | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let base = crate::cpu::memory::mem8 as u32;
+    for &(linear, physical) in &e.maps[..e.map_count as usize] {
+        let cached = cpu::tlb_data[(linear >> 12) as usize];
+        if cached & mask != cpu::TLB_VALID
+            || ((cached as u32 & !4095) ^ linear).wrapping_sub(base) != physical
+        {
+            return Probe::Unknown;
+        }
+    }
+    Probe::Hit(e)
 }
 #[inline(always)]
 fn missing_hint_slot(entry: super::entry::CpuEntryKey) -> usize { entry_hint_slot(index_key(entry)) }
@@ -119,6 +312,12 @@ struct Record {
     /// cold selection. Refreshed when heat or the published owner set changes.
     fusion_candidate: bool,
     successors: Successors,
+    /// A Tier-1 page function already produced its Tier-2 compilation request.
+    page_promoted: bool,
+    /// Activations since this record's publication or the last automatic
+    /// policy configuration. Tier-1 upgrades are earned from recent activity
+    /// (like the scheduler heat they replace), never from history before it.
+    promotion_hits: u32,
 }
 struct Cache {
     records: Vec<Record>,
@@ -149,8 +348,6 @@ struct Cache {
     fused_hits: u32,
     fused_steps: u32,
     needs_collection: bool,
-    active: bool,
-    active_owner: Option<Owner>,
     observer_checks: u32,
     observer_rejections: u32,
     hits: u32,
@@ -178,7 +375,10 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     promotion_threshold: 256,
     promotion_cursor: promotion::Cursor::new(),
     promotion_stats: [0; 4],
-    capacity: 256,
+    // At the default heat threshold an XP boot keeps ~1000 regions hot; 256
+    // resident owners evict and recompile them. 768 leaves 131 of the 899
+    // shared table slots unused by the (disabled) legacy generator.
+    capacity: 768,
     evictions: 0,
     published: BTreeMap::new(),
     targets: [None; ENTRY_HINT_CAPACITY],
@@ -194,14 +394,16 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     poll_barriers_avoided: 0,
     target_hits: 0,
     successor_hits: 0,
-    fusion_enabled: true,
+    // Off by default: on an XP boot, hot-region fusion replaced ~25% of the
+    // activations but its per-activation exit profiling and fused compiles
+    // cost more (15.47 s vs 15.69 s, paired sync-disk runs). The mechanism
+    // remains available through ir_cache_set_fusion and its tests.
+    fusion_enabled: false,
     fused_publications: 0,
     shared_publications: 0,
     fused_hits: 0,
     fused_steps: 0,
     needs_collection: false,
-    active: false,
-    active_owner: None,
     observer_checks: 0,
     observer_rejections: 0,
     hits: 0,
@@ -250,6 +452,7 @@ pub(super) fn configure_promotion(enabled: bool, threshold: u32) {
     cache.promotion_threshold = threshold;
     cache.promotion_cursor = promotion::Cursor::new();
     for record in &mut cache.records {
+        record.promotion_hits = 0;
         for alias in &mut record.promotion {
             alias.reset();
         }
@@ -424,9 +627,12 @@ pub unsafe fn ir_cache_set_capacity(capacity: u32) -> bool {
 extern "C" {
     fn call_indirect1(f: i32, x: u16);
 }
-pub fn busy() -> bool { CACHE.try_lock().unwrap().active }
+#[inline(always)]
+fn active() -> Option<Owner> { unsafe { ACTIVE } }
+pub fn busy() -> bool { active().is_some() }
 pub fn invalidate() {
     ir_admission_barrier();
+    fast_reset();
     let mut cache = CACHE.try_lock().unwrap();
     cache.promotion_cursor = promotion::Cursor::new();
     for record in &mut cache.records {
@@ -498,6 +704,20 @@ pub unsafe fn ir_cache_set_merged_validation(enabled: u32) -> bool {
     }
     ir_admission_barrier();
     MERGED_VALIDATION_ENABLED = enabled != 0;
+    true
+}
+/// Cold-point contract switch (see STRICT_VALIDATION). Switching retires no
+/// owner: strict mode only adds byte checks, and notified mode relies on the
+/// dirty notifications that both modes already apply.
+#[no_mangle]
+pub unsafe fn ir_cache_set_strict_validation(enabled: u32) -> bool {
+    if enabled > 1 || !cold() {
+        return false;
+    }
+    ir_admission_barrier();
+    STRICT_VALIDATION = enabled != 0;
+    clear_missing_hint();
+    fast_reset();
     true
 }
 /// Startup/cold-point A/B control; absence hints never authorize guest code.
@@ -577,6 +797,11 @@ unsafe fn cached_current(record: &Record) -> CachedMatch {
     else {
         return CachedMatch::Stale;
     };
+    if !strict_validation() {
+        // Notified contract: every code write already retired this owner.
+        // Missing translations still take the read-only capture fallback.
+        return if mappings_current(job) { CachedMatch::Match } else { CachedMatch::Unavailable };
+    }
     if MERGED_VALIDATION_ENABLED
         && record
             .validation
@@ -585,7 +810,8 @@ unsafe fn cached_current(record: &Record) -> CachedMatch {
     {
         return CachedMatch::Match;
     }
-    let first = cached_match(entry.linear.0, &job.source);
+    let _ = entry;
+    let first = cached_match(job.artifact.source_linear().unwrap(), &job.source);
     if first != CachedMatch::Match {
         return first;
     }
@@ -603,8 +829,8 @@ unsafe fn cached_current(record: &Record) -> CachedMatch {
 pub(super) unsafe fn observer_continuation() -> bool {
     let mut cache = CACHE.try_lock().unwrap();
     cache.observer_checks = cache.observer_checks.wrapping_add(1);
-    let valid = cache.active
-        && cache.active_owner.is_some_and(|owner| {
+    let active = active();
+    let valid = active.is_some_and(|owner| {
             cache.records.get(owner.index).is_some_and(|record| {
                 record.job.artifact.key.job == owner.id
                     && record.phase == Phase::Published
@@ -615,7 +841,7 @@ pub(super) unsafe fn observer_continuation() -> bool {
         // The observer just performed the same full source/mapping validation
         // used by cold admission. Reuse that certificate until the next host,
         // mapping or code barrier instead of repeating it on a normal exit.
-        let index = cache.active_owner.unwrap().index;
+        let index = active.unwrap().index;
         cache.records[index].validated_epoch = admission_epoch();
     }
     if !valid {
@@ -635,11 +861,8 @@ unsafe fn mappings_current(job: &Job) -> bool {
     }
     true
 }
-unsafe fn source_current(
-    entry: super::entry::CpuEntryKey,
-    source: &super::compile::ImmutableCodeSnapshot,
-) -> bool {
-    capture(entry.linear.0, source.bytes.len())
+unsafe fn source_current(linear: u32, source: &super::compile::ImmutableCodeSnapshot) -> bool {
+    capture(linear, source.bytes.len())
         .is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings)
 }
 unsafe fn unchanged_full(job: &Job) -> bool {
@@ -650,12 +873,15 @@ unsafe fn unchanged_full(job: &Job) -> bool {
     else {
         return false;
     };
-    source_current(entry, &job.source)
+    let _ = entry;
+    job.artifact
+        .source_linear()
+        .is_some_and(|linear| source_current(linear, &job.source))
         && job
             .artifact
             .fused_sources
             .iter()
-            .all(|s| source_current(s.entry, &s.source))
+            .all(|s| source_current(s.entry.linear.0, &s.source))
 }
 /// At most four immutable sources, added one witnessed hot peer at a time.
 /// the generated dynamic edge still tests the actual guest target.
@@ -673,6 +899,7 @@ fn fusion_indices(cache: &Cache, entry: super::entry::CpuEntryKey) -> Option<(us
     // Alias promotion may compile separately; never reinterpret root bytes at
     // an alias PC while constructing a fused source.
     if root.job.artifact.entry != EntryContract::Cpu(entry)
+        || root.job.artifact.source_origin.is_some()
         || root.phase != Phase::Published
         || root.fusion_attempted
     {
@@ -841,6 +1068,9 @@ pub(super) unsafe fn take_fusion(
     let primary = sources.remove(0).source;
     Some((primary, sources, edges))
 }
+/// Mirrors Cache::fusion_enabled so activations can skip exit profiling
+/// before taking the cache lock.
+static mut FUSION_PROFILE: bool = false;
 #[no_mangle]
 pub unsafe fn ir_cache_set_fusion(enabled: u32) -> bool {
     if enabled > 1 || !cold() {
@@ -849,6 +1079,7 @@ pub unsafe fn ir_cache_set_fusion(enabled: u32) -> bool {
     ir_admission_barrier();
     let mut cache = CACHE.try_lock().unwrap();
     cache.fusion_enabled = enabled != 0;
+    FUSION_PROFILE = enabled != 0;
     refresh_fusion_candidates(&mut cache);
     if enabled == 0 {
         for r in &mut cache.records {
@@ -903,6 +1134,9 @@ pub unsafe fn ir_cache_collect() -> u32 {
             })
             .collect();
         cache.needs_collection = false;
+        if !retired.is_empty() {
+            fast_invalidate();
+        }
         refresh_fusion_candidates(&mut cache);
         cache.reclaimed = cache.reclaimed.wrapping_add(retired.len() as u32);
         retired
@@ -1018,13 +1252,80 @@ pub(super) unsafe fn reserve_with_promotion(
         fusion_attempted: false,
         fusion_candidate: false,
         successors: Successors::default(),
+        page_promoted: false,
+        promotion_hits: 0,
     });
     slot
+}
+/// A published Tier-1 region whose own activations earned Tier-2 promotion
+/// (replaces per-activation scheduler heat). One request per publication.
+pub(super) fn next_region_promotion(threshold: u32) -> Option<super::entry::CpuEntryKey> {
+    let mut cache = CACHE.try_lock().unwrap();
+    let record = cache.records.iter_mut().find(|r| {
+        r.phase == Phase::Published
+            && !r.page_promoted
+            && r.job.artifact.source_origin.is_none()
+            && r.job.artifact.fused_sources.is_empty()
+            && r.job.artifact.tier == super::compile::Tier::One
+            && r.promotion_hits >= threshold
+    })?;
+    record.page_promoted = true;
+    match record.job.artifact.entry {
+        EntryContract::Cpu(entry) => Some(entry),
+        EntryContract::Standalone => None,
+    }
+}
+/// Published Tier-1 region entries inside `span` bytes after `entry`, with
+/// their owners' activation counts. Tier-1 promotion is earned from these
+/// counts (not scheduler heat), so shared Tier-2 peers are selected from them.
+pub(super) fn tier_one_peers(
+    entry: super::entry::CpuEntryKey,
+    span: usize,
+) -> Vec<(super::entry::CpuEntryKey, u32)> {
+    let cache = CACHE.try_lock().unwrap();
+    let mut peers = vec![];
+    for r in cache.records.iter().filter(|r| {
+        r.phase == Phase::Published
+            && r.job.artifact.source_origin.is_none()
+            && r.job.artifact.fused_sources.is_empty()
+            && r.job.artifact.tier == super::compile::Tier::One
+    }) {
+        for &peer in &r.entries {
+            let offset = peer.linear.0.wrapping_sub(entry.linear.0);
+            if peer.cs_base() == entry.cs_base()
+                && peer.default_32 == entry.default_32
+                && offset > 0
+                && (offset as usize) < span
+            {
+                peers.push((peer, r.promotion_hits));
+            }
+        }
+    }
+    peers
+}
+/// A published Tier-1 page function whose activations earned a Tier-2 page
+/// compilation. Returns its served entries (primary first); marks the owner so
+/// one request is made per publication. Bounded by the cache capacity.
+pub(super) fn next_page_promotion(threshold: u32) -> Option<Vec<super::entry::CpuEntryKey>> {
+    let mut cache = CACHE.try_lock().unwrap();
+    let record = cache.records.iter_mut().find(|r| {
+        r.phase == Phase::Published
+            && !r.page_promoted
+            && r.job.artifact.source_origin.is_some()
+            && r.job.artifact.tier == super::compile::Tier::One
+            && r.promotion_hits >= threshold
+    })?;
+    record.page_promoted = true;
+    Some(record.entries.clone())
 }
 /// Automatic policy can reclaim only its own published records, at a cold point.
 pub(super) fn can_make_room(entry: super::entry::CpuEntryKey) -> bool {
     let cache = CACHE.try_lock().unwrap();
-    cache.records.len() < cache.capacity
+    let replaces = cache
+        .published
+        .get(&index_key(entry))
+        .is_some_and(|&index| cache.records[index].phase == Phase::Published);
+    cache.records.len() < cache.capacity + usize::from(replaces)
         || cache.records.iter().any(|r| {
             r.phase == Phase::Retired
                 || r.automatic && r.phase == Phase::Published && !r.entries.contains(&entry)
@@ -1037,7 +1338,14 @@ pub(super) unsafe fn make_room(entry: super::entry::CpuEntryKey) -> bool {
     ir_cache_collect();
     let evicted = {
         let mut cache = CACHE.try_lock().unwrap();
-        if cache.records.len() < cache.capacity {
+        // An upgrade supersedes the current owner of its entry, whose record
+        // retires at publication: evicting another live region for it would
+        // shrink the working set. The table keeps slots beyond the capacity.
+        let replaces = cache
+            .published
+            .get(&index_key(entry))
+            .is_some_and(|&index| cache.records[index].phase == Phase::Published);
+        if cache.records.len() < cache.capacity + usize::from(replaces) {
             return true;
         }
         let victim = cache
@@ -1172,9 +1480,12 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
         return false;
     }
     let entries = cache.records[index].entries.clone();
+    let mut superseded = false;
     for (i, record) in cache.records.iter_mut().enumerate() {
         if i != index && record.phase == Phase::Published {
+            let before = record.entries.len();
             record.entries.retain(|entry| !entries.contains(entry));
+            superseded |= record.entries.len() != before;
             record
                 .promotion
                 .retain(|alias| !entries.contains(&alias.entry));
@@ -1184,10 +1495,18 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
         }
     }
     cache.records[index].phase = Phase::Published;
-    clear_missing_hint();
-    cache.needs_collection = true;
+    unsafe {
+        MISSING_ENTRIES = [None; ENTRY_HINT_CAPACITY];
+    }
+    // A new owner is visible through its own keys only (cleared below);
+    // other owners' witnesses stay valid unless this one took their keys.
+    if superseded {
+        fast_invalidate();
+        cache.needs_collection = true;
+    }
     for entry in &entries {
         cache.published.insert(index_key(*entry), index);
+        fast_clear_key(*entry);
     }
     refresh_fusion_candidates(&mut cache);
     // Cached predecessor hints must not retain authority over superseded aliases.
@@ -1290,6 +1609,9 @@ pub fn ir_cache_stat(field: u32) -> u32 {
         40 => unsafe { u32::from(POLL_REUSE_ENABLED) },
         41 => u32::from(cache.resident_promotion),
         42..=45 => cache.promotion_stats[(field - 42) as usize],
+        46 => unsafe { FAST_HITS },
+        47 => unsafe { FAST_CHAINS },
+        48 => u32::from(strict_validation()),
         _ => 0,
     }
 }
@@ -1380,7 +1702,7 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
                     r.job.artifact.key.job,
                     r.job.artifact.key,
                     r.job.artifact.entry,
-                    r.job.source.clone(),
+                    (r.job.artifact.source_linear(), r.job.source.clone()),
                     r.job.artifact.fused_sources.clone(),
                 )
             })
@@ -1391,9 +1713,10 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
         cache.link_misses = cache.link_misses.wrapping_add(1);
         return None;
     };
+    let _ = canonical;
     let valid = live::generation_current(key)
-        && source_current(canonical, &source)
-        && peers.iter().all(|s| source_current(s.entry, &s.source));
+        && source.0.is_some_and(|linear| source_current(linear, &source.1))
+        && peers.iter().all(|s| source_current(s.entry.linear.0, &s.source));
     let mut cache = CACHE.try_lock().unwrap();
     let Some(index) = cache
         .records
@@ -1434,6 +1757,21 @@ pub unsafe fn ir_cache_link_target() -> u64 {
 pub unsafe fn execute() -> bool {
     if diag::enabled() {
         return execute_mode::<true>();
+    }
+    if !strict_validation() && !cpu::in_jit {
+        match fast_probe() {
+            Probe::Absent => {
+                super::entry::take_link_request();
+                MISSING_HINT_HITS = MISSING_HINT_HITS.wrapping_add(1);
+                return false;
+            },
+            Probe::Hit(witness) => {
+                if fast_execute(witness) {
+                    return true;
+                }
+            },
+            Probe::Unknown => {},
+        }
     }
     if MISSING_HINT_ENABLED {
         let entry = live::entry();
@@ -1505,6 +1843,174 @@ unsafe fn execute_mode<const PROFILE: bool>() -> bool {
     take_link_request();
     true
 }
+/// Notified-contract dispatch of witnessed entries, including their bounded
+/// chain. Returns false when no witness applies; the complete admission then
+/// decides (and refills the witness after a successful admission). Timing and
+/// recording imports are observers and keep the complete path.
+#[inline(always)]
+unsafe fn fast_execute(mut witness: FastEntry) -> bool {
+    if strict_validation() || cpu::in_jit || profiler::performance_recording_enabled() {
+        return false;
+    }
+    if !jit::ir_cache_quiescent() {
+        return false;
+    }
+    {
+        let cache = CACHE.try_lock().unwrap();
+        if active().is_some() || cache.needs_collection {
+            return false;
+        }
+    }
+    use super::entry::take_link_request;
+    take_link_request();
+    let control = *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM);
+    let mut linked = false;
+    for index in 0..=64 {
+        // A retirement during the activation (e.g. a zero-step exit, which
+        // still requests a link) leaves witnesses of retired owners until
+        // collection; the chain must not enter one.
+        let current = fast_run(witness, linked);
+        if index == 64
+            || !current
+            || !take_link_request()
+            || !cpu::ir_link_budget_available()
+            || *gp::in_hlt
+            || *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM) != control
+        {
+            break;
+        }
+        match fast_probe() {
+            Probe::Hit(next) => {
+                witness = next;
+                linked = true;
+                FAST_CHAINS = FAST_CHAINS.wrapping_add(1);
+            },
+            Probe::Absent => break,
+            Probe::Unknown => {
+                // No current witness: the complete admission and its own
+                // bounded chain decide, under the same CPU link budget.
+                collect_if_needed();
+                execute_mode::<false>();
+                break;
+            },
+        }
+    }
+    take_link_request();
+    collect_if_needed();
+    true
+}
+/// One witnessed activation. Mirrors run_activation's accounting, retirement
+/// and fusion profiling without the complete admission or warm handoff.
+/// Returns false once any owner awaits collection: no witness may then chain.
+#[inline(always)]
+unsafe fn fast_run(witness: FastEntry, linked: bool) -> bool {
+    // Every source translation is CPU-visible: this fetch reads only the TLB.
+    *gp::previous_ip = *gp::instruction_pointer;
+    cpu::get_phys_eip().expect("witnessed IR fetch must hit the CPU TLB");
+    let entry = super::entry::CpuEntryKey {
+        pc: GuestEip(witness.linear.wrapping_sub(witness.cs_base)),
+        linear: crate::ir::frontend::decode::LinearAddress(witness.linear),
+        default_32: witness.default_32,
+    };
+    let index = witness.index as usize;
+    ACTIVE = Some(Owner {
+        index,
+        id: witness.id,
+    });
+    FAST_HITS = FAST_HITS.wrapping_add(1);
+    let before = *gp::instruction_counter;
+    super::entry::take_link_request();
+    call_indirect1((witness.slot + cpu::WASM_TABLE_OFFSET) as i32, 0);
+    ACTIVE = None;
+    let poll_reuse = POLL_REUSE_ENABLED && super::entry::poll_exit();
+    if !super::entry::link_requested() && !poll_reuse {
+        ir_admission_barrier();
+    }
+    let steps = (*gp::instruction_counter).wrapping_sub(before);
+    let observed_exit = if FUSION_PROFILE && steps != 0 && super::entry::profile_link_requested() {
+        let target = live::entry();
+        Some((
+            PredictedEdge {
+                from: GuestEip((*gp::previous_ip as u32).wrapping_sub(witness.cs_base)),
+                target: target.pc,
+            },
+            target,
+        ))
+    }
+    else {
+        None
+    };
+    let mut cache = CACHE.try_lock().unwrap();
+    cache.clock = cache.clock.wrapping_add(1);
+    let stamp = cache.clock;
+    cache.hits = cache.hits.wrapping_add(1);
+    if linked {
+        cache.links = cache.links.wrapping_add(1);
+    }
+    if poll_reuse {
+        cache.poll_barriers_avoided = cache.poll_barriers_avoided.wrapping_add(1);
+    }
+    cache.guest_steps = cache.guest_steps.wrapping_add(steps);
+    cache.max_guest_steps = cache.max_guest_steps.max(steps);
+    if steps == 0 {
+        cache.zero_step_exits = cache.zero_step_exits.wrapping_add(1);
+    }
+    let fused = cache
+        .records
+        .get(index)
+        .is_some_and(|r| r.job.artifact.key.job == witness.id && !r.job.artifact.fused_sources.is_empty());
+    let mut needs_heat = false;
+    if fused {
+        cache.fused_hits = cache.fused_hits.wrapping_add(1);
+        cache.fused_steps = cache.fused_steps.wrapping_add(steps);
+    }
+    let profile = cache.fusion_enabled;
+    let mut refresh_fusion = false;
+    if let Some(record) = cache
+        .records
+        .get_mut(index)
+        .filter(|record| record.job.artifact.key.job == witness.id)
+    {
+        record.last_used = stamp;
+        record.hits = record.hits.wrapping_add(1);
+        record.promotion_hits = record.promotion_hits.saturating_add(1);
+        record.guest_steps = record.guest_steps.wrapping_add(steps);
+        record.max_guest_steps = record.max_guest_steps.max(steps);
+        // Tier-1 regions are promoted from their own activation count; only a
+        // Tier-2 fusion candidate still earns scheduler heat.
+        needs_heat = !witness.tier_one && witness.primary && record.fusion_candidate;
+        if let Some((edge, target)) = observed_exit.filter(|_| profile) {
+            let was_hot = record.hot_exit.is_some_and(|(_, _, hits)| hits >= 8);
+            match &mut record.hot_exit {
+                Some((old, old_target, hits)) if old.from == edge.from && *old_target == target => {
+                    *hits = hits.saturating_add(1)
+                },
+                Some((_, _, hits)) if *hits > 1 => *hits -= 1,
+                _ => record.hot_exit = Some((edge, target, 1)),
+            }
+            refresh_fusion = was_hot != record.hot_exit.is_some_and(|(_, _, hits)| hits >= 8);
+        }
+        if steps == 0 {
+            // Zero-budget REP and other no-retirement exits must not trap
+            // scheduling in a repeatedly admitted entry.
+            record.zero_step_exits = record.zero_step_exits.wrapping_add(1);
+            record.phase = Phase::Retired;
+        }
+    }
+    if refresh_fusion {
+        refresh_fusion_candidate(&mut cache, index);
+    }
+    if steps == 0 {
+        clear_missing_hint();
+        cache.needs_collection = true;
+    }
+    let current = !cache.needs_collection;
+    drop(cache);
+    if needs_heat || linked {
+        super::schedule::note_cached(entry, linked, needs_heat);
+    }
+    current
+}
 /// Collection is almost always unnecessary on an ordinary control-flow edge.
 /// Inline only that decision; leave compaction, alias reconstruction and table
 /// reclamation in the existing cold collector, with all its quiescence checks.
@@ -1565,13 +2071,18 @@ fn activate<const PROFILE: bool>(
             cache.promotion_stats[2] = cache.promotion_stats[2].wrapping_add(1);
         }
     }
-    let needs_heat = !resident && tier_one
-        || !tier_one
+    // Tier-1 regions and pages are promoted from record.hits; only a Tier-2
+    // fusion candidate's primary entry still earns scheduler heat.
+    let needs_heat = !tier_one
             && record.fusion_candidate
             && record.job.artifact.entry == EntryContract::Cpu(entry);
     let slot = record.slot;
-    cache.active = true;
-    cache.active_owner = Some(owner);
+    if !PROFILE {
+        fast_fill(cache, index, entry);
+    }
+    unsafe {
+        ACTIVE = Some(owner);
+    }
     cache.hits = cache.hits.wrapping_add(1);
     if linked {
         cache.links = cache.links.wrapping_add(1);
@@ -1619,6 +2130,9 @@ unsafe fn admit_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>) 
         if index.is_none() {
             if !PROFILE && MISSING_HINT_ENABLED && !cache.needs_collection {
                 MISSING_ENTRIES[missing_hint_slot(entry)] = Some(entry);
+            }
+            if !PROFILE && !cache.needs_collection {
+                fast_fill_negative(entry);
             }
             if PROFILE {
                 diag::admission(Admission::Missing);
@@ -1833,7 +2347,7 @@ unsafe fn warm_handoff(cache: &mut Cache, previous: Owner) -> Option<Activation>
     if !cache.warm_chaining
         || !cache.fast_validation
         || cache.needs_collection
-        || cache.active
+        || active().is_some()
         || cpu::in_jit
     {
         return None;
@@ -1923,7 +2437,7 @@ unsafe fn run_activation<const PROFILE: bool>(
         ir_admission_barrier();
     }
     let steps = (*gp::instruction_counter).wrapping_sub(before);
-    let observed_exit = if steps != 0 && super::entry::profile_link_requested() {
+    let observed_exit = if FUSION_PROFILE && steps != 0 && super::entry::profile_link_requested() {
         let target = live::entry();
         Some((
             PredictedEdge {
@@ -1942,8 +2456,7 @@ unsafe fn run_activation<const PROFILE: bool>(
     }
     let next = {
         let mut cache = CACHE.try_lock().unwrap();
-        cache.active = false;
-        cache.active_owner = None;
+        ACTIVE = None;
         if poll_reuse {
             cache.poll_barriers_avoided = cache.poll_barriers_avoided.wrapping_add(1);
         }
@@ -1977,6 +2490,7 @@ unsafe fn run_activation<const PROFILE: bool>(
                 );
             }
             record.hits = record.hits.wrapping_add(1);
+            record.promotion_hits = record.promotion_hits.saturating_add(1);
             record.guest_steps = record.guest_steps.wrapping_add(steps);
             record.max_guest_steps = record.max_guest_steps.max(steps);
             if let Some((edge, target)) = observed_exit.filter(|_| profile) {

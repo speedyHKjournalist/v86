@@ -225,8 +225,18 @@ impl<'a> Draft<'a> {
                 "lowering source changed after allocation".into(),
             ));
         }
-        super::verify::verify(self.hir).map_err(|e| CompileError::InvalidIr(e.0))?;
         let data = &self.data;
+        if data.allocation != self.allocation_witness {
+            return Err(CompileError::InvalidIr(
+                "invalid machine types or local allocation".into(),
+            ));
+        }
+        if !crate::ir::debug::audit() {
+            // Release: lowering built every plan from this same verified HIR
+            // in one transaction; recomputing and comparing them is an audit.
+            return Ok(MirRegion { data: self.data });
+        }
+        super::verify::verify(self.hir).map_err(|e| CompileError::InvalidIr(e.0))?;
         let value_blocks = self
             .hir
             .values

@@ -65,7 +65,7 @@ pub fn dirty_page(page: u32) {
 /// the call. Exhaustion permanently forces a cold exit, without wrapping.
 pub(super) fn continuation_epoch() -> u64 { LIVE.try_lock().unwrap().continuation_epoch }
 #[inline(always)]
-pub(super) unsafe fn entry() -> CpuEntryKey {
+pub unsafe fn entry() -> CpuEntryKey {
     let linear = *gp::instruction_pointer as u32;
     CpuEntryKey {
         pc: GuestEip(linear.wrapping_sub(cpu::get_seg_cs() as u32)),

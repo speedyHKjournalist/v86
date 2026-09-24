@@ -24,14 +24,17 @@ fn eligible(op: &Op) -> bool {
     )
 }
 pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), String> {
-    if region.blocks.len() > 64 || region.instructions.len() > 8192 || region.values.len() > 16384 {
+    if region.blocks.len() > super::MAX_BLOCKS
+        || region.instructions.len() > super::MAX_INSTRUCTIONS
+        || region.values.len() > super::MAX_VALUES
+    {
         return Err("GVN region budget exceeded".into());
     }
     let cfg = Cfg::compute(region)?;
     let mut order: Vec<_> = (0..region.blocks.len()).collect();
     // Strict dominators have fewer dominators than the blocks they dominate.
     // Independent entries and siblings never supply one another's expressions.
-    order.sort_by_key(|&b| cfg.dominates[b].iter().filter(|&&v| v).count());
+    order.sort_by_key(|&b| cfg.dominator_count(b));
     let mut known: HashMap<_, Vec<(usize, ValueId)>> = HashMap::new();
     let mut aliases = vec![None; region.values.len()];
     let mut removed = HashSet::new();
@@ -56,7 +59,7 @@ pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), Stri
             if let Some(&(owner, previous)) = choices
                 .iter()
                 .rev()
-                .find(|(owner, _)| cfg.dominates[b][*owner])
+                .find(|(owner, _)| cfg.dominates(b, *owner))
             {
                 aliases[result.index()] = Some(previous);
                 removed.insert(id);

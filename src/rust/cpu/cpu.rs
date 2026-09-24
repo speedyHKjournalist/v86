@@ -3120,13 +3120,16 @@ pub unsafe fn cycle_internal() -> bool {
         if crate::ir::runtime::cache::execute() {
             return false;
         }
-        crate::ir::runtime::schedule::note_interpreted();
         // The interpreter/legacy path can call devices and mutate raw RAM.
         crate::ir::runtime::entry::ir_admission_barrier();
     }
     let mut jit_entry = None;
     let initial_eip = *instruction_pointer;
     let initial_state_flags = *state_flags;
+    #[cfg(feature = "ir-experimental")]
+    let ir_entry = crate::ir::runtime::live::entry();
+    #[cfg(feature = "ir-experimental")]
+    let ir_heat = *prefixes == 0 && !*in_hlt;
 
     match tlb_code[(initial_eip as u32 >> 12) as usize] {
         None => {},
@@ -3286,6 +3289,13 @@ pub unsafe fn cycle_internal() -> bool {
         }
         #[cfg(not(feature = "ir-experimental"))]
         jit_run_interpreted(phys_addr);
+        #[cfg(feature = "ir-experimental")]
+        if ir_heat {
+            crate::ir::runtime::schedule::note_interpreted(
+                ir_entry,
+                (*instruction_counter).wrapping_sub(initial_instruction_counter),
+            );
+        }
         profiler::performance_chunk_finish(
             performance_sample,
             (*instruction_counter).wrapping_sub(initial_instruction_counter),
@@ -3450,10 +3460,10 @@ pub unsafe fn segment_prefix_op(seg: i32) {
 #[no_mangle]
 pub unsafe fn main_loop() -> f64 {
     profiler::stat_increment(stat::MAIN_LOOP);
-    #[cfg(feature = "ir-experimental")]
-    crate::ir::runtime::schedule::begin_frame();
 
     let start = js::microtick();
+    #[cfg(feature = "ir-experimental")]
+    crate::ir::runtime::schedule::begin_frame(start);
 
     if *in_hlt {
         profiler::performance_execution_add(4, 1.0);
@@ -3464,7 +3474,9 @@ pub unsafe fn main_loop() -> f64 {
             profiler::performance_timer_finish(performance_start, 1);
             if *in_hlt {
                 profiler::stat_increment(stat::MAIN_LOOP_IDLE);
-                return profiler::performance_main_loop_exit(t, true);
+                #[cfg(feature = "ir-experimental")]
+                let t = t - crate::ir::runtime::schedule::idle((t - 0.25).min(8.0));
+                return profiler::performance_main_loop_exit(t.max(0.0), true);
             }
         }
         else {
@@ -3484,7 +3496,9 @@ pub unsafe fn main_loop() -> f64 {
         handle_irqs();
         profiler::performance_timer_finish(performance_start, 1);
         if *in_hlt {
-            return profiler::performance_main_loop_exit(t, true);
+            #[cfg(feature = "ir-experimental")]
+            let t = t - crate::ir::runtime::schedule::idle((t - 0.25).min(8.0));
+            return profiler::performance_main_loop_exit(t.max(0.0), true);
         }
 
         // Give the host a chance to install a newly submitted IR module. All

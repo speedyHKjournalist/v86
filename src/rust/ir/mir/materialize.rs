@@ -67,56 +67,110 @@ fn cs_base() -> Step {
 fn constant_true(region: &Region, value: crate::ir::ids::ValueId) -> bool {
     constant_bool(region, value, true)
 }
-// Prove a constant through phi cycles only when every external input agrees.
-// Unknown inputs and exhausted work retain the dynamic recovery path.
 fn constant_bool(region: &Region, value: crate::ir::ids::ValueId, expected: bool) -> bool {
-    let mut pending = vec![value];
-    let mut seen = std::collections::BTreeSet::new();
-    let mut found_constant = false;
-    let mut work = 4096usize;
-    while let Some(value) = pending.pop() {
-        if !seen.insert(value) {
-            continue;
+    BackingFacts::new(region).constant_bool(value, expected)
+}
+/// Shared predecessor index and memo for proving backing-validity constants
+/// across every StateMap of one region. A page graph has thousands of states;
+/// rescanning all block edges per phi and per state is quadratic.
+pub(crate) struct BackingFacts<'a> {
+    region: &'a Region,
+    incoming: Vec<Vec<(u32, u8)>>,
+    memo: std::collections::HashMap<(u32, bool), bool>,
+}
+impl<'a> BackingFacts<'a> {
+    pub(crate) fn new(region: &'a Region) -> Self {
+        let mut incoming = vec![Vec::new(); region.blocks.len()];
+        for (b, block) in region.blocks.iter().enumerate() {
+            match block.terminator.as_ref() {
+                Some(crate::ir::hir::Terminator::Branch(edge)) => {
+                    incoming[edge.target.index()].push((b as u32, 0))
+                },
+                Some(crate::ir::hir::Terminator::CondBranch {
+                    taken, not_taken, ..
+                }) => {
+                    incoming[taken.target.index()].push((b as u32, 0));
+                    incoming[not_taken.target.index()].push((b as u32, 1));
+                },
+                _ => {},
+            }
         }
-        let Some(left) = work.checked_sub(1)
-        else {
-            return false;
-        };
-        work = left;
-        match region.values[value.index()].definition {
-            Definition::Instruction(id, result) => {
-                if result != 0
-                    || !matches!(region.instructions[id.index()].op, Op::Const(n) if n == expected as u64)
-                {
-                    return false;
-                }
-                found_constant = true;
-            },
-            Definition::Parameter(block, index) => {
-                if region.entries.contains(&block) {
-                    return false;
-                }
-                let mut incoming = false;
-                for source in &region.blocks {
-                    let Some(left) = work.checked_sub(1)
-                    else {
-                        return false;
-                    };
-                    work = left;
-                    for edge in source.terminator.as_ref().unwrap().edges() {
-                        if edge.target == block {
-                            pending.push(edge.args[index as usize]);
-                            incoming = true;
-                        }
-                    }
-                }
-                if !incoming {
-                    return false;
-                }
-            },
+        Self {
+            region,
+            incoming,
+            memo: Default::default(),
         }
     }
-    found_constant
+    fn arg(&self, (b, k): (u32, u8), index: usize) -> crate::ir::ids::ValueId {
+        match self.region.blocks[b as usize].terminator.as_ref().unwrap() {
+            crate::ir::hir::Terminator::Branch(edge) => edge.args[index],
+            crate::ir::hir::Terminator::CondBranch {
+                taken, not_taken, ..
+            } => {
+                if k == 0 {
+                    taken.args[index]
+                }
+                else {
+                    not_taken.args[index]
+                }
+            },
+            crate::ir::hir::Terminator::Exit(_) => unreachable!(),
+        }
+    }
+    // Prove a constant through phi cycles only when every external input agrees.
+    // Unknown inputs and exhausted work retain the dynamic recovery path.
+    pub(crate) fn constant_bool(&mut self, value: crate::ir::ids::ValueId, expected: bool) -> bool {
+        if let Some(&known) = self.memo.get(&(value.0, expected)) {
+            return known;
+        }
+        let region = self.region;
+        let mut pending = vec![value];
+        let mut seen = std::collections::HashSet::new();
+        let mut found_constant = false;
+        let mut work = 4096usize;
+        let result = 'walk: {
+            while let Some(value) = pending.pop() {
+                if !seen.insert(value) {
+                    continue;
+                }
+                let Some(left) = work.checked_sub(1)
+                else {
+                    break 'walk false;
+                };
+                work = left;
+                match region.values[value.index()].definition {
+                    Definition::Instruction(id, result) => {
+                        if result != 0
+                            || !matches!(region.instructions[id.index()].op, Op::Const(n) if n == expected as u64)
+                        {
+                            break 'walk false;
+                        }
+                        found_constant = true;
+                    },
+                    Definition::Parameter(block, index) => {
+                        if region.entries.contains(&block) {
+                            break 'walk false;
+                        }
+                        let edges = &self.incoming[block.index()];
+                        if edges.is_empty() {
+                            break 'walk false;
+                        }
+                        let Some(left) = work.checked_sub(edges.len())
+                        else {
+                            break 'walk false;
+                        };
+                        work = left;
+                        for &edge in edges {
+                            pending.push(self.arg(edge, index as usize));
+                        }
+                    },
+                }
+            }
+            found_constant
+        };
+        self.memo.insert((value.0, expected), result);
+        result
+    }
 }
 
 #[cfg(test)]
@@ -195,11 +249,11 @@ mod backing_tests {
         }
     }
 }
-fn exact_lazy_backing(region: &Region, state: &StateMap) -> bool {
+fn exact_lazy_backing(facts: &mut BackingFacts, state: &StateMap) -> bool {
     state
         .flags
         .backing_valid
-        .is_some_and(|value| constant_true(region, value))
+        .is_some_and(|value| facts.constant_bool(value, true))
         && state.flags.raw_flags.is_some()
         && state.flags.lazy_mask.is_some()
         && state.flags.last_result.is_some()
@@ -367,13 +421,21 @@ fn target(state: &StateMap, cpu: bool, lazy_flags: bool, dynamic_backing: bool) 
     }
 }
 pub fn lower(region: &Region, state: &StateMap) -> StatePlan {
-    let lazy_flags = exact_lazy_backing(region, state);
+    lower_with(&mut BackingFacts::new(region), state)
+}
+/// Every StateMap of one region, sharing one backing-validity analysis.
+pub fn lower_all(region: &Region) -> Vec<StatePlan> {
+    let mut facts = BackingFacts::new(region);
+    region.states.iter().map(|state| lower_with(&mut facts, state)).collect()
+}
+fn lower_with(facts: &mut BackingFacts, state: &StateMap) -> StatePlan {
+    let lazy_flags = exact_lazy_backing(facts, state);
     let dynamic_backing = !lazy_flags
         && state.flags.last_op1.is_some()
         && state
             .flags
             .backing_valid
-            .is_some_and(|value| !constant_bool(region, value, false));
+            .is_some_and(|value| !facts.constant_bool(value, false));
     StatePlan {
         after_instruction: state.resume == ResumeKind::AfterInstruction,
         cpu: target(state, true, lazy_flags, dynamic_backing),
@@ -391,12 +453,13 @@ pub fn lower(region: &Region, state: &StateMap) -> StatePlan {
     }
 }
 pub fn verify(region: &Region, plans: &[StatePlan]) -> Result<(), CompileError> {
+    let mut facts = BackingFacts::new(region);
     if plans.len() != region.states.len()
         || region
             .states
             .iter()
             .zip(plans)
-            .any(|(s, p)| lower(region, s) != *p)
+            .any(|(s, p)| lower_with(&mut facts, s) != *p)
     {
         return Err(CompileError::InvalidIr(
             "invalid state materialization plan".into(),

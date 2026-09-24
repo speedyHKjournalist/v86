@@ -2,6 +2,7 @@
 //! contribute heat only; no compiler or publisher runs with guest locals alive.
 use super::diagnostics::{CompileScope, Scope, Stage};
 use super::hot_index::HotIndex;
+use super::pages::{PageKey, Pages};
 use super::{
     cache,
     compile::*,
@@ -46,6 +47,7 @@ struct Pending {
     entries: Vec<(CpuEntryKey, Option<f64>)>,
     tier: u32,
     promotion: Option<Attempt>,
+    page: Option<PageKey>,
 }
 struct Scheduler {
     debug: crate::ir::debug::Config,
@@ -68,6 +70,28 @@ struct Scheduler {
     scan_credit: bool,
     interpreted_ready: Option<CpuEntryKey>,
     stats: [u32; 24],
+    /// Page-granular compilation (default). Region compilation remains the
+    /// fallback for pages whose page function cannot be built.
+    page_mode: bool,
+    pages: Pages,
+    page_tier2: u32,
+    /// Interpreted visits a code page needs before its first compilation.
+    page_threshold: u32,
+    /// Compile while the guest is halted (HLT) instead of inside busy CPU
+    /// frames; synchronous compilation resumes only after `sync_after` ms
+    /// without an idle window (CPU-bound phases never starve).
+    idle_mode: bool,
+    frame_start: f64,
+    last_idle: f64,
+    sync_after: f64,
+    /// Compilation/publication attempts (lets idle work detect progress).
+    work: u32,
+    idle_ms: f64,
+    idle_compiles: u32,
+    /// Entries that crossed a compilation threshold, kept until an idle window
+    /// (or a synchronous fallback) compiles them. The bounded hot ring turns
+    /// over within milliseconds; its heat alone does not survive until then.
+    candidates: VecDeque<(CpuEntryKey, u32)>,
 }
 static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
     debug: crate::ir::debug::Config {
@@ -100,7 +124,23 @@ static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
     scan_credit: false,
     interpreted_ready: None,
     stats: [0; 24],
+    page_mode: false,
+    pages: Pages::new(),
+    page_tier2: 0,
+    page_threshold: 512,
+    idle_mode: false,
+    frame_start: 0.0,
+    last_idle: f64::NEG_INFINITY,
+    sync_after: 16.0,
+    work: 0,
+    idle_ms: 0.0,
+    idle_compiles: 0,
+    candidates: VecDeque::new(),
 });
+static mut FORCED: bool = false;
+static mut DIRECT_T2: bool = false;
+#[no_mangle]
+pub unsafe fn ir_auto_set_direct_tier2(enabled: u32) { DIRECT_T2 = enabled != 0; }
 #[link(wasm_import_module = "env")]
 extern "C" {
     fn ir_codegen_finalize(id: u64, slot: u32, ptr: u32, len: u32);
@@ -118,9 +158,11 @@ pub fn invalidate() {
     s.credit = false;
     s.scan_credit = false;
     s.interpreted_ready = None;
+    s.pages.clear();
 }
 pub fn dirty_page(page: u32) {
     let mut s = SCHEDULER.try_lock().unwrap();
+    s.pages.dirty(page);
     let previous_len = s.hot.len();
     s.ready.retain(|job| {
         !job.job
@@ -228,6 +270,7 @@ pub unsafe fn ir_auto_debug(verify: u32, dump: u32) -> bool {
         return false;
     }
     s.debug = config;
+    crate::ir::debug::set_audit(config.verify == crate::ir::debug::VerifyMode::EveryPass);
     crate::ir::debug::ir_dump_clear();
     true
 }
@@ -242,24 +285,94 @@ pub fn ir_auto_optimization_stat(field: u32) -> u32 {
         _ => 0,
     }
 }
-pub fn begin_frame() {
+pub fn begin_frame(now: f64) {
     let mut s = SCHEDULER.try_lock().unwrap();
     s.credit = true;
     s.scan_credit = true;
     s.interpreted_ready = None;
+    s.frame_start = now;
+}
+/// Guest halted until the next timer in `budget` ms: compile and publish
+/// queued candidates now. Returns the milliseconds spent (the caller shortens
+/// its idle wait, so timer delivery is not delayed by this work).
+pub unsafe fn idle(budget: f64) -> f64 {
+    if budget < 0.5 || !cold() {
+        return 0.0;
+    }
+    let start = crate::cpu::cpu::js::microtick();
+    {
+        let mut s = SCHEDULER.try_lock().unwrap();
+        if !s.config.enabled || !s.idle_mode || s.pending.is_some() {
+            return 0.0;
+        }
+        s.last_idle = start;
+    }
+    FORCED = true;
+    for _ in 0..256 {
+        let before = {
+            let mut s = SCHEDULER.try_lock().unwrap();
+            s.credit = true;
+            s.scan_credit = true;
+            s.work
+        };
+        visit();
+        let s = SCHEDULER.try_lock().unwrap();
+        if s.work == before
+            || s.pending.is_some()
+            || crate::cpu::cpu::js::microtick() - start >= budget
+        {
+            break;
+        }
+    }
+    FORCED = false;
+    let end = crate::cpu::cpu::js::microtick();
+    let mut s = SCHEDULER.try_lock().unwrap();
+    s.last_idle = end;
+    s.idle_ms += end - start;
+    end - start
+}
+/// Startup/cold-point policy: compile during guest idle windows (default).
+#[no_mangle]
+pub unsafe fn ir_auto_set_idle_mode(enabled: u32, sync_after_ms: u32) -> bool {
+    if enabled > 1 || !(1..=10_000).contains(&sync_after_ms) || !cold() {
+        return false;
+    }
+    let mut s = SCHEDULER.try_lock().unwrap();
+    s.idle_mode = enabled != 0;
+    s.sync_after = sync_after_ms as f64;
+    true
 }
 /// An evicted region must earn fresh heat. Historical visits must not make a
 /// working set larger than the cache continually recompile inactive entries.
 pub(super) fn evicted(entry: CpuEntryKey) {
-    if let Some(h) = SCHEDULER
-        .try_lock()
-        .unwrap()
-        .hot
-        .iter_mut()
-        .find(|h| h.entry == entry)
-    {
+    let mut s = SCHEDULER.try_lock().unwrap();
+    s.pages.unserve(&[entry]);
+    if let Some(h) = s.hot.iter_mut().find(|h| h.entry == entry) {
         h.hits = 0;
     }
+}
+/// Startup/cold-point page heat threshold (interpreted visits per page).
+#[no_mangle]
+pub unsafe fn ir_auto_set_page_threshold(visits: u32) -> bool {
+    if !(1..=1_000_000).contains(&visits) || !cold() {
+        return false;
+    }
+    SCHEDULER.try_lock().unwrap().page_threshold = visits;
+    true
+}
+/// Startup/cold-point A/B policy: page-granular versus region compilation.
+#[no_mangle]
+pub unsafe fn ir_auto_set_page_mode(enabled: u32) -> bool {
+    if enabled > 1 || !cold() {
+        return false;
+    }
+    let mut s = SCHEDULER.try_lock().unwrap();
+    if s.pending.is_some() || !s.ready.is_empty() {
+        return false;
+    }
+    s.page_mode = enabled != 0;
+    s.pages.clear();
+    true
 }
 unsafe fn cold() -> bool { !cpu::in_jit && !cache::busy() && jit::ir_cache_quiescent() }
 #[no_mangle]
@@ -304,16 +417,30 @@ pub unsafe fn ir_auto_config(
         s.pending.take()
     };
     cache::configure_promotion(enabled != 0, promote);
+    configure_heat(threshold);
     if let Some(p) = pending {
         cache::ir_cache_cancel(p.id, p.slot);
         cache::ir_cache_collect();
     }
     true
 }
-unsafe fn record(entry: CpuEntryKey, interpreted: bool) {
+unsafe fn record(entry: CpuEntryKey, interpreted: bool) { record_weighted(entry, interpreted, 1) }
+unsafe fn record_weighted(entry: CpuEntryKey, interpreted: bool, weight: u32) {
     let mut s = SCHEDULER.try_lock().unwrap();
-    if !s.config.enabled || *gp::prefixes != 0 || *gp::in_hlt {
+    // Interpreted visits are recorded after their block retired: the caller
+    // checked prefix/HLT state at the block's entry instead.
+    if !s.config.enabled || !interpreted && (*gp::prefixes != 0 || *gp::in_hlt) {
         return;
+    }
+    // Page functions are limited to 32-bit code: a real-mode boot-loader
+    // regression remains unexplained in 16-bit page functions.
+    if s.page_mode && interpreted && entry.default_32 {
+        let threshold = s.page_threshold;
+        // Only entries of pages that cannot be compiled whole keep the
+        // bounded region heat ring.
+        if !s.pages.visit(entry, threshold) {
+            return;
+        }
     }
     // Profile the exact same visits, but bypass tree lookup for stable hot PCs.
     // Replacement/compaction cannot give the hint authority: compare full entry.
@@ -328,7 +455,26 @@ unsafe fn record(entry: CpuEntryKey, interpreted: bool) {
     let recorded_index = if let Some(index) = index {
         s.hot_hints[hint] = index as u16;
         let h = &mut s.hot[index];
-        h.hits = h.hits.saturating_add(1);
+        let old = h.hits;
+        h.hits = h.hits.saturating_add(weight);
+        let (hits, failed) = (h.hits, h.failed);
+        let crossed = |threshold: u32| old < threshold && hits >= threshold;
+        if s.idle_mode && failed == 0 {
+            let tier = if crossed(s.config.threshold) {
+                Some(1)
+            }
+            else if crossed(s.config.promote) && !interpreted {
+                Some(2)
+            }
+            else {
+                None
+            };
+            if let Some(tier) = tier {
+                if s.candidates.len() < 512 && !s.candidates.contains(&(entry, tier)) {
+                    s.candidates.push_back((entry, tier));
+                }
+            }
+        }
         index
     }
     else {
@@ -344,7 +490,7 @@ unsafe fn record(entry: CpuEntryKey, interpreted: bool) {
         s.probation[hint] = None;
         let new = Hot {
             entry,
-            hits: if witness.is_some() { 2 } else { 1 },
+            hits: if witness.is_some() { weight + 1 } else { weight },
             source: None,
             failed: 0,
             discovered: witness
@@ -395,7 +541,84 @@ pub unsafe fn note_cached(entry: CpuEntryKey, linked: bool, needs_heat: bool) {
         record(entry, false);
     }
 }
-pub unsafe fn note_interpreted() { record(live::entry(), true); }
+/// Interpreted heat is weighted by executed guest instructions, like the
+/// legacy JIT's per-page heat, and accumulates in a large tagged direct-mapped
+/// table instead of the bounded ring: a flood of cold PCs only ages a resident
+/// slot, so a recurrent hot entry cannot be displaced before it is compiled.
+/// Only an entry whose heat crosses the threshold reaches the ring (with the
+/// visit threshold as its weight), which leaves the ring a short list of real
+/// candidates. The table grants no execution authority: collisions, aging and
+/// resets only change when compilation is attempted.
+#[derive(Clone, Copy)]
+struct HeatSlot {
+    linear: u32,
+    pc: u32,
+    default_32: bool,
+    heat: u32,
+}
+const HEAT_SLOTS: usize = 1 << 14;
+const EMPTY_HEAT: HeatSlot = HeatSlot { linear: 0, pc: 0, default_32: false, heat: 0 };
+static mut HEAT: [HeatSlot; HEAT_SLOTS] = [EMPTY_HEAT; HEAT_SLOTS];
+// Instruction-weighted threshold; zero keeps exact per-visit ring heat for
+// small (test and explicitly tuned) visit thresholds.
+static mut HEAT_STEPS: u32 = 0;
+// Guest instructions charged per visit of the configured visit threshold. The
+// default 32 visits x 4096 = 131072 interpreted instructions, comparable to the
+// legacy JIT's 50K-200K per page. An XP boot compiles ~1000 regions with this
+// threshold (all resident); lower thresholds compile 2-4x more regions whose
+// compilation cost exceeds their interpretation savings.
+static mut HEAT_STEPS_PER_VISIT: u32 = 4096;
+#[inline(always)]
+fn heat_slot(entry: CpuEntryKey) -> usize {
+    let bits = entry.linear.0 ^ entry.pc.0.rotate_left(11) ^ u32::from(entry.default_32);
+    (bits.wrapping_mul(0x9E3779B1) >> (32 - 14)) as usize
+}
+/// Startup/tuning knob: guest instructions charged per configured visit.
+/// Zero restores per-visit heat. Applies at the next ir_auto_config.
+#[no_mangle]
+pub unsafe fn ir_auto_set_heat_steps(steps_per_visit: u32) -> bool {
+    if steps_per_visit > 65536 {
+        return false;
+    }
+    HEAT_STEPS_PER_VISIT = steps_per_visit;
+    configure_heat(SCHEDULER.try_lock().unwrap().config.threshold);
+    true
+}
+unsafe fn configure_heat(threshold: u32) {
+    HEAT = [EMPTY_HEAT; HEAT_SLOTS];
+    HEAT_STEPS = if threshold >= 32 { threshold.saturating_mul(HEAT_STEPS_PER_VISIT) } else { 0 };
+}
+/// One interpreted basic block starting at `entry` (outside HLT and any
+/// prefix, checked by the caller before interpretation) retired `steps` guest
+/// instructions.
+pub unsafe fn note_interpreted(entry: CpuEntryKey, steps: u32) {
+    if HEAT_STEPS == 0 {
+        record(entry, true);
+        return;
+    }
+    let steps = steps.max(1);
+    let slot = &mut HEAT[heat_slot(entry)];
+    if slot.linear == entry.linear.0 && slot.pc == entry.pc.0 && slot.default_32 == entry.default_32 {
+        slot.heat = slot.heat.saturating_add(steps);
+    }
+    else if slot.heat <= steps {
+        *slot = HeatSlot {
+            linear: entry.linear.0,
+            pc: entry.pc.0,
+            default_32: entry.default_32,
+            heat: steps,
+        };
+    }
+    else {
+        slot.heat -= steps;
+        return;
+    }
+    if slot.heat >= HEAT_STEPS {
+        slot.heat = 0;
+        let weight = SCHEDULER.try_lock().unwrap().config.threshold;
+        record_weighted(entry, true, weight);
+    }
+}
 pub(super) fn diagnose_missing(entry: CpuEntryKey) {
     let s = SCHEDULER.try_lock().unwrap();
     let reason = if s
@@ -461,7 +684,10 @@ pub unsafe fn visit() -> bool {
         // scan credit is exhausted. Ready artifacts have a separate publication
         // budget and MUST bypass this rejection (including sibling entries).
         // This is only a negative work hint, never execution/publication authority.
-        if s.ready.is_empty() && (!s.credit || !s.scan_credit && s.interpreted_ready.is_none()) {
+        if !FORCED
+            && s.ready.is_empty()
+            && (!s.credit || !s.scan_credit && s.interpreted_ready.is_none())
+        {
             s.stats[22] = s.stats[22].wrapping_add(1);
             return false;
         }
@@ -477,7 +703,42 @@ pub unsafe fn visit() -> bool {
         s.ready.pop_front()
     };
     if let Some(job) = ready {
-        return publish(job);
+        SCHEDULER.try_lock().unwrap().work += 1;
+        return yields(publish(job));
+    }
+    {
+        // Busy frames defer compilation to the next guest idle window, unless
+        // the guest has not halted for a while (a CPU-bound phase).
+        let s = SCHEDULER.try_lock().unwrap();
+        if !FORCED && s.idle_mode && s.frame_start - s.last_idle < s.sync_after {
+            return false;
+        }
+    }
+    let page_work = {
+        let mut s = SCHEDULER.try_lock().unwrap();
+        if s.page_mode && s.credit {
+            let promote = s.config.promote;
+            match s.pages.take_ready() {
+                Some((key, entries)) => Some((key, entries, 1)),
+                None => cache::next_page_promotion(promote).map(|entries| {
+                    (PageKey::of(entries[0]), entries, 2)
+                }),
+            }
+        }
+        else {
+            None
+        }
+    };
+    if let Some((key, entries, tier)) = page_work {
+        {
+            let mut s = SCHEDULER.try_lock().unwrap();
+            s.credit = false;
+            s.work += 1;
+            if FORCED {
+                s.idle_compiles += 1;
+            }
+        }
+        return yields(compile_page(key, entries, tier));
     }
     let selected = {
         let mut s = SCHEDULER.try_lock().unwrap();
@@ -487,6 +748,21 @@ pub unsafe fn visit() -> bool {
             || !s.scan_credit && s.interpreted_ready.is_none()
         {
             return false;
+        }
+        // Queued threshold crossings first: still needed if no newer tier exists.
+        while let Some((entry, tier)) = s.candidates.pop_front() {
+            let current = cache::tier(entry);
+            let tier = if DIRECT_T2 && current == 0 { 2 } else { tier };
+            if current + 1 == tier || DIRECT_T2 && current == 0 {
+                let config = s.config;
+                s.credit = false;
+                s.work += 1;
+                if FORCED {
+                    s.idle_compiles += 1;
+                }
+                drop(s);
+                return yields(compile_entry(entry, tier, config));
+            }
         }
         let earned = s.interpreted_ready.take();
         // A fruitless scan must not consume the frame's compilation credit.
@@ -501,7 +777,7 @@ pub unsafe fn visit() -> bool {
                 let index = s.hot_index.get(entry)?;
                 let hot = &s.hot[index];
                 (hot.hits >= config.threshold && hot.failed == 0 && cache::tier(entry) == 0)
-                    .then_some((entry, 1, config, None))
+                    .then_some((entry, if DIRECT_T2 { 2 } else { 1 }, config, None))
             });
         if selected.is_none() && s.scan_credit {
             s.scan_credit = false;
@@ -509,7 +785,11 @@ pub unsafe fn visit() -> bool {
             // persistent scan domains so ready Tier 1 owners cannot starve
             // existing Tier 2 fusion; each domain examines at most 128 positions.
             let resident = s.resident_promotion;
-            if resident && s.prefer_promotion {
+            if !resident {
+                selected = cache::next_region_promotion(config.promote)
+                    .map(|entry| (entry, 2, config, None));
+            }
+            if selected.is_none() && resident && s.prefer_promotion {
                 selected = cache::next_promotion(MAX_FRAME_SCAN)
                     .map(|ticket| (ticket.entry, 2, config, Some(ticket)));
             }
@@ -524,7 +804,8 @@ pub unsafe fn visit() -> bool {
                         && !(resident && tier == 1)
                         && (tier < 2 || cache::fusion_ready(h.entry))
                     {
-                        selected = Some((h.entry, (tier + 1).min(2), config, None));
+                        let next = if DIRECT_T2 { 2 } else { (tier + 1).min(2) };
+                        selected = Some((h.entry, next, config, None));
                         break;
                     }
                 }
@@ -539,6 +820,10 @@ pub unsafe fn visit() -> bool {
         }
         if selected.is_some() {
             s.credit = false;
+            s.work += 1;
+            if FORCED {
+                s.idle_compiles += 1;
+            }
         }
         selected
     };
@@ -546,6 +831,18 @@ pub unsafe fn visit() -> bool {
     else {
         return false;
     };
+    compile_selected(entry, tier, config, ticket)
+}
+unsafe fn compile_entry(entry: CpuEntryKey, tier: u32, config: Config) -> bool {
+    compile_selected(entry, tier, config, None)
+}
+/// Capture, compile and submit one selected entry (region compilation).
+unsafe fn compile_selected(
+    entry: CpuEntryKey,
+    tier: u32,
+    config: Config,
+    ticket: Option<Ticket>,
+) -> bool {
     if ticket.is_some_and(|ticket| !cache::promotion_current(ticket)) {
         return false;
     }
@@ -606,8 +903,14 @@ pub unsafe fn visit() -> bool {
     // must retain the old heat and aggregate suffix-byte budget for fallback.
     // Tier 2 keeps its original hot-peer policy.
     let peers = {
+        let tier_one = if tier == 2 {
+            cache::tier_one_peers(entry, snapshot.bytes.len())
+        }
+        else {
+            vec![]
+        };
         let s = SCHEDULER.try_lock().unwrap();
-        let candidates: Vec<_> = s
+        let mut candidates: Vec<_> = s
             .hot
             .iter()
             .filter(|h| {
@@ -622,6 +925,15 @@ pub unsafe fn visit() -> bool {
             })
             .map(|h| (h.entry, h.hits))
             .collect();
+        for (peer, hits) in tier_one {
+            if s.hot.iter().any(|h| h.entry == peer && h.failed == tier) {
+                continue;
+            }
+            match candidates.iter_mut().find(|(e, _)| *e == peer) {
+                Some((_, old)) => *old = (*old).max(hits),
+                None => candidates.push((peer, hits)),
+            }
+        }
         super::peers::select(
             entry,
             snapshot.bytes.len(),
@@ -781,7 +1093,125 @@ pub unsafe fn visit() -> bool {
         }
     }
     let job = SCHEDULER.try_lock().unwrap().ready.pop_front().unwrap();
-    publish(job)
+    yields(publish(job))
+}
+/// A host that published synchronously already completed the transaction;
+/// only a still-pending asynchronous installation needs the CPU to yield.
+fn yields(submitted: bool) -> bool {
+    submitted && SCHEDULER.try_lock().unwrap().pending.is_some()
+}
+/// Compile one whole code page with its observed entries and submit it.
+unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bool {
+    let (config, opt_level, disabled, debug) = {
+        let s = SCHEDULER.try_lock().unwrap();
+        (s.config, s.opt_level, s.passes_disabled, s.debug)
+    };
+    let _compile_context = super::diagnostics::CompileContext::new(entries[0].linear.0, tier);
+    let snapshot = {
+        let _clock = CompileScope::new(1);
+        super::snapshot::capture_page(key.base)
+    };
+    let Ok(snapshot) = snapshot
+    else {
+        SCHEDULER.try_lock().unwrap().pages.compiled(key, &entries, None);
+        return false;
+    };
+    let physical = snapshot.mappings[0].physical.0;
+    if !cache::can_make_room(entries[0]) {
+        return false;
+    }
+    let Some(publication) = live::publication_key()
+    else {
+        return false;
+    };
+    let compile_tier = if tier == 1 { Tier::One } else { Tier::Two };
+    let request = CompileRequest {
+        key: publication,
+        pc: entries[0].pc,
+        linear: entries[0].linear,
+        default_32: key.default_32,
+        tier: compile_tier,
+    };
+    let ir_config = IrConfig {
+        optimize: opt_level != 0,
+        passes: crate::ir::passes::PassConfig {
+            debug,
+            ..(if tier == 1 || opt_level == 1 {
+                crate::ir::passes::PassConfig::tier1()
+            }
+            else {
+                Default::default()
+            })
+            .disable(disabled)
+        },
+        execution_budget: config.budget,
+        rep_iteration_budget: config.rep,
+        max_code_bytes: 4096,
+        layout: StateLayout {
+            gpr: 0,
+            flags: 32,
+            eip: 36,
+            committed: 40,
+            flag_operand: 44,
+        },
+    };
+    {
+        let mut s = SCHEDULER.try_lock().unwrap();
+        s.stats[tier as usize + 1] = s.stats[tier as usize + 1].wrapping_add(1);
+    }
+    let compile_scope = Scope::new(Stage::Compile);
+    let compile_clock = CompileScope::new(0);
+    let started = crate::profiler::performance_codegen_start();
+    let compiled = compile_cpu_page(&request, &snapshot, &entries, &ir_config);
+    crate::profiler::performance_codegen_finish(started);
+    drop(compile_clock);
+    drop(compile_scope);
+    let artifact = match compiled {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            use crate::ir::lowering::CompileError;
+            let mut s = SCHEDULER.try_lock().unwrap();
+            let field = match error {
+                CompileError::Unsupported(_) => 9,
+                CompileError::Budget(_) => 10,
+                CompileError::InvalidIr(_) => 11,
+            };
+            s.stats[field] = s.stats[field].wrapping_add(1);
+            if tier == 1 {
+                s.pages.compiled(key, &entries, None);
+            }
+            return false;
+        },
+    };
+    let served: Vec<CpuEntryKey> = artifact.cpu_entries().collect();
+    {
+        let mut s = SCHEDULER.try_lock().unwrap();
+        s.pages.compiled(key, &entries, Some((&served, physical)));
+        if tier == 2 {
+            s.page_tier2 = s.page_tier2.wrapping_add(1);
+        }
+    }
+    publish_page(
+        Queued {
+            job: Job {
+                observed: artifact.dependencies.clone(),
+                artifact,
+                source: snapshot,
+                stale: false,
+            },
+            promotion: None,
+        },
+        key,
+    )
+}
+unsafe fn publish_page(queued: Queued, page: PageKey) -> bool {
+    let submitted = publish(queued);
+    if submitted {
+        if let Some(p) = SCHEDULER.try_lock().unwrap().pending.as_mut() {
+            p.page = Some(page);
+        }
+    }
+    submitted
 }
 unsafe fn publish(queued: Queued) -> bool {
     let Queued { job, promotion } = queued;
@@ -838,6 +1268,7 @@ unsafe fn publish(queued: Queued) -> bool {
                 .collect(),
             tier,
             promotion,
+            page: None,
         });
     }
     // JS copies bytes now; all Rust locks have been released. Completion is a
@@ -858,6 +1289,14 @@ pub fn ir_auto_complete(id: u64, success: u32) {
         return;
     }
     let p = s.pending.take().unwrap();
+    if let Some(page) = p.page {
+        if !success {
+            let entries: Vec<_> = p.entries.iter().map(|(k, _)| *k).collect();
+            s.pages.unserve(&entries);
+            let _ = page;
+        }
+    }
+    let resident = p.promotion.is_some();
     if !success {
         if let Some(attempt) = p.promotion {
             cache::promotion_failed(attempt.ticket, Some(attempt.source));
@@ -870,6 +1309,12 @@ pub fn ir_auto_complete(id: u64, success: u32) {
     }
     let stat = if success { p.tier as usize + 3 } else { 7 };
     s.stats[stat] = s.stats[stat].wrapping_add(1);
+    // Region upgrades are requested once per Tier-1 owner (and fused traces
+    // once per root): a failed Tier-2 publication is suppressed, not retried,
+    // until changed bytes publish a new owner.
+    if !success && p.tier == 2 && p.page.is_none() && !resident {
+        s.stats[8] = s.stats[8].wrapping_add(1);
+    }
     for hot in &mut s.hot {
         if p.entries.iter().any(|(key, _)| *key == hot.entry) {
             hot.hits = 0;
@@ -897,6 +1342,16 @@ pub fn ir_auto_stat(field: u32) -> u32 {
         27 => s.stats[22], // idle visits rejected before cache/jit quiescence checks
         28 => s.stats[23], // visits requiring the original cold-work path
         29 => s.hot_capacity as u32,
+        30 => u32::from(s.page_mode),
+        31 => s.pages.compiles,
+        32 => s.pages.failures,
+        33 => s.page_tier2,
+        34 => s.pages.first,
+        35 => s.pages.again,
+        36 => s.pages.dirty_resets,
+        37 => s.pages.declined_entries,
+        38 => s.idle_compiles,
+        39 => s.idle_ms as u32,
         _ => 0,
     }
 }

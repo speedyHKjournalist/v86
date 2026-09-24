@@ -307,7 +307,7 @@ pub unsafe fn cached_match(linear: u32, snapshot: &ImmutableCodeSnapshot) -> Cac
     }
 }
 pub unsafe fn capture(linear: u32, length: usize) -> Result<ImmutableCodeSnapshot, CaptureError> {
-    if length == 0 || length > 15 * 128 {
+    if length == 0 || length > crate::ir::frontend::region::CfgLimits::PAGE.source_bytes {
         return Err(CaptureError::Size);
     }
     let mut snapshot = ImmutableCodeSnapshot {
@@ -332,6 +332,13 @@ pub unsafe fn capture(linear: u32, length: usize) -> Result<ImmutableCodeSnapsho
         snapshot.bytes.extend_from_slice(ram(physical, chunk)?);
     }
     Ok(snapshot)
+}
+
+/// Exactly one code page from its base. Admission then needs one TLB-visible
+/// mapping; a final instruction straddling into the next page is left to the
+/// interpreter (the page lifter declines what it cannot decode in full).
+pub unsafe fn capture_page(linear: u32) -> Result<ImmutableCodeSnapshot, CaptureError> {
+    capture(linear & !4095, 4096)
 }
 
 #[cfg(test)]

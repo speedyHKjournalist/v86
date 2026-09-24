@@ -69,6 +69,16 @@ pub unsafe fn ir_enter_checked(linear: u32, cs_base: u32, default_32: u32) -> bo
     ir_enter();
     true
 }
+/// Page functions test the exact PC against their served entry list inline.
+#[no_mangle]
+pub unsafe fn ir_enter_page(cs_base: u32, default_32: u32) -> bool {
+    let linear = *gp::instruction_pointer as u32;
+    if !super::entry::matches_current(linear, cs_base, default_32) {
+        return false;
+    }
+    ir_enter();
+    true
+}
 #[cfg(feature = "ir-test-hooks")]
 #[no_mangle]
 pub unsafe fn ir_test_enter_checked_in_jit(linear: u32, cs_base: u32, mode: u32) -> bool {

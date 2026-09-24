@@ -186,16 +186,18 @@ fn shuffle(r: &Region, i: &Instruction, mask: [u8; 16]) -> Option<(Vec<ValueId>,
 }
 
 pub fn run(region: &mut Region, limit: usize) -> Result<Stats, String> {
-    if region.blocks.len() > 64
-        || region.instructions.len() > 8192
-        || region.values.len() > 16384
-        || region.states.len() > 8192
+    if region.blocks.len() > super::MAX_BLOCKS
+        || region.instructions.len() > super::MAX_INSTRUCTIONS
+        || region.values.len() > super::MAX_VALUES
+        || region.states.len() > super::MAX_STATES
     {
         return Err("SIMD simplification region budget exceeded".into());
     }
     let mut work = Work(limit);
     work.spend(region.instructions.len() + region.values.len() + region.states.len() + 1)?;
-    verify(region).map_err(|e| e.0)?;
+    if crate::ir::debug::audit() {
+        verify(region).map_err(|e| e.0)?;
+    }
     // Scalar-only regions do not need dominance analysis or a private copy.
     if !region
         .blocks
@@ -219,7 +221,7 @@ pub fn run(region: &mut Region, limit: usize) -> Result<Stats, String> {
     let mut removed = vec![false; draft.instructions.len()];
     let mut stats = Stats::default();
     let mut order: Vec<_> = (0..draft.blocks.len()).collect();
-    order.sort_by_key(|&b| (cfg.dominates[b].iter().filter(|&&d| d).count(), b));
+    order.sort_by_key(|&b| (cfg.dominator_count(b), b));
     for b in order {
         for id in draft.blocks[b].instructions.clone() {
             work.spend(1)?;

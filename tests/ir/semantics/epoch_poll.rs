@@ -90,6 +90,7 @@ fn epoch_poll_observer_fixtures() {
                         &[PC],
                         true,
                         &[],
+                        false,
                         true,
                         elide,
                     )

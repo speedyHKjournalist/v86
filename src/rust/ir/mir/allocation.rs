@@ -403,7 +403,9 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
         require(
             control.instructions == block.instructions
                 && control.recovery == block.recovery_id
-                && control.budget_cost == if cold_dispatch[b] { 0 } else { 1 },
+                && (control.budget_cost == if cold_dispatch[b] { 0 } else { 1 }
+                    || data.control.sparse_polls
+                        && (control.budget_cost == 0 || !cold_dispatch[b])),
         )?;
         for &v in &block.params {
             require(ty(v)? != Type::RmwTicket)?;
@@ -725,7 +727,7 @@ pub(super) fn verify(data: &MirData, work_limit: usize) -> Result<(), CompileErr
                 check_state(s, b, p + 1)?;
             }
             if let Some(poll) = &data.control.polls[id.index()] {
-                require(Some(poll.recovery) == inst.before && poll.cost == 1)?;
+                require(Some(poll.recovery) == inst.before && poll.cost >= 1)?;
                 check_state(poll.recovery, b, p)?;
             }
         }
@@ -1197,9 +1199,15 @@ pub(super) fn cpu_copy_control(
     })).collect()
 }
 
-/// Same-block CPU backing knowledge. Calls and memory effects discard it;
-/// normal CpuReload results establish new facts after an actual observation.
-/// State IDs may be used at multiple sites, so their certificates intersect.
+/// Region-wide CPU backing knowledge: "backing address A currently holds SSA
+/// value V". A plain backing read establishes a fact; a normal CpuReload after
+/// a call establishes fresh facts; a call or effect discards all of them. A
+/// recovery materialization may or may not execute on the continuing path (a
+/// slow-path fault check, a budget exit), so it keeps only facts whose value it
+/// would write unchanged. Facts meet by intersection at control-flow merges.
+/// Only architectural state words take part: PC, retirement and every other
+/// absolute address are neither remembered nor elided. State IDs may be used
+/// at multiple sites, so their certificates intersect.
 pub(super) fn backing_sync(
     data: &MirData,
     work_limit: usize,
@@ -1208,13 +1216,168 @@ pub(super) fn backing_sync(
         materialize::Store,
         value::{Address, Load, Reading},
     };
+    type Facts = Vec<(Address, Store, ValueId)>;
+    let tracked = |address: Address| match address {
+        Address::Gpr(_) | Address::Flags | Address::FlagOperand => true,
+        Address::Absolute(a) => {
+            use crate::cpu::global_pointers as gp;
+            a == gp::flags_changed as u32
+                || a == gp::last_result as u32
+                || a == gp::last_op_size as u32
+                || (0..8).any(|r| a == gp::get_reg_xmm_offset(r))
+        },
+        Address::Eip | Address::Committed => false,
+    };
+    let graph = &data.allocation_graph;
     let mut left = work_limit;
-    spend(&mut left, data.states.len() + data.values.len())?;
-    let mut masks: Vec<Option<Vec<bool>>> = vec![None; data.states.len()];
-    let mut observe = |id: StateId,
-                       known: &[(Address, Store, ValueId)],
-                       left: &mut usize|
+    spend(&mut left, data.states.len() + data.values.len() + graph.blocks.len())?;
+    let written = |id: StateId, address: Address| -> Option<(Store, Option<ValueId>)> {
+        data.states[id.index()]
+            .cpu
+            .writes
+            .iter()
+            .rev()
+            .find(|w| w.address == address)
+            .map(|w| {
+                (
+                    w.store,
+                    match w.expression[..] {
+                        [Step::Value(v)] => Some(v),
+                        _ => None,
+                    },
+                )
+            })
+    };
+    // A materialization that might execute leaves a fact only when it would
+    // rewrite the same value with the same width.
+    let materialize = |id: StateId, known: &mut Facts, left: &mut usize| -> Result<(), CompileError> {
+        spend(left, known.len().saturating_mul(data.states[id.index()].cpu.writes.len() + 1))?;
+        known.retain(|&(address, store, v)| match written(id, address) {
+            None => true,
+            Some((s, value)) => s == store && value == Some(v),
+        });
+        Ok(())
+    };
+    let remember = |reading: &Reading, v, known: &mut Facts| {
+        if let Reading::Memory { address, load } = reading {
+            let store = match load {
+                Load::I32 => Store::I32,
+                Load::V128 => Store::V128,
+                _ => return,
+            };
+            if !tracked(*address) {
+                return;
+            }
+            known.retain(|&(a, _, _)| a != *address);
+            known.push((*address, store, v));
+        }
+    };
+    // One block's transfer. `observe` sees the facts at each recovery use.
+    let transfer = |block: &Block,
+                    known: &mut Facts,
+                    left: &mut usize,
+                    observe: &mut dyn FnMut(StateId, &Facts, &mut usize) -> Result<(), CompileError>|
      -> Result<(), CompileError> {
+        if let Some(s) = block.recovery_id {
+            observe(s, known, left)?;
+            materialize(s, known, left)?;
+        }
+        for &id in &block.instructions {
+            spend(left, 1)?;
+            if data.stack_elided[id.index()] {
+                continue;
+            }
+            let inst = &graph.instructions[id.index()];
+            // Caller-owned fault delivery can restore the same state after the
+            // callee has changed backing. That restoration must retain all writes.
+            if data.calls[id.index()]
+                .as_ref()
+                .is_some_and(|c| c.delivery.is_some())
+            {
+                known.clear();
+            }
+            for s in [inst.before, inst.after].into_iter().flatten() {
+                observe(s, known, left)?;
+                materialize(s, known, left)?;
+            }
+            if let Some(value) = &data.values[id.index()] {
+                if let [Step::Read { cpu, .. }] = &value.steps[..] {
+                    remember(cpu, value.result, known);
+                }
+            }
+            // Segment/memory/SSE checks, RMW commits and division write CPU
+            // backing only on a fault path, which never continues here; their
+            // slow-path recovery writes were applied above. CMPXCHG8B updates
+            // EAX/EDX/FLAGS backing on its normal path.
+            if data.effects[id.index()].as_ref().is_some_and(|plan| {
+                !matches!(
+                    plan,
+                    super::effect::EffectPlan::Address { .. }
+                        | super::effect::EffectPlan::Check { .. }
+                        | super::effect::EffectPlan::RmwCommit { .. }
+                        | super::effect::EffectPlan::Arithmetic(
+                            super::arithmetic::ArithmeticPlan::Division(_)
+                        )
+                )
+            }) {
+                known.clear();
+            }
+            if let Some(call) = &data.calls[id.index()] {
+                known.clear();
+                // A native FP branch can assign SSA without writing CPU memory.
+                // Its helper-only sibling cannot authorize a joint certificate.
+                if call.native_fp.is_none() && call.normal.is_some() {
+                    for (v, reading) in &call.reload {
+                        remember(reading, *v, known);
+                    }
+                }
+            }
+        }
+        if let Terminator::Exit(s) = block.terminator {
+            observe(s, known, left)?;
+        }
+        Ok(())
+    };
+    let successors = |block: &Block| -> Vec<BlockId> {
+        match &block.terminator {
+            Terminator::Exit(_) => vec![],
+            Terminator::Jump(e) => vec![e.target],
+            Terminator::Branch(_, a, b) => vec![a.target, b.target],
+        }
+    };
+    // Forward fixpoint over block entry facts; None is "not yet reached".
+    let n = graph.blocks.len();
+    let mut entry: Vec<Option<Facts>> = vec![None; n];
+    for e in &graph.entries {
+        entry[e.index()] = Some(vec![]);
+    }
+    let mut work: Vec<usize> = graph.entries.iter().map(|e| e.index()).collect();
+    let mut queued = vec![false; n];
+    for &b in &work {
+        queued[b] = true;
+    }
+    while let Some(b) = work.pop() {
+        queued[b] = false;
+        let mut known = entry[b].clone().unwrap_or_default();
+        transfer(&graph.blocks[b], &mut known, &mut left, &mut |_, _, _| Ok(()))?;
+        for next in successors(&graph.blocks[b]) {
+            let t = next.index();
+            spend(&mut left, known.len() + 1)?;
+            let merged = match &entry[t] {
+                None => known.clone(),
+                Some(old) => old.iter().copied().filter(|f| known.contains(f)).collect(),
+            };
+            if entry[t].as_ref() != Some(&merged) {
+                entry[t] = Some(merged);
+                if !queued[t] {
+                    queued[t] = true;
+                    work.push(t);
+                }
+            }
+        }
+    }
+    let mut masks: Vec<Option<Vec<bool>>> = vec![None; data.states.len()];
+    let mut observe = |id: StateId, known: &Facts, left: &mut usize| -> Result<(), CompileError> {
         let state = &data.states[id.index()];
         spend(left, state.cpu.writes.len().saturating_mul(known.len() + 1))?;
         let next: Vec<bool> = state
@@ -1222,11 +1385,7 @@ pub(super) fn backing_sync(
             .writes
             .iter()
             .map(|w| {
-                // PC, previous-IP and instruction accounting keep their original
-                // phases even when two expressions happen to compare equal.
-                !matches!(w.address, Address::Eip | Address::Committed)
-                    && w.address
-                        != Address::Absolute(crate::cpu::global_pointers::previous_ip as u32)
+                tracked(w.address)
                     && known.iter().any(|&(address, store, v)| {
                         address == w.address && store == w.store && w.expression == [Step::Value(v)]
                     })
@@ -1242,64 +1401,10 @@ pub(super) fn backing_sync(
         }
         Ok(())
     };
-    let remember = |reading: &Reading, v, known: &mut Vec<(Address, Store, ValueId)>| {
-        if let Reading::Memory { address, load } = reading {
-            let store = match load {
-                Load::I32 => Store::I32,
-                Load::V128 => Store::V128,
-                _ => return,
-            };
-            known.retain(|&(a, _, _)| a != *address);
-            known.push((*address, store, v));
-        }
-    };
-    for block in &data.allocation_graph.blocks {
-        let mut known = vec![];
-        if let Some(s) = block.recovery_id {
-            observe(s, &known, &mut left)?;
-        }
-        for &id in &block.instructions {
-            spend(&mut left, 1)?;
-            if data.stack_elided[id.index()] {
-                continue;
-            }
-            let inst = &data.allocation_graph.instructions[id.index()];
-            // Caller-owned fault delivery can restore the same state after the
-            // callee has changed backing. That restoration must retain all writes.
-            if data.calls[id.index()]
-                .as_ref()
-                .is_some_and(|c| c.delivery.is_some())
-            {
-                known.clear();
-            }
-            if let Some(s) = inst.before {
-                observe(s, &known, &mut left)?;
-            }
-            if let Some(s) = inst.after {
-                observe(s, &known, &mut left)?;
-            }
-            if let Some(value) = &data.values[id.index()] {
-                if let [Step::Read { cpu, .. }] = &value.steps[..] {
-                    remember(cpu, value.result, &mut known);
-                }
-            }
-            if data.memory[id.index()].is_some() || data.effects[id.index()].is_some() {
-                known.clear();
-            }
-            if let Some(call) = &data.calls[id.index()] {
-                known.clear();
-                // A native FP branch can assign SSA without writing CPU memory.
-                // Its helper-only sibling cannot authorize a joint certificate.
-                if call.native_fp.is_none() && call.normal.is_some() {
-                    for (v, reading) in &call.reload {
-                        remember(reading, *v, &mut known);
-                    }
-                }
-            }
-        }
-        if let Terminator::Exit(s) = block.terminator {
-            observe(s, &known, &mut left)?;
-        }
+    for (b, block) in graph.blocks.iter().enumerate() {
+        // Unreached blocks keep an empty certificate: no write is skipped.
+        let mut known = entry[b].clone().unwrap_or_default();
+        transfer(block, &mut known, &mut left, &mut observe)?;
     }
     Ok(masks
         .into_iter()

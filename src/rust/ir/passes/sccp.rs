@@ -255,7 +255,9 @@ impl<'a> Analysis<'a> {
 }
 
 pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
-    verify(region).map_err(|e| e.0)?;
+    if crate::ir::debug::audit() {
+        verify(region).map_err(|e| e.0)?;
+    }
     let mut analysis = Analysis::new(region, work_limit)?;
     analysis.solve()?;
     let mut constants = Vec::new();

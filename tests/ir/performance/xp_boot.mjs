@@ -15,16 +15,57 @@ const region_budget = {};
 if(process.env.IR_HOT_THRESHOLD !== undefined) region_budget.hot_threshold = Number(process.env.IR_HOT_THRESHOLD);
 if(process.env.IR_PROMOTION_THRESHOLD !== undefined) region_budget.promotion_threshold = Number(process.env.IR_PROMOTION_THRESHOLD);
 if(process.env.IR_SOURCE_WINDOW !== undefined) region_budget.max_source_bytes = Number(process.env.IR_SOURCE_WINDOW);
+// IR_SYNC_DISK=1: reads complete synchronously from the image and writes stay
+// in a RAM sector overlay. This removes host I/O latency from the boot, so the
+// milestone time measures emulated CPU work (a benchmarking aid, not the
+// default acceptance configuration).
+class SyncDisk {
+    constructor(path) {
+        this.fd = fs.openSync(path, "r");
+        this.byteLength = fs.fstatSync(this.fd).size;
+        this.overlay = new Map();
+    }
+    load() { this.onload && this.onload({}); }
+    get(start, len, fn) {
+        const out = new Uint8Array(len);
+        fs.readSync(this.fd, out, 0, len, start);
+        for(let sector = Math.floor(start / 512); sector * 512 < start + len; sector++) {
+            const data = this.overlay.get(sector);
+            if(!data) continue;
+            const from = Math.max(start, sector * 512), to = Math.min(start + len, sector * 512 + 512);
+            out.set(data.subarray(from - sector * 512, to - sector * 512), from - start);
+        }
+        fn(out);
+    }
+    get_and_cache(start, len, fn) { this.get(start, len, fn); }
+    get_from_cache() { return undefined; }
+    set(start, slice, fn) {
+        for(let at = 0; at < slice.length;) {
+            const offset = start + at, sector = Math.floor(offset / 512), within = offset - sector * 512;
+            let data = this.overlay.get(sector);
+            if(!data) { data = new Uint8Array(512); this.get(sector * 512, 512, b => data.set(b)); this.overlay.set(sector, data); }
+            const n = Math.min(512 - within, slice.length - at);
+            data.set(slice.subarray(at, at + n), within);
+            at += n;
+        }
+        fn && fn();
+    }
+    get_buffer(fn) { fn(); }
+    get_state() { return []; }
+    set_state() {}
+}
 let milestone = null;
 let phase = "bios";
 const vm = new V86({
     wasm_path: wasm, jit_backend: backend,
     ...(backend === "ir" ? {ir_region_budget: region_budget} : {}),
+    ...(backend === "ir" && process.env.IR_SYNC_PUB !== undefined
+        ? {ir_sync_publication: process.env.IR_SYNC_PUB === "1"} : {}),
     ...(backend === "ir" && process.env.IR_OPT_LEVEL !== undefined
         ? {ir_opt_level: Number(process.env.IR_OPT_LEVEL)} : {}),
     memory_size: 2048 * 1024 * 1024, vga_memory_size: 16 * 1024 * 1024,
     bios: { url: "bios/seabios.bin" }, vga_bios: { url: "bios/vgabios.bin" },
-    hda: { url: disk, size: fs.statSync(disk).size, async: true },
+    hda: process.env.IR_SYNC_DISK === "1" ? new SyncDisk(disk) : { url: disk, size: fs.statSync(disk).size, async: true },
     x87_fast_math: true, x87_jit_cache: true,
     v86gl_pci: { maxBatchBytes: 16 * 1024 * 1024 },
     disable_keyboard: true, disable_mouse: true, disable_speaker: true,
@@ -74,6 +115,12 @@ try {
         assert.equal(e.ir_auto_set_hot_capacity(capacity), 1);
         assert.equal(e.ir_auto_config(enabled, ...args), 1);
     }
+    if(process.env.IR_REGION_INSTR !== undefined) { const [a,b]=process.env.IR_REGION_INSTR.split(",").map(Number); assert.equal(e.ir_auto_set_region_instructions(a,b),1); }
+    if(process.env.IR_HEAT_STEPS !== undefined) assert.equal(e.ir_auto_set_heat_steps(Number(process.env.IR_HEAT_STEPS)),1);
+    if(process.env.IR_DIRECT_T2 !== undefined) e.ir_auto_set_direct_tier2(Number(process.env.IR_DIRECT_T2));
+    if(process.env.IR_IDLE_MODE !== undefined) assert.equal(e.ir_auto_set_idle_mode(Number(process.env.IR_IDLE_MODE), Number(process.env.IR_SYNC_AFTER || 16)),1);
+    if(process.env.IR_PAGE_MODE !== undefined) assert.equal(e.ir_auto_set_page_mode(Number(process.env.IR_PAGE_MODE)),1);
+    if(process.env.IR_PAGE_THRESHOLD !== undefined) assert.equal(e.ir_auto_set_page_threshold(Number(process.env.IR_PAGE_THRESHOLD)),1);
     if(process.env.IR_HOT_FILTER !== undefined) assert.equal(e.ir_auto_set_hot_filter(Number(process.env.IR_HOT_FILTER)),1);
     if(process.env.IR_CACHE_CAPACITY !== undefined) assert.equal(e.ir_cache_set_capacity(Number(process.env.IR_CACHE_CAPACITY)),1);
     if(process.env.IR_FAST_VALIDATION !== undefined) {

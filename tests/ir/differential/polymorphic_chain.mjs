@@ -16,6 +16,9 @@ const little = (value, size) => Array.from({ length: size }, (_, i) => value >>>
 try {
     await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
     const cpu = vm.v86.cpu, e = cpu.wm.exports;
+    // These cases exercise the strict (byte-validating) admission contract and
+    // its slow-path machinery; notified_validation.mjs covers the default.
+    assert.equal(e.ir_cache_set_strict_validation(1), 1);
     const memory = () => new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset);
     const words = () => new Uint32Array(e.memory.buffer);
     const write32 = (address, value) => memory().setUint32(address, value, true);

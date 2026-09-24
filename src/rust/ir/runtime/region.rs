@@ -21,16 +21,29 @@ impl Policy {
         match tier {
             Tier::One => Self {
                 max_bytes: configured_window.clamp(15, 960) as usize,
-                max_instructions: 32,
+                max_instructions: unsafe { TIER1_INSTRUCTIONS },
             },
             Tier::Two => Self {
                 max_bytes: configured_window.saturating_mul(2).clamp(15, 1920) as usize,
-                max_instructions: 96,
+                max_instructions: unsafe { TIER2_INSTRUCTIONS },
             },
         }
     }
 }
 
+/// Instruction caps of automatically selected regions (startup policy).
+pub(super) static mut TIER1_INSTRUCTIONS: usize = 32;
+pub(super) static mut TIER2_INSTRUCTIONS: usize = 96;
+#[cfg(feature = "ir-experimental")]
+#[no_mangle]
+pub unsafe fn ir_auto_set_region_instructions(tier1: u32, tier2: u32) -> bool {
+    if !(8..=120).contains(&tier1) || !(8..=120).contains(&tier2) {
+        return false;
+    }
+    TIER1_INSTRUCTIONS = tier1 as usize;
+    TIER2_INSTRUCTIONS = tier2 as usize;
+    true
+}
 fn target_offset(
     start: GuestEip,
     instruction: &crate::ir::frontend::decode::DecodedInstruction,

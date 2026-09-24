@@ -14,6 +14,11 @@ const PC = 0x100000, INITIAL = 0xFFFFFFF0, N = 512, THRESHOLD = 64;
 try {
     await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
     const cpu = vm.v86.cpu, e = cpu.wm.exports;
+    // These cases exercise the strict (byte-validating) admission contract and
+    // its slow-path machinery; notified_validation.mjs covers the default.
+    assert.equal(e.ir_cache_set_strict_validation(1), 1);
+    // THRESHOLD counts exact visits: disable instruction-weighted heat.
+    assert.equal(e.ir_auto_set_heat_steps(0), 1);
     const words = () => new Uint32Array(e.memory.buffer);
     const count = () => vm.get_instruction_counter() >>> 0;
     vm.run(); const deadline = performance.now() + 10000;

@@ -133,6 +133,59 @@ impl ScalarObserver {
         }
     }
 }
+/// Release observer under the notified code-validity contract. A device or
+/// clock callback cannot change CPU mode, descriptor or XMM state: a reset
+/// rewrites EIP, CR0 and the instruction counter, and every notified code write
+/// (DMA through write_blob, jit_dirty_cache) or reset advances the live
+/// continuation epoch, which retires any dependent owner. Strict validation,
+/// diagnostics and debug builds keep the complete ScalarObserver certificate.
+#[cfg(feature = "ir-experimental")]
+pub(super) struct NotifiedObserver {
+    quiet: bool,
+    epoch: u64,
+    pc: i32,
+    previous_pc: i32,
+    count: u32,
+    cr0: i32,
+}
+#[cfg(feature = "ir-experimental")]
+impl NotifiedObserver {
+    #[inline(always)]
+    pub(super) unsafe fn enabled() -> bool {
+        !cfg!(debug_assertions)
+            && !super::cache::strict_validation()
+            && !super::diagnostics::enabled()
+    }
+    #[inline(always)]
+    pub(super) unsafe fn capture() -> Self {
+        Self {
+            quiet: no_pending_irq(),
+            epoch: super::live::continuation_epoch(),
+            pc: *gp::instruction_pointer,
+            previous_pc: *gp::previous_ip,
+            count: *gp::instruction_counter,
+            cr0: *gp::cr,
+        }
+    }
+    #[inline(always)]
+    pub(super) unsafe fn finish(self) -> u32 {
+        if self.quiet
+            && no_pending_irq()
+            && self.epoch != u64::MAX
+            && self.epoch == super::live::continuation_epoch()
+            && self.pc == *gp::instruction_pointer
+            && self.previous_pc == *gp::previous_ip
+            && self.count == *gp::instruction_counter
+            && self.cr0 == *gp::cr
+        {
+            Outcome::Normal as u32
+        }
+        else {
+            *gp::instruction_counter = (*gp::instruction_counter).wrapping_add(1);
+            Outcome::Invalidated as u32
+        }
+    }
+}
 /// No controller can currently acknowledge a request. Do not consult backed
 /// FLAGS here: STI's emitter may still carry IF in SSA. A masked request remains
 /// in IRR; an observer which unmasks it is checked again after completion.

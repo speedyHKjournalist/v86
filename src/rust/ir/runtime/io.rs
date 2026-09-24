@@ -24,6 +24,15 @@ unsafe fn write(port: u32, bytes: u32, value: u32) {
         _ => unreachable!(),
     }
 }
+#[cfg(feature = "ir-experimental")]
+unsafe fn write_accumulator(bytes: u32, value: i32) {
+    match bytes {
+        1 => cpu::write_reg8(0, value),
+        2 => cpu::write_reg16(0, value),
+        4 => cpu::write_reg32(0, value),
+        _ => unreachable!(),
+    }
+}
 #[no_mangle]
 pub unsafe fn ir_io_check(port: u32, bytes: u32) -> u32 {
     assert!(!cpu::in_jit);
@@ -65,6 +74,15 @@ pub unsafe fn ir_out(port: u32, bytes: u32, _value: u32) -> u32 {
 pub unsafe fn ir_in_continue(port: u32, bytes: u32) -> u32 {
     // Permission checks may read a TSS/I/O bitmap through MMIO. Include those
     // observers in the certificate, not only the eventual port callback.
+    #[cfg(feature = "ir-experimental")]
+    if super::continuation::NotifiedObserver::enabled() {
+        let observer = super::continuation::NotifiedObserver::capture();
+        if ir_io_check(port, bytes) != 0 {
+            return Outcome::ControlTransferred as u32;
+        }
+        write_accumulator(bytes, read(port, bytes));
+        return observer.finish();
+    }
     let observer = super::continuation::ScalarObserver::capture();
     if ir_io_check(port, bytes) != 0 {
         return Outcome::ControlTransferred as u32;
@@ -80,6 +98,15 @@ pub unsafe fn ir_in_continue(port: u32, bytes: u32) -> u32 {
 }
 #[no_mangle]
 pub unsafe fn ir_out_continue(port: u32, bytes: u32, _value: u32) -> u32 {
+    #[cfg(feature = "ir-experimental")]
+    if super::continuation::NotifiedObserver::enabled() {
+        let observer = super::continuation::NotifiedObserver::capture();
+        if ir_io_check(port, bytes) != 0 {
+            return Outcome::ControlTransferred as u32;
+        }
+        write(port, bytes, cpu::read_reg32(0) as u32);
+        return observer.finish();
+    }
     let observer = super::continuation::ScalarObserver::capture();
     if ir_io_check(port, bytes) != 0 {
         return Outcome::ControlTransferred as u32;

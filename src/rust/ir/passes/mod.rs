@@ -21,8 +21,8 @@ pub struct PassConfig {
     pub fold: bool,
     /// CPU-only per-flag demand/liveness after exact backing lowering.
     pub flags: bool,
-    /// Allow post-observer backing-state analysis; cold policy only enables
-    /// entry-equivalence certificates already derived during lowering.
+    /// Region-wide backing-state facts for exit-write elision; disabled, only
+    /// entry-equivalence certificates already derived during lowering apply.
     pub state_sync: bool,
     /// Trim pre-call CPU StateMap observations for audited pure helpers.
     pub helper_state: bool,
@@ -50,7 +50,9 @@ impl Default for PassConfig {
     }
 }
 impl PassConfig {
-    pub const MASK: u32 = (1 << 18) - 1;
+    /// Bit 18: loop-header budget polls in non-fused regions (sparse_polls).
+    pub const SPARSE_POLLS: u32 = 18;
+    pub const MASK: u32 = (1 << 19) - 1;
     pub fn enabled(&self, bit: u32) -> bool { self.disabled & (1 << bit) == 0 }
     pub fn disable(mut self, mask: u32) -> Self {
         self.disabled |= mask;
@@ -66,19 +68,21 @@ impl PassConfig {
         self
     }
     /// Low-latency Tier-1 canonicalization plus CPU demand from exact recovery
-    /// plans. State trimming only enables certificates already checked during
-    /// lowering; global dataflow and post-observer analysis remain Tier 2.
+    /// plans and backing-state write elision. Global value dataflow, helper
+    /// observation trimming and loop motion remain Tier 2.
     pub fn tier1() -> Self {
         Self {
             debug: Default::default(),
-            disabled: Self::MASK & !(((1 << 9) - 1) | (1 << 13)),
+            disabled: Self::MASK & !(((1 << 9) - 1) | (1 << 13) | (1 << Self::SPARSE_POLLS)),
             prune: true,
             merge: true,
             phis: true,
             copy: true,
             fold: false,
             flags: true,
-            state_sync: false,
+            // Region-wide backing facts remove exit writes of unchanged state;
+            // they are cheaper than emitting and compiling those writes.
+            state_sync: true,
             helper_state: false,
             gvn: false,
             dce: false,
@@ -111,6 +115,12 @@ pub struct PassStats {
     pub sccp_constants: usize,
     pub sccp_parameters: usize,
 }
+/// Absolute HIR arena caps shared by all passes. Page regions (the frontend's
+/// CfgLimits::PAGE) stay below them; every pass also keeps its own work limit.
+pub(crate) const MAX_BLOCKS: usize = 1024;
+pub(crate) const MAX_INSTRUCTIONS: usize = 65536;
+pub(crate) const MAX_VALUES: usize = 131072;
+pub(crate) const MAX_STATES: usize = 65536;
 pub fn run(region: &mut Region, config: PassConfig) -> Result<PassStats, String> {
     let config = config.disable(config.disabled);
     config.debug.check_hir(region, true)?;
@@ -335,6 +345,109 @@ fn rewrite_values(region: &mut Region, replace: impl Fn(&mut ValueId)) {
         }
     }
 }
+/// Page functions poll only at loop headers (MIR sparse polls). Remove the
+/// per-instruction and merged-boundary PollBudget operations: each carried a
+/// cold full-state exit. Their recovery maps stay available to the other
+/// operations that reference them; the effect chain skips the removed nodes.
+/// Exact sparse budget accounting for non-fused regions. A block's weight
+/// bounds the guest instructions it starts: its PollBudget count plus one for a
+/// recovery map (the per-instruction scheme's block-entry credit). Poll points
+/// are loop headers and the entry frontier (first weighted block reached from
+/// an entry). Control lowering charges each with the longest weighted path to
+/// the next poll point and exits before it when the remaining budget cannot
+/// cover it; a frontier block without a recovery map (an entry) keeps its first
+/// PollBudget, before any of its instructions, as that check. Retirement thus
+/// stays within the budget without an exit per instruction. A region with a
+/// poll point costing more than `budget` keeps per-instruction polls (None,
+/// unchanged): it could never make progress on a fresh budget.
+pub fn sparse_polls(region: &mut Region, budget: u32) -> Option<usize> {
+    use crate::ir::mir::control::{back_edge_targets, entry_frontier, longest_guest_paths};
+    let n = region.blocks.len();
+    let successors = |b: usize| -> Vec<usize> {
+        region.blocks[b]
+            .terminator
+            .as_ref()
+            .map(|t| t.edges().iter().map(|e| e.target.index()).collect())
+            .unwrap_or_default()
+    };
+    let weight: Vec<u32> = region
+        .blocks
+        .iter()
+        .map(|block| {
+            block
+                .instructions
+                .iter()
+                .filter(|id| region.instructions[id.index()].op == Op::PollBudget)
+                .count() as u32
+                + u32::from(block.entry_state.is_some())
+        })
+        .collect();
+    let headers = back_edge_targets(&region.entries, n, successors);
+    let frontier = entry_frontier(&region.entries, n, &headers, successors, |b| weight[b]);
+    let longest = longest_guest_paths(n, &headers, successors, |b| weight[b])?;
+    if (0..n).any(|b| (frontier[b] || headers[b]) && longest[b] > budget) {
+        return None;
+    }
+    let mut aliases: Vec<Option<ValueId>> = vec![None; region.values.len()];
+    let mut removed = 0;
+    for b in 0..n {
+        let keep_first = frontier[b] && region.blocks[b].entry_state.is_none();
+        let instructions = &region.instructions;
+        let mut kept = false;
+        region.blocks[b].instructions.retain(|id| {
+            let inst = &instructions[id.index()];
+            if inst.op != Op::PollBudget {
+                return true;
+            }
+            if keep_first && !kept {
+                kept = true;
+                return true;
+            }
+            aliases[inst.results[0].index()] = Some(inst.args[0]);
+            removed += 1;
+            false
+        });
+        region.blocks[b].budget = weight[b];
+    }
+    if removed != 0 {
+        let resolve = |mut value: ValueId| {
+            while let Some(next) = aliases[value.index()] {
+                value = next;
+            }
+            value
+        };
+        rewrite_values(region, |v| *v = resolve(*v));
+    }
+    Some(removed)
+}
+pub fn strip_polls(region: &mut Region) -> usize {
+    let mut aliases: Vec<Option<ValueId>> = vec![None; region.values.len()];
+    let mut removed = 0;
+    for b in 0..region.blocks.len() {
+        let instructions = &region.instructions;
+        region.blocks[b].instructions.retain(|id| {
+            let inst = &instructions[id.index()];
+            if inst.op == Op::PollBudget {
+                aliases[inst.results[0].index()] = Some(inst.args[0]);
+                removed += 1;
+                false
+            }
+            else {
+                true
+            }
+        });
+    }
+    if removed != 0 {
+        let resolve = |mut value: ValueId| {
+            while let Some(next) = aliases[value.index()] {
+                value = next;
+            }
+            value
+        };
+        rewrite_values(region, |v| *v = resolve(*v));
+    }
+    removed
+}
 fn dce(region: &mut Region, stats: &mut PassStats) {
     let mut live = HashSet::new();
     let mut work = Vec::new();
@@ -378,54 +491,118 @@ fn dce(region: &mut Region, stats: &mut PassStats) {
 }
 
 fn trivial_phis(region: &mut Region, stats: &mut PassStats) {
-    for b in 0..region.blocks.len() {
-        if region.entries.contains(&BlockId(b as u32)) {
-            continue;
+    // A parameter is trivial when every incoming argument other than itself
+    // resolves to one value. Collect all such aliases to a fixed point, then
+    // rewrite the arenas and drop the parameters/arguments once.
+    let n = region.blocks.len();
+    let mut incoming: Vec<Vec<(usize, usize)>> = vec![vec![]; n];
+    for (a, block) in region.blocks.iter().enumerate() {
+        for (k, edge) in block.terminator.as_ref().unwrap().edges().into_iter().enumerate() {
+            incoming[edge.target.index()].push((a, k));
         }
-        for p in (0..region.blocks[b].params.len()).rev() {
-            let param = region.blocks[b].params[p];
-            let mut candidate = None;
-            let mut differs = false;
-            for block in &region.blocks {
-                for edge in block.terminator.as_ref().unwrap().edges() {
-                    if edge.target.index() != b {
-                        continue;
-                    }
-                    let value = edge.args[p];
+    }
+    fn arg(region: &Region, (a, k): (usize, usize), p: usize) -> ValueId {
+        match region.blocks[a].terminator.as_ref().unwrap() {
+            Terminator::Branch(edge) => edge.args[p],
+            Terminator::CondBranch {
+                taken, not_taken, ..
+            } => {
+                if k == 0 {
+                    taken.args[p]
+                }
+                else {
+                    not_taken.args[p]
+                }
+            },
+            Terminator::Exit(_) => unreachable!(),
+        }
+    }
+    let mut aliases: Vec<Option<ValueId>> = vec![None; region.values.len()];
+    let resolve = |aliases: &[Option<ValueId>], mut value: ValueId| {
+        while let Some(next) = aliases[value.index()] {
+            value = next;
+        }
+        value
+    };
+    let mut removed: Vec<Vec<bool>> = region.blocks.iter().map(|b| vec![false; b.params.len()]).collect();
+    let mut count = 0;
+    loop {
+        let mut changed = false;
+        for b in 0..n {
+            if region.entries.contains(&BlockId(b as u32)) {
+                continue;
+            }
+            for p in 0..region.blocks[b].params.len() {
+                if removed[b][p] {
+                    continue;
+                }
+                let param = region.blocks[b].params[p];
+                // Effect phis remain explicit chain roots until effect-aware CFG simplification.
+                if region.values[param.index()].ty == super::types::Type::Effect {
+                    continue;
+                }
+                let mut candidate = None;
+                let mut differs = false;
+                for &edge in &incoming[b] {
+                    let value = resolve(&aliases, arg(region, edge, p));
                     if value == param {
                         continue;
                     }
                     if candidate.is_some() && candidate != Some(value) {
                         differs = true;
+                        break;
                     }
                     candidate = Some(value);
                 }
-            }
-            if differs {
-                continue;
-            }
-            let Some(value) = candidate
-            else {
-                continue;
-            };
-            // Effect phis remain explicit chain roots until effect-aware CFG simplification.
-            if region.values[param.index()].ty == super::types::Type::Effect {
-                continue;
-            }
-            replace(region, param, value);
-            region.blocks[b].params.remove(p);
-            for block in &mut region.blocks {
-                for edge in block.terminator.as_mut().unwrap().edges_mut() {
-                    if edge.target.index() == b {
-                        edge.args.remove(p);
-                    }
+                if differs {
+                    continue;
                 }
+                let Some(value) = candidate
+                else {
+                    continue;
+                };
+                aliases[param.index()] = Some(value);
+                removed[b][p] = true;
+                changed = true;
+                count += 1;
             }
-            for (i, &v) in region.blocks[b].params.iter().enumerate() {
-                region.values[v.index()].definition =
-                    Definition::Parameter(BlockId(b as u32), i as u32);
-            }
-            stats.phis += 1;
+        }
+        if !changed {
+            break;
         }
     }
+    if count == 0 {
+        return;
+    }
+    rewrite_values(region, |v| *v = resolve(&aliases, *v));
+    for (b, block) in region.blocks.iter_mut().enumerate() {
+        if let Some(term) = block.terminator.as_mut() {
+            for edge in term.edges_mut() {
+                let drop = &removed[edge.target.index()];
+                if drop.iter().any(|d| *d) {
+                    let mut i = 0;
+                    edge.args.retain(|_| {
+                        i += 1;
+                        !drop[i - 1]
+                    });
+                }
+            }
+        }
+        let _ = b;
+    }
+    for b in 0..n {
+        if !removed[b].iter().any(|d| *d) {
+            continue;
+        }
+        let mut i = 0;
+        let drop = &removed[b];
+        region.blocks[b].params.retain(|_| {
+            i += 1;
+            !drop[i - 1]
+        });
+        for (i, &v) in region.blocks[b].params.iter().enumerate() {
+            region.values[v.index()].definition = Definition::Parameter(BlockId(b as u32), i as u32);
+        }
+    }
+    stats.phis += count;
 }

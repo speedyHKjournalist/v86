@@ -120,6 +120,51 @@ fn predicted(
 }
 fn invalid(message: &'static str) -> CompileError { CompileError::Unsupported(message) }
 
+/// Graph-size limits of one reachable CFG. REGION is the historical bounded
+/// hot-window shape; PAGE covers every reachable instruction of one code page
+/// from all of its observed external entries (the legacy JIT's granularity).
+#[derive(Clone, Copy, Debug)]
+pub struct CfgLimits {
+    pub sources: usize,
+    pub source_bytes: usize,
+    pub entries: usize,
+    pub fragments: usize,
+    pub blocks: usize,
+    pub instructions: usize,
+    pub values: usize,
+    /// Page mode: an undecodable, unsupported or overlapping reachable
+    /// instruction (or discovery beyond the fragment budget) becomes an exit
+    /// to the interpreter instead of rejecting the whole graph.
+    pub tolerant: bool,
+    /// Charge the execution budget only at loop headers instead of at every
+    /// guest instruction (PollBudget). Acyclic code is bounded by the graph.
+    pub sparse_polls: bool,
+}
+impl CfgLimits {
+    pub const REGION: Self = Self {
+        sources: 4,
+        source_bytes: 15 * 128,
+        entries: 8,
+        fragments: 128,
+        blocks: 64,
+        instructions: 8192,
+        values: 16384,
+        tolerant: false,
+        sparse_polls: false,
+    };
+    pub const PAGE: Self = Self {
+        sources: 1,
+        source_bytes: 4096 + 16,
+        entries: 64,
+        fragments: 1024,
+        blocks: 512,
+        instructions: 65536,
+        values: 131072,
+        tolerant: true,
+        sparse_polls: true,
+    };
+}
+
 pub fn lift_cpu_cfg(
     bytes: &[u8],
     pc: GuestEip,
@@ -143,7 +188,27 @@ pub fn lift_cpu_cfg_sources(
     rep_budget: u32,
 ) -> Result<Region, CompileError> {
     let entries: Vec<_> = sources.first().map(|s| vec![s.pc]).unwrap_or_default();
-    lift_cpu_cfg_sources_inner(sources, predictions, &entries, default_32, rep_budget, true)
+    lift_cpu_cfg_sources_inner(
+        sources,
+        predictions,
+        &entries,
+        default_32,
+        rep_budget,
+        true,
+        CfgLimits::REGION,
+    )
+}
+/// Every instruction of one page reachable from its observed entries.
+/// Returns the graph and the external entries it actually serves, in
+/// dispatch order; a tolerant graph may leave some entries to the interpreter.
+pub fn lift_cpu_cfg_page(
+    source: CfgSource<'_>,
+    entries: &[GuestEip],
+    default_32: bool,
+    rep_budget: u32,
+    limits: CfgLimits,
+) -> Result<(Region, Vec<GuestEip>), CompileError> {
+    lift_cfg_graph(&[source], &[], entries, default_32, rep_budget, true, limits)
 }
 /// One SSA graph with a shared cold prologue and exact-PC dispatch. External
 /// entries remain CFG leaders, even when a fallthrough predecessor exists.
@@ -154,7 +219,15 @@ pub fn lift_cpu_cfg_entries(
     default_32: bool,
     rep_budget: u32,
 ) -> Result<Region, CompileError> {
-    lift_cpu_cfg_sources_inner(sources, predictions, entries, default_32, rep_budget, true)
+    lift_cpu_cfg_sources_inner(
+        sources,
+        predictions,
+        entries,
+        default_32,
+        rep_budget,
+        true,
+        CfgLimits::REGION,
+    )
 }
 #[cfg(test)]
 pub(crate) fn lift_cpu_cfg_uncoalesced(
@@ -171,6 +244,7 @@ pub(crate) fn lift_cpu_cfg_uncoalesced(
         default_32,
         rep_budget,
         false,
+        CfgLimits::REGION,
     )
 }
 fn lift_cpu_cfg_sources_inner(
@@ -180,17 +254,32 @@ fn lift_cpu_cfg_sources_inner(
     default_32: bool,
     rep_budget: u32,
     compact: bool,
+    limits: CfgLimits,
 ) -> Result<Region, CompileError> {
+    let (region, served) =
+        lift_cfg_graph(sources, predictions, entries, default_32, rep_budget, compact, limits)?;
+    debug_assert_eq!(served, entries);
+    Ok(region)
+}
+fn lift_cfg_graph(
+    sources: &[CfgSource<'_>],
+    predictions: &[PredictedEdge],
+    entries: &[GuestEip],
+    default_32: bool,
+    rep_budget: u32,
+    compact: bool,
+    limits: CfgLimits,
+) -> Result<(Region, Vec<GuestEip>), CompileError> {
     if sources.is_empty() || sources.iter().any(|s| s.bytes.is_empty()) {
         return Err(invalid("empty CFG snapshot"));
     }
-    if sources.len() > 4
-        || sources.iter().any(|s| s.bytes.len() > 15 * 128)
+    if sources.len() > limits.sources
+        || sources.iter().any(|s| s.bytes.len() > limits.source_bytes)
         || predictions.len() > 4
     {
         return Err(CompileError::Budget("CFG code snapshot"));
     }
-    if entries.is_empty() || entries.len() > 8 {
+    if entries.is_empty() || entries.len() > limits.entries {
         return Err(CompileError::Budget("CFG external entries"));
     }
     for (i, pc) in entries.iter().enumerate() {
@@ -223,48 +312,65 @@ fn lift_cpu_cfg_sources_inner(
     }
     let mut fragments: BTreeMap<usize, Fragment> = BTreeMap::new();
     let mut pending: BTreeSet<_> = entries.iter().map(|pc| pc.0 as usize).collect();
+    // Page mode only: addresses left to the interpreter (never CFG targets).
+    let mut declined = BTreeSet::new();
     while let Some(address) = pending.pop_first() {
-        if fragments.contains_key(&address) {
+        if fragments.contains_key(&address) || declined.contains(&address) {
             continue;
         }
         let (source, at) = locate(sources, GuestEip(address as u32))
             .ok_or_else(|| invalid("missing CFG source"))?;
         let CfgSource { bytes, pc, linear } = source;
-        if fragments.len() >= 128 {
+        if fragments.len() >= limits.fragments {
+            if limits.tolerant {
+                declined.insert(address);
+                continue;
+            }
             return Err(CompileError::Budget("CFG decoded instructions"));
         }
-        let decoded = decode(
-            &bytes[at..],
-            GuestEip(pc.0.wrapping_add(at as u32)),
-            LinearAddress(linear.0.wrapping_add(at as u32)),
-            default_32,
-        )
-        .map_err(|_| invalid("CFG decode stop"))?;
-        let span = if decoded.encoding.opcode == 0xFB {
-            super::sti::extent(
+        let lifted = (|| {
+            let decoded = decode(
                 &bytes[at..],
+                GuestEip(pc.0.wrapping_add(at as u32)),
+                LinearAddress(linear.0.wrapping_add(at as u32)),
+                default_32,
+            )
+            .map_err(|_| invalid("CFG decode stop"))?;
+            let span = if decoded.encoding.opcode == 0xFB {
+                super::sti::extent(
+                    &bytes[at..],
+                    decoded.instruction_pc,
+                    decoded.linear_pc,
+                    default_32,
+                )?
+            }
+            else {
+                decoded.length as usize
+            };
+            if fragments.iter().any(|(&other, f)| {
+                (address as u32).wrapping_sub(other as u32) < f.span as u32
+                    || (other as u32).wrapping_sub(address as u32) < span as u32
+            }) {
+                return Err(invalid("overlapping guest instruction streams"));
+            }
+            let ir = lift_cpu_with_rep_budget(
+                &bytes[at..at + span],
                 decoded.instruction_pc,
                 decoded.linear_pc,
                 default_32,
-            )?
-        }
-        else {
-            decoded.length as usize
+                rep_budget,
+            )?;
+            Ok((decoded, span, ir))
+        })();
+        let (decoded, span, ir) = match lifted {
+            Ok(lifted) => lifted,
+            Err(_) if limits.tolerant => {
+                declined.insert(address);
+                continue;
+            },
+            Err(error) => return Err(error),
         };
         let end = at + span;
-        if fragments.iter().any(|(&other, f)| {
-            (address as u32).wrapping_sub(other as u32) < f.span as u32
-                || (other as u32).wrapping_sub(address as u32) < span as u32
-        }) {
-            return Err(invalid("overlapping guest instruction streams"));
-        }
-        let ir = lift_cpu_with_rep_budget(
-            &bytes[at..end],
-            decoded.instruction_pc,
-            decoded.linear_pc,
-            default_32,
-            rep_budget,
-        )?;
         // Scalar and vector stores can continue through the guarded RAM path.
         // Cold/MMIO writes and aliases of any immutable code dependency still
         // commit then exit there. Other commit-bearing adapters own their exit.
@@ -318,6 +424,15 @@ fn lift_cpu_cfg_sources_inner(
             },
         );
     }
+    let entries: Vec<GuestEip> = entries
+        .iter()
+        .copied()
+        .filter(|pc| fragments.contains_key(&(pc.0 as usize)))
+        .collect();
+    if entries.is_empty() {
+        return Err(invalid("no lifted CFG external entry"));
+    }
+    let entries = &entries[..];
     // Pay CFG/block-parameter costs per straight-line run, not per x86
     // instruction. Branch destinations and externally callable entries remain
     // leaders; a failed compound lift keeps the original precise fragments.
@@ -332,7 +447,7 @@ fn lift_cpu_cfg_sources_inner(
         );
     }
     let block_count = entries.len() + fragments.values().map(|f| f.ir.blocks.len()).sum::<usize>();
-    if block_count > 64 {
+    if block_count > limits.blocks {
         return Err(CompileError::Budget("CFG block count"));
     }
     let xmm = fragments.values().any(|f| {
@@ -439,15 +554,16 @@ fn lift_cpu_cfg_sources_inner(
             sources,
             predictions,
         )?;
-        if b.region.instructions.len() > 8192
-            || b.region.values.len() > 16384
-            || b.region.blocks.len() > 64
+        if b.region.instructions.len() > limits.instructions
+            || b.region.values.len() > limits.values
+            || b.region.blocks.len() > limits.blocks
         {
             return Err(CompileError::Budget("CFG IR size"));
         }
     }
+    // The one release verification before passes; lowering checks again.
     crate::ir::verify::verify(&b.region).map_err(|e| CompileError::InvalidIr(e.0))?;
-    Ok(b.region)
+    Ok((b.region, entries.to_vec()))
 }
 /// Collapse only uniquely reached, contiguous fallthrough chains. This happens
 /// before the graph budget: otherwise 64 ordinary instructions exhaust the
@@ -790,7 +906,9 @@ fn graft(
                 }
                 else {
                     successor(&state, sources).or_else(|| predicted(&state, sources, predictions))
-                } {
+                }
+                .filter(|next| roots.contains_key(next))
+                {
                     if fragment.decoded.encoding.opcode == 0xFB {
                         // Only a normally completed compound shadow can reach
                         // this edge. Keep fault/terminal paths on their original

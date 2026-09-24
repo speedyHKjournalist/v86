@@ -149,6 +149,10 @@ impl DerefMut for JitStateRef {
 
 #[no_mangle]
 pub fn rust_init() {
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        *crate::cpu::global_pointers::ir_tlb_base = std::ptr::addr_of!(cpu::tlb_data) as u32;
+    }
     #[cfg(feature = "ir-experimental")]
     {
         crate::ir::runtime::live::invalidate();
@@ -199,6 +203,10 @@ struct JitState {
     wasm_table_index_free_list: Vec<WasmTableIndex>,
     #[cfg(feature = "ir-experimental")]
     ir_slots: HashMap<WasmTableIndex, (u64, HashSet<Page>)>,
+    /// Number of IR slots watching each physical page (TLB fills query this
+    /// on every page walk; iterating all slots' sets was measurable).
+    #[cfg(feature = "ir-experimental")]
+    ir_page_counts: Vec<u16>,
     published_modules: VecDeque<WasmTableIndex>,
     compiling: Option<(WasmTableIndex, CompilingPageState)>,
     compiling_ticket: u64,
@@ -308,6 +316,8 @@ impl JitState {
             wasm_table_index_free_list: Vec::from_iter(wasm_table_indices),
             #[cfg(feature = "ir-experimental")]
             ir_slots: HashMap::new(),
+            #[cfg(feature = "ir-experimental")]
+            ir_page_counts: Vec::new(),
             published_modules: VecDeque::new(),
             compiling: None,
             compiling_ticket: 0,
@@ -2966,9 +2976,19 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
         crate::ir::runtime::live::dirty_page(page.to_address());
         crate::ir::runtime::cache::dirty_page(page.to_address());
         crate::ir::runtime::schedule::dirty_page(page.to_address());
-        for (_, pages) in ctx.ir_slots.values_mut() {
-            if pages.contains(&page) {
-                ir_unwatched.extend(pages.drain());
+        if ir_page_watched(ctx, page) {
+            let JitState {
+                ir_slots,
+                ir_page_counts,
+                ..
+            } = &mut *ctx;
+            for (_, pages) in ir_slots.values_mut() {
+                if pages.contains(&page) {
+                    for p in pages.drain() {
+                        ir_page_count(ir_page_counts, p, -1);
+                        ir_unwatched.insert(p);
+                    }
+                }
             }
         }
     }
@@ -3079,6 +3099,7 @@ fn jit_clear_cache(ctx: &mut JitState) {
         for (_, pages) in ctx.ir_slots.values_mut() {
             pages_with_code.extend(pages.drain());
         }
+        ctx.ir_page_counts.clear();
     }
     ctx.failed_compilations.clear();
 
@@ -3108,14 +3129,25 @@ pub fn jit_page_has_code(page: Page) -> bool { jit_page_has_code_ctx(&mut get_ji
 
 fn jit_page_has_code_ctx(ctx: &mut JitState, page: Page) -> bool {
     #[cfg(feature = "ir-experimental")]
-    if ctx
-        .ir_slots
-        .values()
-        .any(|(_, pages)| pages.contains(&page))
-    {
+    if ir_page_watched(ctx, page) {
         return true;
     }
-    ctx.pages.contains_key(&page) || ctx.entry_points.contains_key(&page)
+    !ctx.pages.is_empty() && ctx.pages.contains_key(&page)
+        || !ctx.entry_points.is_empty() && ctx.entry_points.contains_key(&page)
+}
+#[cfg(feature = "ir-experimental")]
+fn ir_page_watched(ctx: &JitState, page: Page) -> bool {
+    ctx.ir_page_counts
+        .get(page.to_u32() as usize)
+        .is_some_and(|count| *count != 0)
+}
+#[cfg(feature = "ir-experimental")]
+fn ir_page_count(counts: &mut Vec<u16>, page: Page, delta: i32) {
+    let index = page.to_u32() as usize;
+    if counts.len() <= index {
+        counts.resize(index + 1, 0);
+    }
+    counts[index] = (counts[index] as i32 + delta).max(0) as u16;
 }
 
 /// Reservations share the bounded legacy pool, but never appear in legacy entry/link tables.
@@ -3126,6 +3158,9 @@ pub fn ir_cache_quiescent() -> bool { JIT_STATE.try_lock().is_ok() }
 pub fn ir_reserve_slot(id: u64, pages: HashSet<Page>) -> Option<u32> {
     let mut ctx = get_jit_state();
     let index = ctx.wasm_table_index_free_list.pop()?;
+    for &page in &pages {
+        ir_page_count(&mut ctx.ir_page_counts, page, 1);
+    }
     ctx.ir_slots.insert(index, (id, pages.clone()));
     cpu::tlb_set_has_code_multiple(&pages, true);
     check_jit_state_invariants(&mut ctx);
@@ -3148,6 +3183,9 @@ pub fn ir_release_slot(index: u32, id: u64) -> bool {
         return false;
     }
     let (_, pages) = ctx.ir_slots.remove(&index).unwrap();
+    for &page in &pages {
+        ir_page_count(&mut ctx.ir_page_counts, page, -1);
+    }
     for page in pages {
         cpu::tlb_set_has_code(page, jit_page_has_code_ctx(&mut ctx, page));
     }

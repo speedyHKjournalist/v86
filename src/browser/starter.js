@@ -247,6 +247,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings["ir_stats"] = options["ir_stats"];
     settings["ir_verify"] = options["ir_verify"];
     settings["ir_dump"] = options["ir_dump"];
+    settings["ir_sync_publication"] = options["ir_sync_publication"];
     settings["ir_opt_level"] = options["ir_opt_level"];
     settings["ir_passes_disabled"] = options["ir_passes_disabled"];
     settings["x87_fast_math"] = options["x87_fast_math"];

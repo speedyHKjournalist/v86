@@ -202,7 +202,11 @@ pub fn run_mode(r: &mut Region, work_limit: usize, mode: Mode) -> Result<Stats, 
     ] {
         work.spend(n)?;
     }
-    verify(r).map_err(|e| e.0)?;
+    // The pipeline verified its input (lifting) and verifies its output
+    // (lowering); per-pass re-verification is a debug/every_pass audit.
+    if crate::ir::debug::audit() {
+        verify(r).map_err(|e| e.0)?;
+    }
     let mut active = vec![false; r.instructions.len()];
     for block in &r.blocks {
         work.spend(block.instructions.len())?;

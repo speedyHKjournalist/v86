@@ -98,8 +98,10 @@ fn budget_batch_public_compiler_obeys_tier_and_disable_mask() {
             physical: PhysicalAddress(pc),
         }],
     };
+    // Per-instruction polls (sparse polls disabled) are what batches combine.
+    let per_instruction = 1 << PassConfig::SPARSE_POLLS;
     for (tier, enabled) in [(Tier::One, false), (Tier::Two, true)] {
-        for disabled in [0, 1 << 17] {
+        for disabled in [0, 1 << 17, per_instruction, per_instruction | 1 << 17] {
             let request = CompileRequest {
                 key: PublicationKey {
                     job: 1,
@@ -127,11 +129,11 @@ fn budget_batch_public_compiler_obeys_tier_and_disable_mask() {
                 },
             };
             let artifact = compile_cpu_cfg_region(&request, &snapshot, &config).unwrap();
-            assert_eq!(
-                artifact.code.budget_batch_blocks > 0,
-                enabled && disabled == 0
-            );
-            assert_eq!(artifact.passes.budget_batches > 0, enabled && disabled == 0);
+            // Default non-fused regions charge the budget at loop headers
+            // only: no per-instruction polls remain to batch.
+            let batched = enabled && disabled == per_instruction;
+            assert_eq!(artifact.code.budget_batch_blocks > 0, batched);
+            assert_eq!(artifact.passes.budget_batches > 0, batched);
         }
     }
 }

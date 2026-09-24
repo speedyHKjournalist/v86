@@ -456,6 +456,7 @@ mod tests {
             blocks,
             dynamic_counts: true,
             polls: vec![],
+            sparse_polls: false,
         }
     }
 

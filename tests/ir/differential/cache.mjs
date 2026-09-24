@@ -12,6 +12,9 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms)),u32=n=>[n&255,n>>>8&255,n>>>16&
 const PC=0x100000, DATA=0x200000, OFFSET=1024;
 try {
     await new Promise(r=>vm.add_listener("emulator-loaded",r));const cpu=vm.v86.cpu,e=cpu.wm.exports,table=cpu.wm.wasm_table;
+    // These cases exercise the strict (byte-validating) admission contract and
+    // its slow-path machinery; notified_validation.mjs covers the default.
+    assert.equal(e.ir_cache_set_strict_validation(1), 1);
     const word=a=>new DataView(cpu.mem8.buffer,cpu.mem8.byteOffset).getUint32(a,true);
     const set=(a,n)=>new DataView(cpu.mem8.buffer,cpu.mem8.byteOffset).setUint32(a,n,true);
     const count=()=>new Uint32Array(e.memory.buffer)[664>>2];
@@ -358,7 +361,7 @@ try {
     assert.equal(e.ir_cache_stat(1),0);
     console.log(`PASS: ${wasm}: active I/O write/reset retains its table slot until return, rejects nested compilation, and zero-retirement REP exits resume interpretation`);
     // Table capacity accounting includes IR reservations while legacy compilation continues.
-    prepare([0x40,0xF4]);const free=e.jit_get_wasm_table_index_free_list_count(),capacity=e.ir_cache_capacity();assert.equal(capacity,256);assert.equal(e.ir_cache_set_capacity(255),0);assert.equal(e.ir_cache_set_capacity(769),0);assert.equal(e.ir_cache_set_capacity(768),1);assert.equal(e.ir_cache_capacity(),768);assert.equal(e.ir_cache_set_capacity(256),1);
+    prepare([0x40,0xF4]);const free=e.jit_get_wasm_table_index_free_list_count();assert.equal(e.ir_cache_capacity(),768);assert.equal(e.ir_cache_set_capacity(255),0);assert.equal(e.ir_cache_set_capacity(769),0);assert.equal(e.ir_cache_set_capacity(256),1);const capacity=e.ir_cache_capacity();assert.equal(capacity,256);
     for(let i=0;i<capacity;i++){const address=PC+i*4096;vm.write_memory(Uint8Array.of(0x40,0xF4),address);cpu.instruction_pointer[0]=address;assert(await request(1));}
     assert.equal(e.ir_cache_stat(0),capacity);assert.equal(e.jit_get_wasm_table_index_free_list_count(),free-capacity);
     cpu.instruction_pointer[0]=PC+capacity*4096;vm.write_memory(Uint8Array.of(0x40,0xF4),PC+capacity*4096);assert.equal(await request(1),false);

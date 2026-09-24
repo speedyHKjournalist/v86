@@ -75,7 +75,7 @@ pub fn verify(region: &Region) -> Result<()> {
             },
         };
         require(
-            cfg.dominates[block][owner],
+            cfg.dominates(block, owner),
             "definition does not dominate use",
         )?;
         if owner == block {

@@ -97,17 +97,14 @@ try {
         assert.equal(count(), (INITIAL + 4 * visits) >>> 0);
         assert.equal(cpu.reg32[0], visits); assert.equal(cpu.reg32[1], 0);
         assert.equal(cpu.instruction_pointer[0], halt + 1);
-        if(policy) {
-            assert(e.ir_auto_stat(3) > attempts && e.ir_auto_stat(5) > published,
-                "resident aliases retain heat through more than 128 interleaved PCs");
-            assert.deepEqual(state(), baseline, "promotion changes no guest or lazy-FLAGS state");
-        }
-        else {
-            assert.equal(e.ir_auto_stat(3), attempts, "old ring loses each PC before eight visits");
-            assert.equal(e.ir_auto_stat(5), published); baseline = state();
-        }
+        // Both policies earn upgrades from the resident owners' own activation
+        // counts; the 128-PC heat ring no longer decides Tier-1 promotion.
+        assert(e.ir_auto_stat(3) > attempts && e.ir_auto_stat(5) > published,
+            `policy ${policy}: resident owners retain heat through more than 128 interleaved PCs`);
+        if(policy) assert.deepEqual(state(), baseline, "promotion changes no guest or lazy-FLAGS state");
+        else baseline = state();
     }
-    console.log(`PASS: ${wasm}: 160 interleaved Tier-1 owners, default128 old/new promotion A/B and exact wrapped guest/lazy-FLAGS state`);
+    console.log(`PASS: ${wasm}: 160 interleaved Tier-1 owners promote under both policies with identical wrapped guest/lazy-FLAGS state`);
 
     // Establish two entry aliases of one published body using actual observed
     // execution, then measure independent admission heat after a config reset.

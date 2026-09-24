@@ -616,17 +616,23 @@ fn cpu_prologue_imports_only_pointer_bases_used_by_machine_plans() {
         let input = snapshot(code.to_vec(), 0x100000);
         for optimize in [false, true] {
             let artifact = compile_cpu_region(&req, &input, &config(optimize)).unwrap();
-            for (name, needed) in [("ir_tlb_base", tlb), ("ir_memory_base", ram)] {
-                assert_eq!(
-                    artifact
-                        .code
-                        .bytes
-                        .windows(name.len())
-                        .any(|w| w == name.as_bytes()),
-                    needed,
-                    "{code:02X?}, optimized={optimize}: {name}"
-                );
-            }
+            let contains = |pattern: &[u8]| {
+                artifact.code.bytes.windows(pattern.len()).any(|w| w == pattern)
+            };
+            // The TLB base is a load of the fixed CPU slot, not an import.
+            let slot = crate::cpu::global_pointers::ir_tlb_base as u32;
+            assert_eq!(slot, 2048, "the fixture encoding below assumes this slot");
+            assert!(!contains(b"ir_tlb_base"), "{code:02X?}: no TLB base import");
+            assert_eq!(
+                contains(&[0x41, 0x80, 0x10, 0x28]), // i32.const 2048; i32.load
+                tlb,
+                "{code:02X?}, optimized={optimize}: TLB base slot"
+            );
+            assert_eq!(
+                contains(b"ir_memory_base"),
+                ram,
+                "{code:02X?}, optimized={optimize}: ir_memory_base"
+            );
         }
     }
 }

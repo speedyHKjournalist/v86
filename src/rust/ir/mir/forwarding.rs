@@ -236,9 +236,9 @@ fn alias(data: &MirData, a: AddressKey, a_bytes: u8, b: AddressKey, b_bytes: u8)
 
 fn validate_arenas(data: &MirData) -> Result<(), CompileError> {
     let n = data.memory.len();
-    if data.control.blocks.len() > 64
-        || n > 8192
-        || data.value_types.len() > 16384
+    if data.control.blocks.len() > crate::ir::passes::MAX_BLOCKS
+        || n > crate::ir::passes::MAX_INSTRUCTIONS
+        || data.value_types.len() > crate::ir::passes::MAX_VALUES
         || data.value_blocks.len() != data.value_types.len()
         || data.value_definitions.len() != data.value_types.len()
     {
@@ -295,7 +295,7 @@ fn plan_with_loops(
                 ));
             };
             if let Some(poll) = &data.control.polls[index] {
-                if poll.cost == 1 {
+                if poll.cost >= 1 {
                     continue;
                 }
                 previous = None;
@@ -457,7 +457,9 @@ fn loop_plan(data: &MirData, work_limit: usize) -> Result<LoopPlan, CompileError
     let nblocks = data.control.blocks.len();
     let ninst = data.memory.len();
     let mut result = LoopPlan::disabled(ninst, nblocks);
-    if nblocks == 0 {
+    // Loop membership and dominance below are single-word bitsets; larger
+    // (page) graphs keep the disabled, conservative plan.
+    if nblocks == 0 || nblocks > 64 {
         return Ok(result);
     }
     let mut left = work_limit;
@@ -597,7 +599,7 @@ fn loop_plan(data: &MirData, work_limit: usize) -> Result<LoopPlan, CompileError
                     }
                 }
                 if let Some(poll) = &data.control.polls[index] {
-                    if poll.cost != 1 {
+                    if poll.cost == 0 {
                         safe = false;
                         break;
                     }
@@ -697,7 +699,7 @@ fn guard_plan(data: &MirData, work_limit: usize) -> Result<Vec<Option<Forwarding
                 }
             }
             else if let Some(poll) = &data.control.polls[i] {
-                if poll.cost == 1 {
+                if poll.cost >= 1 {
                     continue;
                 }
             }

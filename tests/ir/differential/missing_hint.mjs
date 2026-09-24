@@ -11,6 +11,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 try {
     await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
     const cpu = vm.v86.cpu, e = cpu.wm.exports, PC = 0x8000, N = 8000, initial = 0xFFFFFFF0;
+    // These cases exercise the strict (byte-validating) admission contract and
+    // its slow-path machinery; notified_validation.mjs covers the default.
+    assert.equal(e.ir_cache_set_strict_validation(1), 1);
     const count = () => vm.get_instruction_counter() >>> 0;
     vm.run(); const deadline = performance.now() + 10000;
     while(new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset).getUint16(0x500, true) !== 0xCAFE) {

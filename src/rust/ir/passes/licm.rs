@@ -77,7 +77,7 @@ fn discover(region: &Region, cfg: &Cfg, work: &mut Work) -> Result<Vec<NaturalLo
         let mut has_backedge = false;
         for pred in &cfg.predecessors[header] {
             work.spend(1)?;
-            if cfg.dominates[pred.index()][header] {
+            if cfg.dominates(pred.index(), header) {
                 has_backedge = true;
                 if !members[pred.index()] {
                     members[pred.index()] = true;
@@ -105,7 +105,7 @@ fn discover(region: &Region, cfg: &Cfg, work: &mut Work) -> Result<Vec<NaturalLo
                 continue;
             }
             valid &=
-                cfg.dominates[block][header] && !region.entries.contains(&BlockId(block as u32));
+                cfg.dominates(block, header) && !region.entries.contains(&BlockId(block as u32));
             if block != header {
                 for pred in &cfg.predecessors[block] {
                     work.spend(1)?;
@@ -130,7 +130,7 @@ fn discover(region: &Region, cfg: &Cfg, work: &mut Work) -> Result<Vec<NaturalLo
         if !matches!(
             region.blocks[preheader].terminator.as_ref(),
             Some(Terminator::Branch(edge)) if edge.target.index() == header
-        ) || !cfg.dominates[header][preheader]
+        ) || !cfg.dominates(header, preheader)
         {
             continue;
         }
@@ -148,8 +148,11 @@ fn discover(region: &Region, cfg: &Cfg, work: &mut Work) -> Result<Vec<NaturalLo
 /// Atomically optimize a verified region. An error leaves the caller's arenas,
 /// scheduling and recovery maps unchanged. The work limit covers discovery and
 /// candidate/operand visits; fixed arena caps bound the verifier and cloning.
+/// Loop discovery here is bounded to region-sized graphs; the compiler skips
+/// LICM for larger (page) graphs instead of failing their compilation.
+pub const MAX_BLOCKS: usize = 64;
 pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
-    if region.blocks.len() > 64
+    if region.blocks.len() > MAX_BLOCKS
         || region.instructions.len() > 8192
         || region.values.len() > 16384
         || region.states.len() > 8192
@@ -162,7 +165,9 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
         used: 0,
     };
     work.spend(1)?;
-    verify(region).map_err(|e| e.0)?;
+    if crate::ir::debug::audit() {
+        verify(region).map_err(|e| e.0)?;
+    }
     let cfg = Cfg::compute(region)?;
     let loops = discover(region, &cfg, &mut work)?;
     if loops.is_empty() {
@@ -179,7 +184,7 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
             .filter(|&b| natural.members[b])
             .collect();
         // A definition precedes a dominated use, regardless of arena numbering.
-        order.sort_by_key(|&b| (cfg.dominates[b].iter().filter(|&&d| d).count(), b));
+        order.sort_by_key(|&b| (cfg.dominator_count(b), b));
         let mut moved = vec![false; staged.instructions.len()];
         let mut hoisted = Vec::new();
         for &block in &order {
@@ -198,7 +203,7 @@ pub fn run(region: &mut Region, work_limit: usize) -> Result<Stats, String> {
                             staged.instructions[def.index()].block.index()
                         },
                     };
-                    invariant &= !natural.members[owner] && cfg.dominates[natural.preheader][owner];
+                    invariant &= !natural.members[owner] && cfg.dominates(natural.preheader, owner);
                 }
                 if invariant {
                     // Updating ownership makes dependent expressions available

@@ -57,6 +57,21 @@ pub unsafe fn ir_rdtsc_continue() -> u32 {
         cpu::trigger_gp(0);
         return Outcome::ControlTransferred as u32;
     }
+    // Under the notified contract the only host import of a release RDTSC is
+    // the monotonic clock: it cannot write guest RAM, CPU state or IRQ lines.
+    // Strict mode, debug logging and timing diagnostics keep the full observer.
+    #[cfg(feature = "ir-experimental")]
+    if !cfg!(debug_assertions)
+        && !super::cache::strict_validation()
+        && !super::diagnostics::enabled()
+    {
+        let quiet = super::continuation::no_pending_irq();
+        instructions_0f::instr_0F31();
+        if quiet && super::continuation::no_pending_irq() {
+            return Outcome::Normal as u32;
+        }
+        return commit();
+    }
     let observer = super::continuation::ScalarObserver::capture();
     instructions_0f::instr_0F31();
     observer.finish()

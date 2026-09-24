@@ -243,6 +243,9 @@ pub struct Block {
     pub params: Vec<ValueId>,
     pub instructions: Vec<InstId>,
     pub terminator: Option<Terminator>,
+    /// Guest instruction boundaries whose PollBudget was removed by sparse
+    /// polling; charged at the dominating entry or loop-header poll point.
+    pub budget: u32,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Region {

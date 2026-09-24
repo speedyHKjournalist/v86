@@ -20,7 +20,26 @@ pub fn lower(region: &Region) -> Result<MirRegion, CompileError> {
     draft.finish()
 }
 pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
-    if region.blocks.len() > 64 || region.instructions.len() > 8192 || region.values.len() > 16384 {
+    lower_draft_limited(region, crate::ir::frontend::region::CfgLimits::REGION)
+}
+/// Page regions may exceed the bounded hot-window shape; every other lowering
+/// contract and verifier remains identical.
+pub fn lower_limited(
+    region: &Region,
+    limits: crate::ir::frontend::region::CfgLimits,
+) -> Result<MirRegion, CompileError> {
+    let draft = lower_draft_limited(region, limits)?;
+    let _clock = CompileScope::new(10);
+    draft.finish()
+}
+pub fn lower_draft_limited(
+    region: &Region,
+    limits: crate::ir::frontend::region::CfgLimits,
+) -> Result<Draft<'_>, CompileError> {
+    if region.blocks.len() > limits.blocks
+        || region.instructions.len() > limits.instructions
+        || region.values.len() > limits.values
+    {
         return Err(CompileError::Budget("IR region size"));
     }
     verify(region).map_err(|e| CompileError::InvalidIr(e.0))?;
@@ -168,11 +187,7 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
         .map(|inst| super::mir::value::lower(region, inst))
         .collect();
     let state_clock = CompileScope::new(8);
-    let states: Vec<_> = region
-        .states
-        .iter()
-        .map(|state| super::mir::materialize::lower(region, state))
-        .collect();
+    let states = super::mir::materialize::lower_all(region);
     drop(state_clock);
     let proof_clock = CompileScope::new(9);
     let helper_state = super::mir::helper_state::lower(
@@ -191,7 +206,7 @@ pub fn lower_draft(region: &Region) -> Result<Draft<'_>, CompileError> {
         let _clock = CompileScope::new(7);
         allocate(region).map_err(CompileError::Budget)?
     };
-    let control = super::mir::control::lower(region, &allocation)?;
+    let control = super::mir::control::lower_with(region, &allocation, limits.sparse_polls)?;
     Ok(Draft::new(
         region,
         MirData {

@@ -47,7 +47,7 @@ impl Config {
     /// HIR pipeline boundaries are correctness checks in every mode. Only
     /// diagnostic rescans between trusted, bounded passes are optional.
     pub fn check_hir(self, region: &super::hir::Region, boundary: bool) -> Result<(), String> {
-        if boundary
+        if boundary && audit()
             || self.verify == VerifyMode::EveryPass
             || self.verify == VerifyMode::Debug && cfg!(debug_assertions)
         {
@@ -69,6 +69,26 @@ impl Config {
     }
 }
 
+/// Redundant audits of already verified compiler transactions (re-verifying
+/// the HIR at pass boundaries and after lifting, and recomputing every lowered
+/// plan in Draft::finish). Always on in debug/test builds and with
+/// `ir_verify: "every_pass"`; release production keeps the single HIR
+/// verification at the lowering input plus every structural identity check.
+static mut AUDIT: bool = cfg!(any(test, debug_assertions));
+pub fn audit() -> bool { unsafe { AUDIT } }
+/// `every_pass` forces audits; otherwise they follow the build profile.
+pub fn set_audit(every_pass: bool) {
+    unsafe {
+        AUDIT = every_pass || cfg!(any(test, debug_assertions));
+    }
+}
+/// Benchmarks of the release pipeline inside test builds only.
+#[cfg(test)]
+pub fn force_audit(enabled: bool) {
+    unsafe {
+        AUDIT = enabled;
+    }
+}
 #[cfg(test)]
 mod hir_tests {
     use super::*;

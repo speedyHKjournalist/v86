@@ -12,6 +12,12 @@ mod copy_tests;
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/core.rs"]
 mod core_tests;
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/page_bench.rs"]
+mod page_bench_tests;
+#[cfg(test)]
+#[path = "../../../tests/ir/semantics/region_bench.rs"]
+mod region_bench_tests;
 pub mod dump;
 pub mod effects;
 #[cfg(test)]

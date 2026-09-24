@@ -3,16 +3,18 @@ use super::diagnostics::CompileScope;
 use super::entry::{CpuEntryKey, EntryContract};
 use crate::ir::{
     backend::wasm::{
-        emit, emit_cpu_entry, emit_cpu_fused_entry, emit_cpu_shared_entry, Artifact, StateLayout,
+        emit, emit_cpu_entry, emit_cpu_fused_entry, emit_cpu_page_entry, emit_cpu_shared_entry,
+        Artifact, StateLayout,
     },
     frontend::{
         decode::{decode, Flow, GuestEip, LinearAddress, PhysicalAddress},
         lift::{lift, lift_cpu_with_rep_budget},
         region::{
-            lift_cpu_cfg, lift_cpu_cfg_entries, lift_cpu_cfg_sources, CfgSource, PredictedEdge,
+            lift_cpu_cfg, lift_cpu_cfg_entries, lift_cpu_cfg_page, lift_cpu_cfg_sources,
+            CfgLimits, CfgSource, PredictedEdge,
         },
     },
-    lowering::{lower, CompileError},
+    lowering::{lower_limited, CompileError},
     passes::{licm, run, PassConfig, PassStats},
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,6 +99,9 @@ pub struct CompiledArtifact {
     pub fused_edges: Vec<PredictedEdge>,
     /// Exact alternative PCs sharing this function, snapshot and table owner.
     pub alternate_entries: Vec<CpuEntryKey>,
+    /// Linear address of the first snapshot byte when it is not the primary
+    /// entry (page artifacts cover a whole code page from its base).
+    pub source_origin: Option<LinearAddress>,
 }
 #[derive(Clone, Debug)]
 pub struct CapturedRegion {
@@ -115,6 +120,14 @@ impl CompiledArtifact {
     }
     pub fn accepts_entry(&self, entry: CpuEntryKey) -> bool {
         self.cpu_entries().any(|key| key == entry)
+    }
+    /// Linear address of the first byte of the primary immutable snapshot.
+    pub fn source_linear(&self) -> Option<u32> {
+        match (self.source_origin, self.entry) {
+            (Some(origin), _) => Some(origin.0),
+            (None, EntryContract::Cpu(entry)) => Some(entry.linear.0),
+            (None, EntryContract::Standalone) => None,
+        }
     }
     /// Must run before installing a table slot; equality includes dependency versions and reset generation.
     /// This is a compiler-side check, not yet the production JS publication protocol.
@@ -299,7 +312,7 @@ fn compile_inner(
         )?
     };
     drop(lift_clock);
-    compile_lifted(request, snapshot, config, cpu, region, vec![], vec![])
+    compile_lifted(request, snapshot, config, cpu, region, vec![], vec![], None)
 }
 pub fn compile_cpu_fused(
     request: &CompileRequest,
@@ -414,6 +427,7 @@ pub fn compile_cpu_fused_regions(
         region,
         peers.to_vec(),
         vec![],
+        None,
     )?;
     artifact.fused_edges = predictions.to_vec();
     Ok(artifact)
@@ -427,7 +441,17 @@ fn compile_lifted(
     mut region: crate::ir::hir::Region,
     fused_sources: Vec<CapturedRegion>,
     alternate_entries: Vec<CpuEntryKey>,
+    // Some(origin): a page artifact whose snapshot starts at `origin`.
+    page: Option<LinearAddress>,
 ) -> Result<CompiledArtifact, CompileError> {
+    let mut limits = if page.is_some() { CfgLimits::PAGE } else { CfgLimits::REGION };
+    // Only fused artifacts check the continuation epoch at instruction polls.
+    // Elsewhere a poll merely bounds work, which the acyclic graph already
+    // does: charge the budget at loop headers and drop per-instruction exits.
+    limits.sparse_polls |= config.optimize
+        && config.passes.rounds != 0
+        && fused_sources.is_empty()
+        && config.passes.enabled(PassConfig::SPARSE_POLLS);
     let _context = super::diagnostics::CompileContext::classified(
         request.linear.0,
         if request.tier == Tier::One { 1 } else { 2 },
@@ -473,16 +497,25 @@ fn compile_lifted(
         && request.tier == Tier::Two
         && config.passes.rounds != 0
         && config.passes.enabled(9)
+        && region.blocks.len() <= licm::MAX_BLOCKS
     {
         passes.loop_hoisted = licm::run(&mut region, licm::DEFAULT_WORK_LIMIT)
             .map_err(CompileError::InvalidIr)?
             .hoisted;
     }
+    if page.is_some() {
+        crate::ir::passes::strip_polls(&mut region);
+    }
+    else if limits.sparse_polls {
+        limits.sparse_polls =
+            crate::ir::passes::sparse_polls(&mut region, config.execution_budget).is_some();
+    }
     let hir_dump =
         if config.passes.debug.hir() { crate::ir::dump::text(&region) } else { String::new() };
+
     drop(pass_clock);
     let lower_clock = CompileScope::new(4);
-    let mut mir = lower(&region)?;
+    let mut mir = lower_limited(&region, limits)?;
     drop(lower_clock);
     config.passes.debug.check(&mir, true)?;
     let machine_clock = CompileScope::new(5);
@@ -517,9 +550,9 @@ fn compile_lifted(
             if config.passes.enabled(13) {
                 let _clock = CompileScope::new(14);
                 passes.state_writes_elided =
-                    if request.tier == Tier::One || !config.passes.state_sync {
-                        // Lowering already proves unchanged entry backing. Cold
-                        // code can use that result without a second dataflow pass.
+                    if !config.passes.state_sync {
+                        // Entry-equivalence only: lowering already proves
+                        // unchanged entry backing without a dataflow pass.
                         mir.elide_entry_cpu_state_writes(
                             crate::ir::mir::state_elision::DEFAULT_WORK_LIMIT,
                         )?
@@ -584,7 +617,16 @@ fn compile_lifted(
     let _emit_clock = CompileScope::new(6);
     let code = if cpu {
         let code_pages: Vec<u32> = dependencies.iter().map(|d| d.page.0).collect();
-        if alternate_entries.is_empty() {
+        if page.is_some() {
+            emit_cpu_page_entry(
+                &mir,
+                config.execution_budget,
+                request.cpu_entry(),
+                &alternate_entries,
+                &code_pages,
+            )?
+        }
+        else if alternate_entries.is_empty() {
             let emit_entry =
                 if fused_sources.is_empty() { emit_cpu_entry } else { emit_cpu_fused_entry };
             emit_entry(
@@ -639,6 +681,7 @@ fn compile_lifted(
         fused_sources,
         fused_edges: vec![],
         alternate_entries,
+        source_origin: page,
     })
 }
 
@@ -781,6 +824,92 @@ pub fn compile_cpu_shared_entries(
         region,
         vec![],
         keys[1..].to_vec(),
+        None,
+    )
+}
+/// Page-granular compilation: every instruction of one code page reachable
+/// from its observed external entries, in one function with one table owner.
+/// `snapshot` starts at the page base (`origin.linear & !4095`) and may extend
+/// at most 16 bytes into the next page for a straddling final instruction.
+/// Unsupported/undecodable instructions become interpreter exits; entries the
+/// graph cannot serve are dropped. The first served entry is the primary one.
+pub fn compile_cpu_page(
+    origin: &CompileRequest,
+    snapshot: &ImmutableCodeSnapshot,
+    entries: &[CpuEntryKey],
+    config: &IrConfig,
+) -> Result<CompiledArtifact, CompileError> {
+    let base = LinearAddress(origin.linear.0 & !4095);
+    let base_pc = GuestEip(origin.pc.0.wrapping_sub(origin.linear.0 & 4095));
+    if snapshot.bytes.len() < 4096 || snapshot.bytes.len() > CfgLimits::PAGE.source_bytes {
+        return Err(CompileError::Budget("page snapshot"));
+    }
+    let pages = if snapshot.bytes.len() > 4096 { 2 } else { 1 };
+    if snapshot.mappings.len() != pages
+        || snapshot.dependencies.is_empty()
+        || snapshot.dependencies.len() > pages
+        || snapshot
+            .mappings
+            .iter()
+            .enumerate()
+            .any(|(i, m)| m.linear.0 != base.0.wrapping_add(i as u32 * 4096) || m.physical.0 & 4095 != 0)
+        || snapshot
+            .dependencies
+            .iter()
+            .any(|d| !snapshot.mappings.iter().any(|m| m.physical == d.page))
+    {
+        return Err(CompileError::InvalidIr("invalid page snapshot".into()));
+    }
+    if entries.is_empty()
+        || entries.len() > CfgLimits::PAGE.entries
+        || entries.iter().enumerate().any(|(i, e)| {
+            e.linear.0 & !4095 != base.0
+                || e.cs_base() != origin.cpu_entry().cs_base()
+                || e.default_32 != origin.default_32
+                || entries[..i].contains(e)
+        })
+    {
+        return Err(CompileError::InvalidIr("invalid page entries".into()));
+    }
+    let _context = super::diagnostics::CompileContext::classified(
+        origin.linear.0,
+        if origin.tier == Tier::One { 1 } else { 2 },
+        2,
+        0,
+    );
+    let lift_clock = CompileScope::new(2);
+    let (region, served) = lift_cpu_cfg_page(
+        CfgSource {
+            bytes: &snapshot.bytes,
+            pc: base_pc,
+            linear: base,
+        },
+        &entries.iter().map(|e| e.pc).collect::<Vec<_>>(),
+        origin.default_32,
+        config.rep_iteration_budget,
+        CfgLimits::PAGE,
+    )?;
+    drop(lift_clock);
+    let keys: Vec<CpuEntryKey> = served
+        .iter()
+        .map(|pc| *entries.iter().find(|e| e.pc == *pc).unwrap())
+        .collect();
+    let request = CompileRequest {
+        key: origin.key,
+        pc: keys[0].pc,
+        linear: keys[0].linear,
+        default_32: origin.default_32,
+        tier: origin.tier,
+    };
+    compile_lifted(
+        &request,
+        snapshot,
+        config,
+        true,
+        region,
+        vec![],
+        keys[1..].to_vec(),
+        Some(base),
     )
 }
 /// Automatic multi-entry work shares one immutable capture; each entry may

@@ -2,7 +2,7 @@
 use super::{constant, rewrite_values, PassStats};
 use crate::ir::{analysis::cfg::Cfg, hir::*, ids::*};
 pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), String> {
-    if region.blocks.len() > 64 {
+    if region.blocks.len() > super::MAX_BLOCKS {
         return Err("CFG prune block budget exceeded".into());
     }
     for b in 0..region.blocks.len() {
@@ -31,14 +31,14 @@ pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), Stri
             stats.branches += 1;
         }
     }
-    let cfg = Cfg::compute(region)?;
-    if cfg.reachable.iter().all(|&v| v) {
+    let (_, reachable) = Cfg::reachability(region)?;
+    if reachable.iter().all(|&v| v) {
         return Ok(());
     }
-    stats.unreachable += cfg.reachable.iter().filter(|&&v| !v).count();
+    stats.unreachable += reachable.iter().filter(|&&v| !v).count();
     let mut block_ids = vec![None; region.blocks.len()];
     let mut next = 0;
-    for (i, &live) in cfg.reachable.iter().enumerate() {
+    for (i, &live) in reachable.iter().enumerate() {
         if live {
             block_ids[i] = Some(BlockId(next));
             next += 1;
@@ -48,7 +48,7 @@ pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), Stri
     let mut value_live = vec![false; region.values.len()];
     let mut state_live = vec![false; region.states.len()];
     for (b, block) in region.blocks.iter().enumerate() {
-        if !cfg.reachable[b] {
+        if !reachable[b] {
             continue;
         }
         for v in &block.params {
@@ -95,7 +95,7 @@ pub(super) fn run(region: &mut Region, stats: &mut PassStats) -> Result<(), Stri
         keep
     };
     let mut i = 0;
-    region.blocks.retain(|_| take(&mut i, &cfg.reachable));
+    region.blocks.retain(|_| take(&mut i, &reachable));
     let mut i = 0;
     region.instructions.retain(|_| take(&mut i, &inst_live));
     let mut i = 0;
