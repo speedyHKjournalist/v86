@@ -44,9 +44,19 @@ pub enum RoundingMode {
 // CPU.init selects the browser/API option; standalone arithmetic tests start
 // in compatible mode. Changing this helper policy does not invalidate JIT code.
 static mut X87_FAST_MATH: bool = false;
+// The CPU derives its generated-code x87 policy from this flag (see cpu::fpu).
+static mut X87_POLICY_OBSERVER: Option<unsafe fn()> = None;
 
 #[no_mangle]
-pub unsafe fn set_x87_fast_math(enabled: bool) { X87_FAST_MATH = enabled; }
+pub unsafe fn set_x87_fast_math(enabled: bool) {
+    X87_FAST_MATH = enabled;
+    if let Some(observer) = X87_POLICY_OBSERVER {
+        observer();
+    }
+}
+pub unsafe fn set_x87_policy_observer(observer: unsafe fn()) {
+    X87_POLICY_OBSERVER = Some(observer);
+}
 
 // State snapshots use SoftFloat's codes: precision 32/64/80 and rounding
 // nearest-even/toward-zero/down/up (0/1/2/3), not x87 control-word RC bits.

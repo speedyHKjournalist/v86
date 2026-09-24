@@ -496,8 +496,23 @@ pub fn verify(region: &Region) -> Result<()> {
                         && results == [Type::V128],
                     "vector replace types/lane",
                 )?,
-                Op::SseCheck => {
-                    require(args.is_empty() && results.is_empty(), "SSE guard signature")?
+                Op::SseCheck | Op::FpuCheck => {
+                    require(args.is_empty() && results.is_empty(), "FP guard signature")?
+                },
+                Op::X87 { opcode, modrm } => {
+                    let (inputs, outputs) = match crate::ir::x87::io(*opcode, *modrm) {
+                        Some(crate::ir::x87::Io::Load { .. }) => (2, 0),
+                        Some(crate::ir::x87::Io::Store { .. }) => (0, 2),
+                        Some(crate::ir::x87::Io::Stack) => (0, 0),
+                        None => (usize::MAX, 0),
+                    };
+                    require(
+                        args.len() == inputs
+                            && args.iter().all(|t| *t == Type::I32)
+                            && results.len() == outputs
+                            && results.iter().all(|t| *t == Type::I32),
+                        "x87 operation signature",
+                    )?
                 },
                 Op::XmmLoad { bytes, register }
                 | Op::XmmStore {

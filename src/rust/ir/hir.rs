@@ -78,6 +78,15 @@ pub enum Op {
     },
     /// CR0.EM/#UD then CR0.TS/#NM, before EA resolution.
     SseCheck,
+    /// x87 #NM for CR0.EM or CR0.TS, before EA resolution.
+    FpuCheck,
+    /// One x87 stack/control operation on CPU-owned FPU state (see ir::x87).
+    /// Memory operands are loaded/stored by ordinary guest-memory ops; this
+    /// never faults, exits, or observes GPRs, FLAGS or guest memory.
+    X87 {
+        opcode: u8,
+        modrm: u8,
+    },
     /// RAM returns V128 SSA; CPU slow completion exits at this instruction's next PC.
     XmmLoad {
         bytes: u8,
@@ -165,6 +174,8 @@ impl Op {
                 | Self::RmwStore { .. }
                 | Self::CompareExchange8B { .. }
                 | Self::SseCheck
+                | Self::FpuCheck
+                | Self::X87 { .. }
                 | Self::XmmLoad { .. }
                 | Self::XmmBinary { .. }
                 | Self::XmmShuffle { .. }

@@ -1004,6 +1004,34 @@ impl WasmBuilder {
     pub fn instruction_body_length(&self) -> u32 { wasm_len(self.instruction_body.len()) }
 }
 
+/// Scalar floating-point forms used by the experimental IR backend's x87 path.
+#[allow(dead_code)]
+impl WasmBuilder {
+    pub fn reinterpret_f32_as_i32(&mut self) {
+        self.instruction_body.push(op::OP_I32REINTERPRETF32);
+    }
+    pub fn promote_f32_to_f64(&mut self) { self.instruction_body.push(op::OP_F64PROMOTEF32); }
+    pub fn demote_f64_to_f32(&mut self) { self.instruction_body.push(op::OP_F32DEMOTEF64); }
+    pub fn convert_i32_to_f64(&mut self) { self.instruction_body.push(op::OP_F64CONVERTSI32); }
+    pub fn convert_i64_to_f64(&mut self) { self.instruction_body.push(op::OP_F64CONVERTSI64); }
+    /// Traps outside the i32 range: callers range-check first.
+    pub fn trunc_f64_to_i32(&mut self) { self.instruction_body.push(op::OP_I32TRUNCSF64); }
+    /// Traps outside the i64 range: callers range-check first.
+    pub fn trunc_f64_to_i64(&mut self) { self.instruction_body.push(op::OP_I64TRUNCSF64); }
+    pub fn const_f64(&mut self, v: f64) {
+        self.instruction_body.push(op::OP_F64CONST);
+        self.instruction_body.extend_from_slice(&v.to_le_bytes());
+    }
+    pub fn ge_f64(&mut self) { self.instruction_body.push(op::OP_F64GE); }
+    pub fn le_f64(&mut self) { self.instruction_body.push(op::OP_F64LE); }
+    pub fn ne_f64(&mut self) { self.instruction_body.push(op::OP_F64NE); }
+    pub fn store_aligned_f64(&mut self, byte_offset: u32) {
+        self.instruction_body.push(op::OP_F64STORE);
+        self.instruction_body.push(op::MEM_ALIGN64);
+        write_leb_u32(&mut self.instruction_body, byte_offset);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FunctionType, WasmBuilder, WASM_MODULE_ARGUMENT_COUNT};

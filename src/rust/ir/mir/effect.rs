@@ -47,6 +47,14 @@ pub enum EffectPlan {
         commit: StateId,
         call: RuntimeCall,
     },
+    /// Continuing x87 operation. `call` is the canonical fallback; loaded
+    /// operand words are its arguments, stored words its packed i64 result.
+    X87 {
+        opcode: u8,
+        modrm: u8,
+        outputs: Vec<ValueId>,
+        call: RuntimeCall,
+    },
 }
 impl EffectPlan {
     pub fn call(&self) -> &RuntimeCall {
@@ -54,7 +62,8 @@ impl EffectPlan {
             Self::Arithmetic(plan) => plan.call(),
             Self::Address { call, .. }
             | Self::Check { call, .. }
-            | Self::RmwCommit { call, .. } => call,
+            | Self::RmwCommit { call, .. }
+            | Self::X87 { call, .. } => call,
         }
     }
 }
@@ -100,6 +109,33 @@ pub fn lower(inst: &Instruction) -> Option<EffectPlan> {
             call: RuntimeCall::i32("ir_sse_guard", vec![], WasmType::I32),
             success: None,
             fault: 2,
+        },
+        Op::FpuCheck => EffectPlan::Check {
+            guard: Some(GlobalGuard {
+                address: gp::cr as u32,
+                mask: 12,
+            }),
+            before: inst.state.unwrap(),
+            call: RuntimeCall::i32("ir_fpu_guard", vec![], WasmType::I32),
+            success: Some(0),
+            fault: 2,
+        },
+        Op::X87 { opcode, modrm } => {
+            let inputs = &inst.args[..inst.args.len() - 1];
+            let operand = |n: usize| inputs.get(n).map_or(I32(0), |&v| Value(v));
+            EffectPlan::X87 {
+                opcode,
+                modrm,
+                outputs: inst.results[..inst.results.len() - 1].to_vec(),
+                call: RuntimeCall {
+                    name: "ir_x87_op",
+                    signature: Signature::new(
+                        &[WasmType::I32, WasmType::I32, WasmType::I32, WasmType::I32],
+                        &[WasmType::I64],
+                    ),
+                    args: vec![I32(opcode as i32), I32(modrm as i32), operand(0), operand(1)],
+                },
+            }
         },
         Op::RmwStore { bytes, .. } => EffectPlan::RmwCommit {
             bytes,

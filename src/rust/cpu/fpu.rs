@@ -29,36 +29,36 @@ static mut X87_JIT_VALUES: [u64; 8] = [0; 8];
 // Physical stack slots survive regions, branches and JIT module returns.
 // VALID identifies exact f64 mirrors; DIRTY identifies authoritative f64 values
 // that must be materialized before any legacy F80/MMX/state observer.
-static mut X87_VALUES: [u64; 8] = [0; 8];
-static mut X87_VALID: u32 = 0;
-static mut X87_DIRTY: u32 = 0;
+const X87_VALUES: *mut [u64; 8] = x87_shadow_values;
+const X87_VALID: *mut u32 = x87_shadow_valid;
+const X87_DIRTY: *mut u32 = x87_shadow_dirty;
 
 #[no_mangle]
 pub unsafe fn fpu_sync_slot(index: u32) {
     dbg_assert!(index < 8);
     let bit = 1 << index;
-    if X87_DIRTY & bit != 0 {
-        *fpu_st.add(index as usize) = F80::of_f64(X87_VALUES[index as usize]);
-        X87_DIRTY &= !bit;
+    if *X87_DIRTY & bit != 0 {
+        *fpu_st.add(index as usize) = F80::of_f64((*X87_VALUES)[index as usize]);
+        *X87_DIRTY &= !bit;
         crate::x87_profiler::cache_add(4, 1);
     }
 }
 #[no_mangle]
 pub unsafe fn fpu_invalidate_slot(index: u32) {
     dbg_assert!(index < 8);
-    X87_VALID &= !(1 << index);
-    X87_DIRTY &= !(1 << index);
+    *X87_VALID &= !(1 << index);
+    *X87_DIRTY &= !(1 << index);
 }
 #[no_mangle]
 pub unsafe fn fpu_sync_all() {
-    while X87_DIRTY != 0 {
-        fpu_sync_slot(X87_DIRTY.trailing_zeros());
+    while *X87_DIRTY != 0 {
+        fpu_sync_slot((*X87_DIRTY).trailing_zeros());
     }
 }
 #[no_mangle]
 pub unsafe fn fpu_discard_cache() {
-    X87_VALID = 0;
-    X87_DIRTY = 0;
+    *X87_VALID = 0;
+    *X87_DIRTY = 0;
 }
 #[no_mangle]
 pub unsafe fn fpu_cache_barrier() {
@@ -72,6 +72,42 @@ pub unsafe fn set_x87_jit_cache(enabled: bool) {
         fpu_cache_barrier();
     }
     X87_JIT_CACHE = enabled;
+    crate::softfloat::set_x87_policy_observer(refresh_x87_native_policy);
+    refresh_x87_native_policy();
+}
+/// Generated IR code inlines fast-math x87 against the shadow cache only while
+/// both policies hold; a change applies at the next instruction.
+unsafe fn refresh_x87_native_policy() {
+    *x87_native_policy =
+        (X87_JIT_CACHE && crate::softfloat::performance_recording_x87_state(2) != 0) as u8;
+}
+/// Addresses of the shadow values ([u64; 8]), VALID and DIRTY masks, for
+/// generated code that reads/writes the cache exactly like `write_cached`.
+pub fn x87_cache_addresses() -> [u32; 3] {
+    [X87_VALUES as u32, X87_VALID as u32, X87_DIRTY as u32]
+}
+/// Mirror every full slot whose F80 is exactly a binary64 into the cache, as
+/// `cached_value` would on first use. F80 stays authoritative (not DIRTY).
+pub unsafe fn fpu_mirror_exact_slots() {
+    if !X87_JIT_CACHE || crate::softfloat::performance_recording_x87_state(2) == 0 {
+        return;
+    }
+    let full = !*fpu_stack_empty as u32 & !*X87_VALID & 255;
+    for slot in 0..8 {
+        if full & 1 << slot == 0 {
+            continue;
+        }
+        let f = *fpu_st.add(slot);
+        let exponent = f.sign_exponent & 0x7FFF;
+        if (exponent == 0 && f.mantissa == 0)
+            || ((0x3C01..=0x43FE).contains(&exponent)
+                && f.mantissa >> 63 == 1
+                && f.mantissa & 0x7FF == 0)
+        {
+            (*X87_VALUES)[slot] = f.to_f64();
+            *X87_VALID |= 1 << slot;
+        }
+    }
 }
 #[no_mangle]
 pub unsafe fn get_x87_jit_cache() -> bool { X87_JIT_CACHE }
@@ -86,7 +122,7 @@ unsafe fn cached_value(r: u32) -> Option<f64> {
     if *fpu_stack_empty as u32 & (1 << slot) != 0 {
         return None;
     }
-    if X87_VALID & (1 << slot) == 0 {
+    if *X87_VALID & (1 << slot) == 0 {
         let f = *fpu_st.add(slot as usize);
         let exponent = f.sign_exponent & 0x7FFF;
         if !((exponent == 0 && f.mantissa == 0)
@@ -96,20 +132,22 @@ unsafe fn cached_value(r: u32) -> Option<f64> {
         {
             return None;
         }
-        X87_VALUES[slot as usize] = f.to_f64();
-        X87_VALID |= 1 << slot;
+        (*X87_VALUES)[slot as usize] = f.to_f64();
+        *X87_VALID |= 1 << slot;
         crate::x87_profiler::cache_add(3, 1);
     }
     else {
         crate::x87_profiler::cache_add(8, 1);
     }
-    Some(f64::from_bits(X87_VALUES[slot as usize]))
+    Some(f64::from_bits((*X87_VALUES)[slot as usize]))
 }
+/// Exact f64 bits of ST(0) through the shared shadow cache, as FST m64 uses.
+pub unsafe fn fpu_cached_st0() -> Option<u64> { cached_value(0).map(f64::to_bits) }
 unsafe fn write_cached(r: u32, value: f64) {
     let slot = (*fpu_stack_ptr as u32 + r) & 7;
-    X87_VALUES[slot as usize] = value.to_bits();
-    X87_VALID |= 1 << slot;
-    X87_DIRTY |= 1 << slot;
+    (*X87_VALUES)[slot as usize] = value.to_bits();
+    *X87_VALID |= 1 << slot;
+    *X87_DIRTY |= 1 << slot;
     crate::x87_profiler::cache_add(9, 1);
 }
 unsafe fn push_cached(value: f64) -> bool {
@@ -173,7 +211,7 @@ pub unsafe fn fpu_jit_cache_begin(full: u32, empty: u32) -> u32 {
             if full & (1 << r) == 0 {
                 continue;
             }
-            if X87_VALID & (1 << ((top + r) & 7)) != 0 {
+            if *X87_VALID & (1 << ((top + r) & 7)) != 0 {
                 continue;
             }
             let value = *fpu_st.add(((top + r) & 7) as usize);
@@ -197,15 +235,15 @@ pub unsafe fn fpu_jit_cache_begin(full: u32, empty: u32) -> u32 {
     for r in 0..8 {
         X87_JIT_VALUES[r] = if full & (1 << r) != 0 {
             let slot = (top as usize + r) & 7;
-            if X87_VALID & (1 << slot) != 0 {
+            if *X87_VALID & (1 << slot) != 0 {
                 crate::x87_profiler::cache_add(8, 1);
             }
             else {
-                X87_VALUES[slot] = (*fpu_st.add(slot)).to_f64();
-                X87_VALID |= 1 << slot;
+                (*X87_VALUES)[slot] = (*fpu_st.add(slot)).to_f64();
+                *X87_VALID |= 1 << slot;
                 crate::x87_profiler::cache_add(3, 1);
             }
-            X87_VALUES[slot]
+            (*X87_VALUES)[slot]
         }
         else {
             0
@@ -228,9 +266,9 @@ pub unsafe fn fpu_jit_cache_commit(dirty: u32, metadata: u32, counts: u32) {
     for r in 0..8 {
         if dirty & (1 << r) != 0 {
             let slot = ((top + r) & 7) as usize;
-            X87_VALUES[slot] = X87_JIT_VALUES[r as usize];
-            X87_VALID |= 1 << slot;
-            X87_DIRTY |= 1 << slot;
+            (*X87_VALUES)[slot] = X87_JIT_VALUES[r as usize];
+            *X87_VALID |= 1 << slot;
+            *X87_DIRTY |= 1 << slot;
         }
     }
     let empty = (metadata >> 4) & 255;

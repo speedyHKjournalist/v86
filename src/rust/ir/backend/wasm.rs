@@ -19,6 +19,8 @@ use crate::ir::runtime::entry::CpuEntryKey;
 use crate::ir::{ids::*, lowering::CompileError, mir::MirRegion, types::Type};
 use crate::wasmgen::wasm_builder::{Label, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128};
 use std::collections::{BTreeMap, VecDeque};
+
+mod x87;
 #[derive(Clone, Copy)]
 pub struct StateLayout {
     pub gpr: u32,
@@ -1014,7 +1016,7 @@ impl Emitter<'_> {
         // faults terminate the activation, whose admission interval is revoked.
         if !matches!(
             call.name,
-            "ir_segment_address" | "ir_pop_address" | "ir_rmw_value"
+            "ir_segment_address" | "ir_pop_address" | "ir_rmw_value" | "ir_x87_op"
         ) {
             self.admission_barrier();
         }
@@ -1430,6 +1432,21 @@ impl Emitter<'_> {
                 if guard.is_some() {
                     self.w.block_end();
                 }
+            },
+            EffectPlan::X87 {
+                opcode,
+                modrm,
+                outputs,
+                call,
+            } => {
+                let inputs: Vec<_> = call.args[2..]
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        Argument::Value(value) => Some(*value),
+                        Argument::I32(_) => None,
+                    })
+                    .collect();
+                self.x87(*opcode, *modrm, &inputs, outputs, call);
             },
             EffectPlan::RmwCommit {
                 bytes,

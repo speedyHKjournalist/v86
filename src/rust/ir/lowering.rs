@@ -84,6 +84,7 @@ pub fn lower_draft_limited(
                     | Op::RmwStore { .. }
                     | Op::CompareExchange8B { .. }
                     | Op::SseCheck
+                    | Op::FpuCheck
                     | Op::XmmLoad { .. }
                     | Op::XmmBinary { .. }
                     | Op::XmmShuffle { .. }

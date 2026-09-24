@@ -24,7 +24,12 @@ fn x87_memory_fixtures() {
                     assert!(lift(&bytes, GuestEip(0x8000), LinearAddress(0x8000), mode).is_err());
                     let mut r =
                         lift_cpu(&bytes, GuestEip(0x8000), LinearAddress(0x8000), mode).unwrap();
-                    assert_eq!(r.helpers.last().unwrap().name, "ir_x87_mem");
+                    if crate::ir::x87::io(opcode, group << 3).is_some() {
+                        assert!(r.helpers.is_empty());
+                    }
+                    else {
+                        assert_eq!(r.helpers.last().unwrap().name, "ir_x87_mem");
+                    }
                     for opt in 0..2 {
                         if opt != 0 {
                             run(&mut r, PassConfig::default()).unwrap();

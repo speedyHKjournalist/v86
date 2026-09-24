@@ -118,6 +118,114 @@ fn predicted(
         .find(|e| e.from == state.instruction_pc && locate(sources, e.target).is_some())
         .map(|e| e.target.0 as usize)
 }
+/// A direct near CALL pushes a constant target (32-bit operand size only).
+fn constant_target(ir: &Region, value: ValueId) -> Option<u32> {
+    let Definition::Instruction(id, 0) = ir.values[value.index()].definition
+    else {
+        return None;
+    };
+    match ir.instructions[id.index()].op {
+        Op::Const(target) if ir.values[value.index()].ty == Type::I32 => Some(target as u32),
+        _ => None,
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Transfer {
+    Other,
+    Call,
+    Return,
+}
+/// Classify a committed dynamic-target exit by re-decoding its own bytes.
+/// Coalesced fragments end in the transfer, so the decoded leader cannot tell.
+fn transfer_kind(state: &StateMap, sources: &[CfgSource<'_>], default_32: bool) -> Transfer {
+    if state.resume != ResumeKind::AfterInstruction || state.next_value.is_none() {
+        return Transfer::Other;
+    }
+    let Some((source, at)) = locate(sources, state.instruction_pc)
+    else {
+        return Transfer::Other;
+    };
+    let Ok(i) = decode(
+        &source.bytes[at..],
+        state.instruction_pc,
+        LinearAddress(source.linear.0.wrapping_add(at as u32)),
+        default_32,
+    )
+    else {
+        return Transfer::Other;
+    };
+    match i.encoding.opcode {
+        0xE8 => Transfer::Call,
+        0xFF if i.modrm.is_some_and(|m| m >> 3 & 7 == 2) => Transfer::Call,
+        0xC2 | 0xC3 => Transfer::Return,
+        _ => Transfer::Other,
+    }
+}
+/// Return sites a near RET in this graph may reach without leaving generated
+/// code. Each remains a guarded candidate: any other popped target exits.
+const RETURN_CANDIDATES: usize = 4;
+/// Every in-graph successor of one exit. A static fallthrough is unguarded;
+/// all dynamic candidates (profile prediction, direct CALL target, known
+/// return sites for RET) keep an exact target comparison in `graft`.
+fn exit_targets(
+    ir: &Region,
+    state: &StateMap,
+    sources: &[CfgSource<'_>],
+    predictions: &[PredictedEdge],
+    default_32: bool,
+    return_sites: &[usize],
+) -> Vec<usize> {
+    if let Some(next) = successor(state, sources) {
+        return vec![next];
+    }
+    if state.resume != ResumeKind::AfterInstruction {
+        return vec![];
+    }
+    let Some(value) = state.next_value
+    else {
+        return vec![];
+    };
+    let mut targets = vec![];
+    if let Some(target) = predicted(state, sources, predictions) {
+        targets.push(target);
+    }
+    if let Some(target) = constant_target(ir, value) {
+        if locate(sources, GuestEip(target)).is_some() {
+            targets.push(target as usize);
+        }
+    }
+    if transfer_kind(state, sources, default_32) == Transfer::Return {
+        targets.extend(return_sites.iter().take(RETURN_CANDIDATES));
+    }
+    let mut unique = vec![];
+    for target in targets {
+        if !unique.contains(&target) {
+            unique.push(target);
+        }
+    }
+    unique
+}
+/// The instruction after a direct near CALL whose callee is in the captured
+/// code. After a far or indirect call the return site is only reachable from
+/// the callee's own region, so it would be dead code here.
+fn return_site(
+    ir: &Region,
+    state: &StateMap,
+    sources: &[CfgSource<'_>],
+    default_32: bool,
+) -> Option<usize> {
+    let callee = constant_target(ir, state.next_value?)?;
+    (transfer_kind(state, sources, default_32) == Transfer::Call
+        && locate(sources, GuestEip(callee)).is_some()
+        && locate(sources, state.next_pc).is_some())
+    .then_some(state.next_pc.0 as usize)
+}
+fn exit_states(ir: &Region) -> impl Iterator<Item = &StateMap> {
+    ir.blocks.iter().filter_map(move |block| match block.terminator {
+        Some(Terminator::Exit(state)) => Some(&ir.states[state.index()]),
+        _ => None,
+    })
+}
 fn invalid(message: &'static str) -> CompileError { CompileError::Unsupported(message) }
 
 /// Graph-size limits of one reachable CFG. REGION is the historical bounded
@@ -403,15 +511,11 @@ fn lift_cfg_graph(
                 }
         });
         if !stop {
-            for block in &ir.blocks {
-                if let Some(Terminator::Exit(state)) = block.terminator {
-                    let state = &ir.states[state.index()];
-                    if let Some(next) =
-                        successor(state, sources).or_else(|| predicted(state, sources, predictions))
-                    {
-                        pending.insert(next);
-                    }
-                }
+            for state in exit_states(&ir) {
+                pending.extend(exit_targets(&ir, state, sources, predictions, default_32, &[]));
+                // A return site is reached by the callee's RET, not by an edge
+                // of the CALL itself; discover it so the RET can be guarded to it.
+                pending.extend(return_site(&ir, state, sources, default_32));
             }
         }
         fragments.insert(
@@ -446,6 +550,39 @@ fn lift_cfg_graph(
             rep_budget,
         );
     }
+    let mut return_sites = vec![];
+    for fragment in fragments.values().filter(|f| !f.stop) {
+        for state in exit_states(&fragment.ir) {
+            if let Some(site) = return_site(&fragment.ir, state, sources, default_32) {
+                if fragments.contains_key(&site) && !return_sites.contains(&site) {
+                    return_sites.push(site);
+                }
+            }
+        }
+    }
+    // A return site is entered only through a guarded RET. When the callee
+    // leaves the graph before returning, the site has no predecessor: keep
+    // only fragments reachable from the entries along the edges graft wires.
+    let mut reachable = BTreeSet::new();
+    let mut work: Vec<usize> = entries.iter().map(|pc| pc.0 as usize).collect();
+    while let Some(at) = work.pop() {
+        if !reachable.insert(at) {
+            continue;
+        }
+        let fragment = &fragments[&at];
+        if fragment.stop {
+            continue;
+        }
+        for state in exit_states(&fragment.ir) {
+            work.extend(
+                exit_targets(&fragment.ir, state, sources, predictions, default_32, &return_sites)
+                    .into_iter()
+                    .filter(|next| fragments.contains_key(next)),
+            );
+        }
+    }
+    fragments.retain(|at, _| reachable.contains(at));
+    return_sites.retain(|site| reachable.contains(site));
     let block_count = entries.len() + fragments.values().map(|f| f.ir.blocks.len()).sum::<usize>();
     if block_count > limits.blocks {
         return Err(CompileError::Budget("CFG block count"));
@@ -553,6 +690,8 @@ fn lift_cfg_graph(
             at,
             sources,
             predictions,
+            default_32,
+            &return_sites,
         )?;
         if b.region.instructions.len() > limits.instructions
             || b.region.values.len() > limits.values
@@ -579,13 +718,13 @@ fn coalesce_fragments(
 ) {
     let mut incoming = BTreeMap::<usize, usize>::new();
     for fragment in fragments.values().filter(|f| !f.stop) {
-        for block in &fragment.ir.blocks {
-            if let Some(Terminator::Exit(id)) = block.terminator {
-                if let Some(next) = successor(&fragment.ir.states[id.index()], sources)
-                    .or_else(|| predicted(&fragment.ir.states[id.index()], sources, predictions))
-                {
-                    *incoming.entry(next).or_default() += 1;
-                }
+        for state in exit_states(&fragment.ir) {
+            for next in exit_targets(&fragment.ir, state, sources, predictions, default_32, &[]) {
+                *incoming.entry(next).or_default() += 1;
+            }
+            // Return sites are RET targets: never fold them into a predecessor.
+            if let Some(site) = return_site(&fragment.ir, state, sources, default_32) {
+                *incoming.entry(site).or_default() += 2;
             }
         }
     }
@@ -692,6 +831,8 @@ fn graft(
     at: usize,
     sources: &[CfgSource<'_>],
     predictions: &[PredictedEdge],
+    default_32: bool,
+    return_sites: &[usize],
 ) -> Result<(), CompileError> {
     let src = &fragment.ir;
     let (root, frame) = &roots[&at];
@@ -901,14 +1042,26 @@ fn graft(
             Terminator::Exit(old) => {
                 let id = states[old.index()];
                 let state = out.states[id.index()].clone();
-                if let Some(next) = if fragment.stop {
-                    None
+                let targets: Vec<usize> = if fragment.stop {
+                    vec![]
                 }
                 else {
-                    successor(&state, sources).or_else(|| predicted(&state, sources, predictions))
+                    exit_targets(
+                        src,
+                        &src.states[old.index()],
+                        sources,
+                        predictions,
+                        default_32,
+                        return_sites,
+                    )
                 }
+                .into_iter()
                 .filter(|next| roots.contains_key(next))
-                {
+                .collect();
+                if targets.is_empty() {
+                    Terminator::Exit(id)
+                }
+                else {
                     if fragment.decoded.encoding.opcode == 0xFB {
                         // Only a normally completed compound shadow can reach
                         // this edge. Keep fault/terminal paths on their original
@@ -962,48 +1115,57 @@ fn graft(
                         count,
                         effect: effects[index],
                     };
-                    let next = Edge {
-                        target: roots[&next].0,
+                    let edge_to = |target: usize| Edge {
+                        target: roots[&target].0,
                         args: next_frame.args(),
                     };
-                    if let Some(target) = state.next_value {
-                        let expected = out.append(
-                            destination,
-                            Op::Const(
-                                out.states
-                                    [out.blocks[next.target.index()].entry_state.unwrap().index()]
-                                .instruction_pc
-                                .0 as u64,
-                            ),
-                            vec![],
-                            &[Type::I32],
-                            None,
-                        )[0];
-                        let condition = out.append(
-                            destination,
-                            Op::Binary(Binary::Eq),
-                            vec![target, expected],
-                            &[Type::I1],
-                            None,
-                        )[0];
+                    if let Some(value) = state.next_value {
+                        // Exact guards in candidate order; any other dynamic
+                        // target commits through the original exit.
                         let fallback = out.block(false);
                         out.blocks[fallback.index()].entry_state = Some(id);
                         out.terminate(fallback, Terminator::Exit(id));
-                        Terminator::CondBranch {
-                            condition,
-                            taken: next,
-                            not_taken: Edge {
-                                target: fallback,
+                        let tests: Vec<BlockId> = std::iter::once(destination)
+                            .chain((1..targets.len()).map(|_| out.block(false)))
+                            .collect();
+                        let mut first = None;
+                        for (k, &target) in targets.iter().enumerate() {
+                            let block = tests[k];
+                            let expected = out.append(
+                                block,
+                                Op::Const(target as u64),
+                                vec![],
+                                &[Type::I32],
+                                None,
+                            )[0];
+                            let condition = out.append(
+                                block,
+                                Op::Binary(Binary::Eq),
+                                vec![value, expected],
+                                &[Type::I1],
+                                None,
+                            )[0];
+                            let not_taken = Edge {
+                                target: tests.get(k + 1).copied().unwrap_or(fallback),
                                 args: vec![],
-                            },
+                            };
+                            let test = Terminator::CondBranch {
+                                condition,
+                                taken: edge_to(target),
+                                not_taken,
+                            };
+                            if k == 0 {
+                                first = Some(test);
+                            }
+                            else {
+                                out.terminate(block, test);
+                            }
                         }
+                        first.unwrap()
                     }
                     else {
-                        Terminator::Branch(next)
+                        Terminator::Branch(edge_to(targets[0]))
                     }
-                }
-                else {
-                    Terminator::Exit(id)
                 }
             },
         };
@@ -1027,6 +1189,34 @@ mod formation_tests {
             region.states.iter().map(|s| s.committed_instructions).max(),
             Some(32)
         );
+        crate::ir::lowering::lower(&region).unwrap();
+    }
+
+    #[test]
+    fn near_call_and_return_stay_inside_the_graph() {
+        // CALL f; DEC ECX; JNZ entry; HLT; f: ADD EAX,EBX; RET.
+        let bytes = [0xE8, 4, 0, 0, 0, 0x49, 0x75, 0xF8, 0xF4, 0x01, 0xD8, 0xC3];
+        let region =
+            lift_cpu_cfg(&bytes, GuestEip(0x1000), LinearAddress(0x2000), true, 64).unwrap();
+        crate::ir::verify::verify(&region).unwrap();
+        let entry_pcs: Vec<u32> = region
+            .blocks
+            .iter()
+            .filter_map(|b| b.entry_state.map(|s| region.states[s.index()].instruction_pc.0))
+            .collect();
+        // Callee and return site are graph blocks, not exits to the dispatcher.
+        assert!(entry_pcs.contains(&0x1009), "{entry_pcs:x?}");
+        assert!(entry_pcs.contains(&0x1005), "{entry_pcs:x?}");
+        crate::ir::lowering::lower(&region).unwrap();
+    }
+
+    #[test]
+    fn return_site_without_a_returning_callee_is_dropped() {
+        // CALL f; INC EAX; HLT; f: JMP far away (the callee leaves the graph).
+        let bytes = [0xE8, 2, 0, 0, 0, 0x40, 0xF4, 0xE9, 0, 0x10, 0, 0];
+        let region =
+            lift_cpu_cfg(&bytes, GuestEip(0x1000), LinearAddress(0x2000), true, 64).unwrap();
+        crate::ir::verify::verify(&region).unwrap();
         crate::ir::lowering::lower(&region).unwrap();
     }
 

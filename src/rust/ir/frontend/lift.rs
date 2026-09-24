@@ -248,13 +248,14 @@ fn lift_inner(
             continue;
         }
         if super::x87::supports(&i) {
-            if !cpu || i.ea.is_some() && offset != bytes.len() {
+            let continues = super::x87::continues(&i);
+            if !cpu || !continues && i.ea.is_some() && offset != bytes.len() {
                 return Err(CompileError::Unsupported(
                     "x87 memory requires terminal CPU region",
                 ));
             }
             super::x87::lift(&mut b, &i, count);
-            if i.ea.is_some() {
+            if !continues && i.ea.is_some() {
                 return Ok(b.region);
             }
             if offset == bytes.len() {

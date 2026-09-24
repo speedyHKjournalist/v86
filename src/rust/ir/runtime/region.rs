@@ -109,10 +109,19 @@ pub fn reachable_length(
                 conditional,
                 call,
             } => {
+                let target = target_offset(pc, &instruction, displacement);
                 if call {
+                    // A callee inside the window is followed, and its RET is
+                    // guarded back to the return site. After a far call, the
+                    // return site is reached only from another region.
+                    if target < bytes.len() {
+                        pending.insert(target);
+                        if end < bytes.len() {
+                            pending.insert(end);
+                        }
+                    }
                     continue;
                 }
-                let target = target_offset(pc, &instruction, displacement);
                 if target < bytes.len() {
                     pending.insert(target);
                 }

@@ -22,6 +22,10 @@ unsafe fn ud() -> u32 {
 }
 
 fn valid(opcode: u32, group: u32, r: u32) -> bool {
+    crate::ir::x87::valid_register(opcode as u8, group as u8, r as u8)
+}
+#[allow(dead_code)]
+fn valid_reference(opcode: u32, group: u32, r: u32) -> bool {
     match opcode {
         0xD8 | 0xDC => true,
         0xD9 => match group {
@@ -52,27 +56,8 @@ fn valid(opcode: u32, group: u32, r: u32) -> bool {
     }
 }
 
-#[no_mangle]
-pub unsafe fn ir_x87_reg_continue(opcode: u32, group: u32, r: u32, operand_size: u32) -> u32 {
-    assert!(!cpu::in_jit);
-    assert!((0xD8..=0xDF).contains(&opcode));
-    assert!(group < 8 && r < 8 && matches!(operand_size, 16 | 32));
-
-    // x87 (unlike SSE/MMX) raises #NM for either CR0.EM or CR0.TS.
-    if !cpu::task_switch_test() {
-        return Outcome::ControlTransferred as u32;
-    }
-
-    // The legacy JIT may have left exact-enough f64 shadow values live. IR x87
-    // always executes against canonical F80 state; synchronize only after the
-    // task-switch guard so a faulting instruction does not observe/mutate FPU
-    // state before #NM.
-    fpu::fpu_cache_barrier();
-
-    if !valid(opcode, group, r) {
-        return ud();
-    }
-
+/// Shared register instruction bodies after the guard and nested #UD checks.
+unsafe fn register_semantics(opcode: u32, group: u32, r: u32) {
     let r = r as i32;
     match (opcode, group) {
         (0xD8, 0) => instructions::instr_D8_0_reg(r),
@@ -142,6 +127,30 @@ pub unsafe fn ir_x87_reg_continue(opcode: u32, group: u32, r: u32, operand_size:
         _ => unreachable!("validated x87 register dispatch"),
     }
 
+}
+
+#[no_mangle]
+pub unsafe fn ir_x87_reg_continue(opcode: u32, group: u32, r: u32, operand_size: u32) -> u32 {
+    assert!(!cpu::in_jit);
+    assert!((0xD8..=0xDF).contains(&opcode));
+    assert!(group < 8 && r < 8 && matches!(operand_size, 16 | 32));
+
+    // x87 (unlike SSE/MMX) raises #NM for either CR0.EM or CR0.TS.
+    if !cpu::task_switch_test() {
+        return Outcome::ControlTransferred as u32;
+    }
+
+    // The legacy JIT may have left exact-enough f64 shadow values live. IR x87
+    // always executes against canonical F80 state; synchronize only after the
+    // task-switch guard so a faulting instruction does not observe/mutate FPU
+    // state before #NM.
+    fpu::fpu_cache_barrier();
+
+    if !valid(opcode, group, r) {
+        return ud();
+    }
+
+    register_semantics(opcode, group, r);
     // Register semantics cannot observe host/guest memory or change execution
     // context. F80 remains CPU-owned; CpuReload makes FNSTSW AX and FCOMI's
     // architectural outputs available to following SSA without retiring here.
@@ -375,4 +384,122 @@ pub unsafe fn ir_test_x87_pattern(sample: u32, control: u32) {
             },
         );
     }
+}
+
+/// #NM guard of continuing x87 forms, called only when CR0.EM or CR0.TS is set.
+#[no_mangle]
+pub unsafe fn ir_fpu_guard() -> u32 {
+    if cpu::task_switch_test() {
+        0
+    }
+    else {
+        2
+    }
+}
+
+/// Canonical (non-inlined) semantics of one continuing x87 form after its #NM
+/// guard: operands arrive already loaded and stores leave through the returned
+/// (high << 32 | low) word after a successful write preflight. Mirrors the
+/// interpreter's instruction bodies, including the shared f64 shadow cache.
+#[no_mangle]
+pub unsafe fn ir_x87_op(opcode: u32, modrm: u32, low: u32, high: u32) -> u64 {
+    use crate::{
+        cpu::fpu::*,
+        ir::x87::{io, Io},
+        softfloat::F80,
+    };
+    let (opcode, modrm) = (opcode as u8, modrm as u8);
+    let group = modrm >> 3 & 7;
+    // The next execution of the inlined form finds exact operands mirrored.
+    fpu_mirror_exact_slots();
+    let wide = (high as u64) << 32 | low as u64;
+    match io(opcode, modrm).expect("continuing x87 form") {
+        Io::Stack => register_semantics(opcode.into(), group.into(), (modrm & 7).into()),
+        Io::Load { .. } => {
+            let value = match opcode {
+                0xD8 => f32_to_f80(low as i32),
+                0xDA => i32_to_f80(low as i32),
+                0xDC => f64_to_f80(wide),
+                0xDE => i32_to_f80(low as i16 as i32),
+                _ => {
+                    match (opcode, group) {
+                        (0xD9, 0) => {
+                            F80::clear_exception_flags();
+                            fpu_push_m32_bits(low as i32);
+                        },
+                        (0xDD, 0) => {
+                            F80::clear_exception_flags();
+                            fpu_push_m64_bits(wide);
+                        },
+                        (0xDB, 0) => fpu_push(i32_to_f80(low as i32)),
+                        (0xDF, 0) => fpu_push(i32_to_f80(low as i16 as i32)),
+                        (0xDF, 5) => fpu_push(i64_to_f80(wide as i64)),
+                        (0xD9, 5) => set_control_word(low as u16),
+                        _ => unreachable!(),
+                    }
+                    return 0;
+                },
+            };
+            match group {
+                0 => fpu_fadd(0, value),
+                1 => fpu_fmul(0, value),
+                2 => fpu_fcom(value),
+                3 => fpu_fcomp(value),
+                4 => fpu_fsub(0, value),
+                5 => fpu_fsubr(0, value),
+                6 => fpu_fdiv(0, value),
+                7 => fpu_fdivr(0, value),
+                _ => unreachable!(),
+            }
+        },
+        Io::Store { .. } => {
+            let bits = match (opcode, group) {
+                (0xD9, 7) => (*gp::fpu_control_word).into(),
+                (0xDD, 7) => fpu_load_status_word().into(),
+                (0xD9, 2 | 3) => {
+                    let value = fpu_get_st0();
+                    F80::clear_exception_flags();
+                    let bits = value.to_f32() as u32 as u64;
+                    *gp::fpu_status_word |= F80::get_exception_flags() as u16;
+                    bits
+                },
+                (0xDD, 2 | 3) => {
+                    if let Some(value) = fpu_cached_st0() {
+                        F80::clear_exception_flags();
+                        value
+                    }
+                    else {
+                        let value = fpu_get_st0();
+                        F80::clear_exception_flags();
+                        let bits = value.to_f64();
+                        *gp::fpu_status_word |= F80::get_exception_flags() as u16;
+                        bits
+                    }
+                },
+                (0xDB, _) => {
+                    let value = fpu_get_st0();
+                    (if group == 1 { fpu_truncate_to_i32(value) } else { fpu_convert_to_i32(value) })
+                        as u32 as u64
+                },
+                (0xDD, 1) => fpu_truncate_to_i64(fpu_get_st0()) as u64,
+                (0xDF, 7) => fpu_convert_to_i64(fpu_get_st0()) as u64,
+                (0xDF, _) => {
+                    let value = fpu_get_st0();
+                    (if group == 1 { fpu_truncate_to_i16(value) } else { fpu_convert_to_i16(value) })
+                        as u16 as u64
+                },
+                _ => unreachable!(),
+            };
+            let pops = match (opcode, group) {
+                (0xD9 | 0xDD, 7) => false,
+                (0xD9 | 0xDD, 2) | (0xDB | 0xDF, 2) => false,
+                _ => true,
+            };
+            if pops {
+                fpu_pop();
+            }
+            return bits;
+        },
+    }
+    0
 }

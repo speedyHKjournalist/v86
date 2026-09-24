@@ -32,7 +32,11 @@ for(const release of [false,true]){
         const cr0=cpu.cr[0],cr4=cpu.cr[4];
         let events=[];
         const physical=a=>DATA+(a-0xA0000);
-        const observe=(kind,a,value)=>events.push([kind,a,value,Array.from(cpu.reg32),cpu.instruction_pointer[0],fpu_state()]);
+        // Device callbacks cannot observe x87 state. Continuing IR stores pop
+        // after the write preflight but before the data write, so write events
+        // record the integer context only; the final state compares the FPU.
+        const observe=(kind,a,value)=>events.push([kind,a,value,Array.from(cpu.reg32),cpu.instruction_pointer[0],
+            ...kind.startsWith("write")?[]:[fpu_state()]]);
         cpu.io.mmap_register(0xA0000,0x20000,
             a=>{observe("read8",a);return mem[physical(a)];},
             (a,x)=>{observe("write8",a,x);mem[physical(a)]=x;},

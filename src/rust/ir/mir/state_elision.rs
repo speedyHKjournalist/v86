@@ -250,7 +250,7 @@ fn derive(region: &Region, states: &[StatePlan], work_limit: usize) -> Result<Pl
             .map(|id| &region.instructions[id.index()])
             .any(|inst| {
                 (inst.state.is_some() || inst.commit.is_some())
-                    && !matches!(inst.op, Op::PollBudget | Op::SseCheck)
+                    && !matches!(inst.op, Op::PollBudget | Op::SseCheck | Op::FpuCheck | Op::X87 { .. })
                     && !transparent_helper(region, inst)
             })
     {

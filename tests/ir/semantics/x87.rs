@@ -5,6 +5,7 @@ use crate::ir::{
         lift::{lift, lift_cpu},
     },
     helper::HelperAbi,
+    hir::Op,
     lowering::lower,
     passes::{run, PassConfig},
 };
@@ -61,9 +62,7 @@ fn x87_register_fixtures() {
 
                     let mut region =
                         lift_cpu(&bytes, GuestEip(0x8000), LinearAddress(0x8000), true).unwrap();
-                    assert_eq!(region.helpers.len(), 1);
-                    assert_eq!(region.helpers[0].name, "ir_x87_reg_continue");
-                    assert!(matches!(region.helpers[0].abi, HelperAbi::CpuReload));
+                    assert_register_lowering(&region, opcode as u8, 0xC0 | (group << 3) as u8 | r as u8);
 
                     for opt in 0..2 {
                         if opt != 0 {
@@ -100,6 +99,11 @@ fn x87_register_continuation_contract() {
         assert!(lift_cpu(&[0xF0, opcode, 0xC0], GuestEip(0), LinearAddress(0), true).is_err());
 
         let region = lift_cpu(&bytes, GuestEip(0), LinearAddress(0), true).unwrap();
+        assert_register_lowering(&region, opcode, 0xC0);
+        // Stack-only forms have no helper call at all; test the CPU-state forms.
+        let region =
+            lift_cpu(&[if opcode == 0xDF { 0xDF } else { 0xDB }, 0xF1], GuestEip(0), LinearAddress(0), true)
+                .unwrap();
         assert_eq!(region.helpers.len(), 1);
         assert_eq!(region.helpers[0].name, "ir_x87_reg_continue");
         assert!(matches!(region.helpers[0].abi, HelperAbi::CpuReload));
@@ -122,9 +126,10 @@ fn x87_register_continuation_contract() {
     // Address-size override is semantically inert for mod=3, but must remain
     // accepted by the shared decoder/frontend.
     assert!(lift_cpu(&[0x67, 0xD8, 0xC1], GuestEip(0), LinearAddress(0), true).is_ok());
-    // Memory forms use their own terminal ABI, including #NM-before-segment order.
+    // Environment/state-image memory forms keep their own terminal ABI,
+    // including #NM-before-segment order.
     let memory = lift_cpu(
-        &[0xD9, 0x05, 0, 0, 0, 0],
+        &[0xD9, 0x25, 0, 0, 0, 0],
         GuestEip(0),
         LinearAddress(0),
         true,
@@ -132,7 +137,38 @@ fn x87_register_continuation_contract() {
     .unwrap();
     assert_eq!(memory.helpers[0].name, "ir_x87_mem");
     assert!(matches!(memory.helpers[0].abi, HelperAbi::CpuExit));
-    assert!(lift_cpu(&[0xD9, 0x00, 0x90], GuestEip(0), LinearAddress(0), true).is_err());
+    assert!(lift_cpu(&[0xD9, 0x20, 0x90], GuestEip(0), LinearAddress(0), true).is_err());
+    // Operand loads/stores continue: #NM guard, ordinary memory op, x87 op.
+    let load = lift_cpu(&[0xD9, 0x00, 0x90], GuestEip(0), LinearAddress(0), true).unwrap();
+    assert!(load.helpers.is_empty());
+    let ops: Vec<_> = load.instructions.iter().map(|i| i.op.clone()).collect();
+    let check = ops.iter().position(|op| *op == Op::FpuCheck).unwrap();
+    let read = ops.iter().position(|op| matches!(op, Op::GuestLoad { bytes: 4 })).unwrap();
+    let x87 = ops.iter().position(|op| matches!(op, Op::X87 { opcode: 0xD9, modrm: 0 })).unwrap();
+    assert!(check < read && read < x87);
+    let store = lift_cpu(&[0xDD, 0x18, 0x90], GuestEip(0), LinearAddress(0), true).unwrap();
+    let ops: Vec<_> = store.instructions.iter().map(|i| i.op.clone()).collect();
+    let preflight =
+        ops.iter().position(|op| matches!(op, Op::GuestCheck { bytes: 8, write: true })).unwrap();
+    let x87 = ops.iter().position(|op| matches!(op, Op::X87 { .. })).unwrap();
+    let partial = ops.iter().position(|op| matches!(op, Op::PartialStore { bytes: 4 })).unwrap();
+    let commit = ops.iter().position(|op| matches!(op, Op::GuestStore { bytes: 4 })).unwrap();
+    assert!(preflight < x87 && x87 < partial && partial < commit);
+}
+
+/// Stack-only register forms lower to one `X87` op after the #NM guard.
+/// FLAGS/GPR forms and nested invalid encodings reload through the helper.
+fn assert_register_lowering(region: &crate::ir::hir::Region, opcode: u8, modrm: u8) {
+    if crate::ir::x87::io(opcode, modrm).is_some() {
+        assert!(region.helpers.is_empty());
+        assert!(region.instructions.iter().any(|i| i.op == Op::FpuCheck));
+        assert!(region.instructions.iter().any(|i| i.op == Op::X87 { opcode, modrm }));
+    }
+    else {
+        assert_eq!(region.helpers.len(), 1);
+        assert_eq!(region.helpers[0].name, "ir_x87_reg_continue");
+        assert!(matches!(region.helpers[0].abi, HelperAbi::CpuReload));
+    }
 }
 
 #[test]

@@ -920,6 +920,7 @@ fn plan_references(data: &MirData, id: InstId) -> (Vec<ValueId>, Vec<ValueId>, V
                 uses.push(c.address);
                 states.push(c.before);
             },
+            EffectPlan::X87 { outputs, .. } => defs.extend(outputs),
         }
     }
     if let Some(c) = &data.calls[id.index()] {
@@ -1315,6 +1316,7 @@ pub(super) fn backing_sync(
                     super::effect::EffectPlan::Address { .. }
                         | super::effect::EffectPlan::Check { .. }
                         | super::effect::EffectPlan::RmwCommit { .. }
+                        | super::effect::EffectPlan::X87 { .. }
                         | super::effect::EffectPlan::Arithmetic(
                             super::arithmetic::ArithmeticPlan::Division(_)
                         )

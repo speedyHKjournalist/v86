@@ -24,6 +24,7 @@ pub enum Protocol {
     TicketCommit,
     Check,
     CpuExit,
+    X87,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Contract {
@@ -71,6 +72,8 @@ imports! {
     "ir_memory_read": [I32,I32] -> [I64], Packed, "translation, A/D bits and device read; high32=0 or 2";
     "ir_memory_check": [I32,I32,I32] -> [I32], Check, "translation preflight; no device read; returns 0 or 2";
     "ir_sse_guard": [] -> [I32], Check, "reads CR0 TS/EM; returns 0 or CPU-owned fault 2";
+    "ir_fpu_guard": [] -> [I32], Check, "reads CR0 TS/EM; x87 #NM; returns 0 or CPU-owned fault 2";
+    "ir_x87_op": [I32,I32,I32,I32] -> [I64], X87, "x87 stack/status/control and f64 shadow cache only; operand words in, stored words out; no fault, exit, GPR/FLAGS or memory access";
     "ir_memory_write": [I32,I32,I32] -> [I32], CpuExit, "ordered write, callbacks, code invalidation; returns 2 or 4; caller retires";
     "ir_memory_write_unmasked_word": [I32,I32,I32] -> [I32], CpuExit, "ENTER16 MMIO compatibility; returns 2 or 4; caller retires";
     "ir_rmw_read": [I32,I32] -> [I64], Ticket, "preflights both write pages before read; publishes RMW_VALUE; MAX=fault";
@@ -147,6 +150,7 @@ pub(crate) fn verify(data: &MirData) -> Result<(), CompileError> {
             EffectPlan::RmwCommit { .. } => Protocol::TicketCommit,
             EffectPlan::Arithmetic(ArithmeticPlan::Division(_)) => Protocol::Fault,
             EffectPlan::Arithmetic(ArithmeticPlan::CompareExchange(_)) => Protocol::CpuExit,
+            EffectPlan::X87 { .. } => Protocol::X87,
         };
         check(p.call(), &data.value_types, protocol)?;
     }

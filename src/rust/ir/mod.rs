@@ -47,6 +47,7 @@ pub mod state;
 mod store_continuation_tests;
 pub mod types;
 pub mod verify;
+pub mod x87;
 
 #[cfg(test)]
 #[path = "../../../tests/ir/semantics/shifts.rs"]
