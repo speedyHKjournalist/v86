@@ -192,3 +192,45 @@ pub unsafe fn ir_t0_write_slow(address: u32, value: u32, bytes: u32) -> u32 {
     let _ = epoch;
     0
 }
+
+/// How a page function leaving its page continues in the next page's
+/// function: by returning to the loop in t0_execute (Iterative), by a
+/// nested call (Nested, ir_t0_chain), or by a Wasm tail call from the page
+/// function itself (Tail, ir_t0_link; needs engine support, see
+/// ir_t0_set_tail_calls). Page functions are emitted for the mode current
+/// at compile time; the helpers decline in any other mode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    Iterative,
+    Nested,
+    Tail,
+}
+static mut T0_LINK: Link = Link::Iterative;
+static mut T0_TAIL_CALLS: bool = false;
+pub fn t0_link() -> Link { unsafe { T0_LINK } }
+/// Whether the host engine validates Wasm tail calls and passes its
+/// function table to generated modules as ("e", "t"). Tail linking is not
+/// the default: in V8 a cross-instance return_call_indirect costs more than
+/// returning to t0_execute's loop.
+#[no_mangle]
+pub unsafe fn ir_t0_set_tail_calls(supported: u32) -> bool {
+    if supported > 1 {
+        return false;
+    }
+    T0_TAIL_CALLS = supported == 1;
+    if !T0_TAIL_CALLS && T0_LINK == Link::Tail {
+        T0_LINK = Link::Iterative;
+    }
+    true
+}
+/// A/B switch: 0 iterative, 1 nested, 2 tail (if supported).
+#[no_mangle]
+pub unsafe fn ir_t0_set_link_mode(mode: u32) -> bool {
+    T0_LINK = match mode {
+        0 => Link::Iterative,
+        1 => Link::Nested,
+        2 if T0_TAIL_CALLS => Link::Tail,
+        _ => return false,
+    };
+    true
+}

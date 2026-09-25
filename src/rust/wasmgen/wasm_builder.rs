@@ -121,6 +121,13 @@ pub struct WasmBuilder {
     pub arg_local_initial_state: WasmLocal,
     pub defer_flags: bool,
     deferred_stores: Vec<(u32, WasmLocal)>,
+    /// Imports the host's function table as ("e", "t") (tail calls).
+    table_import: bool,
+    /// The module's function returns an i32 (FN1_RET instead of FN1).
+    entry_result: bool,
+    /// Branch hints (body offset of an if/br_if, likely taken), emitted as
+    /// the "metadata.code.branch_hint" section.
+    branch_hints: Vec<(usize, bool)>,
 }
 
 #[derive(Eq, PartialEq)]
@@ -175,6 +182,9 @@ impl WasmBuilder {
             arg_local_initial_state: WasmLocal(0),
             defer_flags: false,
             deferred_stores: Vec::new(),
+            table_import: false,
+            entry_result: false,
+            branch_hints: Vec::new(),
         }
     }
     pub fn defer_fixed_i32(&mut self, address: u32) {
@@ -243,6 +253,9 @@ impl WasmBuilder {
         self.next_label = Label::ZERO;
         self.label_to_depth.clear();
         self.defer_flags = false;
+        self.table_import = false;
+        self.entry_result = false;
+        self.branch_hints.clear();
         self.finished = false;
     }
 
@@ -299,7 +312,7 @@ impl WasmBuilder {
             self.deferred_stores.is_empty(),
             "unmaterialized deferred stores"
         );
-        let entry_type = self.intern_signature(FunctionType::FN1.signature());
+        let entry_type = self.intern_signature(self.entry_signature());
         self.output.extend_from_slice(b"\0asm\x01\0\0\0");
         let mut body = Vec::new();
         write_leb_u32(&mut body, wasm_len(self.signatures.len()));
@@ -315,7 +328,7 @@ impl WasmBuilder {
         write_leb_u32(
             &mut body,
             wasm_len(self.imports.len())
-                .checked_add(1)
+                .checked_add(1 + self.table_import as u32)
                 .expect("import overflow"),
         );
         for (fn_name, ty) in &self.imports {
@@ -328,6 +341,12 @@ impl WasmBuilder {
         name(&mut body, "m");
         body.extend_from_slice(&[op::EXT_MEMORY, 0]);
         write_leb_u32(&mut body, 64);
+        if self.table_import {
+            name(&mut body, "e");
+            name(&mut body, "t");
+            // funcref, no maximum, minimum 0 (indices are checked at run time)
+            body.extend_from_slice(&[op::EXT_TABLE, op::TYPE_ANYFUNC, 0, 0]);
+        }
         section(&mut self.output, op::SC_IMPORT, &body);
         body.clear();
         body.push(1);
@@ -355,6 +374,20 @@ impl WasmBuilder {
             write_leb_u32(&mut body, count);
             body.push(ty as u8);
         }
+        if !self.branch_hints.is_empty() {
+            // Offsets from the start of the function body (its locals).
+            let mut hints = Vec::new();
+            name(&mut hints, "metadata.code.branch_hint");
+            hints.push(1);
+            write_leb_u32(&mut hints, wasm_len(self.imports.len()));
+            write_leb_u32(&mut hints, wasm_len(self.branch_hints.len()));
+            for &(offset, likely) in &self.branch_hints {
+                write_leb_u32(&mut hints, wasm_len(body.len() + offset));
+                hints.push(1);
+                hints.push(likely as u8);
+            }
+            section(&mut self.output, 0, &hints);
+        }
         body.extend_from_slice(&self.instruction_body);
         body.push(op::OP_END);
         let mut code = vec![1];
@@ -370,6 +403,12 @@ impl WasmBuilder {
     /// Bytes of instructions emitted so far (for size statistics).
     #[cfg(any(test, feature = "ir-experimental"))]
     pub fn body_len(&self) -> usize { self.instruction_body.len() }
+    /// Replace emitted instructions (the bytes from `start` to `end` of the
+    /// body, a stack-neutral sequence) by nops.
+    #[cfg(any(test, feature = "ir-experimental"))]
+    pub fn patch_nop(&mut self, start: usize, end: usize) {
+        self.instruction_body[start..end].fill(op::OP_NOP);
+    }
 
     /// Declared locals excluding parameters, including temporary staging slots.
     #[cfg(any(test, feature = "ir-experimental"))]
@@ -935,6 +974,27 @@ impl WasmBuilder {
     }
 
     pub fn return_(&mut self) { self.instruction_body.push(op::OP_RETURN); }
+
+    /// Hint the next instruction (an if or br_if) as likely or unlikely
+    /// taken (Wasm branch hinting; engines without it ignore the section).
+    #[cfg(any(test, feature = "ir-experimental"))]
+    pub fn hint(&mut self, likely: bool) { self.branch_hints.push((self.instruction_body.len(), likely)); }
+    /// The module function returns an i32 (every return leaves one).
+    #[cfg(any(test, feature = "ir-experimental"))]
+    pub fn set_entry_result(&mut self) { self.entry_result = true; }
+    fn entry_signature(&self) -> Signature {
+        if self.entry_result { FunctionType::FN1_RET.signature() } else { FunctionType::FN1.signature() }
+    }
+    /// Tail call (Wasm tail-call proposal) of the table entry on the stack,
+    /// with the module entry signature; the table is the host's ("e", "t").
+    #[cfg(any(test, feature = "ir-experimental"))]
+    pub fn return_call_indirect_fn1(&mut self) {
+        let ty = self.intern_signature(self.entry_signature());
+        self.table_import = true;
+        self.instruction_body.push(op::OP_RETURN_CALL_INDIRECT);
+        write_leb_u32(&mut self.instruction_body, ty);
+        self.instruction_body.push(0);
+    }
 
     #[allow(dead_code)]
     pub fn drop_(&mut self) { self.instruction_body.push(op::OP_DROP); }

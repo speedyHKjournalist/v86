@@ -22,13 +22,20 @@ pub enum EntryContract {
 // Normal edges and audited, committed observer exits can request a successor.
 // Fault, invalidation and budget exits never authorize unchecked continuation.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ExitKind {
-    None,
-    Normal,
-    Observer,
-    Poll,
+#[repr(u8)]
+pub enum ExitKind {
+    None = 0,
+    Normal = 1,
+    Observer = 2,
+    Poll = 3,
 }
 static mut EXIT_KIND: ExitKind = ExitKind::None;
+/// Where generated code may store an ExitKind byte itself instead of calling
+/// ir_request_link/ir_request_poll_exit: only code generated in the running
+/// Wasm instance (natively generated fixtures must call the imports).
+pub fn exit_kind_address() -> Option<u32> {
+    if cfg!(target_arch = "wasm32") { Some(std::ptr::addr_of!(EXIT_KIND) as u32) } else { None }
+}
 // A byte-validation certificate is valid only in a synchronous CPU interval
 // without unobserved host writes. No certificate survives a new CPU batch,
 // interpretation, an observing import, or code/reset invalidation. Saturation

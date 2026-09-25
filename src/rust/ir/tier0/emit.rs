@@ -30,7 +30,8 @@ mod simd;
 mod x87run;
 /// Register-only x87 runs (A/B switch).
 const X87_RUNS: bool = true;
-use crate::ir::runtime::entry::CpuEntryKey;
+use crate::ir::runtime::tier0::{t0_link, Link};
+use crate::ir::runtime::entry::{exit_kind_address, CpuEntryKey, ExitKind};
 use crate::state_flags::CachedStateFlags;
 use crate::wasmgen::wasm_builder::{Label, Signature, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128, WasmType};
 
@@ -218,9 +219,6 @@ impl Form {
                     | Form::Jcc { .. }
             )
     }
-    /// Whether the template reads or read-modify-writes the lazy FLAGS in
-    /// memory (pending stores are written first). Producers (flags_arith,
-    /// flags_logic) and conditions (which materialize themselves) are not.
     /// Whether the template reads or writes the CPU's x87 state other than
     /// through the x87 cache (MMX aliases the stack; helpers).
     fn reads_x87_state(self) -> bool {
@@ -240,40 +238,19 @@ impl Form {
             _ => false,
         }
     }
+    /// Whether the template reads or read-modify-writes the lazy FLAGS in
+    /// memory (pending stores are written first). Others keep their FLAGS
+    /// effects pending (see PendingFlags) or read the pending state.
     fn touches_flags_memory(self) -> bool {
-        !matches!(
-            self,
-            Form::Alu { .. }
-                | Form::Test { .. }
-                | Form::MovToRm { .. }
-                | Form::MovToReg { .. }
-                | Form::Lea { .. }
-                | Form::MovExtend { .. }
-                | Form::NegNot { .. }
-                | Form::Xadd { .. }
-                | Form::Cmpxchg { .. }
-                | Form::Div { .. }
-                | Form::Moffs { .. }
-                | Form::X87 { .. }
-                | Form::Fnstsw
-                | Form::Fcmov { .. }
-                | Form::Push { .. }
-                | Form::Pop { .. }
-                | Form::Xchg { .. }
-                | Form::Cdq
-                | Form::Cwde
-                | Form::Nop
-                | Form::Leave
-                | Form::Setcc { .. }
-                | Form::Cmov { .. }
-                | Form::Jmp { .. }
-                | Form::Jcc { .. }
-                | Form::Call { .. }
-                | Form::Ret { .. }
-                | Form::JmpIndirect
-                | Form::CallIndirect
-                | Form::Simd(_)
-        ) || matches!(self, Form::Simd(simd::Simd::CompareFlags { .. }))
+        match self {
+            Form::ShiftHelper { name: "rol32" | "ror32", size: 32, count: Count::Imm(_) } => false,
+            Form::DoubleShift { size: 32, count: Count::Imm(_), .. } => false,
+            // Helpers over the lazy state, and dynamic counts (no FLAGS
+            // change for a zero count).
+            Form::ShiftHelper { .. } | Form::DoubleShift { .. } => true,
+            Form::X87Flags { .. } | Form::Simd(simd::Simd::CompareFlags { .. }) => true,
+            _ => false,
+        }
     }
     fn control(self) -> bool {
         matches!(
@@ -551,6 +528,12 @@ struct Page {
     flags: PendingFlags,
     p_op1: WasmLocal,
     p_result: WasmLocal,
+    p_word: WasmLocal,
+    /// GPRs any template writes: sync_out stores of the others (recorded in
+    /// sync_stores) become nops once the function is complete, as locals of
+    /// unwritten GPRs always equal the CPU state.
+    gpr_written: u8,
+    sync_stores: Vec<(usize, usize, u8)>,
     /// XMM registers cached in locals within the block; `xmm_dirty` ones are
     /// newer than the CPU state (written at block ends and before any
     /// interpreter step, see xmm_store).
@@ -582,13 +565,17 @@ impl X87Words for X87Locals<'_> {
 
 /// Lazy-FLAGS stores of this block's last producers not yet written to memory
 /// (see Page::materialize): last_op1 from p_op1, last_result from p_result,
-/// last_op_size/flags_changed constants, and FLAGS bits to clear.
+/// last_op_size/flags_changed constants, and FLAGS bits `clear` replaced by
+/// p_word's bits in `set` (the others by 0). Bits of a pending flags_changed
+/// are computed lazily, so their FLAGS bits are dead (each producer that
+/// removes a bit from flags_changed also writes that FLAGS bit): pruned.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct PendingFlags {
     op1: bool,
     result: bool,
     size_changed: Option<(i32, i32)>,
     clear: i32,
+    set: i32,
 }
 
 /// One level of the structured layout: the page's dispatch loop or a loop
@@ -628,11 +615,35 @@ impl Page {
         self.w.const_i32(value);
         self.w.store_aligned_i32(0);
     }
+    /// Write the GPRs back (only those the function writes survive: see
+    /// Page::gpr_written).
     fn sync_out(&mut self) {
         for r in 0..8 {
+            let start = self.w.body_len();
             self.w.const_i32(gp::reg32 as i32 + 4 * r);
             self.w.get_local(&self.gpr[r as usize]);
             self.w.store_aligned_i32(0);
+            self.sync_stores.push((start, self.w.body_len(), r as u8));
+        }
+    }
+    /// A GPR write (the value on the stack).
+    fn set_gpr(&mut self, r: usize) {
+        self.gpr_written |= 1 << r;
+        self.w.set_local(&self.gpr[r]);
+    }
+    /// The CPU's exit request (see runtime::entry), stored directly when
+    /// the generated code runs in this instance.
+    fn request_exit(&mut self, kind: ExitKind) {
+        match exit_kind_address() {
+            Some(address) => {
+                self.w.const_i32(address as i32);
+                self.w.const_i32(kind as i32);
+                self.w.store_u8(0);
+            },
+            None => {
+                let name = if kind == ExitKind::Poll { "ir_request_poll_exit" } else { "ir_request_link" };
+                self.w.call_signature(name, signature(name));
+            },
         }
     }
     fn sync_in(&mut self) {
@@ -709,10 +720,27 @@ impl Page {
         self.w.get_local(&self.tlb);
         self.w.load_aligned_i32((linear >> 12) * 4);
         self.page_mismatch(linear as i32, self.hosts[page as usize] as i32);
+        self.w.hint(false);
         self.w.if_void();
         self.w.const_i32(offset as i32);
         self.w.set_local(&self.offset);
         self.w.br(self.exit);
+        self.w.block_end();
+    }
+    /// At the start of a block whose bytes run into page `page` of a
+    /// multi-page function: interpret its first instruction (the step block,
+    /// which always progresses) unless that page still translates to the
+    /// compiled code.
+    fn check_block_page(&mut self, page: u32, start: u32) {
+        let linear = self.page_linear.wrapping_add(page << 12);
+        self.w.get_local(&self.tlb);
+        self.w.load_aligned_i32((linear >> 12) * 4);
+        self.page_mismatch(linear as i32, self.hosts[page as usize] as i32);
+        self.w.hint(false);
+        self.w.if_void();
+        self.w.const_i32(start as i32);
+        self.w.set_local(&self.offset);
+        self.w.br(self.step);
         self.w.block_end();
     }
     /// Push nonzero unless the TLB entry on the stack maps `linear` (a page
@@ -764,6 +792,7 @@ impl Page {
         self.w.get_local(&self.retired);
         self.w.const_i32(crate::cpu::cpu::LOOP_COUNTER);
         self.w.geu_i32();
+        self.w.hint(false);
         self.w.if_void();
         self.sync_out();
         self.x87_close();
@@ -773,7 +802,8 @@ impl Page {
         self.w.const_i32(self.page_linear as i32);
         self.w.add_i32();
         self.w.store_aligned_i32(0);
-        self.w.call_signature("ir_request_poll_exit", signature("ir_request_poll_exit"));
+        self.request_exit(ExitKind::Poll);
+        self.w.const_i32(0);
         self.w.return_();
         self.w.block_end();
     }
@@ -823,7 +853,7 @@ impl Page {
     /// Write the value on the stack to a register of `size`.
     fn write_reg(&mut self, r: u8, size: u8) {
         if size == 32 {
-            self.w.set_local(&self.gpr[r as usize]);
+            self.set_gpr(r as usize);
             return;
         }
         self.w.set_local(&self.tmp);
@@ -843,7 +873,7 @@ impl Page {
             self.w.shl_i32();
         }
         self.w.or_i32();
-        self.w.set_local(&self.gpr[register as usize]);
+        self.set_gpr(register as usize);
     }
     /// Run the current instruction in the interpreter instead (which delivers
     /// any fault with the GPRs written back), through the page's shared step
@@ -866,6 +896,7 @@ impl Page {
     }
     /// retry() if the condition on the stack is nonzero.
     fn retry_if(&mut self) {
+        self.w.hint(false);
         if let Some(label) = self.retry_label {
             self.w.br_if(label);
             return;
@@ -945,6 +976,7 @@ impl Page {
     fn read_mem(&mut self, size: u8, write: bool) {
         let bytes = size as u32 / 8;
         self.tlb_miss(bytes, write);
+        self.w.hint(false);
         self.w.if_i32();
         self.w.get_local(&self.addr);
         self.w.const_i32(bytes as i32);
@@ -972,6 +1004,7 @@ impl Page {
     fn write_mem(&mut self, size: u8, value: &WasmLocal) {
         let bytes = size as u32 / 8;
         self.tlb_miss(bytes, true);
+        self.w.hint(false);
         self.w.if_void();
         self.w.get_local(&self.addr);
         self.w.get_local(value);
@@ -1035,6 +1068,7 @@ impl Page {
             result: true,
             size_changed: Some((size as i32 - 1, FLAGS_ALL | if sub { FLAG_SUB } else { 0 })),
             clear: 0,
+            set: 0,
         };
         self.known = if sub { Known::Sub(size) } else { Known::Add(size) };
     }
@@ -1048,8 +1082,82 @@ impl Page {
             result: true,
             size_changed: Some((size as i32 - 1, FLAGS_ALL & !bits)),
             clear: self.flags.clear | bits,
+            set: self.flags.set & !bits,
         };
+        self.prune_word();
         self.known = Known::Logic(size);
+    }
+    /// A producer's last_result (pending).
+    fn pend_result(&mut self, local: &WasmLocal) {
+        self.w.get_local(local);
+        self.w.set_local(&self.p_result);
+        self.flags.result = true;
+    }
+    fn pend_op1(&mut self, local: &WasmLocal) {
+        self.w.get_local(local);
+        self.w.set_local(&self.p_op1);
+        self.flags.op1 = true;
+    }
+    /// A producer's last_op_size and flags_changed (pending constants).
+    fn pend_size_changed(&mut self, size: u8, changed: i32) {
+        self.flags.size_changed = Some((size as i32 - 1, changed));
+        self.prune_word();
+    }
+    /// flags_changed &= keep: on the pending constant, else in memory.
+    fn and_changed(&mut self, keep: i32) {
+        match self.flags.size_changed {
+            Some((size, changed)) => self.flags.size_changed = Some((size, changed & keep)),
+            None => {
+                self.w.const_i32(gp::flags_changed as i32);
+                self.w.load_fixed_i32(gp::flags_changed as u32);
+                self.w.const_i32(keep);
+                self.w.and_i32();
+                self.w.store_aligned_i32(0);
+            },
+        }
+    }
+    /// FLAGS bits `bits` become the value on the stack (only those bits).
+    fn pend_word(&mut self, bits: i32) {
+        if self.flags.set != 0 {
+            self.w.get_local(&self.p_word);
+            self.w.const_i32(!bits);
+            self.w.and_i32();
+            self.w.or_i32();
+        }
+        self.w.set_local(&self.p_word);
+        self.flags.clear |= bits;
+        self.flags.set |= bits;
+    }
+    fn prune_word(&mut self) {
+        if let Some((_, changed)) = self.flags.size_changed {
+            self.flags.clear &= !changed;
+            self.flags.set &= !changed;
+        }
+    }
+    fn push_op1(&mut self) {
+        if self.flags.op1 { self.w.get_local(&self.p_op1) } else { self.w.load_fixed_i32(gp::last_op1 as u32) }
+    }
+    fn push_result(&mut self) {
+        if self.flags.result { self.w.get_local(&self.p_result) } else { self.w.load_fixed_i32(gp::last_result as u32) }
+    }
+    /// FLAGS bit `flag` (not lazily computed) as 0/1: pending or in memory.
+    fn word_bit(&mut self, flag: i32) {
+        if self.flags.clear & flag != 0 {
+            if self.flags.set & flag == 0 {
+                self.w.const_i32(0);
+                return;
+            }
+            self.w.get_local(&self.p_word);
+        }
+        else {
+            self.w.load_fixed_i32(gp::flags as u32);
+        }
+        if flag != 1 {
+            self.w.const_i32(flag.trailing_zeros() as i32);
+            self.w.shr_u_i32();
+        }
+        self.w.const_i32(1);
+        self.w.and_i32();
     }
     /// Write the pending lazy-FLAGS stores (the interpreter's state).
     fn materialize(&mut self) {
@@ -1140,7 +1248,17 @@ impl Page {
             self.store_size_changed(size, changed);
         }
         if flags.clear != 0 {
-            self.clear_flags(flags.clear);
+            self.w.const_i32(gp::flags as i32);
+            self.w.load_fixed_i32(gp::flags as u32);
+            self.w.const_i32(!flags.clear);
+            self.w.and_i32();
+            if flags.set != 0 {
+                self.w.get_local(&self.p_word);
+                self.w.const_i32(flags.set);
+                self.w.and_i32();
+                self.w.or_i32();
+            }
+            self.w.store_aligned_i32(0);
         }
     }
     /// last_op_size and flags_changed (adjacent) in one store.
@@ -1149,15 +1267,27 @@ impl Page {
         self.w.const_i64((changed as u32 as i64) << 32 | size as u32 as i64);
         self.w.store_aligned_i64(0);
     }
-    fn clear_flags(&mut self, bits: i32) {
-        self.w.const_i32(gp::flags as i32);
-        self.w.load_fixed_i32(gp::flags as u32);
-        self.w.const_i32(!bits);
-        self.w.and_i32();
-        self.w.store_aligned_i32(0);
-    }
-    /// cpu::misc_instr::getcf over the lazy state in memory.
+    /// cpu::misc_instr::getcf over the lazy state (pending or in memory).
     fn lazy_carry(&mut self) {
+        if let Some((_, changed)) = self.flags.size_changed {
+            if changed & FLAG_CARRY == 0 {
+                self.word_bit(FLAG_CARRY);
+                return;
+            }
+            let sub = changed >> 31;
+            self.push_result();
+            if sub != 0 {
+                self.w.const_i32(sub);
+                self.w.xor_i32();
+            }
+            self.push_op1();
+            if sub != 0 {
+                self.w.const_i32(sub);
+                self.w.xor_i32();
+            }
+            self.w.ltu_i32();
+            return;
+        }
         self.materialize();
         self.w.load_fixed_i32(gp::flags_changed as u32);
         self.w.const_i32(1);
@@ -1324,8 +1454,47 @@ impl Page {
         }
         true
     }
-    /// cpu::misc_instr::getzf/getsf/getof over the lazy state in memory.
+    /// cpu::misc_instr::getzf/getsf/getof over the lazy state (pending or in
+    /// memory).
     fn lazy_flag(&mut self, flag: i32) {
+        if let Some((size, changed)) = self.flags.size_changed {
+            if changed & flag == 0 {
+                self.word_bit(flag);
+                return;
+            }
+            match flag {
+                FLAG_ZERO => {
+                    self.push_result();
+                    self.w.const_i32(-1);
+                    self.w.xor_i32();
+                    self.push_result();
+                    self.w.const_i32(1);
+                    self.w.sub_i32();
+                    self.w.and_i32();
+                },
+                FLAG_SIGN => self.push_result(),
+                _ => {
+                    self.push_op1();
+                    self.push_result();
+                    self.w.xor_i32();
+                    self.push_result();
+                    self.push_op1();
+                    self.w.sub_i32();
+                    if changed < 0 {
+                        self.w.const_i32(1);
+                        self.w.sub_i32();
+                    }
+                    self.push_result();
+                    self.w.xor_i32();
+                    self.w.and_i32();
+                },
+            }
+            self.w.const_i32(size);
+            self.w.shr_u_i32();
+            self.w.const_i32(1);
+            self.w.and_i32();
+            return;
+        }
         self.materialize();
         self.w.load_fixed_i32(gp::flags_changed as u32);
         self.w.const_i32(flag);
@@ -1402,7 +1571,7 @@ impl Page {
         self.w.get_local(&self.gpr[4]);
         self.w.const_i32(4);
         self.w.sub_i32();
-        self.w.set_local(&self.gpr[4]);
+        self.set_gpr(4);
     }
 
     /// Emit the fast path of `form`; guard failures branch to `slow`.
@@ -1504,13 +1673,9 @@ impl Page {
                     None => self.read_rm(i, size, true),
                 }
                 self.w.set_local(&fa);
-                // CF survives: fold the current lazy CF into flags (stored
-                // after the result, so a retried store commits nothing).
-                self.w.load_fixed_i32(gp::flags as u32);
-                self.w.const_i32(!1);
-                self.w.and_i32();
+                // CF survives: the current lazy CF becomes a FLAGS bit
+                // (pending after the result, so a retried store commits nothing).
                 self.lazy_carry();
-                self.w.or_i32();
                 self.w.set_local(&value);
                 self.w.get_local(&fa);
                 self.w.const_i32(1);
@@ -1525,14 +1690,11 @@ impl Page {
                     },
                     None => self.write_rm(i, size, &fr),
                 }
-                self.store_fixed(gp::flags as u32, &value);
-                self.store_fixed(gp::last_op1 as u32, &fa);
-                self.store_fixed(gp::last_result as u32, &fr);
-                self.store_fixed_const(gp::last_op_size as u32, size as i32 - 1);
-                self.store_fixed_const(
-                    gp::flags_changed as u32,
-                    FLAGS_ALL & !1 | if dec { FLAG_SUB } else { 0 },
-                );
+                self.w.get_local(&value);
+                self.pend_word(FLAG_CARRY);
+                self.pend_op1(&fa);
+                self.pend_result(&fr);
+                self.pend_size_changed(size, FLAGS_ALL & !1 | if dec { FLAG_SUB } else { 0 });
                 self.known = if dec { Known::Dec(size) } else { Known::Inc(size) };
             },
             Form::NegNot { neg, size } => {
@@ -1574,14 +1736,7 @@ impl Page {
                 }
                 self.w.set_local(&fr);
                 self.write_rm(i, 32, &fr);
-                self.store_fixed(gp::last_result as u32, &fr);
-                self.store_fixed_const(gp::last_op_size as u32, 31);
-                self.store_fixed_const(gp::flags_changed as u32, FLAGS_ALL & !1 & !FLAG_OVERFLOW);
-                // flags = flags & !(CF | OF) | CF | OF, as cpu::arith::shl32/shr32/sar32.
-                self.w.const_i32(gp::flags as i32);
-                self.w.load_fixed_i32(gp::flags as u32);
-                self.w.const_i32(!1 & !FLAG_OVERFLOW);
-                self.w.and_i32();
+                // CF | OF, as cpu::arith::shl32/shr32/sar32.
                 self.w.get_local(&fa);
                 self.w.const_i32(match kind {
                     Shift::Left => 32 - count as i32,
@@ -1592,7 +1747,6 @@ impl Page {
                 self.w.and_i32();
                 self.w.set_local(&value);
                 self.w.get_local(&value);
-                self.w.or_i32();
                 match kind {
                     Shift::Left => {
                         self.w.get_local(&value);
@@ -1616,7 +1770,9 @@ impl Page {
                     },
                     Shift::Arithmetic => {},
                 }
-                self.w.store_aligned_i32(0);
+                self.pend_word(FLAG_CARRY | FLAG_OVERFLOW);
+                self.pend_result(&fr);
+                self.pend_size_changed(32, FLAGS_ALL & !1 & !FLAG_OVERFLOW);
                 self.known = Known::None;
             },
             Form::ShiftHelper { name: name @ ("rol32" | "ror32"), size: 32, count } => {
@@ -1632,19 +1788,22 @@ impl Page {
                 self.w.set_local(&fr);
                 self.write_rm(i, 32, &fr);
                 if count != Count::Imm(0) {
-                    if count == Count::Cl {
+                    // A dynamic count updates the lazy state in memory (see
+                    // touches_flags_memory), a constant one the pending state.
+                    let dynamic = count == Count::Cl;
+                    if dynamic {
                         self.w.get_local(&fb);
                         self.w.if_void();
+                        self.w.const_i32(gp::flags_changed as i32);
+                        self.w.load_fixed_i32(gp::flags_changed as u32);
+                        self.w.const_i32(!1 & !FLAG_OVERFLOW);
+                        self.w.and_i32();
+                        self.w.store_aligned_i32(0);
+                        self.w.const_i32(gp::flags as i32);
+                        self.w.load_fixed_i32(gp::flags as u32);
+                        self.w.const_i32(!1 & !FLAG_OVERFLOW);
+                        self.w.and_i32();
                     }
-                    self.w.const_i32(gp::flags_changed as i32);
-                    self.w.load_fixed_i32(gp::flags_changed as u32);
-                    self.w.const_i32(!1 & !FLAG_OVERFLOW);
-                    self.w.and_i32();
-                    self.w.store_aligned_i32(0);
-                    self.w.const_i32(gp::flags as i32);
-                    self.w.load_fixed_i32(gp::flags as u32);
-                    self.w.const_i32(!1 & !FLAG_OVERFLOW);
-                    self.w.and_i32();
                     self.w.get_local(&fr);
                     if left {
                         // result & 1 | (result << 11 ^ result >> 20) & OF
@@ -1669,10 +1828,14 @@ impl Page {
                     self.w.const_i32(FLAG_OVERFLOW);
                     self.w.and_i32();
                     self.w.or_i32();
-                    self.w.or_i32();
-                    self.w.store_aligned_i32(0);
-                    if count == Count::Cl {
+                    if dynamic {
+                        self.w.or_i32();
+                        self.w.store_aligned_i32(0);
                         self.w.block_end();
+                    }
+                    else {
+                        self.and_changed(!1 & !FLAG_OVERFLOW);
+                        self.pend_word(FLAG_CARRY | FLAG_OVERFLOW);
                     }
                 }
                 self.known = Known::None;
@@ -1719,17 +1882,6 @@ impl Page {
                     self.w.get_local(&fr);
                     self.write_reg(reg, size);
                 }
-                self.store_fixed(gp::last_op1 as u32, &fa);
-                self.store_fixed(gp::last_result as u32, &fr);
-                self.store_fixed_const(gp::last_op_size as u32, size as i32 - 1);
-                self.store_fixed_const(
-                    gp::flags_changed as u32,
-                    FLAGS_ALL & !FLAG_CARRY & !FLAG_ADJUST & !FLAG_OVERFLOW | if sub { FLAG_SUB } else { 0 },
-                );
-                self.w.const_i32(gp::flags as i32);
-                self.w.load_fixed_i32(gp::flags as u32);
-                self.w.const_i32(!FLAG_CARRY & !FLAG_ADJUST & !FLAG_OVERFLOW);
-                self.w.and_i32();
                 // CF: adc: a ^ ((a ^ b) & (b ^ r)); sbb: r ^ ((r ^ b) & (b ^ a)).
                 let (x, y) = if sub { (&fr, &fa) } else { (&fa, &fr) };
                 self.w.get_local(x);
@@ -1745,7 +1897,6 @@ impl Page {
                 self.w.shr_u_i32();
                 self.w.const_i32(1);
                 self.w.and_i32();
-                self.w.or_i32();
                 // AF: a ^ b ^ r.
                 self.w.get_local(&fa);
                 self.w.get_local(&fb);
@@ -1771,7 +1922,13 @@ impl Page {
                 self.w.const_i32(FLAG_OVERFLOW);
                 self.w.and_i32();
                 self.w.or_i32();
-                self.w.store_aligned_i32(0);
+                self.pend_word(FLAG_CARRY | FLAG_ADJUST | FLAG_OVERFLOW);
+                self.pend_op1(&fa);
+                self.pend_result(&fr);
+                self.pend_size_changed(
+                    size,
+                    FLAGS_ALL & !FLAG_CARRY & !FLAG_ADJUST & !FLAG_OVERFLOW | if sub { FLAG_SUB } else { 0 },
+                );
                 self.known = Known::None;
             },
             Form::DoubleShift { left, size: 32, reg, count } => {
@@ -1810,17 +1967,19 @@ impl Page {
                 self.w.set_local(&fr);
                 self.write_rm(i, 32, &fr);
                 if count != Count::Imm(0) {
+                    // A dynamic count updates the lazy state in memory (see
+                    // touches_flags_memory), a constant one the pending state.
                     if dynamic {
                         self.w.get_local(&value);
                         self.w.if_void();
+                        self.store_fixed(gp::last_result as u32, &fr);
+                        self.store_fixed_const(gp::last_op_size as u32, 31);
+                        self.store_fixed_const(gp::flags_changed as u32, FLAGS_ALL & !1 & !FLAG_OVERFLOW);
+                        self.w.const_i32(gp::flags as i32);
+                        self.w.load_fixed_i32(gp::flags as u32);
+                        self.w.const_i32(!1 & !FLAG_OVERFLOW);
+                        self.w.and_i32();
                     }
-                    self.store_fixed(gp::last_result as u32, &fr);
-                    self.store_fixed_const(gp::last_op_size as u32, 31);
-                    self.store_fixed_const(gp::flags_changed as u32, FLAGS_ALL & !1 & !FLAG_OVERFLOW);
-                    self.w.const_i32(gp::flags as i32);
-                    self.w.load_fixed_i32(gp::flags as u32);
-                    self.w.const_i32(!1 & !FLAG_OVERFLOW);
-                    self.w.and_i32();
                     // CF: the last bit shifted out of the destination.
                     self.w.get_local(&fa);
                     if left {
@@ -1837,7 +1996,6 @@ impl Page {
                     self.w.const_i32(1);
                     self.w.and_i32();
                     self.w.tee_local(&self.tmp);
-                    self.w.or_i32();
                     if left {
                         // OF (count 1 only): CF ^ the result's sign.
                         self.w.get_local(&self.tmp);
@@ -1864,9 +2022,15 @@ impl Page {
                         self.w.and_i32();
                     }
                     self.w.or_i32();
-                    self.w.store_aligned_i32(0);
                     if dynamic {
+                        self.w.or_i32();
+                        self.w.store_aligned_i32(0);
                         self.w.block_end();
+                    }
+                    else {
+                        self.pend_word(FLAG_CARRY | FLAG_OVERFLOW);
+                        self.pend_result(&fr);
+                        self.pend_size_changed(32, FLAGS_ALL & !1 & !FLAG_OVERFLOW);
                     }
                 }
                 self.known = Known::None;
@@ -1892,18 +2056,13 @@ impl Page {
                 // As cpu::arith::bsf32/bsr32: a zero source keeps the register.
                 self.read_rm(i, 32, false);
                 self.w.set_local(&fb);
-                self.store_fixed_const(gp::last_op_size as u32, 31);
-                self.store_fixed_const(gp::flags_changed as u32, FLAGS_ALL & !FLAG_ZERO & !FLAG_CARRY);
-                self.w.const_i32(gp::flags as i32);
-                self.w.load_fixed_i32(gp::flags as u32);
-                self.w.const_i32(!FLAG_ZERO & !FLAG_CARRY);
-                self.w.and_i32();
+                // ZF: a zero source; CF: 0.
                 self.w.get_local(&fb);
                 self.w.eqz_i32();
                 self.w.const_i32(6);
                 self.w.shl_i32();
-                self.w.or_i32();
-                self.w.store_aligned_i32(0);
+                self.pend_word(FLAG_ZERO | FLAG_CARRY);
+                self.pend_size_changed(32, FLAGS_ALL & !FLAG_ZERO & !FLAG_CARRY);
                 self.w.get_local(&fb);
                 self.w.if_i32();
                 if reverse {
@@ -1923,7 +2082,7 @@ impl Page {
                 self.w.const_i32(0);
                 self.w.block_end();
                 self.w.set_local(&fr);
-                self.store_fixed(gp::last_result as u32, &fr);
+                self.pend_result(&fr);
                 self.known = Known::None;
             },
             Form::BitTest { op, offset } => {
@@ -1937,22 +2096,13 @@ impl Page {
                 self.w.const_i32(31);
                 self.w.and_i32();
                 self.w.set_local(&fb);
-                self.w.const_i32(gp::flags as i32);
-                self.w.load_fixed_i32(gp::flags as u32);
-                self.w.const_i32(!1);
-                self.w.and_i32();
                 self.read_reg(base, 32);
                 self.w.get_local(&fb);
                 self.w.shr_u_i32();
                 self.w.const_i32(1);
                 self.w.and_i32();
-                self.w.or_i32();
-                self.w.store_aligned_i32(0);
-                self.w.const_i32(gp::flags_changed as i32);
-                self.w.load_fixed_i32(gp::flags_changed as u32);
-                self.w.const_i32(!1);
-                self.w.and_i32();
-                self.w.store_aligned_i32(0);
+                self.pend_word(FLAG_CARRY);
+                self.and_changed(!1);
                 if op != 0 {
                     self.read_reg(base, 32);
                     self.w.const_i32(1);
@@ -1981,19 +2131,14 @@ impl Page {
                 self.w.set_local_i64(&self.wide);
                 self.w.get_local_i64(&self.wide);
                 self.w.wrap_i64_to_i32();
-                self.w.set_local(&self.gpr[0]);
+                self.set_gpr(0);
                 self.w.get_local_i64(&self.wide);
                 self.w.const_i64(32);
                 self.w.shr_u_i64();
                 self.w.wrap_i64_to_i32();
-                self.w.set_local(&self.gpr[2]);
+                self.set_gpr(2);
                 let eax = self.gpr[0].unsafe_clone();
-                self.store_fixed(gp::last_result as u32, &eax);
-                self.store_fixed_const(gp::last_op_size as u32, 31);
-                self.w.const_i32(gp::flags as i32);
-                self.w.load_fixed_i32(gp::flags as u32);
-                self.w.const_i32(!1 & !FLAG_OVERFLOW);
-                self.w.and_i32();
+                // CF = OF = the high half is not the extension of the low.
                 self.w.get_local(&self.gpr[2]);
                 if signed {
                     self.w.get_local(&self.gpr[0]);
@@ -2007,9 +2152,9 @@ impl Page {
                 }
                 self.w.const_i32(1 | FLAG_OVERFLOW);
                 self.w.mul_i32();
-                self.w.or_i32();
-                self.w.store_aligned_i32(0);
-                self.store_fixed_const(gp::flags_changed as u32, FLAGS_ALL & !1 & !FLAG_OVERFLOW);
+                self.pend_word(FLAG_CARRY | FLAG_OVERFLOW);
+                self.pend_result(&eax);
+                self.pend_size_changed(32, FLAGS_ALL & !1 & !FLAG_OVERFLOW);
                 self.known = Known::None;
             },
             Form::Div { signed } => {
@@ -2071,10 +2216,10 @@ impl Page {
                     self.w.rem_i64();
                 }
                 self.w.wrap_i64_to_i32();
-                self.w.set_local(&self.gpr[2]);
+                self.set_gpr(2);
                 self.w.get_local_i64(&self.quotient);
                 self.w.wrap_i64_to_i32();
-                self.w.set_local(&self.gpr[0]);
+                self.set_gpr(0);
             },
             Form::Xadd { size, reg } => {
                 // As cpu::arith::xadd*: reg = old rm, rm = old rm + reg.
@@ -2185,6 +2330,7 @@ impl Page {
                     let slow = self.w.block_void();
                     self.w.load_fixed_u8(gp::x87_native_policy as u32);
                     self.w.eqz_i32();
+                    self.w.hint(false);
                     self.w.br_if(slow);
                     let cache = Some(self.x87.unsafe_clone());
                     let mut words = X87Locals { w: &mut self.w, words: [&low, &high], cache };
@@ -2264,22 +2410,16 @@ impl Page {
                 self.w.set_local(&fr);
                 self.w.get_local(&fr);
                 self.write_reg(reg, 32);
-                self.store_fixed(gp::last_result as u32, &fr);
-                self.store_fixed_const(gp::last_op_size as u32, 31);
                 // CF = OF = the product does not fit in 32 signed bits.
-                self.w.const_i32(gp::flags as i32);
-                self.w.load_fixed_i32(gp::flags as u32);
-                self.w.const_i32(!1 & !FLAG_OVERFLOW);
-                self.w.and_i32();
                 self.w.get_local_i64(&self.wide);
                 self.w.get_local(&fr);
                 self.w.extend_signed_i32_to_i64();
                 self.w.ne_i64();
                 self.w.const_i32(1 | FLAG_OVERFLOW);
                 self.w.mul_i32();
-                self.w.or_i32();
-                self.w.store_aligned_i32(0);
-                self.store_fixed_const(gp::flags_changed as u32, FLAGS_ALL & !1 & !FLAG_OVERFLOW);
+                self.pend_word(FLAG_CARRY | FLAG_OVERFLOW);
+                self.pend_result(&fr);
+                self.pend_size_changed(32, FLAGS_ALL & !1 & !FLAG_OVERFLOW);
                 self.known = Known::None;
             },
             Form::Push { src } => {
@@ -2298,26 +2438,26 @@ impl Page {
                 self.w.get_local(&self.gpr[4]);
                 self.w.const_i32(4);
                 self.w.add_i32();
-                self.w.set_local(&self.gpr[4]);
+                self.set_gpr(4);
                 self.w.get_local(&value);
                 self.write_reg(reg, 32);
             },
             Form::Xchg { a, b } => {
                 self.w.get_local(&self.gpr[a as usize]);
                 self.w.get_local(&self.gpr[b as usize]);
-                self.w.set_local(&self.gpr[a as usize]);
-                self.w.set_local(&self.gpr[b as usize]);
+                self.set_gpr(a as usize);
+                self.set_gpr(b as usize);
             },
             Form::Cdq => {
                 self.w.get_local(&self.gpr[0]);
                 self.w.const_i32(31);
                 self.w.shr_s_i32();
-                self.w.set_local(&self.gpr[2]);
+                self.set_gpr(2);
             },
             Form::Cwde => {
                 let eax = self.gpr[0].unsafe_clone();
                 self.signed(&eax, 16);
-                self.w.set_local(&self.gpr[0]);
+                self.set_gpr(0);
             },
             Form::Nop => {},
             Form::Leave => {
@@ -2328,9 +2468,9 @@ impl Page {
                 self.w.get_local(&self.gpr[5]);
                 self.w.const_i32(4);
                 self.w.add_i32();
-                self.w.set_local(&self.gpr[4]);
+                self.set_gpr(4);
                 self.w.get_local(&value);
-                self.w.set_local(&self.gpr[5]);
+                self.set_gpr(5);
             },
             Form::Setcc { cc } => {
                 self.prepare_rm(i);
@@ -2344,7 +2484,7 @@ impl Page {
                 self.condition(cc);
                 self.w.if_void();
                 self.w.get_local(&value);
-                self.w.set_local(&self.gpr[reg as usize]);
+                self.set_gpr(reg as usize);
                 self.w.block_end();
             },
             Form::Jmp { target } => {
@@ -2374,7 +2514,7 @@ impl Page {
                 self.w.get_local(&self.gpr[4]);
                 self.w.const_i32(4 + pop as i32);
                 self.w.add_i32();
-                self.w.set_local(&self.gpr[4]);
+                self.set_gpr(4);
                 self.flush();
                 self.w.get_local(&value);
                 self.goto_dynamic();
@@ -2532,6 +2672,11 @@ fn emit_units(
                 p.xmm_reset();
                 p.x87_known_open = false;
                 p.current_page = block.start as u32 >> 12;
+                // Instructions in (or running into) a later page: see
+                // check_block_page.
+                for page in p.current_page + 1..=(block.end() as u32 - 1) >> 12 {
+                    p.check_block_page(page, block.start as u32);
+                }
                 let mut ended = false;
                 let insts = &block.instructions;
                 let mut j = 0;
@@ -2588,6 +2733,9 @@ pub fn emit_page(
     hosts: &[u32],
 ) -> Emitted {
     let mut w = WasmBuilder::new();
+    // The result is the linear EIP left for when a link is requested (see
+    // cache::t0_execute; other returns leave 0).
+    w.set_entry_result();
     // The argument is the chain depth (0 from the CPU dispatcher, see
     // cache::ir_t0_chain). A foreign context returns before any state change.
     let depth = w.arg_local_initial_state.unsafe_clone();
@@ -2605,6 +2753,7 @@ pub fn emit_page(
     w.call_signature("ir_enter_page", signature("ir_enter_page"));
     w.eqz_i32();
     w.if_void();
+    w.const_i32(0);
     w.return_();
     w.block_end();
     w.block_end();
@@ -2618,6 +2767,7 @@ pub fn emit_page(
         w.and_i32();
         w.const_i32(required);
         w.ne_i32();
+        w.hint(false);
         w.if_void();
         w.const_i32(-1);
         w.call_signature("ir_t0_step", Signature::new(&[WasmType::I32], &[WasmType::I32]));
@@ -2627,6 +2777,7 @@ pub fn emit_page(
         w.const_i32(1);
         w.add_i32();
         w.store_aligned_i32(0);
+        w.const_i32(0);
         w.return_();
         w.block_end();
     }
@@ -2658,7 +2809,7 @@ pub fn emit_page(
     let write_mask = w.set_new_local();
     let read_mask = w.set_new_local();
     let mut locals = vec![];
-    for _ in 0..15 {
+    for _ in 0..16 {
         locals.push(w.declare_zeroed_local());
     }
     let wide = w.declare_zeroed_local_i64();
@@ -2715,6 +2866,9 @@ pub fn emit_page(
         x87_known_open: false,
         p_op1: locals.pop().unwrap(),
         p_result: locals.pop().unwrap(),
+        p_word: locals.pop().unwrap(),
+        gpr_written: 0,
+        sync_stores: vec![],
         flat,
     };
     p.poll_check();
@@ -2750,6 +2904,7 @@ pub fn emit_page(
     p.w.eq_i32();
     p.w.if_void();
     p.commit_count();
+    p.w.const_i32(0);
     p.w.return_();
     p.w.block_end();
     p.sync_in();
@@ -2770,14 +2925,39 @@ pub fn emit_page(
     p.w.add_i32();
     p.w.store_aligned_i32(0);
     // Continue in the page function serving the target, if any.
-    p.w.get_local(&depth);
-    p.w.call_signature("ir_t0_chain", signature("ir_t0_chain"));
-    p.w.if_void();
-    p.w.return_();
-    p.w.block_end();
-    p.w.call_signature("ir_request_link", signature("ir_request_link"));
-    let Page { mut w, gpr, tlb, read_mask, write_mask, offset, result, fa, fb, fr, addr, host, value, tmp, wide, quotient, retired, committed, p_op1, p_result, x87, x87_is_open, .. } = p;
-    for local in gpr.into_iter().chain([tlb, read_mask, write_mask, offset, result, fa, fb, fr, addr, host, value, tmp, retired, committed, p_op1, p_result, x87.top, x87.tags, x87.valid, x87.dirty, x87_is_open]) {
+    match t0_link() {
+        Link::Tail => {
+            p.w.call_signature("ir_t0_link", signature("ir_t0_link"));
+            p.w.tee_local(&p.tmp);
+            p.w.const_i32(0);
+            p.w.ge_i32();
+            p.w.if_void();
+            p.w.const_i32(1);
+            p.w.get_local(&p.tmp);
+            p.w.return_call_indirect_fn1();
+            p.w.block_end();
+        },
+        Link::Nested => {
+            p.w.get_local(&depth);
+            p.w.call_signature("ir_t0_chain", signature("ir_t0_chain"));
+            p.w.if_void();
+            p.w.const_i32(0);
+            p.w.return_();
+            p.w.block_end();
+        },
+        Link::Iterative => {},
+    }
+    p.request_exit(ExitKind::Normal);
+    p.w.get_local(&p.offset);
+    p.w.const_i32(page_linear as i32);
+    p.w.add_i32();
+    for &(start, end, r) in &p.sync_stores {
+        if p.gpr_written & 1 << r == 0 {
+            p.w.patch_nop(start, end);
+        }
+    }
+    let Page { mut w, gpr, tlb, read_mask, write_mask, offset, result, fa, fb, fr, addr, host, value, tmp, wide, quotient, retired, committed, p_op1, p_result, p_word, x87, x87_is_open, .. } = p;
+    for local in gpr.into_iter().chain([tlb, read_mask, write_mask, offset, result, fa, fb, fr, addr, host, value, tmp, retired, committed, p_op1, p_result, p_word, x87.top, x87.tags, x87.valid, x87.dirty, x87_is_open]) {
         w.free_local(local);
     }
     w.free_local_i64(wide);

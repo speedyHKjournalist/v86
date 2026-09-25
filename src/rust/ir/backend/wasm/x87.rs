@@ -46,6 +46,7 @@ impl Emitter<'_> {
         let slow = self.w.block_void();
         self.w.load_fixed_u8(gp::x87_native_policy as u32);
         self.w.eqz_i32();
+        self.w.hint(false);
         self.w.br_if(slow);
         let mut words = EmitterWords {
             e: self,
@@ -165,6 +166,7 @@ pub(crate) fn x87_native<T: X87Words>(t: &mut T, native: Native, slow: Label) {
             t.w().const_i32(1);
             t.w().and_i32();
             t.w().eqz_i32();
+            t.w().hint(false);
             t.w().br_if(slow);
             t.w().get_local(&slot);
             t.w().set_local(&s.top);
@@ -208,6 +210,7 @@ pub(crate) fn x87_native<T: X87Words>(t: &mut T, native: Native, slow: Label) {
                 t.w().get_local_f64(v);
                 t.w().get_local_f64(v);
                 t.w().ne_f64();
+                t.w().hint(false);
                 t.w().br_if(slow);
             }
             t.w().load_fixed_u16(gp::fpu_status_word as u32);
@@ -330,6 +333,7 @@ fn x87_read<T: X87Words>(t: &mut T, s: &Stack, r: u8, slow: Label) -> WasmLocalF
     t.w().const_i32(1);
     t.w().and_i32();
     t.w().eqz_i32();
+    t.w().hint(false);
     t.w().br_if(slow);
     t.w().get_local(&slot);
     t.w().const_i32(3);
@@ -385,6 +389,7 @@ fn x87_source<T: X87Words>(t: &mut T, s: &Stack, source: Source, slow: Label) ->
                     t.w().add_i64();
                     t.w().const_i64(1 << 54);
                     t.w().gtu_i64();
+                    t.w().hint(false);
                     t.w().br_if(slow);
                     t.w().get_local_i64(&integer);
                     t.w().convert_i64_to_f64();
@@ -410,6 +415,7 @@ fn x87_source<T: X87Words>(t: &mut T, s: &Stack, source: Source, slow: Label) ->
         t.w().get_local_f64(&value);
         t.w().get_local_f64(&value);
         t.w().ne_f64();
+        t.w().hint(false);
         t.w().br_if(slow);
     }
     value
@@ -428,6 +434,7 @@ fn x87_store<T: X87Words>(t: &mut T, to: Stored, value: &WasmLocalF64, slow: Lab
             t.w().load_fixed_u16(gp::fpu_control_word as u32);
             t.w().const_i32(0xC00);
             t.w().and_i32();
+            t.w().hint(false);
             t.w().br_if(slow);
             t.w().get_local_f64(value);
             t.w().demote_f64_to_f32();
@@ -450,6 +457,7 @@ fn x87_store<T: X87Words>(t: &mut T, to: Stored, value: &WasmLocalF64, slow: Lab
             t.w().leu_i32();
             t.w().and_i32();
             t.w().eqz_i32();
+            t.w().hint(false);
             t.w().br_if(slow);
             t.w().get_local(&bits);
             t.output(0);
@@ -508,6 +516,7 @@ fn x87_store<T: X87Words>(t: &mut T, to: Stored, value: &WasmLocalF64, slow: Lab
             }
             t.w().and_i32();
             t.w().eqz_i32();
+            t.w().hint(false);
             t.w().br_if(slow);
             t.w().get_local_f64(&rounded);
             if bytes == 8 {

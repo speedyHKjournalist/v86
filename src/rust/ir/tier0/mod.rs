@@ -17,9 +17,10 @@ use crate::ir::{
 };
 
 /// The pages a page function for `entries` covers: the primary page plus
-/// the previous and/or next page when its code branches, calls or falls
-/// into them (bounded work across page boundaries, as the legacy JIT's
-/// multi-page modules). Returns (first page linear, page count).
+/// the previous and/or next page when its code jumps or falls into them
+/// (code continuing across a page boundary, as in the legacy JIT's
+/// multi-page modules; calls into neighbors do not count). Returns (first
+/// page linear, page count).
 pub fn range(
     origin: &CompileRequest,
     primary: &ImmutableCodeSnapshot,
@@ -33,10 +34,23 @@ pub fn range(
     }
     let offsets: Vec<usize> = entries.iter().map(|e| (e.linear.0 & 4095) as usize).collect();
     let plan = analysis::analyze(&primary.bytes, base_pc, LinearAddress(base), origin.default_32, &offsets, 0..4096);
-    let before = plan.external.iter().any(|&t| (-4096..0).contains(&t)) && code_page(base.wrapping_sub(4096));
-    let after = plan.external.iter().any(|&t| (4096..8192).contains(&t)) && code_page(base.wrapping_add(4096));
+    let before = plan.jumps.iter().any(|&t| (-4096..0).contains(&t)) && code_page(base.wrapping_sub(4096));
+    let after = plan.jumps.iter().any(|&t| (4096..8192).contains(&t)) && code_page(base.wrapping_add(4096));
     let first = if before { base.wrapping_sub(4096) } else { base };
     (first, 1 + before as u32 + after as u32)
+}
+
+/// Whether code of `entries` (in the first of the two pages of `snapshot`)
+/// runs on through the second page into the page after it.
+pub fn continues(origin: &CompileRequest, snapshot: &ImmutableCodeSnapshot, entries: &[CpuEntryKey]) -> bool {
+    let base = origin.linear.0 & !4095;
+    if snapshot.bytes.len() != 2 * analysis::PAGE || snapshot.mappings[0].linear.0 != base {
+        return false;
+    }
+    let base_pc = GuestEip(origin.pc.0.wrapping_sub(origin.linear.0 & 4095));
+    let offsets: Vec<usize> = entries.iter().map(|e| (e.linear.0 & 4095) as usize).collect();
+    let plan = analysis::analyze(&snapshot.bytes, base_pc, LinearAddress(base), origin.default_32, &offsets, 0..4096);
+    plan.jumps.iter().any(|&t| (8192..12288).contains(&t))
 }
 
 /// Compile a page function for `entries` (primary first, all in one page)
@@ -68,7 +82,7 @@ pub fn compile_page(
     let base = first;
     let base_pc = GuestEip(origin.pc.0.wrapping_sub(origin.linear.0.wrapping_sub(base.0)));
     if entries.is_empty()
-        || entries.len() > 64
+        || entries.len() > 256
         || entries.iter().any(|e| {
             e.linear.0 & !4095 != primary
                 || e.cs_base() != origin.cpu_entry().cs_base()
@@ -106,6 +120,8 @@ pub fn compile_page(
     if served.is_empty() {
         return Err(CompileError::Unsupported("no decodable tier-0 entry"));
     }
+    let seeded = analysis::seeds(&plan, &served.iter().map(offset_of).collect::<Vec<_>>());
+    let page_seeds = served.iter().zip(seeded).filter(|(_, seed)| *seed).map(|(e, _)| *e).collect();
     // Specialize for the current state when it is flat 32-bit code of this
     // page's mode; the page function checks it on entry.
     let state = unsafe { *crate::cpu::global_pointers::state_flags };
@@ -146,5 +162,6 @@ pub fn compile_page(
         alternate_entries: served[1..].to_vec(),
         source_origin: Some(base),
         page_blocks: Some(page_blocks),
+        page_seeds,
     })
 }

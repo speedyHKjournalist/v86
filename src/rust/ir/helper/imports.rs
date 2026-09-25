@@ -74,6 +74,7 @@ imports! {
     "ir_sse_guard": [] -> [I32], Check, "reads CR0 TS/EM; returns 0 or CPU-owned fault 2";
     "ir_fpu_guard": [] -> [I32], Check, "reads CR0 TS/EM; x87 #NM; returns 0 or CPU-owned fault 2";
     "ir_t0_step": [I32] -> [I32], Pure, "tier-0 fallback: interprets one instruction at EIP (all CPU effects, faults, devices); returns 0 next, 1 dispatch, 2 exit";
+    "ir_t0_link": [] -> [I32], Entry, "tier-0: table index of the page function serving the written-back EIP (caller tail-calls it) or -1; no guest state change";
     "ir_t0_chain": [I32] -> [I32], Entry, "tier-0: runs the page function serving the written-back EIP nested (returns 1) or declines (0); caller returns";
     "ir_t0_read_slow": [I32,I32,I32] -> [I64], Packed, "tier-0: probes, then reads with interpreter effects (MMIO, A bits); high word 1 = would fault, nothing done";
     "ir_t0_write_slow": [I32,I32,I32] -> [I32], Check, "tier-0: probes, then writes with interpreter effects; 1 = would fault (nothing written), 2 = wrote watched code";

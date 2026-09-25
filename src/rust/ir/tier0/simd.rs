@@ -345,6 +345,7 @@ impl Page {
         self.w.load_fixed_i32(dirty);
         self.w.const_i32(1 << r);
         self.w.and_i32();
+        self.w.hint(false);
         self.w.if_void();
         self.w.const_i32(r as i32);
         self.w.call_signature("fpu_sync_slot", Signature::new(&[WasmType::I32], &[]));

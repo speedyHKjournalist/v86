@@ -7,6 +7,8 @@
 //
 //   node tests/ir/differential/tier0_fuzz.mjs [cases=40] [seed=1] [wasm]
 // Needs build/bench/boot.bin (make bench-build): flat protected mode, paging.
+// FUZZ_STRADDLE=1 places each program across a page boundary and compiles
+// Tier-0 page functions with their neighbor pages (ir_t0_set_ranges).
 import fs from "node:fs";
 import assert from "node:assert/strict";
 import { V86 } from "../../../build/libv86.mjs";
@@ -35,6 +37,7 @@ const rr = (r, m) => 0xC0 | r << 3 | m;
 
 // FUZZ_KIND=i0..i33 / s0..s9 restricts programs to one instruction kind.
 const only = process.env.FUZZ_KIND || "";
+const straddle = process.env.FUZZ_STRADDLE === "1";
 function instruction() {
     const op = random() % 8, r = reg(), m = reg();
     const kind = random() % 34;
@@ -162,14 +165,16 @@ async function machine(tier0) {
     }
     await vm.stop();
     if(tier0) assert(e.ir_auto_set_tier0(1));
+    if(tier0 && straddle) assert(e.ir_t0_set_ranges(1));
     else e.set_jit_config(0, 1); // no legacy generation: the interpreter only
     return { vm, cpu, e, tier0 };
 }
 
-async function run(m, code, init, page) {
+async function run(m, code, init, page, split) {
     const { vm, cpu, e } = m;
     // A fresh code page per case: mem8.set bypasses code-write detection.
-    const base = CODE + page * 0x1000;
+    // Straddling programs start `split` bytes before the end of a page.
+    const base = split ? CODE + page * 0x2000 + 0x1000 - split : CODE + page * 0x1000;
     cpu.mem8.set(code, base);
     cpu.mem8.set(init.data, DATA);
     cpu.mem8.fill(0, STACK - 0x1000, STACK);
@@ -221,7 +226,8 @@ for(let c = 0; c < cases; c++) {
         // Finite floats: exponents kept in range so arithmetic rarely makes NaNs.
         xmm: Array.from({ length: 32 }, () => random() & 0xBFFFFFFF),
     };
-    const expected = await run(reference, code, init, c), actual = await run(tier0, code, init, c);
+    const split = straddle ? 4 + random() % (code.length - 8) : 0;
+    const expected = await run(reference, code, init, c, split), actual = await run(tier0, code, init, c, split);
     for(const key of Object.keys(expected)) {
         try { assert.deepEqual(actual[key], expected[key]); }
         catch {

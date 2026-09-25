@@ -123,8 +123,7 @@ try {
     if(process.env.IR_TIER0 !== undefined) assert.equal(e.ir_auto_set_tier0(Number(process.env.IR_TIER0)),1);
     if(process.env.IR_T0_RANGES !== undefined) assert.equal(e.ir_t0_set_ranges(Number(process.env.IR_T0_RANGES)),1);
     if(process.env.IR_PAGE_THRESHOLD !== undefined) assert.equal(e.ir_auto_set_page_threshold(Number(process.env.IR_PAGE_THRESHOLD)),1);
-    if(process.env.IR_T0_RANGES !== undefined) assert.equal(e.ir_t0_set_ranges(Number(process.env.IR_T0_RANGES)),1);
-    if(process.env.IR_PAGE_THRESHOLD !== undefined) assert.equal(e.ir_auto_set_page_threshold(Number(process.env.IR_PAGE_THRESHOLD)),1);
+    if(process.env.IR_T0_LINK !== undefined) assert.equal(e.ir_t0_set_link_mode(Number(process.env.IR_T0_LINK)),1);
     if(process.env.IR_HOT_FILTER !== undefined) assert.equal(e.ir_auto_set_hot_filter(Number(process.env.IR_HOT_FILTER)),1);
     if(process.env.IR_CACHE_CAPACITY !== undefined) assert.equal(e.ir_cache_set_capacity(Number(process.env.IR_CACHE_CAPACITY)),1);
     if(process.env.IR_FAST_VALIDATION !== undefined) {

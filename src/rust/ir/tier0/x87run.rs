@@ -180,9 +180,11 @@ impl Page {
         self.w.load_fixed_i32(gp::cr as u32);
         self.w.const_i32(crate::cpu::cpu::CR0_EM | crate::cpu::cpu::CR0_TS);
         self.w.and_i32();
+        self.w.hint(false);
         self.w.br_if(slow);
         self.w.load_fixed_u8(gp::x87_native_policy as u32);
         self.w.eqz_i32();
+        self.w.hint(false);
         self.w.br_if(slow);
         // Masks relative to TOP: rotate right by TOP (8 bits).
         let rotate = |p: &mut Page, mask: &dyn Fn(&mut Page)| {
@@ -211,6 +213,7 @@ impl Page {
             });
             self.w.const_i32(plan.need_full as i32);
             self.w.and_i32();
+            self.w.hint(false);
             self.w.br_if(slow);
         }
         if plan.need_empty != 0 {
@@ -219,6 +222,7 @@ impl Page {
             self.w.and_i32();
             self.w.const_i32(plan.need_empty as i32);
             self.w.ne_i32();
+            self.w.hint(false);
             self.w.br_if(slow);
         }
         let slot = |p: &mut Page, k: u8| {

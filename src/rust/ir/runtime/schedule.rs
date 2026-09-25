@@ -382,6 +382,11 @@ pub(super) fn tier0() -> bool { unsafe { TIER0 } }
 /// XP boot, neighbors rarely are the pages execution chains to (chains -5%)
 /// while code grew 38% and boot slowed 7%; only page-crossing loops gain.
 static mut T0_RANGES: bool = false;
+/// Frequent links from the page function of the page at `base` to a
+/// neighbor page: recompile it with its neighbors (see tier0::range).
+pub(super) fn want_range(base: u32, cs_base: u32, default_32: bool) {
+    SCHEDULER.try_lock().unwrap().pages.want_range(PageKey { base, cs_base, default_32 });
+}
 #[no_mangle]
 pub unsafe fn ir_t0_set_ranges(enabled: u32) -> bool {
     T0_RANGES = enabled != 0;
@@ -411,7 +416,9 @@ pub unsafe fn ir_auto_set_tier0(enabled: u32) -> bool {
     }
     // Executed instructions per page before its first compilation (the
     // legacy JIT's threshold for flat 32-bit code); page_threshold tunes it.
-    SCHEDULER.try_lock().unwrap().page_threshold = if TIER0 { 50_000 } else { 512 };
+    let mut s = SCHEDULER.try_lock().unwrap();
+    s.page_threshold = if TIER0 { 50_000 } else { 512 };
+    s.pages.set_tier0(TIER0);
     true
 }
 unsafe fn cold() -> bool { !cpu::in_jit && !cache::busy() && jit::ir_cache_quiescent() }
@@ -1210,7 +1217,7 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
     };
     let Ok(snapshot) = snapshot
     else {
-        SCHEDULER.try_lock().unwrap().pages.compiled(key, &entries, None);
+        SCHEDULER.try_lock().unwrap().pages.compiled(key, &entries, None, &[]);
         return false;
     };
     let physical = snapshot.mappings[0].physical.0;
@@ -1229,14 +1236,26 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
         default_32: key.default_32,
         tier: compile_tier,
     };
-    // A Tier-0 page function also covers neighbor pages its code enters.
-    let snapshot = if TIER0 && tier == 1 && T0_RANGES {
-        let (first, pages) = {
-            let s = SCHEDULER.try_lock().unwrap();
-            crate::ir::tier0::range(&request, &snapshot, &entries, |base| {
-                s.pages.known_code(PageKey { base, ..key })
-            })
-        };
+    // A Tier-0 page function also covers neighbor pages its code continues
+    // into, where its links to them are frequent (or all, T0_RANGES).
+    let ranged = TIER0 && tier == 1 && (T0_RANGES || SCHEDULER.try_lock().unwrap().pages.range(key));
+    let snapshot = if ranged {
+        let known = |base| SCHEDULER.try_lock().unwrap().pages.known_code(PageKey { base, ..key });
+        let (first, mut pages) = crate::ir::tier0::range(&request, &snapshot, &entries, known);
+        // Code that runs on through the next page may continue into the one
+        // after it (the legacy JIT's three-page modules).
+        if pages == 2 && first == key.base && known(key.base.wrapping_add(8192)) {
+            let _clock = CompileScope::new(1);
+            if let Ok(two) = super::snapshot::capture_pages(first, 2) {
+                if crate::ir::tier0::continues(&request, &two, &entries) {
+                    pages = 3;
+                }
+            }
+        }
+        // Links to a neighbor that its code only calls: the same function.
+        if pages == 1 && !T0_RANGES && SCHEDULER.try_lock().unwrap().pages.range_only(key) {
+            return false;
+        }
         if pages > 1 {
             let _clock = CompileScope::new(1);
             super::snapshot::capture_pages(first, pages).unwrap_or(snapshot)
@@ -1299,7 +1318,7 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
             };
             s.stats[field] = s.stats[field].wrapping_add(1);
             if tier == 1 {
-                s.pages.compiled(key, &entries, None);
+                s.pages.compiled(key, &entries, None, &[]);
             }
             return false;
         },
@@ -1307,7 +1326,7 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
     let served: Vec<CpuEntryKey> = artifact.cpu_entries().collect();
     {
         let mut s = SCHEDULER.try_lock().unwrap();
-        s.pages.compiled(key, &entries, Some((&served, physical)));
+        s.pages.compiled(key, &entries, Some((&served, physical)), &artifact.page_seeds);
         if tier == 2 {
             s.page_tier2 = s.page_tier2.wrapping_add(1);
         }

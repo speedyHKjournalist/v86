@@ -348,6 +348,18 @@ CPU.prototype.create_jit_imports = function()
         jit_imports[name] = this.wm.exports[name];
     }
 
+    // With Wasm tail calls, IR Tier-0 page functions continue in the next
+    // page's function directly, through the shared function table.
+    const table = this.wm.wasm_table;
+    if(table && this.wm.exports["ir_t0_set_tail_calls"])
+    {
+        // (module (func (return_call 0)))
+        const probe = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 10, 6, 1, 4, 0, 18, 0, 11]);
+        const supported = WebAssembly.validate(probe);
+        if(supported) jit_imports["t"] = table;
+        this.wm.exports["ir_t0_set_tail_calls"](supported ? 1 : 0);
+    }
+
     this.jit_imports = jit_imports;
 };
 

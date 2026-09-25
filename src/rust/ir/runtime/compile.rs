@@ -106,6 +106,9 @@ pub struct CompiledArtifact {
     /// function may be entered at any of them, not only its exact entries.
     /// Tier-0: block starts of each covered page (one bitmap per mapping).
     pub page_blocks: Option<Vec<[u64; 64]>>,
+    /// Tier-0: the served entries a recompilation must seed to find the same
+    /// blocks (see tier0::analysis::seeds).
+    pub page_seeds: Vec<CpuEntryKey>,
 }
 #[derive(Clone, Debug)]
 pub struct CapturedRegion {
@@ -687,6 +690,7 @@ fn compile_lifted(
         alternate_entries,
         source_origin: page,
         page_blocks: None,
+        page_seeds: vec![],
     })
 }
 

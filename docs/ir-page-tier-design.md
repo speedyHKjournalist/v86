@@ -99,23 +99,35 @@ PUSH/POP、CALL/RET/JMP/Jcc/LOOP、XCHG、CDQ 等；紧邻的 CMP/TEST/SUB + Jcc
 | 阶段 | 结果 |
 |---|---|
 | M1 | 完成。页函数、`br_table` 分派、页热度（批量计入）、发布与失效；无模板的指令结束基本块，经共享的单步块由解释器执行一条。 |
-| M2 | 完成。整数/控制流模板（含 ADC/SBB、ROL/ROR、SHLD/SHRD、BSF/BSR、BT*、MUL/DIV、XADD/CMPXCHG、LOCK）；GPR 常驻局部变量；惰性 FLAGS **延迟写回**（块内被覆盖的 FLAGS 不写内存）；CMP/TEST+Jcc 与未知生产者的条件都内联求值；页内强连通分量编译为嵌套 wasm `loop`，返回点在循环分派处直接比较。 |
+| M2 | 完成。整数/控制流模板（含 ADC/SBB、ROL/ROR、SHLD/SHRD、BSF/BSR、BT*、MUL/DIV、XADD/CMPXCHG、LOCK）；GPR 常驻局部变量（出口只写回函数内被写过的 GPR）；惰性 FLAGS 在块内**完全延迟**：`PendingFlags` 记录 last_op1/last_result（局部变量）、last_op_size/flags_changed（常量）以及 FLAGS 字的待写位（`p_word`），部分写 FLAGS 的指令（INC/DEC、移位、ROL/ROR、IMUL、ADC/SBB、BT、BSF 等）也只改待写状态，读取者（Jcc/SETcc/CMOVcc/ADC 的 CF）直接从待写状态求值，块结束时一次写回；页内强连通分量编译为嵌套 wasm `loop`，返回点在循环分派处直接比较。 |
 | M3 | 完成。TLB 快路径；慢路径助手；平坦分段/32 位栈特化（入口检查）；写入含 IR 代码的页时交给解释器（无需写后检查）。REP 字符串走单步。 |
 | M4 | 未做，也不再需要：x87/SSE/MMX 直接由 Tier-0 原生模板覆盖，已快于优化层。 |
-| M5 | 以 Rust 辅助方式完成：页函数退出时 `ir_t0_chain` 查页见证后嵌套调用下一页函数；CPU 循环对页见证走精简激活路径（`t0_execute`）。相邻页合并（一个函数覆盖 2–3 页）已实现但默认关闭：XP 启动链接只减少 5%，代码量增加 38%，启动变慢 7%。 |
+| M5 | 完成。页函数返回要去的线性 EIP，`t0_execute` 的循环据此查页见证并调用下一页函数（最多 64 次）；嵌套调用（`ir_t0_chain`）与 wasm 尾调用（`ir_t0_link` + `return_call_indirect`，需引擎支持）保留为 A/B 选项（`ir_t0_set_link_mode`），在 V8 中都更慢。**自适应多页函数**：链接循环统计页函数到相邻页的跳转，某页达到 100K 次后带相邻页重编译（`tier0::range`：只算跳转/落入，不算调用；向前连续时覆盖 3 页，同 legacy 的多页模块），跨页处检查 TLB 映射，块跨页时在块入口检查。全部页都合并（`ir_t0_set_ranges`）对 XP 没有好处，保持关闭。 |
 | M6 | 完成。x87 复用优化层的 f64 原生发射器（`backend/wasm/x87.rs`，泛化为 `X87Words`）+ `ir_t0_x87` 慢路径；x87 的 TOP/tags/VALID/DIRTY 在整个页函数内缓存在局部变量中（运行时“已打开”标志，在读 x87 状态的指令和函数出口前写回）；连续 ≥3 条纯寄存器 x87 指令按相对栈位置编译为一段 f64 局部变量代码（`tier0/x87run.rs`，一次入口检查、一次提交）。MMX/SSE/SSE2 用 wasm SIMD 原生实现，块内 XMM 寄存器缓存在局部变量中；NaN 结果交给解释器以保证逐位一致。 |
 
-**结果**（`build/bench/results-tier0.json`，满规模，所有校验和与指令数与 legacy 一致）：
-总分 warm 1.41×、cold 1.32×（优化区域层为 0.55×）；x87 2.45、SSE 2.34、MMX 1.53、micro 1.16、
-int 1.07、memory 1.04、control 0.96。低于 legacy 的：708.pages 0.44（legacy 一个模块覆盖多页，
-Tier-0 每次跨页都要链接）、502.codebloat 0.86（同样是跨页）、vcall 0.93、bytecode 0.94，
-其余（recursion、muldiv、rmw、trig）在 0.97–0.99 的测量噪声范围内。
-**XP 启动到桌面**（同步磁盘、交替测量）：Tier-0 约 12.1–12.4 s，legacy 约 13.0–13.2 s。
+**块分析。** 两遍：先从入口与静态目标发现指令串（串汇合处成为块起点），再按块起点切分，每条指令只解码一次。
+重编译只用**种子入口**（其它入口能经确定的块边界到达的不算，`analysis::seeds`），页上的入口上限为 255；
+每页最多 512 块、2048 条指令。每个循环层的分派表覆盖其成员偏移范围，范围超过 1024 或全函数超过 8192
+的循环改为外层的普通块（V8 对超大 `br_table` 编译极慢，甚至 zone OOM）。
+
+**分支提示。** 内存慢路径、`retry_if`、轮询、跨页检查、x87 守卫都带 wasm branch hint（`metadata.code.branch_hint`
+自定义节）。V8 把这些路径放到延迟块，快路径上不再为慢路径的调用溢出寄存器；对栈与内存密集的代码
+（recursion、vcall、bytecode、lz）提升 15–30%。
+
+**结果**（`build/bench/results-t0-hints.json`，quick，所有校验和与指令数与 legacy 一致）：
+总分 warm 1.67×、cold 1.40×；x87 2.71、SSE 2.46、MMX 1.69、micro 1.43、int 1.40、control 1.17、memory 1.08。
+708.pages 1.31、502.codebloat 1.37、520.vcall 1.07、500.bytecode 1.19、541.recursion 1.29。
+低于 legacy 的只剩 617.trig 0.97（FSIN/FCOS/FPATAN 在两边都由同一个 Rust 助手计算，在噪声范围内）。
+cold 低于 1 的：708.pages 0.86（多页重编译在首轮之后）、502.codebloat 0.89、vcall/muldiv 0.95。
+**XP 启动到桌面**（同步磁盘、交替测量，机器负载较高）：Tier-0 11.4–11.7 s（100–103 MIPS），legacy 13.5–14.0 s（91–99 MIPS）。
 
 **正确性。** `tests/ir/differential/tier0_fuzz.mjs`：随机整数/SSE/x87 程序在循环中运行到页被 Tier-0 编译，
 与纯解释器比较 GPR、EFLAGS（用 PUSHFD/LAHF 记录 AF/OF）、内存、XMM、x87 状态与指令数；
-`FUZZ_KIND=i0..i33|s0..s9|x` 单独测试某一类。
+`FUZZ_KIND=i0..i33|s0..s9|x` 单独测试某一类；`FUZZ_STRADDLE=1` 让程序跨页放置并强制多页函数。
 
 **踩过的坑。** IR 编译器的 Rust 分配使 2 GiB 的 wasm 内存反复 `memory.grow`，每次都触发 V8
 “external memory pressure” 全量 GC（XP 启动约 170 次、0.8 s），启用 Tier-0 时一次性预留编译堆解决；
 标量 SSE 先 8 字节写 XMM 再 16 字节读会导致存储转发失败，标量形式只读用到的通道。
+V8 中跨模块调用的代价：同时轮转调用的模块超过约 12 个时每次调用从约 4 ns 升到 10–14 ns（与模块内函数
+数无关，只与模块数有关）；调用目标若由刚写入内存的值（EIP）读出再做 `call_indirect`，每次再多约 6 ns，
+因此页函数把 EIP 作为返回值交给链接循环。V8 的跨实例 `return_call_indirect` 并不比返回到 Rust 循环快。

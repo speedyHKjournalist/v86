@@ -149,7 +149,9 @@ fn page_fill(cache: &Cache, index: usize) {
         return;
     }
     // Every covered page's blocks are entries of the function; a page's own
-    // function (which covers what follows it) keeps its witness.
+    // function (which covers what follows it) keeps its witness, and of two
+    // functions for a page the newer (a recompilation with more entries).
+    let id = record.job.artifact.key.job;
     for (k, (mapping, bits)) in mappings.iter().zip(blocks.iter()).enumerate() {
         let page = (origin.0 >> 12).wrapping_add(k as u32);
         if mapping.linear.0 >> 12 != page {
@@ -159,12 +161,11 @@ fn page_fill(cache: &Cache, index: usize) {
         unsafe {
             let slot = page_slot(page, entry.cs_base(), entry.default_32);
             let old = &PAGE_FAST[slot];
-            if !primary
-                && old.primary
-                && old.stamp == FAST_STAMP
+            if old.stamp == FAST_STAMP
                 && old.page == page
                 && old.cs_base == entry.cs_base()
                 && old.default_32 == entry.default_32
+                && (old.primary && !primary || old.primary == primary && old.id > id)
             {
                 continue;
             }
@@ -784,9 +785,26 @@ pub unsafe fn ir_cache_set_capacity(capacity: u32) -> bool {
     cache.capacity = capacity as usize;
     true
 }
+use super::tier0::{t0_link, Link};
 extern "C" {
     fn call_indirect1(f: i32, x: u16);
+    fn call_indirect1_ret(f: i32, x: u16) -> i32;
 }
+/// Table slots holding Tier-0 page functions (signature (i32) -> i32: the
+/// linear EIP they leave for, see tier0::emit). Set when a function is
+/// installed; a slot is only called while its owner is published.
+static mut T0_SLOTS: [bool; jit::WASM_TABLE_SIZE as usize] = [false; jit::WASM_TABLE_SIZE as usize];
+/// Run the function in table `slot` (either signature).
+#[inline(always)]
+unsafe fn call_slot(slot: u32) {
+    if T0_SLOTS[slot as usize] {
+        call_indirect1_ret((slot + cpu::WASM_TABLE_OFFSET) as i32, 0);
+    }
+    else {
+        call_indirect1((slot + cpu::WASM_TABLE_OFFSET) as i32, 0);
+    }
+}
+
 /// Chained page functions: at most this many nested activations per dispatch.
 const T0_CHAIN_DEPTH: u32 = 48;
 /// A Tier-0 page function leaving its page has written back all state and
@@ -796,7 +814,8 @@ const T0_CHAIN_DEPTH: u32 = 48;
 /// still bounds the chain so interrupts are serviced.
 #[no_mangle]
 pub unsafe fn ir_t0_chain(depth: u32) -> u32 {
-    if depth >= T0_CHAIN_DEPTH
+    if t0_link() != Link::Nested
+        || depth >= T0_CHAIN_DEPTH
         || COLLECTION_PENDING
         || *gp::prefixes != 0
         || *gp::in_hlt
@@ -814,7 +833,7 @@ pub unsafe fn ir_t0_chain(depth: u32) -> u32 {
     super::entry::take_link_request();
     // The callee skips ir_enter_page at depth > 0: the witness matched CS
     // and mode, and prefixes/HLT were checked above.
-    call_indirect1((slot + cpu::WASM_TABLE_OFFSET) as i32, (depth + 1) as u16);
+    call_indirect1_ret((slot + cpu::WASM_TABLE_OFFSET) as i32, (depth + 1) as u16);
     1
 }
 /// Mirrors Cache::needs_collection for ir_t0_chain (no lock on that path):
@@ -843,7 +862,37 @@ unsafe fn t0_execute() -> bool {
     let before = *gp::instruction_counter;
     super::entry::take_link_request();
     T0_ENTRIES = T0_ENTRIES.wrapping_add(1);
-    call_indirect1((slot + cpu::WASM_TABLE_OFFSET) as i32, 0);
+    T0_CONTROL = *gp::flags & T0_CONTROL_FLAGS;
+    T0_CS = cpu::get_seg_cs() as u32;
+    T0_LINKABLE = true;
+    // The next linear EIP comes back in a register: a call target derived
+    // from the EIP just stored to memory stalls (store-to-load into an
+    // indirect call).
+    let mut from = linear;
+    let mut linear = call_indirect1_ret((slot + cpu::WASM_TABLE_OFFSET) as i32, 0) as u32;
+    if t0_link() != Link::Nested {
+        // Iterative linking (as the legacy JIT's jit_link_once): a page
+        // function that left for another page's block returns, and this
+        // loop enters the next one (depth 1: the checks below replace
+        // ir_enter_page's). With tail calls, page functions link among
+        // themselves (ir_t0_link) and this loop only retries.
+        for _ in 0..64 {
+            if !super::entry::link_requested() || !t0_linkable() {
+                break;
+            }
+            note_neighbor(from, linear);
+            let Some(slot) = page_chain_slot(linear, T0_CS, *gp::is_32)
+            else {
+                break;
+            };
+            *gp::previous_ip = linear as i32;
+            T0_CHAINS = T0_CHAINS.wrapping_add(1);
+            super::entry::take_link_request();
+            from = linear;
+            linear = call_indirect1_ret((slot + cpu::WASM_TABLE_OFFSET) as i32, 1) as u32;
+        }
+    }
+    T0_LINKABLE = false;
     let poll_reuse = POLL_REUSE_ENABLED && super::entry::poll_exit();
     if !super::entry::link_requested() && !poll_reuse {
         ir_admission_barrier();
@@ -853,6 +902,68 @@ unsafe fn t0_execute() -> bool {
     *gp::instruction_counter != before
 }
 static mut T0_ENTRIES: u32 = 0;
+/// Links from a page function to the page before or after its entry page,
+/// per page (direct-mapped): at T0_RANGE_LINKS, the page is recompiled with
+/// the neighbors its code continues into (schedule::want_range).
+static mut NEIGHBOR_LINKS: [(u32, u32); 64] = [(0, 0); 64];
+const T0_RANGE_LINKS: u32 = 100_000;
+#[inline(always)]
+unsafe fn note_neighbor(from: u32, to: u32) {
+    let (page, distance) = (from >> 12, (to >> 12).wrapping_sub(from >> 12));
+    if distance != 1 && distance != u32::MAX {
+        return;
+    }
+    let slot = &mut NEIGHBOR_LINKS[(page ^ page >> 6) as usize & 63];
+    if slot.0 != page {
+        *slot = (page, 0);
+    }
+    slot.1 += 1;
+    if slot.1 == T0_RANGE_LINKS {
+        super::schedule::want_range(page << 12, T0_CS, *gp::is_32);
+    }
+}
+const T0_CONTROL_FLAGS: i32 = cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM;
+/// State at the t0_execute entry that linking must preserve, and whether a
+/// t0_execute activation is running (other callers never link).
+static mut T0_CONTROL: i32 = 0;
+static mut T0_CS: u32 = 0;
+static mut T0_LINKABLE: bool = false;
+#[inline(always)]
+unsafe fn t0_linkable() -> bool {
+    T0_LINKABLE
+        && !COLLECTION_PENDING
+        && *gp::prefixes == 0
+        && !*gp::in_hlt
+        && cpu::ir_link_budget_available()
+        && *gp::flags & T0_CONTROL_FLAGS == T0_CONTROL
+        && cpu::get_seg_cs() as u32 == T0_CS
+}
+/// An activation from the general paths: a Tier-0 page function may link.
+#[inline(always)]
+unsafe fn call_linkable(slot: u32) {
+    T0_CONTROL = *gp::flags & T0_CONTROL_FLAGS;
+    T0_CS = cpu::get_seg_cs() as u32;
+    T0_LINKABLE = true;
+    call_slot(slot);
+    T0_LINKABLE = false;
+}
+/// Tail-call linking: the table index of the page function serving the
+/// written-back EIP, which the leaving page function tail-calls (depth 1),
+/// or -1: it then requests a link and returns.
+#[no_mangle]
+pub unsafe fn ir_t0_link() -> i32 {
+    if t0_link() != Link::Tail || !t0_linkable() {
+        return -1;
+    }
+    let linear = *gp::instruction_pointer as u32;
+    let Some(slot) = page_chain_slot(linear, T0_CS, *gp::is_32)
+    else {
+        return -1;
+    };
+    *gp::previous_ip = linear as i32;
+    T0_CHAINS = T0_CHAINS.wrapping_add(1);
+    (slot + cpu::WASM_TABLE_OFFSET) as i32
+}
 #[no_mangle]
 pub unsafe fn ir_t0_entries() -> u32 { T0_ENTRIES }
 static mut T0_CHAINS: u32 = 0;
@@ -1723,6 +1834,7 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
     if cache.records[index].phase != Phase::Validated {
         return false;
     }
+    T0_SLOTS[slot as usize] = cache.records[index].job.artifact.page_blocks.is_some();
     if !unchanged_full(&cache.records[index].job)
         || cache.records[index]
             .promotion_parent
@@ -2182,7 +2294,7 @@ unsafe fn fast_run(witness: FastEntry, linked: bool) -> bool {
     FAST_HITS = FAST_HITS.wrapping_add(1);
     let before = *gp::instruction_counter;
     super::entry::take_link_request();
-    call_indirect1((witness.slot + cpu::WASM_TABLE_OFFSET) as i32, 0);
+    call_linkable(witness.slot);
     ACTIVE = None;
     let poll_reuse = POLL_REUSE_ENABLED && super::entry::poll_exit();
     if !super::entry::link_requested() && !poll_reuse {
@@ -2690,7 +2802,12 @@ unsafe fn run_activation<const PROFILE: bool>(
         diag::activation_start();
     }
     let execution_scope = PROFILE.then(|| Scope::new(Stage::Generated));
-    call_indirect1((slot + cpu::WASM_TABLE_OFFSET) as i32, 0);
+    if PROFILE {
+        call_slot(slot);
+    }
+    else {
+        call_linkable(slot);
+    }
     let duration = execution_scope.and_then(Scope::finish);
     // Terminal helpers/fault delivery can observe the host even when they do
     // not pass through an emitted continuing-call barrier. A plain recovered

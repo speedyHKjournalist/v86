@@ -3,16 +3,17 @@
 //! Blocks are straight-line runs of complete instructions inside the page.
 //! A block ends after a control transfer, a block-boundary encoding (mode,
 //! paging and I/O instructions) or an instruction without a template (both
-//! run in the interpreter), or before an instruction that cannot be decoded
-//! within the page. Blocks may share bytes when a branch enters the
-//! middle of another block's run; each is decoded from its own start.
+//! run in the interpreter), before another block's start, or before an
+//! instruction that cannot be decoded within the page. Each instruction
+//! belongs to one block, except where a branch enters the middle of another
+//! instruction (a different decoding of the same bytes).
 use crate::ir::frontend::decode::{decode, DecodedInstruction, Flow, GuestEip, LinearAddress};
 use std::collections::BTreeSet;
 
 pub const PAGE: usize = 4096;
 /// Bounded work per page, and a function size V8's optimizing tier handles
 /// comfortably (the legacy JIT caps a module at about 250 extra blocks).
-const MAX_BLOCKS: usize = 256;
+const MAX_BLOCKS: usize = 512;
 const MAX_INSTRUCTIONS: usize = 2048;
 
 pub struct Instruction {
@@ -39,6 +40,10 @@ pub struct PagePlan {
     /// Static targets (and fall-throughs) outside the analyzed bytes, as
     /// offsets from their start (negative: before it).
     pub external: Vec<i64>,
+    /// The part of `external` that continues the code rather than calling
+    /// other code: jump targets, and falling (or an instruction running)
+    /// off the end of the analyzed bytes.
+    pub jumps: Vec<i64>,
 }
 
 /// Direct successors of a block-ending instruction, as offsets from base_pc
@@ -77,40 +82,66 @@ pub fn analyze(
 ) -> PagePlan {
     let size = bytes.len();
     debug_assert!(size % PAGE == 0 && size <= 3 * PAGE);
-    let mut blocks: Vec<Block> = vec![];
-    let mut block_at = vec![None; size];
+    let decode_at = |at: usize| {
+        decode(
+            &bytes[at..],
+            GuestEip(base_pc.0.wrapping_add(at as u32)),
+            LinearAddress(base_linear.0.wrapping_add(at as u32)),
+            default_32,
+        )
+        .ok()
+    };
+    // Discovery: every run from a block start, until a block-ending
+    // instruction or an instruction another run already decoded (whose
+    // start becomes a block start: runs share no instructions).
+    let mut leader = vec![false; size];
+    let mut decoded_at = vec![false; size];
     let mut external = vec![];
+    let mut jumps = vec![];
     let mut pending: BTreeSet<usize> = entries.iter().copied().filter(|&at| at < size).collect();
     let mut total = 0;
+    let mut leaders = 0;
     let next = |pending: &mut BTreeSet<usize>| {
         let preferred = pending.range(prefer.clone()).next().copied();
         preferred.map(|at| pending.take(&at).unwrap()).or_else(|| pending.pop_first())
     };
     while let Some(start) = next(&mut pending) {
-        if block_at[start].is_some() || blocks.len() == MAX_BLOCKS || total >= MAX_INSTRUCTIONS {
+        if leader[start] || leaders == MAX_BLOCKS || total >= MAX_INSTRUCTIONS {
             continue;
         }
-        let mut instructions = vec![];
+        if decoded_at[start] {
+            leader[start] = true;
+            leaders += 1;
+            continue;
+        }
         let mut at = start;
-        loop {
-            let Ok(decoded) = decode(
-                &bytes[at..],
-                GuestEip(base_pc.0.wrapping_add(at as u32)),
-                LinearAddress(base_linear.0.wrapping_add(at as u32)),
-                default_32,
-            )
+        while at < size && !decoded_at[at] && total < MAX_INSTRUCTIONS {
+            // Undecodable or crossing the page end: left to the interpreter.
+            let Some(decoded) = decode_at(at)
             else {
-                break; // undecodable or crosses the page end: leave to the interpreter
+                if size - at < 15 {
+                    jumps.push(size as i64);
+                }
+                break;
             };
+            if at == start {
+                leader[start] = true;
+                leaders += 1;
+            }
+            decoded_at[at] = true;
+            total += 1;
             let length = decoded.length as usize;
-            let last = ends_block(&decoded);
-            if last {
-                for target in successors(&decoded, at, base_pc) {
+            if ends_block(&decoded) {
+                let call = matches!(decoded.flow, Flow::Relative { call: true, .. });
+                for (k, target) in successors(&decoded, at, base_pc).into_iter().enumerate() {
                     if (0..size as i64).contains(&target) {
                         pending.insert(target as usize);
                     }
                     else {
                         external.push(target);
+                        if k > 0 || !call {
+                            jumps.push(target);
+                        }
                     }
                 }
                 // Interpreted instructions continue at their fall-through.
@@ -120,35 +151,41 @@ pub fn analyze(
                     }
                     else {
                         external.push((at + length) as i64);
+                        jumps.push((at + length) as i64);
                     }
-                }
-            }
-            instructions.push(Instruction { offset: at as u16, decoded });
-            total += 1;
-            at += length;
-            // Stop at the page end or where another block already starts.
-            if last || at >= size || block_at[at].is_some() || total >= MAX_INSTRUCTIONS {
-                if !last && at < size {
-                    pending.insert(at);
-                }
-                if !last && at >= size {
-                    external.push(at as i64);
                 }
                 break;
             }
+            at += length;
+            if at >= size {
+                external.push(at as i64);
+                jumps.push(at as i64);
+            }
+            else if decoded_at[at] {
+                pending.insert(at);
+            }
         }
-        if instructions.is_empty() {
-            continue;
+    }
+    // Blocks: each run split at the block starts inside it, in address order
+    // (a jump to a higher address is a forward branch in the emitted
+    // function, see emit::Page::goto_linear).
+    let mut blocks: Vec<Block> = vec![];
+    let mut block_at = vec![None; size];
+    for start in (0..size).filter(|&at| leader[at]) {
+        let mut instructions = vec![];
+        let mut at = start;
+        while let Some(decoded) = decode_at(at) {
+            let length = decoded.length as usize;
+            let last = ends_block(&decoded);
+            instructions.push(Instruction { offset: at as u16, decoded });
+            at += length;
+            // A run cut by the instruction budget continues by dispatch.
+            if last || at >= size || leader[at] || !decoded_at[at] {
+                break;
+            }
         }
         block_at[start] = Some(blocks.len() as u32);
         blocks.push(Block { start: start as u16, instructions });
-    }
-    // Address order: a jump to a higher address is a forward branch in the
-    // emitted function (see emit::Page::goto_linear).
-    blocks.sort_by_key(|b| b.start);
-    let mut block_at = vec![None; size];
-    for (k, b) in blocks.iter().enumerate() {
-        block_at[b.start as usize] = Some(k as u32);
     }
     let mut return_site = vec![false; blocks.len()];
     for b in &blocks {
@@ -159,7 +196,53 @@ pub fn analyze(
             return_site[k as usize] = true;
         }
     }
-    PagePlan { blocks, block_at, return_site, external }
+    PagePlan { blocks, block_at, return_site, external, jumps }
+}
+
+/// Which of `entries` (offsets, in priority order) a recompilation must seed:
+/// those no earlier seed reaches through boundaries every analysis finds
+/// (the targets and fall-throughs of block-ending instructions). An entry
+/// that is a block start only because it was seeded itself, such as a point
+/// inside a straight-line run, stays a seed.
+pub fn seeds(plan: &PagePlan, entries: &[usize]) -> Vec<bool> {
+    let size = plan.block_at.len();
+    let mut reached = vec![false; plan.blocks.len()];
+    let mut work = vec![];
+    entries
+        .iter()
+        .map(|&at| {
+            let Some(Some(k)) = plan.block_at.get(at).copied()
+            else {
+                return false;
+            };
+            if reached[k as usize] {
+                return false;
+            }
+            work.push(k);
+            reached[k as usize] = true;
+            while let Some(k) = work.pop() {
+                let b = &plan.blocks[k as usize];
+                let last = b.instructions.last().unwrap();
+                if !ends_block(&last.decoded) {
+                    continue;
+                }
+                let base = GuestEip(last.decoded.instruction_pc.0.wrapping_sub(last.offset as u32));
+                let mut targets = successors(&last.decoded, last.offset as usize, base);
+                if matches!(last.decoded.flow, Flow::Next | Flow::Boundary) {
+                    targets.push(b.end() as i64);
+                }
+                for t in targets {
+                    if let Some(Some(next)) = usize::try_from(t).ok().filter(|&t| t < size).map(|t| plan.block_at[t]) {
+                        if !reached[next as usize] {
+                            reached[next as usize] = true;
+                            work.push(next);
+                        }
+                    }
+                }
+            }
+            true
+        })
+        .collect()
 }
 
 /// Structured layout of a page function: blocks in address order, with each
@@ -208,7 +291,64 @@ fn block_successors(plan: &PagePlan) -> Vec<Vec<u32>> {
 pub fn layout(plan: &PagePlan) -> Vec<Unit> {
     let successors = block_successors(plan);
     let all: Vec<u32> = (0..plan.blocks.len() as u32).collect();
-    units(&all, &successors, None)
+    let mut layout = units(&all, &successors, None);
+    // Each loop dispatches through a table over its members' offsets (see
+    // emit::emit_units); V8 compiles functions with very large tables
+    // slowly or not at all (its per-function zone limit). Loops over too
+    // wide a range, then the widest ones, become plain blocks of the
+    // enclosing level (their back edges then dispatch there).
+    let start = |k: u32| plan.blocks[k as usize].start as usize;
+    let range = |unit: &Unit| {
+        let mut blocks = vec![];
+        unit.blocks(&mut blocks);
+        blocks.iter().map(|&k| start(k)).max().unwrap() - start(unit.first()) + 1
+    };
+    flatten(&mut layout, &|unit| range(unit) > MAX_LOOP_TABLE);
+    loop {
+        let mut total = 0;
+        let mut widest = 0;
+        visit_loops(&layout, &mut |unit| {
+            total += range(unit);
+            widest = widest.max(range(unit));
+        });
+        if total <= MAX_LOOP_TABLES {
+            break;
+        }
+        flatten(&mut layout, &|unit| range(unit) == widest);
+    }
+    layout
+}
+/// Loop dispatch table bounds: per loop, and for all loops of a function.
+const MAX_LOOP_TABLE: usize = 1024;
+const MAX_LOOP_TABLES: usize = 8192;
+fn visit_loops(units: &[Unit], f: &mut dyn FnMut(&Unit)) {
+    for unit in units {
+        if let Unit::Loop { units, .. } = unit {
+            f(unit);
+            visit_loops(units, f);
+        }
+    }
+}
+/// Replace the loops matching `wide` by their units (in address order).
+fn flatten(units: &mut Vec<Unit>, wide: &dyn Fn(&Unit) -> bool) {
+    let mut out = Vec::with_capacity(units.len());
+    for unit in std::mem::take(units) {
+        let flat = matches!(unit, Unit::Loop { .. }) && wide(&unit);
+        match unit {
+            Unit::Loop { header, units: mut inner } => {
+                flatten(&mut inner, wide);
+                if flat {
+                    out.extend(inner);
+                }
+                else {
+                    out.push(Unit::Loop { header, units: inner });
+                }
+            },
+            unit => out.push(unit),
+        }
+    }
+    out.sort_by_key(Unit::first);
+    *units = out;
 }
 
 /// Units of `members` (sorted), ignoring edges into `header`.

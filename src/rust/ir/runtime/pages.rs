@@ -8,7 +8,10 @@ use super::entry::CpuEntryKey;
 use std::collections::{BTreeMap, VecDeque};
 
 /// Primary plus aliases; the page lifter accepts CfgLimits::PAGE.entries.
-pub(super) const MAX_ENTRIES: usize = 63;
+const MAX_ENTRIES: usize = 63;
+/// Tier-0 page functions (tier0::compile_page) take more: recompilations
+/// seed only the entries that find the other blocks, plus new ones.
+const MAX_TIER0_ENTRIES: usize = 255;
 const CAPACITY: usize = 2048;
 /// Compilations of one page per code version; misses beyond this bound stay
 /// interpreted instead of recompiling a page whose entries keep changing.
@@ -35,6 +38,8 @@ struct Page {
     entries: Vec<(CpuEntryKey, u32)>,
     /// Entries a published page function already serves (no new heat needed).
     served: Vec<CpuEntryKey>,
+    /// The served entries that find all of its blocks (Tier-0; empty: all).
+    seeds: Vec<CpuEntryKey>,
     /// Requested entries the page function could not serve; they keep the
     /// region compiler as their fallback instead of reheating the page.
     declined: Vec<CpuEntryKey>,
@@ -47,6 +52,13 @@ struct Page {
     queued: bool,
     physical: Option<u32>,
     stamp: u64,
+    /// Tier-0: compile with the neighbor pages its code continues into
+    /// (tier0::range), after frequent page-function links to a neighbor;
+    /// `range_pending`: that recompilation is queued.
+    range: bool,
+    range_pending: bool,
+    /// The queued recompilation only adds the range (no new entries).
+    range_only: bool,
 }
 pub(super) struct Pages {
     pages: Vec<Page>,
@@ -61,6 +73,11 @@ pub(super) struct Pages {
     pub again: u32,
     pub dirty_resets: u32,
     pub declined_entries: u32,
+    /// Entries kept per page (MAX_ENTRIES or MAX_TIER0_ENTRIES).
+    max_entries: usize,
+    /// Tier-0: recompilations need the first compile's heat (their entry
+    /// sets only grow), except after repeated attempts.
+    tier0: bool,
 }
 impl Pages {
     pub const fn new() -> Self {
@@ -76,7 +93,13 @@ impl Pages {
             again: 0,
             dirty_resets: 0,
             declined_entries: 0,
+            max_entries: MAX_ENTRIES,
+            tier0: false,
         }
+    }
+    pub fn set_tier0(&mut self, tier0: bool) {
+        self.tier0 = tier0;
+        self.max_entries = if tier0 { MAX_TIER0_ENTRIES } else { MAX_ENTRIES };
     }
     pub fn clear(&mut self) {
         self.pages.clear();
@@ -103,6 +126,7 @@ impl Pages {
             visits: 0,
             entries: Vec::new(),
             served: Vec::new(),
+            seeds: Vec::new(),
             declined: Vec::new(),
             attempts: 0,
             invalidations: 0,
@@ -110,6 +134,9 @@ impl Pages {
             queued: false,
             physical: None,
             stamp: self.clock,
+            range: false,
+            range_pending: false,
+            range_only: false,
         };
         if self.pages.len() < CAPACITY {
             self.pages.push(page);
@@ -155,7 +182,7 @@ impl Pages {
         match page.entries.iter_mut().find(|(e, _)| *e == entry) {
             Some((_, hits)) => *hits = hits.saturating_add(1),
             None => {
-                if page.entries.len() == MAX_ENTRIES {
+                if page.entries.len() == self.max_entries {
                     // Keep the hottest entries; a new one replaces the coldest.
                     let (at, _) = page
                         .entries
@@ -178,7 +205,8 @@ impl Pages {
         page.visits = page.visits.saturating_add(weight);
         // Each recompilation of the same code version doubles the heat its new
         // entries must earn; each code-page write quadruples it.
-        let shift = page.attempts.min(6) as u32 + 2 * page.invalidations.min(8) as u32;
+        let attempts = if self.tier0 { page.attempts.saturating_sub(2) } else { page.attempts };
+        let shift = attempts.min(6) as u32 + 2 * page.invalidations.min(8) as u32;
         let needed = threshold.saturating_mul(1 << shift);
         if page.visits >= needed && !page.queued && page.attempts < MAX_ATTEMPTS {
             page.queued = true;
@@ -197,9 +225,11 @@ impl Pages {
             };
             let page = &mut self.pages[i];
             page.queued = false;
-            if page.failed || page.attempts >= MAX_ATTEMPTS || page.entries.is_empty() {
+            let range = std::mem::take(&mut page.range_pending);
+            if page.failed || page.attempts >= MAX_ATTEMPTS || page.entries.is_empty() && !range {
                 continue;
             }
+            page.range_only = page.entries.is_empty();
             if page.served.is_empty() {
                 self.first += 1;
             }
@@ -211,8 +241,9 @@ impl Pages {
             let mut entries = page.entries.clone();
             entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.linear.0.cmp(&b.0.linear.0)));
             let mut keys: Vec<CpuEntryKey> = entries.into_iter().map(|(e, _)| e).collect();
-            for served in &page.served {
-                if keys.len() < MAX_ENTRIES && !keys.contains(served) {
+            // Seeds first: other served entries are found from them.
+            for served in page.seeds.iter().chain(&page.served) {
+                if keys.len() < self.max_entries && !keys.contains(served) {
                     keys.push(*served);
                 }
             }
@@ -227,6 +258,7 @@ impl Pages {
         key: PageKey,
         requested: &[CpuEntryKey],
         served: Option<(&[CpuEntryKey], u32)>,
+        seeds: &[CpuEntryKey],
     ) {
         let Some(&i) = self.index.get(&key)
         else {
@@ -237,6 +269,7 @@ impl Pages {
             Some((served, physical)) => {
                 self.compiles = self.compiles.wrapping_add(1);
                 page.physical = Some(physical);
+                page.seeds = seeds.to_vec();
                 for entry in served {
                     if !page.served.contains(entry) {
                         page.served.push(*entry);
@@ -256,11 +289,34 @@ impl Pages {
             },
         }
     }
+    /// Recompile a compiled page with its neighbors (see Page::range).
+    pub fn want_range(&mut self, key: PageKey) -> bool {
+        let Some(&i) = self.index.get(&key)
+        else {
+            return false;
+        };
+        let page = &mut self.pages[i];
+        if page.range || page.failed || page.physical.is_none() || page.attempts >= MAX_ATTEMPTS {
+            return false;
+        }
+        page.range = true;
+        page.range_pending = true;
+        if !page.queued {
+            page.queued = true;
+            self.ready.push_back(key);
+        }
+        true
+    }
+    pub fn range(&self, key: PageKey) -> bool { self.index.get(&key).is_some_and(|&i| self.pages[i].range) }
+    pub fn range_only(&self, key: PageKey) -> bool {
+        self.index.get(&key).is_some_and(|&i| self.pages[i].range_only)
+    }
     /// The published function was retired or evicted: its entries need heat.
     pub fn unserve(&mut self, entries: &[CpuEntryKey]) {
         for entry in entries {
             if let Some(&i) = self.index.get(&PageKey::of(*entry)) {
                 self.pages[i].served.retain(|e| e != entry);
+                self.pages[i].seeds.retain(|e| e != entry);
             }
         }
     }
@@ -283,7 +339,9 @@ impl Pages {
                 page.attempts = 0;
                 page.failed = false;
                 page.served.clear();
+                page.seeds.clear();
                 page.declined.clear();
+                page.range = false;
                 page.physical = None;
             }
         }
