@@ -51,6 +51,8 @@ struct Page {
 pub(super) struct Pages {
     pages: Vec<Page>,
     index: BTreeMap<PageKey, usize>,
+    /// Index of the page slot() found last (checked against its key).
+    last: usize,
     ready: VecDeque<PageKey>,
     clock: u64,
     pub compiles: u32,
@@ -65,6 +67,7 @@ impl Pages {
         Self {
             pages: Vec::new(),
             index: BTreeMap::new(),
+            last: usize::MAX,
             ready: VecDeque::new(),
             clock: 0,
             compiles: 0,
@@ -81,6 +84,17 @@ impl Pages {
         self.ready.clear();
     }
     fn slot(&mut self, key: PageKey) -> usize {
+        // Consecutive visits mostly stay on one page.
+        if let Some(page) = self.pages.get(self.last) {
+            if page.key == key {
+                return self.last;
+            }
+        }
+        let i = self.slot_uncached(key);
+        self.last = i;
+        i
+    }
+    fn slot_uncached(&mut self, key: PageKey) -> usize {
         if let Some(&i) = self.index.get(&key) {
             return i;
         }
@@ -120,6 +134,11 @@ impl Pages {
     /// One interpreted visit starting at `entry`. Returns whether the page may
     /// still use region compilation (its page compilation failed).
     pub fn visit(&mut self, entry: CpuEntryKey, threshold: u32) -> bool {
+        self.visit_weighted(entry, threshold, 1)
+    }
+    /// A visit worth `weight` heat (Tier-0 counts executed instructions,
+    /// like the legacy JIT's page hotness).
+    pub fn visit_weighted(&mut self, entry: CpuEntryKey, threshold: u32, weight: u32) -> bool {
         self.clock += 1;
         let i = self.slot(PageKey::of(entry));
         let clock = self.clock;
@@ -146,7 +165,7 @@ impl Pages {
                         .unwrap();
                     if page.entries[at].1 > 1 {
                         page.entries[at].1 -= 1;
-                        page.visits = page.visits.saturating_add(1);
+                        page.visits = page.visits.saturating_add(weight);
                         return false;
                     }
                     page.entries[at] = (entry, 1);
@@ -156,7 +175,7 @@ impl Pages {
                 }
             },
         }
-        page.visits = page.visits.saturating_add(1);
+        page.visits = page.visits.saturating_add(weight);
         // Each recompilation of the same code version doubles the heat its new
         // entries must earn; each code-page write quadruples it.
         let shift = page.attempts.min(6) as u32 + 2 * page.invalidations.min(8) as u32;
@@ -246,6 +265,15 @@ impl Pages {
         }
     }
     /// Code bytes changed: allow new attempts and forget stale service claims.
+    /// Whether the page has run code (interpreted or compiled) and never had
+    /// that code written: a neighbor a page function may cover without
+    /// turning a data page into watched code.
+    pub fn known_code(&self, key: PageKey) -> bool {
+        self.index.get(&key).is_some_and(|&i| {
+            let page = &self.pages[i];
+            page.invalidations == 0 && (page.visits > 0 || !page.entries.is_empty() || page.physical.is_some())
+        })
+    }
     pub fn dirty(&mut self, physical: u32) {
         for page in &mut self.pages {
             if page.physical == Some(physical) {

@@ -53,6 +53,8 @@ pub fn ir_admission_barrier() {
 /// observer revokes continuation before entering another guest instruction.
 #[no_mangle]
 pub fn ir_admission_epoch_address() -> u32 { core::ptr::addr_of!(CONTINUATION_EPOCH) as u32 }
+/// Advances on every known code write and admission barrier.
+pub(crate) fn continuation_epoch() -> u64 { unsafe { CONTINUATION_EPOCH } }
 #[cfg(feature = "ir-experimental")]
 pub(super) fn admission_epoch() -> u64 { unsafe { ADMISSION_EPOCH } }
 #[cfg(feature = "ir-experimental")]

@@ -25,7 +25,7 @@ all-debug: build/cpu-worker.js build/libv86-debug.js build/libv86-debug.mjs buil
 browser: build/cpu-worker.js build/v86_all.js
 
 # CPU benchmark suite (tests/bench): IR vs legacy, see docs/cpu-benchmarks.md.
-.PHONY: bench-build bench bench-quick
+.PHONY: bench-build bench bench-quick ir-tier0-tests
 bench-build:
 	node tools/bench/build.mjs
 
@@ -34,6 +34,11 @@ bench: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
 
 bench-quick: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
 	node tests/bench/run.mjs --quick $(BENCH_ARGS)
+
+# Tier-0 page functions against the interpreter on random programs.
+ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
+	node tests/ir/differential/tier0_fuzz.mjs 60 1
+	for kind in i0 i10 i13 i19 i22 i26 s1 s3 s7 x; do FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
 
 .PHONY: glbridge test-glbridge
 glbridge:

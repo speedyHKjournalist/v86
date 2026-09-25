@@ -374,7 +374,62 @@ pub unsafe fn ir_auto_set_page_mode(enabled: u32) -> bool {
     s.pages.clear();
     true
 }
+/// Tier-0: compile hot code pages with the cheap page compiler (ir::tier0)
+/// instead of the optimizing page pipeline. Implies page mode.
+static mut TIER0: bool = false;
+pub(super) fn tier0() -> bool { unsafe { TIER0 } }
+/// Tier-0 page functions may cover neighbor pages (A/B switch). Off: on the
+/// XP boot, neighbors rarely are the pages execution chains to (chains -5%)
+/// while code grew 38% and boot slowed 7%; only page-crossing loops gain.
+static mut T0_RANGES: bool = false;
+#[no_mangle]
+pub unsafe fn ir_t0_set_ranges(enabled: u32) -> bool {
+    T0_RANGES = enabled != 0;
+    true
+}
+/// Interpreted instructions per (page + 1, CS base) not yet given to Pages,
+/// with the batch's first distinct entries (linear addresses).
+#[derive(Clone, Copy)]
+struct PageHeat {
+    page: u32,
+    cs_base: u32,
+    steps: u32,
+    entries: [u32; 8],
+    count: u8,
+}
+static mut PAGE_HEAT: [PageHeat; 64] =
+    [PageHeat { page: 0, cs_base: 0, steps: 0, entries: [0; 8], count: 0 }; 64];
+const PAGE_HEAT_BATCH: u32 = 1024;
+#[no_mangle]
+pub unsafe fn ir_auto_set_tier0(enabled: u32) -> bool {
+    if enabled > 1 || !ir_auto_set_page_mode(enabled) {
+        return false;
+    }
+    TIER0 = enabled != 0;
+    if TIER0 {
+        reserve_compiler_heap();
+    }
+    // Executed instructions per page before its first compilation (the
+    // legacy JIT's threshold for flat 32-bit code); page_threshold tunes it.
+    SCHEDULER.try_lock().unwrap().page_threshold = if TIER0 { 50_000 } else { 512 };
+    true
+}
 unsafe fn cold() -> bool { !cpu::in_jit && !cache::busy() && jit::ir_cache_quiescent() }
+/// Grow the Wasm heap once for the compiler's working set: every later
+/// memory.grow of the (multi-GiB) guest memory makes the host re-account it as
+/// external memory and collect, so many small grows cost far more than one.
+fn reserve_compiler_heap() {
+    static mut RESERVED: bool = false;
+    unsafe {
+        if RESERVED {
+            return;
+        }
+        RESERVED = true;
+    }
+    // Freed chunks stay in the allocator's free lists.
+    let chunks: Vec<Vec<u8>> = (0..16).map(|_| Vec::with_capacity(2 << 20)).collect();
+    drop(chunks);
+}
 #[no_mangle]
 pub unsafe fn ir_auto_config(
     enabled: u32,
@@ -434,7 +489,7 @@ unsafe fn record_weighted(entry: CpuEntryKey, interpreted: bool, weight: u32) {
     }
     // Page functions are limited to 32-bit code: a real-mode boot-loader
     // regression remains unexplained in 16-bit page functions.
-    if s.page_mode && interpreted && entry.default_32 {
+    if s.page_mode && interpreted && entry.default_32 && !TIER0 {
         let threshold = s.page_threshold;
         // Only entries of pages that cannot be compiled whole keep the
         // bounded region heat ring.
@@ -592,6 +647,46 @@ unsafe fn configure_heat(threshold: u32) {
 /// prefix, checked by the caller before interpretation) retired `steps` guest
 /// instructions.
 pub unsafe fn note_interpreted(entry: CpuEntryKey, steps: u32) {
+    if TIER0 && entry.default_32 {
+        // Tier-0 pages earn instruction-weighted heat from every block; the
+        // region heat below only serves pages Tier-0 could not compile.
+        // Heat reaches the page table in batches (the threshold is 50000).
+        // Distinct entries of the batch are kept: they seed the page's blocks.
+        let page = (entry.linear.0 >> 12) + 1;
+        let slot = &mut PAGE_HEAT[(page ^ page >> 6) as usize % 64];
+        if slot.page != page || slot.cs_base != entry.cs_base() {
+            *slot = PageHeat { page, cs_base: entry.cs_base(), steps: 0, entries: [0; 8], count: 0 };
+        }
+        slot.steps = slot.steps.saturating_add(steps.max(1));
+        if !slot.entries[..slot.count as usize].contains(&entry.linear.0) && slot.count < 8 {
+            slot.entries[slot.count as usize] = entry.linear.0;
+            slot.count += 1;
+        }
+        if slot.steps < PAGE_HEAT_BATCH {
+            return;
+        }
+        let (steps, entries, count) = (slot.steps, slot.entries, slot.count as usize);
+        slot.steps = 0;
+        slot.count = 0;
+        let mut s = SCHEDULER.try_lock().unwrap();
+        if s.config.enabled && s.page_mode {
+            let threshold = s.page_threshold;
+            let mut region = false;
+            for (k, &linear) in entries[..count].iter().enumerate() {
+                let key = CpuEntryKey {
+                    pc: crate::ir::frontend::decode::GuestEip(linear.wrapping_sub(entry.cs_base())),
+                    linear: crate::ir::frontend::decode::LinearAddress(linear),
+                    default_32: true,
+                };
+                // The batch's heat, split evenly (the remainder to the first).
+                let share = steps / count as u32 + if k == 0 { steps % count as u32 } else { 0 };
+                region |= s.pages.visit_weighted(key, threshold, share.max(1));
+            }
+            if !region {
+                return;
+            }
+        }
+    }
     if HEAT_STEPS == 0 {
         record(entry, true);
         return;
@@ -720,6 +815,8 @@ pub unsafe fn visit() -> bool {
             let promote = s.config.promote;
             match s.pages.take_ready() {
                 Some((key, entries)) => Some((key, entries, 1)),
+                // Tier-0 pages are not recompiled whole by the optimizing tier.
+                None if TIER0 => None,
                 None => cache::next_page_promotion(promote).map(|entries| {
                     (PageKey::of(entries[0]), entries, 2)
                 }),
@@ -1132,6 +1229,25 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
         default_32: key.default_32,
         tier: compile_tier,
     };
+    // A Tier-0 page function also covers neighbor pages its code enters.
+    let snapshot = if TIER0 && tier == 1 && T0_RANGES {
+        let (first, pages) = {
+            let s = SCHEDULER.try_lock().unwrap();
+            crate::ir::tier0::range(&request, &snapshot, &entries, |base| {
+                s.pages.known_code(PageKey { base, ..key })
+            })
+        };
+        if pages > 1 {
+            let _clock = CompileScope::new(1);
+            super::snapshot::capture_pages(first, pages).unwrap_or(snapshot)
+        }
+        else {
+            snapshot
+        }
+    }
+    else {
+        snapshot
+    };
     let ir_config = IrConfig {
         optimize: opt_level != 0,
         passes: crate::ir::passes::PassConfig {
@@ -1162,7 +1278,12 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
     let compile_scope = Scope::new(Stage::Compile);
     let compile_clock = CompileScope::new(0);
     let started = crate::profiler::performance_codegen_start();
-    let compiled = compile_cpu_page(&request, &snapshot, &entries, &ir_config);
+    let compiled = if TIER0 && tier == 1 {
+        crate::ir::tier0::compile_page(&request, &snapshot, &entries)
+    }
+    else {
+        compile_cpu_page(&request, &snapshot, &entries, &ir_config)
+    };
     crate::profiler::performance_codegen_finish(started);
     drop(compile_clock);
     drop(compile_scope);

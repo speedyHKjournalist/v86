@@ -102,6 +102,10 @@ pub struct CompiledArtifact {
     /// Linear address of the first snapshot byte when it is not the primary
     /// entry (page artifacts cover a whole code page from its base).
     pub source_origin: Option<LinearAddress>,
+    /// Tier-0 page functions: every page offset that starts a block. Such a
+    /// function may be entered at any of them, not only its exact entries.
+    /// Tier-0: block starts of each covered page (one bitmap per mapping).
+    pub page_blocks: Option<Vec<[u64; 64]>>,
 }
 #[derive(Clone, Debug)]
 pub struct CapturedRegion {
@@ -682,6 +686,7 @@ fn compile_lifted(
         fused_edges: vec![],
         alternate_entries,
         source_origin: page,
+        page_blocks: None,
     })
 }
 

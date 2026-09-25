@@ -5,6 +5,8 @@
 //   node tests/bench/run.mjs [--filter re] [--runs 5] [--cold 3] [--scale 1]
 //        [--wasm build/v86-ir-runtime.wasm] [--baseline other.wasm]
 //        [--xp image.img] [--xp-runs 3] [--out file.json] [--quick]
+//        [--ir-setup "export=value,..."]   (calls on IR arms after boot)
+//        [--fallbacks]   (IR: print the instructions most often interpreted)
 //
 // Build the suite first: node tools/bench/build.mjs (make bench-build).
 //
@@ -37,6 +39,8 @@ const wasm = option("wasm", "build/v86-ir-runtime.wasm");
 const baseline = option("baseline");
 const xp_image = option("xp");
 const xp_runs = Number(option("xp-runs", 3));
+const fallbacks = flag("fallbacks");
+const ir_setup = (option("ir-setup") || "").split(",").filter(Boolean).map(s => s.split("="));
 const out = option("out", `build/bench/results-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
 assert(Number.isInteger(runs) && runs >= 1 && Number.isInteger(cold_runs) && cold_runs >= 0 && scale > 0);
 
@@ -83,6 +87,10 @@ async function create(arm) {
     const end = performance.now() + 15000;
     while(view().getUint32(0x500, true) !== 0xCAFE) { assert(performance.now() < end, "benchmark BIOS did not start"); await sleep(1); }
     await vm.stop();
+    if(arm.backend === "ir") for(const [name, value] of ir_setup) {
+        assert.equal(typeof cpu.wm.exports[name], "function", `--ir-setup: no export ${name}`);
+        assert(cpu.wm.exports[name](Number(value)), `--ir-setup: ${name}(${value}) refused`);
+    }
     return { vm, cpu, e: cpu.wm.exports, view, arm };
 }
 
@@ -138,13 +146,24 @@ for(const bench of manifest.benchmarks) {
                 for(const m of machines) { const s = await execute(m, image, iterations); note(m.arm, s); row.arms[m.arm.label].warmup_ms.push(s.ms); }
                 if(w >= 3 && machines.every(m => { const t = row.arms[m.arm.label].warmup_ms.slice(-2); return Math.abs(t[0] - t[1]) <= 0.05 * Math.min(...t); })) break;
             }
+            if(fallbacks) machines[0].e.ir_t0_steps_reset();
             for(let r = 0; r < runs; r++) for(const m of r % 2 ? [...machines].reverse() : machines) {
                 const s = await execute(m, image, iterations);
                 note(m.arm, s);
                 row.arms[m.arm.label].warm_ms.push(s.ms);
             }
         }
-        finally { for(const m of machines) await m.vm.destroy(); }
+        finally {
+            if(fallbacks && machines[0]?.e.ir_t0_steps) {
+                const e = machines[0].e, total = row.arms.ir.instructions * runs, top = [];
+                for(let key = 0; key < 0x10000; key++) { const n = e.ir_t0_steps(key); if(n) top.push([n, key]); }
+                top.sort((a, b) => b[0] - a[0]);
+                const share = top.reduce((s, [n]) => s + n, 0) / total;
+                console.log(`  interpreted ${(100 * share).toFixed(1)}%: ` + top.slice(0, 8).map(([n, key]) =>
+                    `${(key & 255).toString(16).padStart(2, "0")} ${(key >> 8).toString(16).padStart(2, "0")} ${(100 * n / total).toFixed(1)}%`).join(", "));
+            }
+            for(const m of machines) await m.vm.destroy();
+        }
         const reference = row.arms.legacy;
         for(const arm of arms) {
             const r = row.arms[arm.label];
@@ -210,7 +229,7 @@ let revision = null;
 try { revision = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim() + (execSync("git status --porcelain", { encoding: "utf8" }).trim() ? "+dirty" : ""); } catch {}
 const report = {
     suite: "v86-cpu", version: 1, date: new Date().toISOString(), revision, arms,
-    settings: { runs, cold_runs, scale },
+    settings: { runs, cold_runs, scale, ir_setup },
     host: { platform: process.platform, cpus: os.cpus().length, model: os.cpus()[0]?.model, load: os.loadavg(), node: process.version },
     scores, errors, results,
 };

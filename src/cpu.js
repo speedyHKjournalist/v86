@@ -1064,6 +1064,11 @@ CPU.prototype.configure_jit_backend = function(settings)
         budget["hot_threshold"], budget["promotion_threshold"], budget["max_source_bytes"],
         budget["execution_budget"], budget["rep_iterations"]))
         throw new Error("Cannot configure IR while a CPU compilation or execution is active");
+    if(settings["ir_tier0"] !== undefined && (backend !== "ir" || typeof settings["ir_tier0"] !== "boolean"))
+        throw new Error("ir_tier0 requires jit_backend ir and a boolean");
+    // Page-granular Tier-0 below the optimizing region tier (opt-in for now).
+    if(enabled && settings["ir_tier0"] === true && !(exports["ir_auto_set_tier0"] && exports["ir_auto_set_tier0"](1)))
+        throw new Error("IR Tier-0 requires a compatible fresh core");
     this.set_jit_config(0, backend === "ir" || settings.disable_jit ? 1 : 0);
     this.jit_backend = backend;
     this.ir_sync_publication = settings["ir_sync_publication"] === true;

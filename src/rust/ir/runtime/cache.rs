@@ -98,6 +98,149 @@ static mut FAST_STAMP: u32 = 1;
 // reset (generation change, contract switch).
 static mut NEG_STAMP: u32 = 1;
 static mut FAST_HITS: u32 = 0;
+// Page witnesses: a Tier-0 page function accepts any block start of its page,
+// so one witness per (linear page, CS base, mode) replaces a key per entry.
+// Validity follows FAST_STAMP exactly like FAST; `blocks` points into the
+// record's artifact, which is only freed by collection (a stamp change).
+const PAGE_FAST_CAPACITY: usize = 4096;
+#[derive(Clone, Copy)]
+struct PageWitness {
+    stamp: u32,
+    /// The function's own page (its entries' page), not a covered neighbor.
+    primary: bool,
+    page: u32,
+    cs_base: u32,
+    default_32: bool,
+    physical: u32,
+    slot: u32,
+    index: u32,
+    id: u64,
+    blocks: *const [u64; 64],
+}
+const EMPTY_PAGE: PageWitness = PageWitness {
+    stamp: 0,
+    primary: false,
+    page: 0,
+    cs_base: 0,
+    default_32: false,
+    physical: 0,
+    slot: 0,
+    index: 0,
+    id: 0,
+    blocks: std::ptr::null(),
+};
+static mut PAGE_FAST: [PageWitness; PAGE_FAST_CAPACITY] = [EMPTY_PAGE; PAGE_FAST_CAPACITY];
+fn page_slot(page: u32, cs_base: u32, default_32: bool) -> usize {
+    let bits = page ^ cs_base.rotate_left(9) ^ u32::from(default_32) << 31;
+    (bits.wrapping_mul(0x9E3779B1) >> (32 - PAGE_FAST_CAPACITY.trailing_zeros())) as usize
+}
+fn page_fill(cache: &Cache, index: usize) {
+    let record = &cache.records[index];
+    let (Some(blocks), Some(origin)) = (&record.job.artifact.page_blocks, record.job.artifact.source_origin)
+    else {
+        return;
+    };
+    let EntryContract::Cpu(entry) = record.job.artifact.entry
+    else {
+        return;
+    };
+    let mappings = &record.job.source.mappings;
+    if strict_validation() || mappings.len() != blocks.len() {
+        return;
+    }
+    // Every covered page's blocks are entries of the function; a page's own
+    // function (which covers what follows it) keeps its witness.
+    for (k, (mapping, bits)) in mappings.iter().zip(blocks.iter()).enumerate() {
+        let page = (origin.0 >> 12).wrapping_add(k as u32);
+        if mapping.linear.0 >> 12 != page {
+            return;
+        }
+        let primary = entry.linear.0 >> 12 == page;
+        unsafe {
+            let slot = page_slot(page, entry.cs_base(), entry.default_32);
+            let old = &PAGE_FAST[slot];
+            if !primary
+                && old.primary
+                && old.stamp == FAST_STAMP
+                && old.page == page
+                && old.cs_base == entry.cs_base()
+                && old.default_32 == entry.default_32
+            {
+                continue;
+            }
+            PAGE_FAST[slot] = PageWitness {
+                stamp: FAST_STAMP,
+                primary,
+                page,
+                cs_base: entry.cs_base(),
+                default_32: entry.default_32,
+                physical: mapping.physical.0,
+                slot: record.slot,
+                index: index as u32,
+                id: record.job.artifact.key.job,
+                blocks: bits,
+            };
+        }
+    }
+}
+/// page_probe for chaining: the table slot only.
+#[inline(always)]
+unsafe fn page_chain_slot(linear: u32, cs_base: u32, default_32: bool) -> Option<u32> {
+    let page = linear >> 12;
+    let w = &PAGE_FAST[page_slot(page, cs_base, default_32)];
+    if w.stamp != FAST_STAMP || w.page != page || w.cs_base != cs_base || w.default_32 != default_32 {
+        return None;
+    }
+    let offset = linear & 4095;
+    if (*w.blocks)[offset as usize >> 6] >> (offset & 63) & 1 == 0 {
+        return None;
+    }
+    let mask = cpu::TLB_VALID | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let cached = cpu::tlb_data[page as usize];
+    if cached & mask != cpu::TLB_VALID
+        || ((cached as u32 & !4095) ^ (linear & !4095)).wrapping_sub(crate::cpu::memory::mem8 as u32) != w.physical
+    {
+        return None;
+    }
+    Some(w.slot)
+}
+/// A block start of a witnessed page function at the current EIP.
+#[inline(always)]
+unsafe fn page_probe(linear: u32, cs_base: u32, default_32: bool) -> Option<FastEntry> {
+    let page = linear >> 12;
+    let w = PAGE_FAST[page_slot(page, cs_base, default_32)];
+    if w.stamp != FAST_STAMP || w.page != page || w.cs_base != cs_base || w.default_32 != default_32 {
+        return None;
+    }
+    let offset = linear & 4095;
+    if (*w.blocks)[offset as usize >> 6] >> (offset & 63) & 1 == 0 {
+        return None;
+    }
+    let mask = cpu::TLB_VALID | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let cached = cpu::tlb_data[page as usize];
+    let base = crate::cpu::memory::mem8 as u32;
+    if cached & mask != cpu::TLB_VALID
+        || ((cached as u32 & !4095) ^ (linear & !4095)).wrapping_sub(base) != w.physical
+    {
+        return None;
+    }
+    let mut maps = [(0, 0); FAST_MAPPINGS];
+    maps[0] = (linear & !4095, w.physical);
+    Some(FastEntry {
+        stamp: FAST_STAMP,
+        linear,
+        cs_base,
+        default_32,
+        tier_one: true,
+        primary: false,
+        negative: false,
+        map_count: 1,
+        slot: w.slot,
+        index: w.index,
+        id: w.id,
+        maps,
+    })
+}
 // The running activation. Owned by this single CPU thread; set immediately
 // before a generated call and cleared after it, never across a host yield.
 static mut ACTIVE: Option<Owner> = None;
@@ -116,6 +259,7 @@ fn fast_invalidate() {
 fn fast_reset() {
     unsafe {
         FAST = [EMPTY_FAST; FAST_CAPACITY];
+        PAGE_FAST = [EMPTY_PAGE; PAGE_FAST_CAPACITY];
         FAST_STAMP = 1;
         NEG_STAMP = 1;
     }
@@ -147,8 +291,13 @@ fn fast_fill(cache: &Cache, index: usize, entry: super::entry::CpuEntryKey) {
     let mut count = 0;
     let sources = std::iter::once(&record.job.source)
         .chain(record.job.artifact.fused_sources.iter().map(|s| &s.source));
+    // A Tier-0 page function validates its other pages itself.
+    let tier0 = record.job.artifact.page_blocks.is_some();
     for source in sources {
         for mapping in &source.mappings {
+            if tier0 && mapping.linear.0 != entry.linear.0 & !4095 {
+                continue;
+            }
             let pair = (mapping.linear.0, mapping.physical.0);
             if maps[..count].contains(&pair) {
                 continue;
@@ -209,18 +358,29 @@ unsafe fn fast_probe() -> Probe {
     let linear = *gp::instruction_pointer as u32;
     let cs_base = cpu::get_seg_cs() as u32;
     let default_32 = *gp::is_32;
+    if *gp::prefixes != 0 || *gp::in_hlt {
+        return Probe::Unknown;
+    }
     let e = FAST[fast_slot(linear, cs_base, default_32)];
     if e.stamp != if e.negative { NEG_STAMP } else { FAST_STAMP }
         || e.linear != linear
         || e.cs_base != cs_base
         || e.default_32 != default_32
-        || *gp::prefixes != 0
-        || *gp::in_hlt
+        || e.negative
     {
-        return Probe::Unknown;
-    }
-    if e.negative {
-        return Probe::Absent;
+        // An exact witness is missing (or says no exact owner): a Tier-0
+        // page function may still serve this block start.
+        if let Some(page) = page_probe(linear, cs_base, default_32) {
+            return Probe::Hit(page);
+        }
+        return if e.negative && e.stamp == NEG_STAMP && e.linear == linear && e.cs_base == cs_base
+            && e.default_32 == default_32
+        {
+            Probe::Absent
+        }
+        else {
+            Probe::Unknown
+        };
     }
     let mask = cpu::TLB_VALID | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
     let base = crate::cpu::memory::mem8 as u32;
@@ -627,6 +787,77 @@ pub unsafe fn ir_cache_set_capacity(capacity: u32) -> bool {
 extern "C" {
     fn call_indirect1(f: i32, x: u16);
 }
+/// Chained page functions: at most this many nested activations per dispatch.
+const T0_CHAIN_DEPTH: u32 = 48;
+/// A Tier-0 page function leaving its page has written back all state and
+/// the target EIP. If a published page function serves the target block,
+/// run it nested (the caller then returns at once) instead of returning to
+/// the CPU loop. Same checks as a page-witness dispatch; the CPU batch budget
+/// still bounds the chain so interrupts are serviced.
+#[no_mangle]
+pub unsafe fn ir_t0_chain(depth: u32) -> u32 {
+    if depth >= T0_CHAIN_DEPTH
+        || COLLECTION_PENDING
+        || *gp::prefixes != 0
+        || *gp::in_hlt
+        || !cpu::ir_link_budget_available()
+    {
+        return 0;
+    }
+    let linear = *gp::instruction_pointer as u32;
+    let Some(slot) = page_chain_slot(linear, cpu::get_seg_cs() as u32, *gp::is_32)
+    else {
+        return 0;
+    };
+    *gp::previous_ip = linear as i32;
+    T0_CHAINS = T0_CHAINS.wrapping_add(1);
+    super::entry::take_link_request();
+    // The callee skips ir_enter_page at depth > 0: the witness matched CS
+    // and mode, and prefixes/HLT were checked above.
+    call_indirect1((slot + cpu::WASM_TABLE_OFFSET) as i32, (depth + 1) as u16);
+    1
+}
+/// Mirrors Cache::needs_collection for ir_t0_chain (no lock on that path):
+/// witnesses of retired owners stay filled until collection.
+static mut COLLECTION_PENDING: bool = false;
+/// A Tier-0 page function serving EIP runs directly: page functions own no
+/// per-activation cache state (hits, fusion profile, LRU stamps), and chain
+/// among themselves (ir_t0_chain). False: take the complete path.
+unsafe fn t0_execute() -> bool {
+    if strict_validation()
+        || cpu::in_jit
+        || COLLECTION_PENDING
+        || *gp::prefixes != 0
+        || *gp::in_hlt
+        || profiler::performance_recording_enabled()
+        || !jit::ir_cache_quiescent()
+    {
+        return false;
+    }
+    let linear = *gp::instruction_pointer as u32;
+    let Some(slot) = page_chain_slot(linear, cpu::get_seg_cs() as u32, *gp::is_32)
+    else {
+        return false;
+    };
+    *gp::previous_ip = linear as i32;
+    let before = *gp::instruction_counter;
+    super::entry::take_link_request();
+    T0_ENTRIES = T0_ENTRIES.wrapping_add(1);
+    call_indirect1((slot + cpu::WASM_TABLE_OFFSET) as i32, 0);
+    let poll_reuse = POLL_REUSE_ENABLED && super::entry::poll_exit();
+    if !super::entry::link_requested() && !poll_reuse {
+        ir_admission_barrier();
+    }
+    super::entry::take_link_request();
+    // A page function always retires an instruction; never spin if not.
+    *gp::instruction_counter != before
+}
+static mut T0_ENTRIES: u32 = 0;
+#[no_mangle]
+pub unsafe fn ir_t0_entries() -> u32 { T0_ENTRIES }
+static mut T0_CHAINS: u32 = 0;
+#[no_mangle]
+pub unsafe fn ir_t0_chains() -> u32 { T0_CHAINS }
 #[inline(always)]
 fn active() -> Option<Owner> { unsafe { ACTIVE } }
 pub fn busy() -> bool { active().is_some() }
@@ -640,6 +871,7 @@ pub fn invalidate() {
     }
     clear_missing_hint();
     cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
 }
 pub fn dirty_page(page: u32) {
     super::entry::code_write_barrier();
@@ -661,6 +893,9 @@ pub fn dirty_page(page: u32) {
         clear_missing_hint();
     }
     cache.needs_collection |= retired;
+    if retired {
+        unsafe { COLLECTION_PENDING = true };
+    }
 }
 unsafe fn cold() -> bool { !cpu::in_jit && !busy() && jit::ir_cache_quiescent() }
 /// Diagnostic A/B switch; disabling restores full pre/post-fetch validation.
@@ -800,6 +1035,15 @@ unsafe fn cached_current(record: &Record) -> CachedMatch {
     if !strict_validation() {
         // Notified contract: every code write already retired this owner.
         // Missing translations still take the read-only capture fallback.
+        if job.artifact.page_blocks.is_some() && job.artifact.fused_sources.is_empty() {
+            // A Tier-0 page function checks each other page's translation
+            // when control enters it: only the entry page must translate.
+            let page = *gp::instruction_pointer as u32 & !4095;
+            return match job.source.mappings.iter().find(|m| m.linear.0 == page) {
+                Some(m) if super::snapshot::mapping_cached(m) => CachedMatch::Match,
+                _ => CachedMatch::Unavailable,
+            };
+        }
         return if mappings_current(job) { CachedMatch::Match } else { CachedMatch::Unavailable };
     }
     if MERGED_VALIDATION_ENABLED
@@ -862,8 +1106,14 @@ unsafe fn mappings_current(job: &Job) -> bool {
     true
 }
 unsafe fn source_current(linear: u32, source: &super::compile::ImmutableCodeSnapshot) -> bool {
-    capture(linear, source.bytes.len())
-        .is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings)
+    let current = if source.bytes.len() > 4096 && linear & 4095 == 0 && source.bytes.len() % 4096 == 0 {
+        // A multi-page Tier-0 source.
+        super::snapshot::capture_pages(linear, (source.bytes.len() / 4096) as u32)
+    }
+    else {
+        capture(linear, source.bytes.len())
+    };
+    current.is_ok_and(|current| current.bytes == source.bytes && current.mappings == source.mappings)
 }
 unsafe fn unchanged_full(job: &Job) -> bool {
     if !live::generation_current(job.artifact.key) {
@@ -1089,6 +1339,7 @@ pub unsafe fn ir_cache_set_fusion(enabled: u32) -> bool {
         }
         clear_missing_hint();
         cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
     }
     true
 }
@@ -1134,6 +1385,7 @@ pub unsafe fn ir_cache_collect() -> u32 {
             })
             .collect();
         cache.needs_collection = false;
+        unsafe { COLLECTION_PENDING = false };
         if !retired.is_empty() {
             fast_invalidate();
         }
@@ -1364,6 +1616,7 @@ pub(super) unsafe fn make_room(entry: super::entry::CpuEntryKey) -> bool {
             cache.evictions = cache.evictions.wrapping_add(1);
             clear_missing_hint();
             cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
             Some(entries)
         }
         else {
@@ -1449,6 +1702,7 @@ pub unsafe fn ir_cache_validate(id: u64, slot: u32) -> bool {
     if !valid {
         clear_missing_hint();
         cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
         cache.rejected = cache.rejected.wrapping_add(1);
     }
     valid
@@ -1477,6 +1731,7 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
         cache.records[index].phase = Phase::Retired;
         clear_missing_hint();
         cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
         return false;
     }
     let entries = cache.records[index].entries.clone();
@@ -1503,11 +1758,13 @@ pub unsafe fn ir_cache_finish(id: u64, slot: u32) -> bool {
     if superseded {
         fast_invalidate();
         cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
     }
     for entry in &entries {
         cache.published.insert(index_key(*entry), index);
         fast_clear_key(*entry);
     }
+    page_fill(&cache, index);
     refresh_fusion_candidates(&mut cache);
     // Cached predecessor hints must not retain authority over superseded aliases.
     cache.targets.fill(None);
@@ -1550,6 +1807,7 @@ pub unsafe fn ir_cache_cancel(id: u64, slot: u32) -> bool {
     r.phase = Phase::Retired;
     clear_missing_hint();
     cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
     cache.failed = cache.failed.wrapping_add(1);
     true
 }
@@ -1730,6 +1988,7 @@ pub unsafe fn link_target() -> Option<(u32, u64)> {
         cache.records[index].phase = Phase::Retired;
         clear_missing_hint();
         cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
         cache.link_misses = cache.link_misses.wrapping_add(1);
         return None;
     }
@@ -1757,6 +2016,9 @@ pub unsafe fn ir_cache_link_target() -> u64 {
 pub unsafe fn execute() -> bool {
     if diag::enabled() {
         return execute_mode::<true>();
+    }
+    if super::schedule::tier0() && t0_execute() {
+        return true;
     }
     if !strict_validation() && !cpu::in_jit {
         match fast_probe() {
@@ -2003,6 +2265,7 @@ unsafe fn fast_run(witness: FastEntry, linked: bool) -> bool {
     if steps == 0 {
         clear_missing_hint();
         cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
     }
     let current = !cache.needs_collection;
     drop(cache);
@@ -2079,6 +2342,7 @@ fn activate<const PROFILE: bool>(
     let slot = record.slot;
     if !PROFILE {
         fast_fill(cache, index, entry);
+        page_fill(cache, index);
     }
     unsafe {
         ACTIVE = Some(owner);
@@ -2186,6 +2450,7 @@ unsafe fn admit_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>) 
                 cache.records[index].phase = Phase::Retired;
                 clear_missing_hint();
                 cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
             }
             else {
                 let warm =
@@ -2298,6 +2563,7 @@ unsafe fn admit_one<const PROFILE: bool>(linked: bool, previous: Option<Owner>) 
                             cache.records[index].phase = Phase::Retired;
                             clear_missing_hint();
                             cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
                             false
                         },
                     }
@@ -2525,6 +2791,7 @@ unsafe fn run_activation<const PROFILE: bool>(
             }
             clear_missing_hint();
             cache.needs_collection = true;
+        unsafe { COLLECTION_PENDING = true };
         }
         // A normal completed edge may reuse an admission certificate. Timing
         // imports are observable, so diagnostics/recording retain full admission.

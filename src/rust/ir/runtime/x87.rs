@@ -403,17 +403,32 @@ pub unsafe fn ir_fpu_guard() -> u32 {
 /// interpreter's instruction bodies, including the shared f64 shadow cache.
 #[no_mangle]
 pub unsafe fn ir_x87_op(opcode: u32, modrm: u32, low: u32, high: u32) -> u64 {
-    use crate::{
-        cpu::fpu::*,
-        ir::x87::{io, Io},
-        softfloat::F80,
-    };
     let (opcode, modrm) = (opcode as u8, modrm as u8);
-    let group = modrm >> 3 & 7;
     // The next execution of the inlined form finds exact operands mirrored.
-    fpu_mirror_exact_slots();
+    crate::cpu::fpu::fpu_mirror_exact_slots();
+    let io = crate::ir::x87::io(opcode, modrm).expect("continuing x87 form");
+    x87_semantics(opcode, modrm, io, low, high)
+}
+/// ir_x87_op for Tier-0 page functions, which never inline f64 forms (no
+/// mirroring) and classify at compile time: `form` is opcode | modrm << 8 |
+/// kind << 16 (0 stack, 1 load, 2 store; the transfer width is implied).
+#[no_mangle]
+pub unsafe fn ir_t0_x87(form: u32, low: u32, high: u32) -> u64 {
+    use crate::ir::x87::Io;
+    let (opcode, modrm) = (form as u8, (form >> 8) as u8);
+    let io = match form >> 16 {
+        0 => Io::Stack,
+        1 => Io::Load { bytes: 0 },
+        _ => Io::Store { bytes: 0 },
+    };
+    x87_semantics(opcode, modrm, io, low, high)
+}
+#[inline(always)]
+unsafe fn x87_semantics(opcode: u8, modrm: u8, io: crate::ir::x87::Io, low: u32, high: u32) -> u64 {
+    use crate::{cpu::fpu::*, ir::x87::Io, softfloat::F80};
+    let group = modrm >> 3 & 7;
     let wide = (high as u64) << 32 | low as u64;
-    match io(opcode, modrm).expect("continuing x87 form") {
+    match io {
         Io::Stack => register_semantics(opcode.into(), group.into(), (modrm & 7).into()),
         Io::Load { .. } => {
             let value = match opcode {

@@ -621,6 +621,8 @@ export interface V86Options {
     /** Startup-only diagnostic controls. Verification and recovery cannot be disabled. */
     ir_passes_disabled?: Array<"prune" | "merge" | "phis" | "copy" | "fold" | "flags" | "helper_state" |
         "gvn" | "dce" | "licm" | "mir_fold" | "stack" | "allocation" | "state_elision" | "ram_loop" | "ram_forward" | "ram_guard">;
+    /** Page-granular Tier-0 compilation below the IR region tier (jit_backend: "ir" only; default false). */
+    ir_tier0?: boolean;
     /** Bounded automatic IR policy. Only accepted with jit_backend: "ir". */
     ir_region_budget?: {
         /** Entry visits before Tier 1; integer 1..1000000, default 16. */

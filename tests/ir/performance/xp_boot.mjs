@@ -120,6 +120,10 @@ try {
     if(process.env.IR_DIRECT_T2 !== undefined) e.ir_auto_set_direct_tier2(Number(process.env.IR_DIRECT_T2));
     if(process.env.IR_IDLE_MODE !== undefined) assert.equal(e.ir_auto_set_idle_mode(Number(process.env.IR_IDLE_MODE), Number(process.env.IR_SYNC_AFTER || 16)),1);
     if(process.env.IR_PAGE_MODE !== undefined) assert.equal(e.ir_auto_set_page_mode(Number(process.env.IR_PAGE_MODE)),1);
+    if(process.env.IR_TIER0 !== undefined) assert.equal(e.ir_auto_set_tier0(Number(process.env.IR_TIER0)),1);
+    if(process.env.IR_T0_RANGES !== undefined) assert.equal(e.ir_t0_set_ranges(Number(process.env.IR_T0_RANGES)),1);
+    if(process.env.IR_PAGE_THRESHOLD !== undefined) assert.equal(e.ir_auto_set_page_threshold(Number(process.env.IR_PAGE_THRESHOLD)),1);
+    if(process.env.IR_T0_RANGES !== undefined) assert.equal(e.ir_t0_set_ranges(Number(process.env.IR_T0_RANGES)),1);
     if(process.env.IR_PAGE_THRESHOLD !== undefined) assert.equal(e.ir_auto_set_page_threshold(Number(process.env.IR_PAGE_THRESHOLD)),1);
     if(process.env.IR_HOT_FILTER !== undefined) assert.equal(e.ir_auto_set_hot_filter(Number(process.env.IR_HOT_FILTER)),1);
     if(process.env.IR_CACHE_CAPACITY !== undefined) assert.equal(e.ir_cache_set_capacity(Number(process.env.IR_CACHE_CAPACITY)),1);
@@ -195,6 +199,13 @@ try {
     }
     await vm.stop();
     total+=((vm.get_instruction_counter()>>>0)-count)>>>0;sample_ir();
+    if(e.ir_t0_stat) console.log(JSON.stringify({event:"tier0", pages:e.ir_t0_stat(0), instructions:e.ir_t0_stat(1), templated:e.ir_t0_stat(2), bytes:e.ir_t0_stat(3), chains:e.ir_t0_chains?.(), entries:e.ir_t0_entries?.(), covered:e.ir_t0_stat(4), memory:e.memory.buffer.byteLength}));
+    if(e.ir_t0_template_stat && process.env.IR_TIER0_BYTES) {
+        const kinds = [];
+        for(let k = 0; k < 64; k++) { const n = e.ir_t0_template_stat(k, 1); if(n) kinds.push([k, e.ir_t0_template_stat(k, 0), n]); }
+        kinds.sort((a, b) => b[1] - a[1]);
+        console.log(JSON.stringify({event:"tier0_bytes", kinds: kinds.map(([k, b, n]) => `${k}:${b}/${n}=${(b / n).toFixed(0)}`)}));
+    }
     console.log(JSON.stringify({event:"result", backend, target, completed:target === "time" || !!milestone,
         ms:performance.now()-started, instructions:total, milestone, jit:vm.get_jit_info(),
         // Accumulate wrapping counters per interval; long boots can exceed 2^32.

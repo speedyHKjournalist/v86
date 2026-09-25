@@ -140,6 +140,9 @@ impl WasmLocalI64 {
 pub struct WasmLocalF32(u32);
 pub struct WasmLocalF64(u32);
 pub struct WasmLocalV128(u32);
+impl WasmLocalV128 {
+    pub fn unsafe_clone(&self) -> Self { Self(self.0) }
+}
 
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
 pub struct Label(u32);
@@ -363,6 +366,8 @@ impl WasmBuilder {
 
     #[cfg(any(test, feature = "ir-experimental"))]
     pub fn output(&self) -> &[u8] { &self.output }
+    /// Bytes of instructions emitted so far (for size statistics).
+    pub fn body_len(&self) -> usize { self.instruction_body.len() }
 
     /// Declared locals excluding parameters, including temporary staging slots.
     #[cfg(any(test, feature = "ir-experimental"))]
@@ -829,6 +834,7 @@ impl WasmBuilder {
     pub fn rem_i64(&mut self) { self.instruction_body.push(op::OP_I64REMU); }
 
     pub fn rotl_i32(&mut self) { self.instruction_body.push(op::OP_I32ROTL); }
+    pub fn rotr_i32(&mut self) { self.instruction_body.push(op::OP_I32ROTR); }
 
     pub fn shl_i32(&mut self) { self.instruction_body.push(op::OP_I32SHL); }
     pub fn shl_i64(&mut self) { self.instruction_body.push(op::OP_I64SHL); }

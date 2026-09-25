@@ -3135,6 +3135,9 @@ fn jit_page_has_code_ctx(ctx: &mut JitState, page: Page) -> bool {
     !ctx.pages.is_empty() && ctx.pages.contains_key(&page)
         || !ctx.entry_points.is_empty() && ctx.entry_points.contains_key(&page)
 }
+/// Whether IR code (a published artifact's source) lies on the page.
+#[cfg(feature = "ir-experimental")]
+pub fn ir_page_has_code(page: Page) -> bool { ir_page_watched(&get_jit_state(), page) }
 #[cfg(feature = "ir-experimental")]
 fn ir_page_watched(ctx: &JitState, page: Page) -> bool {
     ctx.ir_page_counts

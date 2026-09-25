@@ -1,6 +1,6 @@
 # IR 页级基线层（Tier-0）设计
 
-状态：设计稿（2026-09-24）。目标：IR 后端在 CPU 基准套件（[cpu-benchmarks.md](cpu-benchmarks.md)）
+状态：已实现（2026-09-25），默认关闭，用 `ir_tier0: true` 启用；实现与结果见第 7 节。目标：IR 后端在 CPU 基准套件（[cpu-benchmarks.md](cpu-benchmarks.md)）
 的每个维度、以及 Windows XP 启动到桌面的时间与平均 MIPS 上都超过 legacy JIT，且不依赖 legacy 编译器。
 
 ## 1. 为什么需要新的一层
@@ -89,3 +89,33 @@ PUSH/POP、CALL/RET/JMP/Jcc/LOOP、XCHG、CDQ 等；紧邻的 CMP/TEST/SUB + Jcc
   （解释器对照）覆盖，并用随机指令序列测试（类似 `x87_native.mjs`）。
 - 页内 GPR 局部缓存要求所有可能观察状态的路径都先写回；回退与故障路径集中实现，避免遗漏。
 - wasm 表槽位：Tier-0 与优化区域共享 IR 的槽位池（legacy 在 IR 模式下不占用），需要统一回收策略。
+
+## 7. 实现状态（2026-09-25）
+
+代码：`src/rust/ir/tier0/`（`analysis.rs` 块与布局、`emit.rs` 模板与页函数、`simd.rs` MMX/SSE/SSE2）、
+`src/rust/ir/runtime/tier0.rs`（解释器单步、慢路径助手、统计）。启用：构造参数
+`jit_backend: "ir", ir_tier0: true`，或导出函数 `ir_auto_set_tier0(1)`。
+
+| 阶段 | 结果 |
+|---|---|
+| M1 | 完成。页函数、`br_table` 分派、页热度（批量计入）、发布与失效；无模板的指令结束基本块，经共享的单步块由解释器执行一条。 |
+| M2 | 完成。整数/控制流模板（含 ADC/SBB、ROL/ROR、SHLD/SHRD、BSF/BSR、BT*、MUL/DIV、XADD/CMPXCHG、LOCK）；GPR 常驻局部变量；惰性 FLAGS **延迟写回**（块内被覆盖的 FLAGS 不写内存）；CMP/TEST+Jcc 与未知生产者的条件都内联求值；页内强连通分量编译为嵌套 wasm `loop`，返回点在循环分派处直接比较。 |
+| M3 | 完成。TLB 快路径；慢路径助手；平坦分段/32 位栈特化（入口检查）；写入含 IR 代码的页时交给解释器（无需写后检查）。REP 字符串走单步。 |
+| M4 | 未做，也不再需要：x87/SSE/MMX 直接由 Tier-0 原生模板覆盖，已快于优化层。 |
+| M5 | 以 Rust 辅助方式完成：页函数退出时 `ir_t0_chain` 查页见证后嵌套调用下一页函数；CPU 循环对页见证走精简激活路径（`t0_execute`）。相邻页合并（一个函数覆盖 2–3 页）已实现但默认关闭：XP 启动链接只减少 5%，代码量增加 38%，启动变慢 7%。 |
+| M6 | 完成。x87 复用优化层的 f64 原生发射器（`backend/wasm/x87.rs`，泛化为 `X87Words`）+ `ir_t0_x87` 慢路径；x87 的 TOP/tags/VALID/DIRTY 在整个页函数内缓存在局部变量中（运行时“已打开”标志，在读 x87 状态的指令和函数出口前写回）；连续 ≥3 条纯寄存器 x87 指令按相对栈位置编译为一段 f64 局部变量代码（`tier0/x87run.rs`，一次入口检查、一次提交）。MMX/SSE/SSE2 用 wasm SIMD 原生实现，块内 XMM 寄存器缓存在局部变量中；NaN 结果交给解释器以保证逐位一致。 |
+
+**结果**（`build/bench/results-tier0.json`，满规模，所有校验和与指令数与 legacy 一致）：
+总分 warm 1.41×、cold 1.32×（优化区域层为 0.55×）；x87 2.45、SSE 2.34、MMX 1.53、micro 1.16、
+int 1.07、memory 1.04、control 0.96。低于 legacy 的：708.pages 0.44（legacy 一个模块覆盖多页，
+Tier-0 每次跨页都要链接）、502.codebloat 0.86（同样是跨页）、vcall 0.93、bytecode 0.94，
+其余（recursion、muldiv、rmw、trig）在 0.97–0.99 的测量噪声范围内。
+**XP 启动到桌面**（同步磁盘、交替测量）：Tier-0 约 12.1–12.4 s，legacy 约 13.0–13.2 s。
+
+**正确性。** `tests/ir/differential/tier0_fuzz.mjs`：随机整数/SSE/x87 程序在循环中运行到页被 Tier-0 编译，
+与纯解释器比较 GPR、EFLAGS（用 PUSHFD/LAHF 记录 AF/OF）、内存、XMM、x87 状态与指令数；
+`FUZZ_KIND=i0..i33|s0..s9|x` 单独测试某一类。
+
+**踩过的坑。** IR 编译器的 Rust 分配使 2 GiB 的 wasm 内存反复 `memory.grow`，每次都触发 V8
+“external memory pressure” 全量 GC（XP 启动约 170 次、0.8 s），启用 Tier-0 时一次性预留编译堆解决；
+标量 SSE 先 8 字节写 XMM 再 16 字节读会导致存储转发失败，标量形式只读用到的通道。

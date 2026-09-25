@@ -53,6 +53,13 @@ still apply. Unknown budget keys, invalid numbers and a budget supplied for the
 legacy backend are rejected. No JS-to-Wasm integer truncation is used to validate
 these options.
 
+`ir_tier0: true` (IR only, default false) adds the page-granular Tier-0
+below the region tier: hot code pages become one Wasm function each, with
+templates for integer, x87, SSE/SSE2 and MMX code (see
+[ir-page-tier-design.md](ir-page-tier-design.md)). With it, the IR core runs
+the CPU benchmark suite ([cpu-benchmarks.md](cpu-benchmarks.md)) and the
+Windows XP boot faster than the legacy JIT.
+
 `disable_jit: true` overrides either selected compiler: IR scheduling and legacy
 generation are disabled. Selecting IR still requires an IR-capable core. A
 missing IR core, unsupported backend or invalid budget emits `emulator-error`

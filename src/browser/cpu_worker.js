@@ -26,6 +26,7 @@ export function encode_worker_options(o)
         "ir_stats": o["ir_stats"],
         "ir_verify": o["ir_verify"], "ir_dump": o["ir_dump"],
         "ir_opt_level": o["ir_opt_level"], "ir_passes_disabled": o["ir_passes_disabled"],
+        "ir_tier0": o["ir_tier0"],
         "x87_fast_math": o["x87_fast_math"],
         "x87_jit_cache": o["x87_jit_cache"],
         "fastboot": o.fastboot, "bootmenu": o.bootmenu, "cmdline": o.cmdline,

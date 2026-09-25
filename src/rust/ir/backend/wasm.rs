@@ -20,7 +20,7 @@ use crate::ir::{ids::*, lowering::CompileError, mir::MirRegion, types::Type};
 use crate::wasmgen::wasm_builder::{Label, WasmBuilder, WasmLocal, WasmLocalI64, WasmLocalV128};
 use std::collections::{BTreeMap, VecDeque};
 
-mod x87;
+pub(crate) mod x87;
 #[derive(Clone, Copy)]
 pub struct StateLayout {
     pub gpr: u32,

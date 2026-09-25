@@ -46,6 +46,7 @@ pub mod state;
 #[path = "../../../tests/ir/semantics/store_continuation.rs"]
 mod store_continuation_tests;
 pub mod types;
+pub mod tier0;
 pub mod verify;
 pub mod x87;
 

@@ -27,6 +27,8 @@ pub mod simd;
 
 pub mod x87;
 
+pub mod tier0;
+
 #[cfg(feature = "ir-experimental")]
 pub mod cache;
 #[cfg(any(feature = "ir-experimental", test))]

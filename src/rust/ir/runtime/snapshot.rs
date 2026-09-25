@@ -80,6 +80,10 @@ pub unsafe fn translate(linear: u32) -> Result<u32, CaptureError> {
 pub unsafe fn mappings_cached(snapshot: &ImmutableCodeSnapshot) -> bool {
     mapping_list_cached(&snapshot.mappings)
 }
+/// One mapping's translation is in the CPU TLB (as mappings_cached).
+pub unsafe fn mapping_cached(mapping: &CodeMapping) -> bool {
+    mapping_list_cached(std::slice::from_ref(mapping))
+}
 #[inline(always)]
 unsafe fn mapping_list_cached(mappings: &[CodeMapping]) -> bool {
     let mask = cpu::TLB_VALID | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
@@ -339,6 +343,27 @@ pub unsafe fn capture(linear: u32, length: usize) -> Result<ImmutableCodeSnapsho
 /// interpreter (the page lifter declines what it cannot decode in full).
 pub unsafe fn capture_page(linear: u32) -> Result<ImmutableCodeSnapshot, CaptureError> {
     capture(linear & !4095, 4096)
+}
+
+/// `pages` (at most three) consecutive whole pages from the page of
+/// `linear`: a Tier-0 page function covering a page and its neighbors.
+pub unsafe fn capture_pages(linear: u32, pages: u32) -> Result<ImmutableCodeSnapshot, CaptureError> {
+    if !(1..=3).contains(&pages) {
+        return Err(CaptureError::Size);
+    }
+    let base = linear & !4095;
+    let mut snapshot = capture(base, 4096)?;
+    for k in 1..pages {
+        let next = capture(base.wrapping_add(k << 12), 4096)?;
+        snapshot.bytes.extend_from_slice(&next.bytes);
+        snapshot.mappings.extend(next.mappings);
+        for dependency in next.dependencies {
+            if !snapshot.dependencies.iter().any(|d| d.page == dependency.page) {
+                snapshot.dependencies.push(dependency);
+            }
+        }
+    }
+    Ok(snapshot)
 }
 
 #[cfg(test)]

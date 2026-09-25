@@ -449,6 +449,7 @@ pub unsafe fn fpu_fadd(target_index: i32, val: F80) {
     *fpu_status_word |= F80::get_exception_flags() as u16;
 }
 pub unsafe fn fpu_fclex() { *fpu_status_word = 0; }
+#[no_mangle]
 pub unsafe fn fpu_fcmovcc(condition: bool, r: i32) {
     // outside of the condition is correct: A stack fault happens even if the condition is not
     // fulfilled

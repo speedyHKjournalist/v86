@@ -74,11 +74,13 @@ pub unsafe fn sub32(x: i32, y: i32) -> i32 { return sub(x, y, OPSIZE_32); }
 pub unsafe fn adc8(x: i32, y: i32) -> i32 { return adc(x, y, OPSIZE_8); }
 #[no_mangle]
 pub unsafe fn adc16(x: i32, y: i32) -> i32 { return adc(x, y, OPSIZE_16); }
+#[no_mangle]
 pub unsafe fn adc32(x: i32, y: i32) -> i32 { return adc(x, y, OPSIZE_32); }
 #[no_mangle]
 pub unsafe fn sbb8(x: i32, y: i32) -> i32 { return sbb(x, y, OPSIZE_8); }
 #[no_mangle]
 pub unsafe fn sbb16(x: i32, y: i32) -> i32 { return sbb(x, y, OPSIZE_16); }
+#[no_mangle]
 pub unsafe fn sbb32(x: i32, y: i32) -> i32 { return sbb(x, y, OPSIZE_32); }
 pub unsafe fn cmp8(x: i32, y: i32) {
     dbg_assert!(x >= 0 && x < 0x100);
@@ -786,6 +788,7 @@ pub unsafe fn shl16(dest_operand: i32, count: i32) -> i32 {
         return result & 0xFFFF;
     };
 }
+#[no_mangle]
 pub unsafe fn shl32(dest_operand: i32, count: i32) -> i32 {
     dbg_assert!(count >= 0 && count < 32);
     if count == 0 {
@@ -835,6 +838,7 @@ pub unsafe fn shr16(dest_operand: i32, count: i32) -> i32 {
         return result;
     };
 }
+#[no_mangle]
 pub unsafe fn shr32(dest_operand: i32, count: i32) -> i32 {
     dbg_assert!(count >= 0 && count < 32);
     if count == 0 {
@@ -896,6 +900,7 @@ pub unsafe fn sar16(dest_operand: i32, count: i32) -> i32 {
         return result & 0xFFFF;
     };
 }
+#[no_mangle]
 pub unsafe fn sar32(dest_operand: i32, count: i32) -> i32 {
     dbg_assert!(count >= 0 && count < 32);
     if count == 0 {
