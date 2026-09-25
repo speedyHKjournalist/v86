@@ -119,8 +119,13 @@ pub fn note_compiled(instructions: usize, templated: usize, bytes: usize, pages:
         COMPILED[3] += bytes as u64;
     }
 }
+/// Compile statistic `field` (see COMPILED); field 5: whether Tier-0 is on.
 #[no_mangle]
 pub unsafe fn ir_t0_stat(field: u32) -> u32 {
+    #[cfg(feature = "ir-experimental")]
+    if field == 5 {
+        return super::schedule::tier0() as u32;
+    }
     let values = COMPILED;
     values.get(field as usize).map_or(0, |v| *v as u32)
 }

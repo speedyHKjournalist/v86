@@ -3138,6 +3138,9 @@ fn jit_page_has_code_ctx(ctx: &mut JitState, page: Page) -> bool {
 /// Whether IR code (a published artifact's source) lies on the page.
 #[cfg(feature = "ir-experimental")]
 pub fn ir_page_has_code(page: Page) -> bool { ir_page_watched(&get_jit_state(), page) }
+/// Test builds without the IR runtime publish no IR code.
+#[cfg(all(test, not(feature = "ir-experimental")))]
+pub fn ir_page_has_code(_page: Page) -> bool { false }
 #[cfg(feature = "ir-experimental")]
 fn ir_page_watched(ctx: &JitState, page: Page) -> bool {
     ctx.ir_page_counts

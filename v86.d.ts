@@ -1042,6 +1042,9 @@ export interface V86JitInfo {
         cache_fast_validation: boolean;
         fused_publications: number; fused_hits: number; fused_guest_steps: number;
         fusion_enabled: boolean;
+        /** Tier-0 page functions (ir_tier0); counters wrap at 2^32. */
+        tier0: { enabled: boolean; page_functions: number; instructions: number; wasm_bytes: number;
+            activations: number; chains: number } | null;
         diagnostics: V86IrDiagnostics | null;
     } | null;
 }

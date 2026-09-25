@@ -1188,6 +1188,14 @@ CPU.prototype.get_jit_info = function()
         ir["fused_hits"] = exports["ir_cache_stat"](24) >>> 0;
         ir["fused_guest_steps"] = exports["ir_cache_stat"](25) >>> 0;
         ir["fusion_enabled"] = !!exports["ir_cache_stat"](26);
+        ir["tier0"] = exports["ir_t0_stat"] ? {
+            "enabled": !!exports["ir_t0_stat"](5),
+            "page_functions": exports["ir_t0_stat"](0) >>> 0,
+            "instructions": exports["ir_t0_stat"](1) >>> 0,
+            "wasm_bytes": exports["ir_t0_stat"](3) >>> 0,
+            "activations": exports["ir_t0_entries"]() >>> 0,
+            "chains": exports["ir_t0_chains"]() >>> 0,
+        } : null;
         ir["diagnostics"] = this.get_ir_diagnostics();
     }
     return {

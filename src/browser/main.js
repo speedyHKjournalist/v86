@@ -2148,7 +2148,7 @@ async function start_emulation(profile, query_args)
     new_query_args.set("cpu_worker", cpu_worker ? "1" : "0");
     if(graphics_proxy) new_query_args.set("graphics_proxy", "1");
     if(cpu_args.has("jit_backend")) new_query_args.set("jit_backend", jit_backend);
-    for(const name of ["ir_opt_level", "ir_passes_disabled", "ir_verify", "ir_dump", "ir_stats"])
+    for(const name of ["ir_opt_level", "ir_passes_disabled", "ir_verify", "ir_dump", "ir_stats", "ir_tier0"])
         if(cpu_args.has(name)) new_query_args.set(name, cpu_args.get(name));
 
     const settings = {};
@@ -2485,6 +2485,8 @@ async function start_emulation(profile, query_args)
             (cpu_args.get("ir_opt_level").trim() ? Number(cpu_args.get("ir_opt_level")) : NaN) : undefined,
         "ir_passes_disabled": cpu_args.has("ir_passes_disabled") ?
             (cpu_args.get("ir_passes_disabled") ? cpu_args.get("ir_passes_disabled").split(",") : []) : undefined,
+        // ?ir_tier0=1: page-granular Tier-0 under the IR region tier.
+        "ir_tier0": cpu_args.has("ir_tier0") ? bool_arg(cpu_args.get("ir_tier0")) : undefined,
         wasm_path: "build/" + (jit_backend === "ir" ? "v86-ir-runtime.wasm" :
             DEBUG ? "v86-debug.wasm" : "v86.wasm") + query_append(),
         "graphics_adapter": graphics_proxy ? window["installV86GLGraphicsAdapter"] : undefined,
