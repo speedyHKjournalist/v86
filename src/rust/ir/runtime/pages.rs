@@ -289,6 +289,15 @@ impl Pages {
             },
         }
     }
+    /// The page's code could not be captured now (not mapped in the current
+    /// address space): not a failure, a later heat batch may compile it.
+    pub fn capture_missed(&mut self, key: PageKey) {
+        if let Some(&i) = self.index.get(&key) {
+            let page = &mut self.pages[i];
+            page.queued = false;
+            page.range_pending = false;
+        }
+    }
     /// Recompile a compiled page with its neighbors (see Page::range).
     pub fn want_range(&mut self, key: PageKey) -> bool {
         let Some(&i) = self.index.get(&key)

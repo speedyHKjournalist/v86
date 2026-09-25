@@ -402,8 +402,34 @@ struct PageHeat {
     entries: [u32; 8],
     count: u8,
 }
-static mut PAGE_HEAT: [PageHeat; 64] =
-    [PageHeat { page: 0, cs_base: 0, steps: 0, entries: [0; 8], count: 0 }; 64];
+const PAGE_HEAT_SLOTS: usize = 256;
+static mut PAGE_HEAT: [PageHeat; PAGE_HEAT_SLOTS] =
+    [PageHeat { page: 0, cs_base: 0, steps: 0, entries: [0; 8], count: 0 }; PAGE_HEAT_SLOTS];
+/// Give a batch's heat to its page (split over the batch's entries).
+/// Returns whether the page may still use region compilation.
+unsafe fn flush_page_heat(batch: &PageHeat) -> bool {
+    let count = batch.count as usize;
+    if count == 0 {
+        return false;
+    }
+    let mut s = SCHEDULER.try_lock().unwrap();
+    if !s.config.enabled || !s.page_mode {
+        return true;
+    }
+    let threshold = s.page_threshold;
+    let mut region = false;
+    for (k, &linear) in batch.entries[..count].iter().enumerate() {
+        let key = CpuEntryKey {
+            pc: crate::ir::frontend::decode::GuestEip(linear.wrapping_sub(batch.cs_base)),
+            linear: crate::ir::frontend::decode::LinearAddress(linear),
+            default_32: true,
+        };
+        // The batch's heat, split evenly (the remainder to the first).
+        let share = batch.steps / count as u32 + if k == 0 { batch.steps % count as u32 } else { 0 };
+        region |= s.pages.visit_weighted(key, threshold, share.max(1));
+    }
+    region
+}
 const PAGE_HEAT_BATCH: u32 = 1024;
 #[no_mangle]
 pub unsafe fn ir_auto_set_tier0(enabled: u32) -> bool {
@@ -660,8 +686,13 @@ pub unsafe fn note_interpreted(entry: CpuEntryKey, steps: u32) {
         // Heat reaches the page table in batches (the threshold is 50000).
         // Distinct entries of the batch are kept: they seed the page's blocks.
         let page = (entry.linear.0 >> 12) + 1;
-        let slot = &mut PAGE_HEAT[(page ^ page >> 6) as usize % 64];
+        let slot = &mut PAGE_HEAT[(page ^ page >> 8) as usize % PAGE_HEAT_SLOTS];
         if slot.page != page || slot.cs_base != entry.cs_base() {
+            // The previous page keeps the heat it gathered in this slot.
+            if slot.steps != 0 {
+                let evicted = *slot;
+                flush_page_heat(&evicted);
+            }
             *slot = PageHeat { page, cs_base: entry.cs_base(), steps: 0, entries: [0; 8], count: 0 };
         }
         slot.steps = slot.steps.saturating_add(steps.max(1));
@@ -672,26 +703,11 @@ pub unsafe fn note_interpreted(entry: CpuEntryKey, steps: u32) {
         if slot.steps < PAGE_HEAT_BATCH {
             return;
         }
-        let (steps, entries, count) = (slot.steps, slot.entries, slot.count as usize);
+        let batch = *slot;
         slot.steps = 0;
         slot.count = 0;
-        let mut s = SCHEDULER.try_lock().unwrap();
-        if s.config.enabled && s.page_mode {
-            let threshold = s.page_threshold;
-            let mut region = false;
-            for (k, &linear) in entries[..count].iter().enumerate() {
-                let key = CpuEntryKey {
-                    pc: crate::ir::frontend::decode::GuestEip(linear.wrapping_sub(entry.cs_base())),
-                    linear: crate::ir::frontend::decode::LinearAddress(linear),
-                    default_32: true,
-                };
-                // The batch's heat, split evenly (the remainder to the first).
-                let share = steps / count as u32 + if k == 0 { steps % count as u32 } else { 0 };
-                region |= s.pages.visit_weighted(key, threshold, share.max(1));
-            }
-            if !region {
-                return;
-            }
+        if !flush_page_heat(&batch) {
+            return;
         }
     }
     if HEAT_STEPS == 0 {
@@ -1215,10 +1231,12 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
         let _clock = CompileScope::new(1);
         super::snapshot::capture_page(key.base)
     };
-    let Ok(snapshot) = snapshot
-    else {
-        SCHEDULER.try_lock().unwrap().pages.compiled(key, &entries, None, &[]);
-        return false;
+    let snapshot = match snapshot {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            SCHEDULER.try_lock().unwrap().pages.capture_missed(key);
+            return false;
+        },
     };
     let physical = snapshot.mappings[0].physical.0;
     if !cache::can_make_room(entries[0]) {

@@ -184,6 +184,24 @@ fn page_fill(cache: &Cache, index: usize) {
         }
     }
 }
+/// Page witnesses go stale with every FAST_STAMP change. Exact witnesses are
+/// refilled by the complete admission path, but a page function's other block
+/// starts are then served by the witnessed fast path, which never refills its
+/// page witness: refill every published page function's witness at once.
+static mut PAGE_REFILL: bool = false;
+#[inline(never)]
+unsafe fn refill_page_witnesses() {
+    let Ok(cache) = CACHE.try_lock()
+    else {
+        return;
+    };
+    PAGE_REFILL = false;
+    for index in 0..cache.records.len() {
+        if cache.records[index].phase == Phase::Published && cache.records[index].job.artifact.page_blocks.is_some() {
+            page_fill(&cache, index);
+        }
+    }
+}
 /// page_probe for chaining: the table slot only.
 #[inline(always)]
 unsafe fn page_chain_slot(linear: u32, cs_base: u32, default_32: bool) -> Option<u32> {
@@ -249,6 +267,7 @@ static mut FAST_CHAINS: u32 = 0;
 #[inline(always)]
 fn fast_invalidate() {
     unsafe {
+        PAGE_REFILL = true;
         FAST_STAMP = FAST_STAMP.wrapping_add(1);
         if FAST_STAMP == 0 {
             // Never let a wrapped stamp revalidate an ancient witness.
@@ -261,6 +280,7 @@ fn fast_reset() {
     unsafe {
         FAST = [EMPTY_FAST; FAST_CAPACITY];
         PAGE_FAST = [EMPTY_PAGE; PAGE_FAST_CAPACITY];
+        PAGE_REFILL = true;
         FAST_STAMP = 1;
         NEG_STAMP = 1;
     }
@@ -852,6 +872,9 @@ unsafe fn t0_execute() -> bool {
         || !jit::ir_cache_quiescent()
     {
         return false;
+    }
+    if PAGE_REFILL && !busy() {
+        refill_page_witnesses();
     }
     let linear = *gp::instruction_pointer as u32;
     let Some(slot) = page_chain_slot(linear, cpu::get_seg_cs() as u32, *gp::is_32)
@@ -2251,6 +2274,11 @@ unsafe fn fast_execute(mut witness: FastEntry) -> bool {
             || *gp::in_hlt
             || *gp::flags & (cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM) != control
         {
+            break;
+        }
+        // Tier-0 page functions chain among themselves in t0_execute, without
+        // this loop's per-activation accounting.
+        if super::schedule::tier0() && t0_execute() {
             break;
         }
         match fast_probe() {
