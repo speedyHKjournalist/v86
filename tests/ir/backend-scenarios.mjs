@@ -14,9 +14,11 @@ export async function backend_scenarios(V86, options, log = console.log)
     };
     const budget = { hot_threshold: 2, promotion_threshold: 4, max_source_bytes: 96, execution_budget: 128, rep_iterations: 8 };
     let vm, ir_snapshot;
+    // The scenarios exercise the region tiers with small budgets, so Tier-0
+    // (on by default) is off unless a scenario asks for the defaults.
     const create = async (extra = {}, expected_error) => {
         vm = new V86({ memory_size: 32 << 20, disable_keyboard: true, disable_mouse: true,
-            disable_speaker: true, net_device: { type: "none" }, ...options, autostart: false, ...extra });
+            disable_speaker: true, net_device: { type: "none" }, ir_tier0: false, ...options, autostart: false, ...extra });
         let loaded = false, failure;
         vm.add_listener("emulator-loaded", () => { loaded = true; });
         vm.add_listener("emulator-error", error => { failure = String(error?.message || error); });
@@ -149,39 +151,33 @@ export async function backend_scenarios(V86, options, log = console.log)
         check(!disabled.legacy_generation_enabled && !disabled.ir.enabled && !disabled.ir.tier1_attempts && !disabled.legacy_compile_requests,
             "disable_jit disables both generators");
         await destroy();
-        await create(); await boot();
-        await until(async () => (await info()).legacy_compile_requests > 0, "default legacy compiler runs");
+        await create({ ir_tier0: undefined }); await boot();
+        await vm.write_memory(Uint8Array.of(0x40, 0xEB, 0xFD), 0x1200000);
+        await vm.write_memory(bytes(0x1200000), 0x600);
+        await until(async () => (await info()).ir.tier0.activations > 0, "default Tier-0 runs");
         await vm.stop();
-        const legacy = await info();
-        check(legacy.backend === "legacy" && legacy.legacy_generation_enabled && !legacy.ir.enabled, "default remains legacy");
+        const defaults = await info();
+        check(defaults.backend === "ir" && defaults.ir.enabled && defaults.ir.tier0.enabled, "default is IR with Tier-0");
+        check(!defaults.legacy_generation_enabled && defaults.legacy_compile_requests === 0, "default generates no legacy code");
         await destroy();
-        log("PASS: explicit disable_jit and unchanged default legacy backend");
+        log("PASS: explicit disable_jit and the default IR + Tier-0 backend");
 
-        await create({ initial_state: { buffer: ir_snapshot } });
-        const destination = await info();
-        check(destination.backend === "legacy" && destination.legacy_generation_enabled && !destination.ir.enabled && !destination.ir.cache_entries,
-            "IR snapshot keeps the destination legacy policy and contains no compiled cache");
-        await vm.run();
-        await until(async () => (await info()).legacy_compile_requests > 0, "legacy recompiles the restored IR guest");
-        await vm.stop();
-        const legacy_snapshot = await vm.save_state();
-        await destroy();
-        await create({ jit_backend: "ir", ir_region_budget: budget, initial_state: { buffer: legacy_snapshot } });
+        await create({ jit_backend: "ir", ir_region_budget: budget, initial_state: { buffer: ir_snapshot } });
         await assert_ir();
+        check(!(await info()).ir.cache_entries, "IR snapshot contains no compiled cache");
         await vm.run();
-        await until(async () => (await info()).ir.tier2_published > 0, "IR recompiles the restored legacy guest");
+        await until(async () => (await info()).ir.tier2_published > 0, "IR recompiles the restored guest");
         await vm.stop(); await assert_ir(); await destroy();
-        log("PASS: snapshots cross both backend directions and preserve the destination compiler policy");
+        log("PASS: snapshots restore without compiled code and recompile under the destination policy");
 
         for(const [extra, error] of [
             [{ jit_backend: "unknown" }, "jit_backend must"],
             [{ jit_backend: null }, "jit_backend must"],
-            [{ ir_stats: "sampled" }, "require jit_backend ir"],
+            [{ jit_backend: "legacy" }, "legacy backend was removed"],
             [{ jit_backend: "ir", ir_stats: "full" }, "ir_stats must"],
-            [{ ir_verify: "every_pass" }, "require jit_backend ir"],
             [{ jit_backend: "ir", ir_verify: "always" }, "ir_verify must"],
             [{ jit_backend: "ir", ir_dump: null }, "ir_dump must"],
-            [{ ir_opt_level: 1 }, "require jit_backend ir"],
+            [{ ir_tier0: 1 }, "ir_tier0 must"],
             [{ jit_backend: "ir", ir_opt_level: null }, "ir_opt_level must"],
             [{ jit_backend: "ir", ir_opt_level: 3 }, "ir_opt_level must"],
             [{ jit_backend: "ir", ir_opt_level: 1.5 }, "ir_opt_level must"],
@@ -194,12 +190,9 @@ export async function backend_scenarios(V86, options, log = console.log)
             [{ jit_backend: "ir", ir_region_budget: { max_source_bytes: 4294967296 } }, "max_source_bytes"],
             [{ jit_backend: "ir", ir_region_budget: { rep_iterations: null } }, "rep_iterations"],
             [{ jit_backend: "ir", ir_region_budget: { typo: 1 } }, "Unknown ir_region_budget"],
-            [{ ir_region_budget: {} }, "requires jit_backend ir"],
+            [{ ir_region_budget: [] }, "ir_region_budget must"],
         ]) { await create({ ...extra, autostart: true }, error); await destroy(); }
         log("PASS: invalid backend and budgets report emulator-error before autostart");
-        await create({ wasm_path: options.wasm_path.replace(/v86-ir-[^/]+\.wasm$/, "v86.wasm"), jit_backend: "ir", autostart: true }, "requires a core built with ir-experimental");
-        await destroy();
-        log("PASS: a core without IR rejects the IR backend explicitly");
         if(!options.cpu_worker)
         {
             for(const wasm_fn of [

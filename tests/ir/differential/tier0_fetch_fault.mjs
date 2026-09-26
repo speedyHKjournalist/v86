@@ -55,7 +55,7 @@ const handler = [
 
 async function machine(tier0) {
     const vm = new V86({
-        wasm_path: wasm, jit_backend: tier0 ? "ir" : "legacy", memory_size: 128 << 20,
+        wasm_path: wasm, disable_jit: !tier0, memory_size: 128 << 20, // reference: the interpreter only
         bios: { buffer: Uint8Array.from(boot).buffer }, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" }, autostart: false,
     });
@@ -69,7 +69,6 @@ async function machine(tier0) {
     }
     await vm.stop();
     if(tier0) assert(e.ir_auto_set_tier0(1));
-    else e.set_jit_config(0, 1); // no legacy generation: the interpreter only
     return { vm, cpu, e, tier0 };
 }
 

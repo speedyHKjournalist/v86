@@ -1,31 +1,30 @@
-# Public experimental IR backend
+# IR backend
 
-`jit_backend: "ir"` selects automatic IR compilation and disables legacy code
-generation. Unsupported instructions continue through the existing interpreter.
-The default is still `"legacy"`; this option does not satisfy the IR-14 default
-cutover or the complete Windows XP and application acceptance gates.
+IR is the only JIT backend. Every V86 instance compiles with automatic IR
+compilation plus the page-granular Tier-0; the legacy code generator is never
+enabled (its Rust code is still linked into the core but unreachable from JS).
+Unsupported instructions continue through the existing interpreter.
+`jit_backend` accepts only `"ir"` (or omission); `"legacy"` is rejected with
+`emulator-error`.
 
-The stock `index.html` also accepts `?jit_backend=ir` (or append
-`&jit_backend=ir` to an existing URL). Manual **Start Emulation** preserves the
-selection in the rebuilt URL, and both main-thread and Worker starts load
-`build/v86-ir-runtime.wasm`. Without the parameter, the page keeps its normal
-legacy core. Build the page, Worker, and experimental cores before using this:
-
-```sh
-make build/v86_all.js build/cpu-worker.js build/v86-ir-runtime.wasm build/v86-ir-runtime-fallback.wasm
-```
+The `ir-experimental` cargo feature is on by default, so `build/v86.wasm`,
+`build/v86-debug.wasm` and `build/v86-ir-runtime.wasm` all contain IR (the
+release and IR runtime cores are identical). `make run` builds
+`build/v86.wasm`; the stock `index.html` loads it (the debug page loads
+`build/v86-debug.wasm`) with Tier-0, `x87_fast_math` and `x87_jit_cache` on and
+the CPU Worker checkbox checked. None of these need URL parameters any more;
+`?ir_tier0=0`, `?x87_fast_math=0`, `?x87_jit_cache=0` and `?cpu_worker=0` turn
+them off, and Manual **Start Emulation** keeps only such non-default values in
+the rebuilt URL.
 
 Reload the page after rebuilding; an already-running VM keeps its constructor
-policy. Selecting IR in the debug page currently also uses the experimental
-release runtime core.
+policy.
 
-Build the experimental core with `make build/v86-ir-runtime.wasm`. Pass its URL
-as `wasm_path` in a browser, Node, or CPU Worker configuration:
+Pass options in a browser, Node, or CPU Worker configuration:
 
 ```js
 const emulator = new V86({
-    wasm_path: "build/v86-ir-runtime.wasm",
-    jit_backend: "ir",
+    wasm_path: "build/v86.wasm",
     ir_opt_level: 2,
     ir_passes_disabled: [],
     ir_region_budget: {
@@ -49,21 +48,21 @@ The budget object is optional; the example shows every default. Heat thresholds
 accept integers 1–1,000,000; source bytes accept 15–960; execution and REP budgets
 accept 1–4,096. Tier 2 doubles the byte window with a 960-byte cap. The independent
 instruction, CFG, cache and per-frame compiler bounds in [ir-auto.md](ir-auto.md)
-still apply. Unknown budget keys, invalid numbers and a budget supplied for the
-legacy backend are rejected. No JS-to-Wasm integer truncation is used to validate
+still apply. Unknown budget keys, invalid numbers and a budget that is not an
+object are rejected. No JS-to-Wasm integer truncation is used to validate
 these options.
 
-`ir_tier0: true` (IR only, default false) adds the page-granular Tier-0
-below the region tier: hot code pages become one Wasm function each, with
-templates for integer, x87, SSE/SSE2 and MMX code (see
-[ir-page-tier-design.md](ir-page-tier-design.md)). With it, the IR core runs
+`ir_tier0` (default true; `false` leaves only the region tiers) is the
+page-granular Tier-0 below the region tier: hot code pages become one Wasm
+function each, with templates for integer, x87, SSE/SSE2 and MMX code (see
+[ir-page-tier-design.md](ir-page-tier-design.md)). With it, the IR core ran
 the CPU benchmark suite ([cpu-benchmarks.md](cpu-benchmarks.md)) and the
-Windows XP boot faster than the legacy JIT.
+Windows XP boot faster than the removed legacy JIT.
 
-`disable_jit: true` overrides either selected compiler: IR scheduling and legacy
-generation are disabled. Selecting IR still requires an IR-capable core. A
-missing IR core, unsupported backend or invalid budget emits `emulator-error`
-before `emulator-loaded` or guest autostart, in either execution mode.
+`disable_jit: true` disables IR scheduling: only the interpreter runs. A core
+built without IR, a backend other than `"ir"` or an invalid budget emits
+`emulator-error` before `emulator-loaded` or guest autostart, in either
+execution mode.
 
 Backend selection is a constructor policy. It is not serialized in guest
 snapshots and is not a public runtime switching API. Reset/restart and snapshot
@@ -94,7 +93,7 @@ APIs keep their own parameters.
 pass does not enable it at a lower optimization level. `allocation` controls the
 optional post-lowering allocation pass, not the required initial typed locals.
 Loop caching does not implicitly enable a disabled forwarding pass. Unknown or
-duplicate names, invalid levels and IR controls on a legacy backend are rejected
+duplicate names and invalid levels are rejected
 before autostart. All verifier, StateMap, fault and cache admission checks remain.
 
 Both options pass through the real Worker initialization path, appear as copied

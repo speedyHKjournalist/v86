@@ -2110,15 +2110,9 @@ async function load_graphics_proxy()
 // - the ?profile= query parameter was set to "custom" and at least one disk image was given
 async function start_emulation(profile, query_args)
 {
-    // Manual starts rebuild the URL. Read the backend before push_state and
-    // preserve it along with the other CPU policies.
+    // Manual starts rebuild the URL. Read the CPU policies before push_state
+    // and preserve the ones that differ from the defaults.
     const cpu_args = query_args || new URLSearchParams(window.location.search);
-    const jit_backend = cpu_args.get("jit_backend") || "legacy";
-    if(jit_backend !== "legacy" && jit_backend !== "ir")
-    {
-        alert("jit_backend must be legacy or ir");
-        return;
-    }
 
     $("boot_options").style.display = "none";
 
@@ -2145,19 +2139,18 @@ async function start_emulation(profile, query_args)
 
     const new_query_args = new Map();
     new_query_args.set("profile", profile?.id || "custom");
-    new_query_args.set("cpu_worker", cpu_worker ? "1" : "0");
+    if(!cpu_worker) new_query_args.set("cpu_worker", "0");
     if(graphics_proxy) new_query_args.set("graphics_proxy", "1");
-    if(cpu_args.has("jit_backend")) new_query_args.set("jit_backend", jit_backend);
-    for(const name of ["ir_opt_level", "ir_passes_disabled", "ir_verify", "ir_dump", "ir_stats", "ir_tier0"])
+    for(const name of ["ir_opt_level", "ir_passes_disabled", "ir_verify", "ir_dump", "ir_stats"])
         if(cpu_args.has(name)) new_query_args.set(name, cpu_args.get(name));
 
+    // IR Tier-0 and the x87 fast paths are on unless the URL passes =0.
     const settings = {};
-    settings["x87_fast_math"] = !cpu_args.has("x87_fast_math") ||
-        bool_arg(cpu_args.get("x87_fast_math"));
-    new_query_args.set("x87_fast_math", settings["x87_fast_math"] ? "1" : "0");
-    settings["x87_jit_cache"] = !cpu_args.has("x87_jit_cache") ||
-        bool_arg(cpu_args.get("x87_jit_cache"));
-    new_query_args.set("x87_jit_cache", settings["x87_jit_cache"] ? "1" : "0");
+    for(const name of ["ir_tier0", "x87_fast_math", "x87_jit_cache"])
+    {
+        settings[name] = !cpu_args.has(name) || bool_arg(cpu_args.get(name));
+        if(!settings[name]) new_query_args.set(name, "0");
+    }
 
     if(profile)
     {
@@ -2477,7 +2470,6 @@ async function start_emulation(profile, query_args)
     const emulator = new V86({
         "cpu_worker": cpu_worker,
         "cpu_worker_url": "build/cpu-worker.js" + query_append(),
-        "jit_backend": jit_backend,
         "ir_stats": cpu_args.has("ir_stats") ? cpu_args.get("ir_stats") : undefined,
         "ir_verify": cpu_args.has("ir_verify") ? cpu_args.get("ir_verify") : undefined,
         "ir_dump": cpu_args.has("ir_dump") ? cpu_args.get("ir_dump") : undefined,
@@ -2485,10 +2477,8 @@ async function start_emulation(profile, query_args)
             (cpu_args.get("ir_opt_level").trim() ? Number(cpu_args.get("ir_opt_level")) : NaN) : undefined,
         "ir_passes_disabled": cpu_args.has("ir_passes_disabled") ?
             (cpu_args.get("ir_passes_disabled") ? cpu_args.get("ir_passes_disabled").split(",") : []) : undefined,
-        // ?ir_tier0=1: page-granular Tier-0 under the IR region tier.
-        "ir_tier0": cpu_args.has("ir_tier0") ? bool_arg(cpu_args.get("ir_tier0")) : undefined,
-        wasm_path: "build/" + (jit_backend === "ir" ? "v86-ir-runtime.wasm" :
-            DEBUG ? "v86-debug.wasm" : "v86.wasm") + query_append(),
+        "ir_tier0": settings["ir_tier0"],
+        wasm_path: "build/" + (DEBUG ? "v86-debug.wasm" : "v86.wasm") + query_append(),
         "graphics_adapter": graphics_proxy ? window["installV86GLGraphicsAdapter"] : undefined,
         "graphics_options": {
             "onError": error => {

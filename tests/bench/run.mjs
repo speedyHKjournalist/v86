@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// v86 CPU benchmark runner: identical guest work on each arm (IR, legacy and
-// optional baseline cores), checked results, SPEC-style ratio scores.
+// v86 CPU benchmark runner: identical guest work on each arm (the core under
+// test and an optional baseline core), checked results, SPEC-style ratio scores.
 //
 //   node tests/bench/run.mjs [--filter re] [--runs 5] [--cold 3] [--scale 1]
 //        [--wasm build/v86-ir-runtime.wasm] [--baseline other.wasm]
 //        [--xp image.img] [--xp-runs 3] [--out file.json] [--quick]
-//        [--ir-setup "export=value,..."]   (calls on IR arms after boot)
+//        [--ir-setup "export=value,..."]   (calls on every arm after boot)
 //        [--fallbacks]   (IR: print the instructions most often interpreted)
 //
 // Build the suite first: node tools/bench/build.mjs (make bench-build).
@@ -13,8 +13,9 @@
 // Measurements per benchmark and arm:
 //   cold  first run in a fresh VM: JIT discovery, compilation and execution
 //   warm  median of timed runs after the timings have stabilized
-// Ratios are legacy time / arm time (above 1 means faster than legacy). Scores
-// are geometric means of the ratios per category and over the whole suite.
+// Ratios are baseline time / arm time (above 1 means faster than the baseline);
+// without --baseline only MIPS are reported. Scores are geometric means of the
+// ratios per category and over the whole suite.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -47,9 +48,8 @@ assert(Number.isInteger(runs) && runs >= 1 && Number.isInteger(cold_runs) && col
 const manifest = JSON.parse(fs.readFileSync("build/bench/manifest.json", "utf8"));
 const boot = fs.readFileSync(manifest.boot);
 const arms = [
-    { label: "ir", backend: "ir", wasm },
-    { label: "legacy", backend: "legacy", wasm },
-    ...baseline ? [{ label: "baseline", backend: "ir", wasm: baseline }] : [],
+    { label: "ir", wasm },
+    ...baseline ? [{ label: "baseline", wasm: baseline }] : [],
 ];
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
@@ -76,7 +76,7 @@ function load_pe(file) {
 
 async function create(arm) {
     const vm = new V86({
-        wasm_path: arm.wasm, jit_backend: arm.backend, memory_size: 128 << 20,
+        wasm_path: arm.wasm, memory_size: 128 << 20,
         bios: { buffer: Uint8Array.from(boot).buffer }, disable_keyboard: true, disable_mouse: true,
         disable_speaker: true, net_device: { type: "none" }, autostart: false,
     });
@@ -87,7 +87,7 @@ async function create(arm) {
     const end = performance.now() + 15000;
     while(view().getUint32(0x500, true) !== 0xCAFE) { assert(performance.now() < end, "benchmark BIOS did not start"); await sleep(1); }
     await vm.stop();
-    if(arm.backend === "ir") for(const [name, value] of ir_setup) {
+    for(const [name, value] of ir_setup) {
         assert.equal(typeof cpu.wm.exports[name], "function", `--ir-setup: no export ${name}`);
         assert(cpu.wm.exports[name](Number(value)), `--ir-setup: ${name}(${value}) refused`);
     }
@@ -164,16 +164,16 @@ for(const bench of manifest.benchmarks) {
             }
             for(const m of machines) await m.vm.destroy();
         }
-        const reference = row.arms.legacy;
+        const reference = row.arms.baseline;
         for(const arm of arms) {
             const r = row.arms[arm.label];
-            if(r.checksum !== reference.checksum || r.instructions !== reference.instructions)
-                errors.push(`${bench.name}: ${arm.label} result ${r.checksum}/${r.instructions} differs from legacy ${reference.checksum}/${reference.instructions}`);
+            if(reference && (r.checksum !== reference.checksum || r.instructions !== reference.instructions))
+                errors.push(`${bench.name}: ${arm.label} result ${r.checksum}/${r.instructions} differs from baseline ${reference.checksum}/${reference.instructions}`);
             r.warm = median(r.warm_ms); r.cold = cold_runs ? median(r.cold_ms) : null;
             r.warm_mips = r.instructions / r.warm / 1000;
             r.cold_mips = r.cold ? r.instructions / r.cold / 1000 : null;
-            r.warm_ratio = reference.warm_ms.length ? median(reference.warm_ms) / r.warm : null;
-            r.cold_ratio = cold_runs ? median(reference.cold_ms) / r.cold : null;
+            r.warm_ratio = reference ? median(reference.warm_ms) / r.warm : null;
+            r.cold_ratio = reference && cold_runs ? median(reference.cold_ms) / r.cold : null;
         }
     }
     catch(error) {
@@ -183,7 +183,7 @@ for(const bench of manifest.benchmarks) {
     results.push(row);
     const line = arms.map(arm => {
         const r = row.arms[arm.label];
-        return row.error ? `${arm.label} -` : `${arm.label} ${r.warm_mips.toFixed(0)} MIPS${arm.label === "legacy" ? "" : ` x${r.warm_ratio.toFixed(2)} cold x${(r.cold_ratio ?? NaN).toFixed(2)}`}`;
+        return row.error ? `${arm.label} -` : `${arm.label} ${r.warm_mips.toFixed(0)} MIPS${arm.label === "baseline" || r.warm_ratio === null ? "" : ` x${r.warm_ratio.toFixed(2)} cold x${(r.cold_ratio ?? NaN).toFixed(2)}`}`;
     }).join(" | ");
     console.log(`${bench.name.padEnd(16)} ${row.error ? "ERROR " + row.error : line}`);
 }
@@ -192,7 +192,7 @@ if(xp_image) {
     const row = { name: "900.xpboot", category: "system", about: "Windows XP boot to the first 800x600x32 desktop mode, synchronous disk", arms: {} };
     for(const arm of arms) row.arms[arm.label] = { boot_ms: [], avg_mips: [] };
     for(let r = 0; r < xp_runs; r++) for(const arm of r % 2 ? [...arms].reverse() : arms) {
-        const child = spawnSync(process.execPath, ["tests/ir/performance/xp_boot.mjs", xp_image, arm.backend, arm.wasm], {
+        const child = spawnSync(process.execPath, ["tests/ir/performance/xp_boot.mjs", xp_image, "ir", arm.wasm], {
             env: { ...process.env, IR_SYNC_DISK: "1", IR_BOOT_TARGET: "desktop", IR_BOOT_MS: "180000", IR_DIAGNOSTICS: "0" },
             encoding: "utf8", timeout: 400000, maxBuffer: 1 << 28,
         });
@@ -204,7 +204,7 @@ if(xp_image) {
     for(const arm of arms) {
         const r = row.arms[arm.label];
         r.warm = median(r.boot_ms); r.warm_mips = median(r.avg_mips);
-        r.warm_ratio = median(row.arms.legacy.boot_ms) / r.warm;
+        r.warm_ratio = row.arms.baseline ? median(row.arms.baseline.boot_ms) / r.warm : null;
     }
     results.push(row);
     console.log(`900.xpboot       ${arms.map(a => `${a.label} ${(row.arms[a.label].warm / 1000).toFixed(2)} s ${row.arms[a.label].warm_mips.toFixed(0)} MIPS`).join(" | ")}`);
@@ -212,7 +212,7 @@ if(xp_image) {
 
 const scores = {};
 for(const arm of arms) {
-    if(arm.label === "legacy") continue;
+    if(arm.label === "baseline" || !baseline) continue;
     const ok = results.filter(r => !r.error && r.arms[arm.label]?.warm_ratio);
     const categories = [...new Set(ok.map(r => r.category))];
     scores[arm.label] = {
@@ -222,7 +222,7 @@ for(const arm of arms) {
             warm: geomean(ok.filter(r => r.category === c).map(r => r.arms[arm.label].warm_ratio)),
             cold: geomean(ok.filter(r => r.category === c && r.arms[arm.label].cold_ratio).map(r => r.arms[arm.label].cold_ratio)),
         }])),
-        slower_than_legacy: ok.filter(r => r.arms[arm.label].warm_ratio < 1).map(r => r.name),
+        slower_than_baseline: ok.filter(r => r.arms[arm.label].warm_ratio < 1).map(r => r.name),
     };
 }
 let revision = null;
@@ -236,9 +236,9 @@ const report = {
 fs.mkdirSync(path.dirname(out), { recursive: true });
 fs.writeFileSync(out, JSON.stringify(report, null, 1));
 for(const [label, s] of Object.entries(scores)) {
-    console.log(`\n${label} vs legacy: warm score ${s.warm?.toFixed(3)}  cold score ${s.cold?.toFixed(3) ?? "-"}`);
+    console.log(`\n${label} vs baseline: warm score ${s.warm?.toFixed(3)}  cold score ${s.cold?.toFixed(3) ?? "-"}`);
     for(const [c, v] of Object.entries(s.categories)) console.log(`  ${c.padEnd(9)} warm ${v.warm.toFixed(3)}  cold ${v.cold?.toFixed(3) ?? "-"}`);
-    if(s.slower_than_legacy.length) console.log(`  slower than legacy: ${s.slower_than_legacy.join(" ")}`);
+    if(s.slower_than_baseline.length) console.log(`  slower than baseline: ${s.slower_than_baseline.join(" ")}`);
 }
 if(errors.length) { console.log("\nERRORS:\n  " + errors.join("\n  ")); process.exitCode = 1; }
 console.log(`\nresults: ${out}`);

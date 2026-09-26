@@ -59,7 +59,7 @@ export class PerformanceRecorder
         const cpu = this.emulator.v86.cpu;
         const exports = cpu.wm.exports;
         this.jit_start = cpu.get_jit_info?.() || null;
-        this.metadata["jit_backend"] = this.jit_start?.["backend"] || "legacy";
+        this.metadata["jit_backend"] = this.jit_start?.["backend"] || "ir";
         this.active = true;
         this.started = this.now();
         this.cleanup = [];

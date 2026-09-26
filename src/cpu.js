@@ -67,7 +67,7 @@ export function CPU(bus, wm, stop_idling)
 {
     this.stop_idling = stop_idling;
     this.wm = wm;
-    this.jit_backend = "legacy";
+    this.jit_backend = "ir";
     this.legacy_compile_requests = 0;
     this.ir_region_budget = null;
     this.ir_pass_names = ["prune", "merge", "phis", "copy", "fold", "flags", "helper_state", "gvn", "dce",
@@ -1015,14 +1015,15 @@ CPU.prototype.create_memory = function(size, minimum_size)
     this.mem32s = view(Uint32Array, this.wasm_memory, memory_offset, size >> 2);
 };
 
-// Constructor policy only; runtime backend switching is not a public API.
+// Constructor policy only. IR is the only backend; the legacy code generator
+// is never enabled.
 CPU.prototype.configure_jit_backend = function(settings)
 {
-    const backend = settings["jit_backend"] === undefined ? "legacy" : settings["jit_backend"];
-    if(backend !== "legacy" && backend !== "ir") throw new Error("jit_backend must be legacy or ir");
+    if(settings["jit_backend"] !== undefined && settings["jit_backend"] !== "ir")
+        throw new Error("jit_backend must be ir (the legacy backend was removed)");
     const exports = this.wm.exports;
-    if(backend === "ir" && !exports["ir_auto_config"])
-        throw new Error("jit_backend ir requires a core built with ir-experimental");
+    if(!exports["ir_auto_config"])
+        throw new Error("This core was built without the IR backend (ir-experimental)");
     const requested = settings["ir_region_budget"];
     const opt_level = settings["ir_opt_level"] === undefined ? 2 : settings["ir_opt_level"];
     const disabled = settings["ir_passes_disabled"] === undefined ? [] : settings["ir_passes_disabled"];
@@ -1030,22 +1031,18 @@ CPU.prototype.configure_jit_backend = function(settings)
     const verify = settings["ir_verify"] === undefined ? "debug" : settings["ir_verify"];
     const dump = settings["ir_dump"] === undefined ? "off" : settings["ir_dump"];
     const verify_modes = ["off", "debug", "every_pass"], dump_modes = ["off", "hir", "mir", "wasm", "all"];
-    if((settings["ir_verify"] !== undefined || settings["ir_dump"] !== undefined || settings["ir_stats"] !== undefined) && backend !== "ir")
-        throw new Error("IR debug options require jit_backend ir");
     if(!["off", "sampled", "debug"].includes(stats)) throw new Error("ir_stats must be off, sampled or debug");
     if(!verify_modes.includes(verify)) throw new Error("ir_verify must be off, debug or every_pass");
     if(!dump_modes.includes(dump)) throw new Error("ir_dump must be off, hir, mir, wasm or all");
     const pass_names = this.ir_pass_names;
-    if((settings["ir_opt_level"] !== undefined || settings["ir_passes_disabled"] !== undefined) && backend !== "ir")
-        throw new Error("IR optimization options require jit_backend ir");
     if(!Number.isInteger(opt_level) || opt_level < 0 || opt_level > 2)
         throw new Error("ir_opt_level must be 0, 1 or 2");
     if(!Array.isArray(disabled) || disabled.some(name => typeof name !== "string" || !pass_names.includes(name))
         || new Set(disabled).size !== disabled.length)
         throw new Error("ir_passes_disabled must contain unique known pass names");
     const disabled_mask = disabled.reduce((mask, name) => mask | 1 << pass_names.indexOf(name), 0);
-    if(requested !== undefined && (backend !== "ir" || !requested || typeof requested !== "object" || Array.isArray(requested)))
-        throw new Error("ir_region_budget requires jit_backend ir and an object");
+    if(requested !== undefined && (!requested || typeof requested !== "object" || Array.isArray(requested)))
+        throw new Error("ir_region_budget must be an object");
     const limits = {
         "hot_threshold": [32, 1, 1000000], "promotion_threshold": [65536, 1, 1000000],
         "max_source_bytes": [192, 15, 960], "execution_budget": [256, 1, 4096],
@@ -1062,29 +1059,26 @@ CPU.prototype.configure_jit_backend = function(settings)
             throw new Error("Invalid ir_region_budget." + key + ": expected integer " + min + ".." + max);
         budget[key] = value;
     }
-    const enabled = backend === "ir" && !settings.disable_jit;
-    if(backend === "ir")
-    {
-        if(settings["ir_stats"] !== undefined && !this.configure_ir_diagnostics(stats === "off" ? 0 : stats === "sampled" ? 128 : 1))
-            throw new Error("Cannot configure IR statistics on this core");
-        if(!exports["ir_auto_debug"] || !exports["ir_auto_debug"](verify_modes.indexOf(verify), dump_modes.indexOf(dump)))
-            throw new Error("IR debug policy requires a fresh compatible core");
-        if(!exports["ir_auto_optimizations"] || !exports["ir_auto_optimizations"](opt_level, disabled_mask))
-            throw new Error("IR optimization policy requires a fresh compatible core");
-    }
-    if(exports["ir_auto_config"] && !exports["ir_auto_config"](enabled ? 1 : 0,
+    const enabled = !settings.disable_jit;
+    if(settings["ir_stats"] !== undefined && !this.configure_ir_diagnostics(stats === "off" ? 0 : stats === "sampled" ? 128 : 1))
+        throw new Error("Cannot configure IR statistics on this core");
+    if(!exports["ir_auto_debug"] || !exports["ir_auto_debug"](verify_modes.indexOf(verify), dump_modes.indexOf(dump)))
+        throw new Error("IR debug policy requires a fresh compatible core");
+    if(!exports["ir_auto_optimizations"] || !exports["ir_auto_optimizations"](opt_level, disabled_mask))
+        throw new Error("IR optimization policy requires a fresh compatible core");
+    if(!exports["ir_auto_config"](enabled ? 1 : 0,
         budget["hot_threshold"], budget["promotion_threshold"], budget["max_source_bytes"],
         budget["execution_budget"], budget["rep_iterations"]))
         throw new Error("Cannot configure IR while a CPU compilation or execution is active");
-    if(settings["ir_tier0"] !== undefined && (backend !== "ir" || typeof settings["ir_tier0"] !== "boolean"))
-        throw new Error("ir_tier0 requires jit_backend ir and a boolean");
-    // Page-granular Tier-0 below the optimizing region tier (opt-in for now).
-    if(enabled && settings["ir_tier0"] === true && !(exports["ir_auto_set_tier0"] && exports["ir_auto_set_tier0"](1)))
+    if(settings["ir_tier0"] !== undefined && typeof settings["ir_tier0"] !== "boolean")
+        throw new Error("ir_tier0 must be a boolean");
+    // Page-granular Tier-0 below the optimizing region tier (default on).
+    if(enabled && settings["ir_tier0"] !== false && !(exports["ir_auto_set_tier0"] && exports["ir_auto_set_tier0"](1)))
         throw new Error("IR Tier-0 requires a compatible fresh core");
-    this.set_jit_config(0, backend === "ir" || settings.disable_jit ? 1 : 0);
-    this.jit_backend = backend;
+    this.set_jit_config(0, 1);
+    this.jit_backend = "ir";
     this.ir_sync_publication = settings["ir_sync_publication"] === true;
-    this.ir_region_budget = backend === "ir" ? budget : null;
+    this.ir_region_budget = budget;
 };
 
 CPU.prototype.configure_ir_diagnostics = function(period)
@@ -1216,13 +1210,12 @@ CPU.prototype.get_jit_info = function()
         "legacy_compile_requests": this.legacy_compile_requests,
         "ir_available": available,
         "ir_region_budget": this.ir_region_budget && { ...this.ir_region_budget },
-        "ir_stats": this.jit_backend === "ir" ? (exports["ir_diagnostic_get"](0, 0, 0) === 0 ? "off" :
-            exports["ir_diagnostic_get"](0, 0, 0) === 1 ? "debug" : "sampled") : null,
-        "ir_verify": this.jit_backend === "ir" ? ["off", "debug", "every_pass"][exports["ir_auto_optimization_stat"](2)] : null,
-        "ir_dump": this.jit_backend === "ir" ? ["off", "hir", "mir", "wasm", "all"][exports["ir_auto_optimization_stat"](3)] : null,
-        "ir_opt_level": this.jit_backend === "ir" ? exports["ir_auto_optimization_stat"](0) : null,
-        "ir_passes_disabled": this.jit_backend === "ir" ?
-            this.ir_pass_names.filter((_, index) => exports["ir_auto_optimization_stat"](1) & 1 << index) : null,
+        "ir_stats": exports["ir_diagnostic_get"](0, 0, 0) === 0 ? "off" :
+            exports["ir_diagnostic_get"](0, 0, 0) === 1 ? "debug" : "sampled",
+        "ir_verify": ["off", "debug", "every_pass"][exports["ir_auto_optimization_stat"](2)],
+        "ir_dump": ["off", "hir", "mir", "wasm", "all"][exports["ir_auto_optimization_stat"](3)],
+        "ir_opt_level": exports["ir_auto_optimization_stat"](0),
+        "ir_passes_disabled": this.ir_pass_names.filter((_, index) => exports["ir_auto_optimization_stat"](1) & 1 << index),
         "ir": ir,
     };
 };

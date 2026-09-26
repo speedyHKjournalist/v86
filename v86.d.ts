@@ -608,8 +608,8 @@ export interface V86Options {
      * @default false
      */
     disable_jit?: boolean;
-    /** Compiler selection. IR requires an ir-experimental core; default legacy. */
-    jit_backend?: "legacy" | "ir";
+    /** Compiler selection. IR is the only backend (the legacy one was removed). */
+    jit_backend?: "ir";
     /** 0: no optional optimization; 1: Tier-1 canonicalization; 2: full Tier-2. Default 2. */
     /** Optional MIR verification: debug builds by default; every_pass also checks release builds. */
     /** Startup diagnostic sampling: off=0, sampled=128, debug=1. */
@@ -621,9 +621,9 @@ export interface V86Options {
     /** Startup-only diagnostic controls. Verification and recovery cannot be disabled. */
     ir_passes_disabled?: Array<"prune" | "merge" | "phis" | "copy" | "fold" | "flags" | "helper_state" |
         "gvn" | "dce" | "licm" | "mir_fold" | "stack" | "allocation" | "state_elision" | "ram_loop" | "ram_forward" | "ram_guard">;
-    /** Page-granular Tier-0 compilation below the IR region tier (jit_backend: "ir" only; default false). */
+    /** Page-granular Tier-0 compilation below the IR region tier (default true). */
     ir_tier0?: boolean;
-    /** Bounded automatic IR policy. Only accepted with jit_backend: "ir". */
+    /** Bounded automatic IR policy. */
     ir_region_budget?: {
         /** Entry visits before Tier 1; integer 1..1000000, default 16. */
         hot_threshold?: number;

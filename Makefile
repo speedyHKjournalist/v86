@@ -294,8 +294,8 @@ clean:
 	-rm build/*.o
 	$(MAKE) -C $(NASM_TEST_DIR) clean
 
-run: browser glbridge
-	python3 -m http.server 2> /dev/null
+run: browser glbridge build/v86.wasm
+	python3 tools/dev-server.py 2> /dev/null
 
 update_version:
 	set -e ;\
