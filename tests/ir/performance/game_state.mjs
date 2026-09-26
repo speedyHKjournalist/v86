@@ -73,6 +73,9 @@ const vga_memory_size = Array.isArray(info.state[52]) ? info.state[52][0] : 8 * 
 const RESPONSE_REGION = 16 * 1024 * 1024 - 4 * 1024 * 1024;
 const HEARTBEAT = RESPONSE_REGION + 4 * 1024 * 1024 - 16;
 const g = { batches: 0, bytes: 0, presents: 0, draws: 0 };
+// Wall-clock intervals between presents (ms, rounded), in the second half.
+const intervals = new Map();
+let last_present = 0, measuring = false;
 const queries = new Map();
 let heartbeat = 0;
 function onSubmit(event) {
@@ -88,7 +91,12 @@ function onSubmit(event) {
     for(let at = 32; at + 16 <= end;) {
         const op = d.getUint16(at, true), size = d.getUint32(at + 4, true), p = at + 16;
         if(size < 16 || at + size > end) break;
-        if(op === 4 || op === 0x226) g.presents++;
+        if(op === 4 || op === 0x226) {
+            g.presents++;
+            const now = performance.now();
+            if(measuring && last_present) { const ms = Math.round(now - last_present); intervals.set(ms, (intervals.get(ms) || 0) + 1); }
+            last_present = now;
+        }
         if(op >= 0x300 && op <= 0x303) g.draws++;
         if(op === 0x123 && size >= 32) queries.set(d.getUint32(p + 4, true), { type: d.getUint32(p + 8, true), offset: d.getUint32(p + 12, true) });
         if(op === 0x401 && size >= 32) {
@@ -166,7 +174,7 @@ await new Promise(resolve => {
             ...(backend === "ir" ? { t0_compiles: e.ir_t0_stat?.(0), t0_chains: e.ir_t0_chains?.() >>> 0 } : {}),
         };
         console.log(JSON.stringify(line));
-        if(s >= seconds / 2) steady.push(line);
+        if(s >= seconds / 2) { steady.push(line); measuring = true; }
         prev = { instructions, presents: g.presents, draws: g.draws, t: now };
         if(session && !profiling && s >= Number(profile_from)) { profiling = true; post("Profiler.start"); }
         if(s >= seconds) { clearInterval(tick); resolve(); }
@@ -176,6 +184,7 @@ await vm.stop();
 clearInterval(speaker);
 if(profiling) fs.writeFileSync(profile_out, JSON.stringify((await post("Profiler.stop")).profile));
 const mean = key => steady.reduce((t, l) => t + l[key], 0) / Math.max(1, steady.length);
-console.log(JSON.stringify({ event: "summary", backend, seconds, second_half: { mips: +mean("mips").toFixed(1), fps: +mean("fps").toFixed(1), draws: Math.round(mean("draws")) } }));
+console.log(JSON.stringify({ event: "summary", backend, seconds, second_half: { mips: +mean("mips").toFixed(1), fps: +mean("fps").toFixed(1), draws: Math.round(mean("draws")) },
+    frame_ms: Object.fromEntries([...intervals].sort((a, b) => b[1] - a[1]).slice(0, 8)) }));
 await vm.destroy();
 process.exit(0);

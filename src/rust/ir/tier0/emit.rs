@@ -477,7 +477,15 @@ fn classify(i: &DecodedInstruction) -> Option<Form> {
 
 struct Page {
     w: WasmBuilder,
+    /// The first covered page. A function of one run of consecutive pages
+    /// maps offsets to linear addresses by adding it; one of several runs
+    /// (a cluster, see analysis::Slots) maps through `runs`, and leaves for
+    /// a target outside with offset = span and the target in `far_eip`.
     page_linear: u32,
+    slots: analysis::Slots,
+    runs: Vec<(u32, usize, usize)>,
+    far_eip: WasmLocal,
+    eip: WasmLocal,
     cs_base: u32,
     gpr: Vec<WasmLocal>,
     tlb: WasmLocal,
@@ -507,7 +515,7 @@ struct Page {
     block_at: Vec<Option<u32>>,
     /// Page offset of each block.
     starts: Vec<u16>,
-    /// Bytes covered (one to three consecutive pages from page_linear).
+    /// Bytes covered (slots.span()).
     span: u32,
     /// Host address of each covered page when compiled (mem8 + physical):
     /// entering another page checks its current translation against it.
@@ -679,7 +687,15 @@ impl Page {
     /// the page, which exits there).
     fn goto_linear(&mut self, linear: u32) {
         self.leave_block();
-        let offset = linear.wrapping_sub(self.page_linear);
+        let offset = match self.slots.offset(linear) {
+            Some(offset) => offset as u32,
+            None if self.runs.len() > 1 => {
+                self.w.const_i32(linear as i32);
+                self.w.set_local(&self.far_eip);
+                self.span
+            },
+            None => linear.wrapping_sub(self.page_linear),
+        };
         if offset < self.span && offset >> 12 != self.current_page {
             self.check_page(offset);
         }
@@ -716,7 +732,7 @@ impl Page {
     /// still translates to the compiled code (the interpreter's TLB view).
     fn check_page(&mut self, offset: u32) {
         let page = offset >> 12;
-        let linear = self.page_linear.wrapping_add(page << 12);
+        let linear = self.slots.pages[page as usize];
         self.w.get_local(&self.tlb);
         self.w.load_aligned_i32((linear >> 12) * 4);
         self.page_mismatch(linear as i32, self.hosts[page as usize] as i32);
@@ -732,7 +748,7 @@ impl Page {
     /// which always progresses) unless that page still translates to the
     /// compiled code.
     fn check_block_page(&mut self, page: u32, start: u32) {
-        let linear = self.page_linear.wrapping_add(page << 12);
+        let linear = self.slots.pages[page as usize];
         self.w.get_local(&self.tlb);
         self.w.load_aligned_i32((linear >> 12) * 4);
         self.page_mismatch(linear as i32, self.hosts[page as usize] as i32);
@@ -771,7 +787,7 @@ impl Page {
         self.w.ltu_i32();
         self.w.if_void();
         for page in 0..self.span >> 12 {
-            let linear = self.page_linear.wrapping_add(page << 12);
+            let linear = self.slots.pages[page as usize];
             self.w.get_local(&self.offset);
             self.w.const_i32(12);
             self.w.shr_u_i32();
@@ -786,6 +802,37 @@ impl Page {
         }
         self.w.block_end();
     }
+    /// offset <- the function offset of the linear address on the stack
+    /// (outside: >= span, and far_eip <- it in a function of several runs).
+    fn set_offset_from_linear(&mut self) {
+        offset_from_linear(&mut self.w, &self.runs, self.page_linear, self.span, [&self.offset, &self.far_eip, &self.eip]);
+    }
+    /// Push the linear address the function leaves for: that of `offset`,
+    /// or far_eip for a target outside a function of several runs.
+    fn push_exit_eip(&mut self) {
+        if self.runs.len() == 1 {
+            self.w.get_local(&self.offset);
+            self.w.const_i32(self.page_linear as i32);
+            self.w.add_i32();
+            return;
+        }
+        self.w.get_local(&self.far_eip);
+        self.w.set_local(&self.eip);
+        for (linear, start, bytes) in self.runs.clone() {
+            self.w.get_local(&self.offset);
+            self.w.const_i32(start as i32);
+            self.w.sub_i32();
+            self.w.const_i32(bytes as i32);
+            self.w.ltu_i32();
+            self.w.if_void();
+            self.w.get_local(&self.offset);
+            self.w.const_i32(linear.wrapping_sub(start as u32) as i32);
+            self.w.add_i32();
+            self.w.set_local(&self.eip);
+            self.w.block_end();
+        }
+        self.w.get_local(&self.eip);
+    }
     /// Bound the work of one activation so interrupts and timers are serviced
     /// (at every loop head; `offset` is the block about to run).
     fn poll_check(&mut self) {
@@ -798,9 +845,7 @@ impl Page {
         self.x87_close();
         self.commit_count();
         self.w.const_i32(gp::instruction_pointer as i32);
-        self.w.get_local(&self.offset);
-        self.w.const_i32(self.page_linear as i32);
-        self.w.add_i32();
+        self.push_exit_eip();
         self.w.store_aligned_i32(0);
         self.request_exit(ExitKind::Poll);
         self.w.const_i32(0);
@@ -815,9 +860,9 @@ impl Page {
     /// (returns, jump tables), else at the page level (called functions).
     fn goto_dynamic_at(&mut self, nearby: bool) {
         self.leave_block();
-        self.w.const_i32(self.cs_base.wrapping_sub(self.page_linear) as i32);
+        self.w.const_i32(self.cs_base as i32);
         self.w.add_i32();
-        self.w.set_local(&self.offset);
+        self.set_offset_from_linear();
         self.check_offset_page();
         let label = if nearby { self.levels.last().map_or(self.dispatch, |level| level.repeat) } else { self.dispatch };
         self.w.br(label);
@@ -2596,6 +2641,34 @@ impl Page {
     }
 }
 
+/// offset <- the function offset of the linear address on the stack (see
+/// Page::set_offset_from_linear); locals are offset, far_eip, a scratch.
+fn offset_from_linear(w: &mut WasmBuilder, runs: &[(u32, usize, usize)], page_linear: u32, span: u32, [offset, far_eip, scratch]: [&WasmLocal; 3]) {
+    if runs.len() == 1 {
+        w.const_i32(page_linear as i32);
+        w.sub_i32();
+        w.set_local(offset);
+        return;
+    }
+    w.set_local(far_eip);
+    w.const_i32(span as i32);
+    w.set_local(offset);
+    for &(linear, start, bytes) in runs {
+        w.get_local(far_eip);
+        w.const_i32(linear as i32);
+        w.sub_i32();
+        w.tee_local(scratch);
+        w.const_i32(bytes as i32);
+        w.ltu_i32();
+        w.if_void();
+        w.get_local(scratch);
+        w.const_i32(start as i32);
+        w.add_i32();
+        w.set_local(offset);
+        w.block_end();
+    }
+}
+
 /// Emit the units of one level: nested blocks in unit order (the first unit's
 /// code comes first), entered through a br_table on `offset` (for a loop,
 /// its header directly), each unit's code after its block's end.
@@ -2711,7 +2784,8 @@ fn emit_units(
                 }
                 if !ended {
                     p.flush();
-                    p.goto_linear(p.page_linear.wrapping_add(block.end() as u32));
+                    let last = block.instructions.last().unwrap();
+                    p.goto_linear(p.slots.linear(last.offset as usize).wrapping_add(last.decoded.length as u32));
                 }
             },
             Unit::Loop { header, units } => {
@@ -2725,17 +2799,14 @@ fn emit_units(
     p.levels.pop();
 }
 
-pub fn emit_page(
-    plan: &PagePlan,
-    page_linear: u32,
-    entries: &[CpuEntryKey],
-    flat: bool,
-    hosts: &[u32],
-) -> Emitted {
+pub fn emit_page(plan: &PagePlan, entries: &[CpuEntryKey], flat: bool, hosts: &[u32]) -> Emitted {
+    let page_linear = plan.slots.pages[0];
+    let runs = plan.slots.runs();
     let mut w = WasmBuilder::new();
     // The result is the linear EIP left for when a link is requested (see
     // cache::t0_execute; other returns leave 0).
     w.set_entry_result();
+    w.set_function_name(format!("t0_{:x}", entries[0].linear.0 & !4095));
     // The argument is the chain depth (0 from the CPU dispatcher, see
     // cache::ir_t0_chain). A foreign context returns before any state change.
     let depth = w.arg_local_initial_state.unsafe_clone();
@@ -2781,10 +2852,6 @@ pub fn emit_page(
         w.return_();
         w.block_end();
     }
-    w.get_local(&offset);
-    w.const_i32(page_linear as i32);
-    w.sub_i32();
-    w.set_local(&offset);
 
     let gpr: Vec<WasmLocal> = (0..8)
         .map(|r| {
@@ -2809,7 +2876,7 @@ pub fn emit_page(
     let write_mask = w.set_new_local();
     let read_mask = w.set_new_local();
     let mut locals = vec![];
-    for _ in 0..16 {
+    for _ in 0..18 {
         locals.push(w.declare_zeroed_local());
     }
     let wide = w.declare_zeroed_local_i64();
@@ -2817,11 +2884,21 @@ pub fn emit_page(
     let retired = w.declare_zeroed_local();
     let committed = w.declare_zeroed_local();
 
+    // offset holds the entry EIP.
+    let span = plan.block_at.len() as u32;
+    let far_eip = locals.pop().unwrap();
+    let eip = locals.pop().unwrap();
+    w.get_local(&offset);
+    offset_from_linear(&mut w, &runs, page_linear, span, [&offset, &far_eip, &eip]);
     let exit_link = w.block_void();
     let dispatch = w.loop_void();
     let mut p = Page {
         w,
         page_linear,
+        slots: plan.slots.clone(),
+        runs,
+        far_eip,
+        eip,
         cs_base,
         gpr,
         tlb,
@@ -2892,9 +2969,7 @@ pub fn emit_page(
     p.x87_close();
     p.commit_count();
     p.w.const_i32(gp::instruction_pointer as i32);
-    p.w.get_local(&p.offset);
-    p.w.const_i32(page_linear as i32);
-    p.w.add_i32();
+    p.push_exit_eip();
     p.w.store_aligned_i32(0);
     // No "next" continuation: every outcome but an exit dispatches on EIP.
     p.w.const_i32(-1);
@@ -2909,9 +2984,7 @@ pub fn emit_page(
     p.w.block_end();
     p.sync_in();
     p.w.load_fixed_i32(gp::instruction_pointer as u32);
-    p.w.const_i32(page_linear as i32);
-    p.w.sub_i32();
-    p.w.set_local(&p.offset);
+    p.set_offset_from_linear();
     p.check_offset_page();
     p.w.br(dispatch);
     p.w.block_end(); // dispatch loop
@@ -2920,9 +2993,7 @@ pub fn emit_page(
     p.x87_close();
     p.commit_count();
     p.w.const_i32(gp::instruction_pointer as i32);
-    p.w.get_local(&p.offset);
-    p.w.const_i32(page_linear as i32);
-    p.w.add_i32();
+    p.push_exit_eip();
     p.w.store_aligned_i32(0);
     // Continue in the page function serving the target, if any.
     match t0_link() {
@@ -2948,16 +3019,14 @@ pub fn emit_page(
         Link::Iterative => {},
     }
     p.request_exit(ExitKind::Normal);
-    p.w.get_local(&p.offset);
-    p.w.const_i32(page_linear as i32);
-    p.w.add_i32();
+    p.push_exit_eip();
     for &(start, end, r) in &p.sync_stores {
         if p.gpr_written & 1 << r == 0 {
             p.w.patch_nop(start, end);
         }
     }
-    let Page { mut w, gpr, tlb, read_mask, write_mask, offset, result, fa, fb, fr, addr, host, value, tmp, wide, quotient, retired, committed, p_op1, p_result, p_word, x87, x87_is_open, .. } = p;
-    for local in gpr.into_iter().chain([tlb, read_mask, write_mask, offset, result, fa, fb, fr, addr, host, value, tmp, retired, committed, p_op1, p_result, p_word, x87.top, x87.tags, x87.valid, x87.dirty, x87_is_open]) {
+    let Page { mut w, gpr, tlb, read_mask, write_mask, offset, result, fa, fb, fr, addr, host, value, tmp, wide, quotient, retired, committed, p_op1, p_result, p_word, x87, x87_is_open, far_eip, eip, .. } = p;
+    for local in gpr.into_iter().chain([tlb, read_mask, write_mask, offset, result, fa, fb, fr, addr, host, value, tmp, retired, committed, p_op1, p_result, p_word, x87.top, x87.tags, x87.valid, x87.dirty, x87_is_open, far_eip, eip]) {
         w.free_local(local);
     }
     w.free_local_i64(wide);

@@ -128,6 +128,8 @@ pub struct WasmBuilder {
     /// Branch hints (body offset of an if/br_if, likely taken), emitted as
     /// the "metadata.code.branch_hint" section.
     branch_hints: Vec<(usize, bool)>,
+    /// The module function's name in the "name" section (profiles).
+    function_name: Option<String>,
 }
 
 #[derive(Eq, PartialEq)]
@@ -185,6 +187,7 @@ impl WasmBuilder {
             table_import: false,
             entry_result: false,
             branch_hints: Vec::new(),
+            function_name: None,
         }
     }
     pub fn defer_fixed_i32(&mut self, address: u32) {
@@ -256,6 +259,7 @@ impl WasmBuilder {
         self.table_import = false;
         self.entry_result = false;
         self.branch_hints.clear();
+        self.function_name = None;
         self.finished = false;
     }
 
@@ -394,6 +398,18 @@ impl WasmBuilder {
         write_leb_u32(&mut code, wasm_len(body.len()));
         code.extend_from_slice(&body);
         section(&mut self.output, op::SC_CODE, &code);
+        if let Some(function_name) = &self.function_name {
+            let mut names = Vec::new();
+            write_leb_u32(&mut names, 1);
+            write_leb_u32(&mut names, wasm_len(self.imports.len()));
+            name(&mut names, function_name);
+            let mut contents = Vec::new();
+            name(&mut contents, "name");
+            contents.push(1);
+            write_leb_u32(&mut contents, wasm_len(names.len()));
+            contents.extend_from_slice(&names);
+            section(&mut self.output, 0, &contents);
+        }
         self.finished = true;
         self.output.len()
     }
@@ -979,6 +995,9 @@ impl WasmBuilder {
     /// taken (Wasm branch hinting; engines without it ignore the section).
     #[cfg(any(test, feature = "ir-experimental"))]
     pub fn hint(&mut self, likely: bool) { self.branch_hints.push((self.instruction_body.len(), likely)); }
+    /// Name the module function (shown by profilers).
+    #[cfg(any(test, feature = "ir-experimental"))]
+    pub fn set_function_name(&mut self, function_name: String) { self.function_name = Some(function_name); }
     /// The module function returns an i32 (every return leaves one).
     #[cfg(any(test, feature = "ir-experimental"))]
     pub fn set_entry_result(&mut self) { self.entry_result = true; }

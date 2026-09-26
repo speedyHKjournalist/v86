@@ -31,36 +31,91 @@ impl Block {
     /// Offset after the last instruction: the static fallthrough.
     pub fn end(&self) -> usize { self.instructions.last().map_or(self.start as usize, Instruction::end) }
 }
+/// The guest pages of a page function in address order: slot k covers the
+/// function offsets [k * PAGE, (k + 1) * PAGE) of linear page `pages[k]`.
+/// Slots of consecutive pages form runs, which code may run through.
+#[derive(Clone)]
+pub struct Slots {
+    pub pages: Vec<u32>,
+    pub cs_base: u32,
+}
+impl Slots {
+    pub fn new(mut pages: Vec<u32>, cs_base: u32) -> Self {
+        pages.sort_unstable();
+        pages.dedup();
+        Slots { pages, cs_base }
+    }
+    pub fn span(&self) -> usize { self.pages.len() * PAGE }
+    pub fn linear(&self, offset: usize) -> u32 { self.pages[offset / PAGE].wrapping_add((offset % PAGE) as u32) }
+    pub fn offset(&self, linear: u32) -> Option<usize> {
+        let k = self.pages.iter().position(|&page| page == linear & !4095)?;
+        Some(k * PAGE + (linear & 4095) as usize)
+    }
+    /// End of the run of slots on consecutive pages that holds `offset`.
+    pub fn run_end(&self, offset: usize) -> usize {
+        let mut k = offset / PAGE;
+        while k + 1 < self.pages.len() && self.pages[k + 1] == self.pages[k].wrapping_add(4096) {
+            k += 1;
+        }
+        (k + 1) * PAGE
+    }
+    /// Runs as (first linear page, first offset, bytes).
+    pub fn runs(&self) -> Vec<(u32, usize, usize)> {
+        let mut out: Vec<(u32, usize, usize)> = vec![];
+        for (k, &page) in self.pages.iter().enumerate() {
+            match out.last_mut() {
+                Some(run) if run.0.wrapping_add(run.2 as u32) == page => run.2 += PAGE,
+                _ => out.push((page, k * PAGE, PAGE)),
+            }
+        }
+        out
+    }
+}
+
 pub struct PagePlan {
+    pub slots: Slots,
     pub blocks: Vec<Block>,
     /// Block index for every offset that starts a block.
     pub block_at: Vec<Option<u32>>,
     /// Blocks that start where a CALL of this page ends.
     pub return_site: Vec<bool>,
-    /// Static targets (and fall-throughs) outside the analyzed bytes, as
-    /// offsets from their start (negative: before it).
-    pub external: Vec<i64>,
+    /// Static targets (and fall-throughs) outside the analyzed pages, as
+    /// linear addresses.
+    pub external: Vec<u32>,
     /// The part of `external` that continues the code rather than calling
     /// other code: jump targets, and falling (or an instruction running)
-    /// off the end of the analyzed bytes.
-    pub jumps: Vec<i64>,
+    /// off the end of the analyzed pages.
+    pub jumps: Vec<u32>,
 }
 
-/// Direct successors of a block-ending instruction, as offsets from base_pc
-/// (possibly outside the analyzed bytes).
-fn successors(i: &DecodedInstruction, offset: usize, base_pc: GuestEip) -> Vec<i64> {
-    let end = offset + i.length as usize;
+/// Direct successors of the block-ending instruction at `offset`, as linear
+/// addresses (possibly outside the analyzed pages).
+fn successors(i: &DecodedInstruction, offset: usize, slots: &Slots) -> Vec<u32> {
+    let end = slots.linear(offset).wrapping_add(i.length as u32);
     let mut out = vec![];
     if let Flow::Relative { displacement, conditional, call } = i.flow {
         let target = i.next_pc.0.wrapping_add(displacement as u32);
         let target = if i.operand_size == 16 { target & 0xFFFF } else { target };
-        out.push(target.wrapping_sub(base_pc.0) as i32 as i64);
+        out.push(target.wrapping_add(slots.cs_base));
         // The return site is dispatched by EIP after the callee's RET.
         if conditional || call {
-            out.push(end as i64);
+            out.push(end);
         }
     }
     out
+}
+/// The static successors of block `b` (including an interpreted last
+/// instruction's fall-through), as function offsets.
+fn block_targets(plan: &PagePlan, b: &Block, only_ends: bool) -> Vec<usize> {
+    let last = b.instructions.last().unwrap();
+    if only_ends && !ends_block(&last.decoded) {
+        return vec![];
+    }
+    let mut targets = successors(&last.decoded, last.offset as usize, &plan.slots);
+    if matches!(last.decoded.flow, Flow::Next | Flow::Boundary) {
+        targets.push(plan.slots.linear(last.offset as usize).wrapping_add(last.decoded.length as u32));
+    }
+    targets.into_iter().filter_map(|t| plan.slots.offset(t)).collect()
 }
 /// Control transfers, boundary encodings, and instructions without a
 /// template: those run in the interpreter and continue by dispatch.
@@ -73,20 +128,21 @@ fn ends_block(i: &DecodedInstruction) -> bool {
 
 pub fn analyze(
     bytes: &[u8],
-    base_pc: GuestEip,
-    base_linear: LinearAddress,
+    slots: Slots,
     default_32: bool,
     entries: &[usize],
     // Block starts in this range are decoded first (the budget favors them).
     prefer: std::ops::Range<usize>,
 ) -> PagePlan {
     let size = bytes.len();
-    debug_assert!(size % PAGE == 0 && size <= 3 * PAGE);
+    debug_assert!(size == slots.span());
+    // Instructions never run past the end of a run of consecutive pages.
     let decode_at = |at: usize| {
+        let linear = slots.linear(at);
         decode(
-            &bytes[at..],
-            GuestEip(base_pc.0.wrapping_add(at as u32)),
-            LinearAddress(base_linear.0.wrapping_add(at as u32)),
+            &bytes[at..slots.run_end(at)],
+            GuestEip(linear.wrapping_sub(slots.cs_base)),
+            LinearAddress(linear),
             default_32,
         )
         .ok()
@@ -115,12 +171,13 @@ pub fn analyze(
             continue;
         }
         let mut at = start;
-        while at < size && !decoded_at[at] && total < MAX_INSTRUCTIONS {
+        let run_end = slots.run_end(start);
+        while at < run_end && !decoded_at[at] && total < MAX_INSTRUCTIONS {
             // Undecodable or crossing the page end: left to the interpreter.
             let Some(decoded) = decode_at(at)
             else {
-                if size - at < 15 {
-                    jumps.push(size as i64);
+                if run_end - at < 15 {
+                    jumps.push(slots.linear(run_end - 1).wrapping_add(1));
                 }
                 break;
             };
@@ -133,33 +190,32 @@ pub fn analyze(
             let length = decoded.length as usize;
             if ends_block(&decoded) {
                 let call = matches!(decoded.flow, Flow::Relative { call: true, .. });
-                for (k, target) in successors(&decoded, at, base_pc).into_iter().enumerate() {
-                    if (0..size as i64).contains(&target) {
-                        pending.insert(target as usize);
-                    }
-                    else {
-                        external.push(target);
-                        if k > 0 || !call {
-                            jumps.push(target);
-                        }
-                    }
-                }
+                let mut targets = successors(&decoded, at, &slots);
+                let calls = call as usize;
                 // Interpreted instructions continue at their fall-through.
                 if matches!(decoded.flow, Flow::Next | Flow::Boundary) {
-                    if at + length < size {
-                        pending.insert(at + length);
-                    }
-                    else {
-                        external.push((at + length) as i64);
-                        jumps.push((at + length) as i64);
+                    targets.push(slots.linear(at).wrapping_add(length as u32));
+                }
+                for (k, target) in targets.into_iter().enumerate() {
+                    match slots.offset(target) {
+                        Some(offset) => {
+                            pending.insert(offset);
+                        },
+                        None => {
+                            external.push(target);
+                            if k >= calls {
+                                jumps.push(target);
+                            }
+                        },
                     }
                 }
                 break;
             }
+            let next = slots.linear(at).wrapping_add(length as u32);
             at += length;
-            if at >= size {
-                external.push(at as i64);
-                jumps.push(at as i64);
+            if at >= run_end {
+                external.push(next);
+                jumps.push(next);
             }
             else if decoded_at[at] {
                 pending.insert(at);
@@ -174,13 +230,14 @@ pub fn analyze(
     for start in (0..size).filter(|&at| leader[at]) {
         let mut instructions = vec![];
         let mut at = start;
+        let run_end = slots.run_end(start);
         while let Some(decoded) = decode_at(at) {
             let length = decoded.length as usize;
             let last = ends_block(&decoded);
             instructions.push(Instruction { offset: at as u16, decoded });
             at += length;
             // A run cut by the instruction budget continues by dispatch.
-            if last || at >= size || leader[at] || !decoded_at[at] {
+            if last || at >= run_end || leader[at] || !decoded_at[at] {
                 break;
             }
         }
@@ -189,14 +246,15 @@ pub fn analyze(
     }
     let mut return_site = vec![false; blocks.len()];
     for b in &blocks {
-        let last = &b.instructions.last().unwrap().decoded;
-        let call = matches!(last.flow, Flow::Relative { call: true, .. })
-            || last.encoding.opcode == 0xFF && last.modrm.is_some_and(|m| m >> 3 & 7 == 2);
-        if let Some(Some(k)) = block_at.get(b.end()).copied().filter(|_| call) {
+        let last = b.instructions.last().unwrap();
+        let call = matches!(last.decoded.flow, Flow::Relative { call: true, .. })
+            || last.decoded.encoding.opcode == 0xFF && last.decoded.modrm.is_some_and(|m| m >> 3 & 7 == 2);
+        let after = slots.offset(slots.linear(last.offset as usize).wrapping_add(last.decoded.length as u32));
+        if let Some(Some(k)) = after.filter(|_| call).map(|at| block_at[at]) {
             return_site[k as usize] = true;
         }
     }
-    PagePlan { blocks, block_at, return_site, external, jumps }
+    PagePlan { slots, blocks, block_at, return_site, external, jumps }
 }
 
 /// Which of `entries` (offsets, in priority order) a recompilation must seed:
@@ -205,7 +263,6 @@ pub fn analyze(
 /// that is a block start only because it was seeded itself, such as a point
 /// inside a straight-line run, stays a seed.
 pub fn seeds(plan: &PagePlan, entries: &[usize]) -> Vec<bool> {
-    let size = plan.block_at.len();
     let mut reached = vec![false; plan.blocks.len()];
     let mut work = vec![];
     entries
@@ -221,18 +278,8 @@ pub fn seeds(plan: &PagePlan, entries: &[usize]) -> Vec<bool> {
             work.push(k);
             reached[k as usize] = true;
             while let Some(k) = work.pop() {
-                let b = &plan.blocks[k as usize];
-                let last = b.instructions.last().unwrap();
-                if !ends_block(&last.decoded) {
-                    continue;
-                }
-                let base = GuestEip(last.decoded.instruction_pc.0.wrapping_sub(last.offset as u32));
-                let mut targets = successors(&last.decoded, last.offset as usize, base);
-                if matches!(last.decoded.flow, Flow::Next | Flow::Boundary) {
-                    targets.push(b.end() as i64);
-                }
-                for t in targets {
-                    if let Some(Some(next)) = usize::try_from(t).ok().filter(|&t| t < size).map(|t| plan.block_at[t]) {
+                for t in block_targets(plan, &plan.blocks[k as usize], true) {
+                    if let Some(next) = plan.block_at[t] {
                         if !reached[next as usize] {
                             reached[next as usize] = true;
                             work.push(next);
@@ -273,18 +320,7 @@ impl Unit {
 fn block_successors(plan: &PagePlan) -> Vec<Vec<u32>> {
     plan.blocks
         .iter()
-        .map(|b| {
-            let last = b.instructions.last().unwrap();
-            let base = GuestEip(last.decoded.instruction_pc.0.wrapping_sub(last.offset as u32));
-            let mut targets = successors(&last.decoded, last.offset as usize, base);
-            if matches!(last.decoded.flow, Flow::Next | Flow::Boundary) {
-                targets.push(b.end() as i64);
-            }
-            targets
-                .into_iter()
-                .filter_map(|at| usize::try_from(at).ok().and_then(|at| plan.block_at.get(at).copied().flatten()))
-                .collect()
-        })
+        .map(|b| block_targets(plan, b, false).into_iter().filter_map(|at| plan.block_at[at]).collect())
         .collect()
 }
 

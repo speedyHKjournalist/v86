@@ -136,7 +136,7 @@ fn page_slot(page: u32, cs_base: u32, default_32: bool) -> usize {
 }
 fn page_fill(cache: &Cache, index: usize) {
     let record = &cache.records[index];
-    let (Some(blocks), Some(origin)) = (&record.job.artifact.page_blocks, record.job.artifact.source_origin)
+    let (Some(blocks), Some(_)) = (&record.job.artifact.page_blocks, record.job.artifact.source_origin)
     else {
         return;
     };
@@ -152,11 +152,8 @@ fn page_fill(cache: &Cache, index: usize) {
     // function (which covers what follows it) keeps its witness, and of two
     // functions for a page the newer (a recompilation with more entries).
     let id = record.job.artifact.key.job;
-    for (k, (mapping, bits)) in mappings.iter().zip(blocks.iter()).enumerate() {
-        let page = (origin.0 >> 12).wrapping_add(k as u32);
-        if mapping.linear.0 >> 12 != page {
-            return;
-        }
+    for (mapping, bits) in mappings.iter().zip(blocks.iter()) {
+        let page = mapping.linear.0 >> 12;
         let primary = entry.linear.0 >> 12 == page;
         unsafe {
             let slot = page_slot(page, entry.cs_base(), entry.default_32);
@@ -222,6 +219,18 @@ unsafe fn page_chain_slot(linear: u32, cs_base: u32, default_32: bool) -> Option
         return None;
     }
     Some(w.slot)
+}
+/// page_chain_slot without the TLB check: a published page function's block
+/// starts there.
+#[inline(always)]
+unsafe fn page_witness_matches(linear: u32, cs_base: u32, default_32: bool) -> bool {
+    let page = linear >> 12;
+    let w = &PAGE_FAST[page_slot(page, cs_base, default_32)];
+    w.stamp == FAST_STAMP
+        && w.page == page
+        && w.cs_base == cs_base
+        && w.default_32 == default_32
+        && (*w.blocks)[(linear & 4095) as usize >> 6] >> (linear & 63) & 1 != 0
 }
 /// A block start of a witnessed page function at the current EIP.
 #[inline(always)]
@@ -877,9 +886,26 @@ unsafe fn t0_execute() -> bool {
         refill_page_witnesses();
     }
     let linear = *gp::instruction_pointer as u32;
-    let Some(slot) = page_chain_slot(linear, cpu::get_seg_cs() as u32, *gp::is_32)
+    let Some(slot) = page_chain_slot(linear, cpu::get_seg_cs() as u32, *gp::is_32).or_else(|| {
+        // Page functions never fetch through the TLB, so a flush (a guest
+        // context switch) leaves their code pages untranslated until the
+        // interpreter runs there: translate EIP as it would next. A fetch
+        // fault is delivered for the instruction at EIP, so previous_ip must
+        // be EIP (not the last retired instruction, which after SYSEXIT or
+        // IRET is kernel code the fault frame would return to in user mode).
+        if !page_witness_matches(linear, cpu::get_seg_cs() as u32, *gp::is_32) {
+            return None;
+        }
+        *gp::previous_ip = linear as i32;
+        if cpu::get_phys_eip().is_err() {
+            return None;
+        }
+        page_chain_slot(linear, cpu::get_seg_cs() as u32, *gp::is_32)
+    })
     else {
-        return false;
+        // A fault while translating EIP was delivered, as the interpreter's
+        // fetch would have: that is progress.
+        return *gp::instruction_pointer as u32 != linear;
     };
     *gp::previous_ip = linear as i32;
     let before = *gp::instruction_counter;
@@ -903,7 +929,7 @@ unsafe fn t0_execute() -> bool {
             if !super::entry::link_requested() || !t0_linkable() {
                 break;
             }
-            note_neighbor(from, linear);
+            note_link(from, linear);
             let Some(slot) = page_chain_slot(linear, T0_CS, *gp::is_32)
             else {
                 break;
@@ -925,24 +951,120 @@ unsafe fn t0_execute() -> bool {
     *gp::instruction_counter != before
 }
 static mut T0_ENTRIES: u32 = 0;
-/// Links from a page function to the page before or after its entry page,
-/// per page (direct-mapped): at T0_RANGE_LINKS, the page is recompiled with
-/// the neighbors its code continues into (schedule::want_range).
-static mut NEIGHBOR_LINKS: [(u32, u32); 64] = [(0, 0); 64];
-const T0_RANGE_LINKS: u32 = 100_000;
+/// Links out of a page function's entry page since the page's last
+/// decision: the total, and the most frequent target pages (space-saving
+/// counters: a new target replaces the least counted and inherits its count
+/// as error, so count - error never overstates a target's links). A target
+/// with T0_RANGE_LINKS links that are at least a fifth of the page's has the
+/// source page recompiled with it: a neighbor its code continues into
+/// (schedule::want_range), or any page it often calls or returns to
+/// (schedule::want_partner, a cluster function), together with the pages
+/// that partner mostly continues to. The page's counts then restart, so its
+/// next hottest target is judged on its own; so do they when no target
+/// qualified in 64 times that many links. Two ways per set, the page with
+/// fewer links giving way.
+#[derive(Clone, Copy)]
+struct PageOut {
+    page: u32,
+    total: u32,
+    /// Target page, count, error, and the last linear target address.
+    targets: [(u32, u32, u32, u32); 4],
+}
+impl PageOut {
+    const fn new(page: u32) -> PageOut { PageOut { page, total: 0, targets: [(!0, 0, 0, 0); 4] } }
+}
+const PAGE_OUT_SETS: usize = 2048;
+static mut PAGE_OUT: [[PageOut; 2]; PAGE_OUT_SETS] = [[PageOut::new(!0); 2]; PAGE_OUT_SETS];
 #[inline(always)]
-unsafe fn note_neighbor(from: u32, to: u32) {
-    let (page, distance) = (from >> 12, (to >> 12).wrapping_sub(from >> 12));
-    if distance != 1 && distance != u32::MAX {
+unsafe fn page_out_set(page: u32) -> &'static mut [PageOut; 2] {
+    &mut *core::ptr::addr_of_mut!(PAGE_OUT[page.wrapping_mul(0x9E3779B1) as usize >> 21 & PAGE_OUT_SETS - 1])
+}
+const T0_RANGE_LINKS: u32 = 100_000;
+/// Where the page's function goes on to in at least half its links (of
+/// enough of them to tell): a chain of pages, each jumping to the next,
+/// joins a cluster in one recompilation instead of one per page.
+unsafe fn dominant_successor(page: u32) -> Option<u32> {
+    let out = page_out_set(page).iter().find(|o| o.page == page)?;
+    let &(_, count, error, linear) = out.targets.iter().max_by_key(|t| t.1 - t.2)?;
+    (out.total >= T0_RANGE_LINKS / 4 && (count - error) * 2 >= out.total).then_some(linear)
+}
+/// Whether the page function just left by RET: the address it popped is
+/// still below ESP (a 32-bit stack in RAM mapped in the TLB; otherwise no).
+/// A return makes its caller a partner only if the caller's page mostly
+/// continues back into the returning page: taking a caller into its
+/// callee's function copies the caller's code into every callee (a
+/// dispatcher into each of its handlers, each copy tiering up on its own)
+/// and saves only the return.
+#[inline(always)]
+unsafe fn link_is_return(to: u32) -> bool {
+    if !*gp::stack_size_32 {
+        return false;
+    }
+    let slot = (cpu::get_seg_ss() as u32).wrapping_add(*gp::reg32.add(cpu::ESP as usize) as u32).wrapping_sub(4);
+    let mask = cpu::TLB_VALID | cpu::TLB_IN_MAPPED_RANGE | if *gp::cpl == 3 { cpu::TLB_NO_USER } else { 0 };
+    let entry = cpu::tlb_data[(slot >> 12) as usize];
+    if entry & mask != cpu::TLB_VALID || slot & 4095 > 4092 {
+        return false;
+    }
+    (((entry as u32 & !4095) ^ slot) as *const u32).read_unaligned() == to
+}
+#[inline(always)]
+unsafe fn note_link(from: u32, to: u32) {
+    let (a, b) = (from >> 12, to >> 12);
+    if a == b {
         return;
     }
-    let slot = &mut NEIGHBOR_LINKS[(page ^ page >> 6) as usize & 63];
-    if slot.0 != page {
-        *slot = (page, 0);
+    let set = page_out_set(a);
+    let way = if set[0].page == a {
+        0
     }
-    slot.1 += 1;
-    if slot.1 == T0_RANGE_LINKS {
-        super::schedule::want_range(page << 12, T0_CS, *gp::is_32);
+    else if set[1].page == a {
+        1
+    }
+    else {
+        let way = (set[1].total < set[0].total) as usize;
+        set[way] = PageOut::new(a);
+        way
+    };
+    let out = &mut set[way];
+    if out.total >= T0_RANGE_LINKS << 6 {
+        *out = PageOut::new(a);
+    }
+    out.total += 1;
+    let mut k = 0;
+    while k < 4 && out.targets[k].0 != b {
+        k += 1;
+    }
+    if k == 4 {
+        k = (0..4).min_by_key(|&k| out.targets[k].1).unwrap();
+        let least = out.targets[k].1;
+        out.targets[k] = (b, least, least, to);
+    }
+    let target = &mut out.targets[k];
+    target.1 += 1;
+    target.3 = to;
+    if target.1 - target.2 < T0_RANGE_LINKS {
+        return;
+    }
+    let total = out.total;
+    *out = PageOut::new(a);
+    if b.wrapping_sub(a).wrapping_add(1) <= 2 {
+        super::schedule::want_range(a << 12, T0_CS, *gp::is_32);
+    }
+    // A call graph without dominant pairs gains little from clusters.
+    else if total / 5 <= T0_RANGE_LINKS
+        && (!link_is_return(to) || dominant_successor(b).is_some_and(|next| next >> 12 == a))
+    {
+        super::schedule::want_partner(a << 12, to, T0_CS, *gp::is_32);
+        let mut page = b;
+        for _ in 0..crate::ir::tier0::MAX_PAGES - 2 {
+            let Some(next) = dominant_successor(page).filter(|&next| next >> 12 != a && next >> 12 != page)
+            else {
+                break;
+            };
+            super::schedule::want_partner(a << 12, next, T0_CS, *gp::is_32);
+            page = next >> 12;
+        }
     }
 }
 const T0_CONTROL_FLAGS: i32 = cpu::FLAG_INTERRUPT | cpu::FLAG_TRAP | cpu::FLAG_VM;
@@ -1241,8 +1363,9 @@ unsafe fn mappings_current(job: &Job) -> bool {
 }
 unsafe fn source_current(linear: u32, source: &super::compile::ImmutableCodeSnapshot) -> bool {
     let current = if source.bytes.len() > 4096 && linear & 4095 == 0 && source.bytes.len() % 4096 == 0 {
-        // A multi-page Tier-0 source.
-        super::snapshot::capture_pages(linear, (source.bytes.len() / 4096) as u32)
+        // A multi-page Tier-0 source: its pages need not be consecutive.
+        let pages: Vec<u32> = source.mappings.iter().map(|m| m.linear.0).collect();
+        super::snapshot::capture_page_list(&pages)
     }
     else {
         capture(linear, source.bytes.len())

@@ -12,6 +12,8 @@ const MAX_ENTRIES: usize = 63;
 /// Tier-0 page functions (tier0::compile_page) take more: recompilations
 /// seed only the entries that find the other blocks, plus new ones.
 const MAX_TIER0_ENTRIES: usize = 255;
+/// Pages a cluster function adds to its own (see want_partner).
+const MAX_PARTNERS: usize = 5;
 const CAPACITY: usize = 2048;
 /// Compilations of one page per code version; misses beyond this bound stay
 /// interpreted instead of recompiling a page whose entries keep changing.
@@ -59,6 +61,9 @@ struct Page {
     range_pending: bool,
     /// The queued recompilation only adds the range (no new entries).
     range_only: bool,
+    /// Pages (linear bases) this page's function often links to, with an
+    /// entry each (the link target): compiled into its function (a cluster).
+    partners: Vec<(u32, u32)>,
 }
 pub(super) struct Pages {
     pages: Vec<Page>,
@@ -137,6 +142,7 @@ impl Pages {
             range: false,
             range_pending: false,
             range_only: false,
+            partners: Vec::new(),
         };
         if self.pages.len() < CAPACITY {
             self.pages.push(page);
@@ -247,6 +253,11 @@ impl Pages {
                     keys.push(*served);
                 }
             }
+            // A range or partner request for a page whose function was
+            // retired: its entries earn heat again first.
+            if keys.is_empty() {
+                continue;
+            }
             return Some((key, keys));
         }
         None
@@ -317,6 +328,48 @@ impl Pages {
         true
     }
     pub fn range(&self, key: PageKey) -> bool { self.index.get(&key).is_some_and(|&i| self.pages[i].range) }
+    /// Recompile a compiled page with `partner` (the page of the linear
+    /// address `target`) in its function.
+    pub fn want_partner(&mut self, key: PageKey, target: u32) -> bool {
+        let Some(&i) = self.index.get(&key)
+        else {
+            return false;
+        };
+        let page = &mut self.pages[i];
+        let partner = target & !4095;
+        if page.failed || page.physical.is_none() || page.attempts >= MAX_ATTEMPTS
+            || page.partners.len() >= MAX_PARTNERS || page.partners.iter().any(|&(p, _)| p == partner)
+        {
+            return false;
+        }
+        page.partners.push((partner, target));
+        page.range_pending = true;
+        if !page.queued {
+            page.queued = true;
+            self.ready.push_back(key);
+        }
+        true
+    }
+    /// The page's partners, each with its known entries (the link target
+    /// and the partner page's own seeds).
+    pub fn partners(&self, key: PageKey) -> Vec<(u32, Vec<u32>)> {
+        let Some(&i) = self.index.get(&key)
+        else {
+            return vec![];
+        };
+        self.pages[i]
+            .partners
+            .iter()
+            .map(|&(partner, target)| {
+                let mut entries = vec![target];
+                if let Some(&j) = self.index.get(&PageKey { base: partner, ..key }) {
+                    let other = &self.pages[j];
+                    entries.extend(other.seeds.iter().chain(&other.served).map(|e| e.linear.0).take(64));
+                }
+                (partner, entries)
+            })
+            .collect()
+    }
     pub fn range_only(&self, key: PageKey) -> bool {
         self.index.get(&key).is_some_and(|&i| self.pages[i].range_only)
     }
@@ -351,6 +404,7 @@ impl Pages {
                 page.seeds.clear();
                 page.declined.clear();
                 page.range = false;
+                page.partners.clear();
                 page.physical = None;
             }
         }

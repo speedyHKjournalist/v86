@@ -7,7 +7,6 @@ pub mod emit;
 
 use crate::ir::{
     backend::wasm::Artifact,
-    frontend::decode::{GuestEip, LinearAddress},
     lowering::CompileError,
     passes::PassStats,
     runtime::{
@@ -21,6 +20,9 @@ use crate::ir::{
 /// (code continuing across a page boundary, as in the legacy JIT's
 /// multi-page modules; calls into neighbors do not count). Returns (first
 /// page linear, page count).
+/// Pages one page function may cover (see compile_page).
+pub const MAX_PAGES: usize = 6;
+
 pub fn range(
     origin: &CompileRequest,
     primary: &ImmutableCodeSnapshot,
@@ -28,14 +30,15 @@ pub fn range(
     code_page: impl Fn(u32) -> bool,
 ) -> (u32, u32) {
     let base = origin.linear.0 & !4095;
-    let base_pc = GuestEip(origin.pc.0.wrapping_sub(origin.linear.0 & 4095));
     if primary.bytes.len() != analysis::PAGE {
         return (base, 1);
     }
     let offsets: Vec<usize> = entries.iter().map(|e| (e.linear.0 & 4095) as usize).collect();
-    let plan = analysis::analyze(&primary.bytes, base_pc, LinearAddress(base), origin.default_32, &offsets, 0..4096);
-    let before = plan.jumps.iter().any(|&t| (-4096..0).contains(&t)) && code_page(base.wrapping_sub(4096));
-    let after = plan.jumps.iter().any(|&t| (4096..8192).contains(&t)) && code_page(base.wrapping_add(4096));
+    let slots = analysis::Slots::new(vec![base], origin.cpu_entry().cs_base());
+    let plan = analysis::analyze(&primary.bytes, slots, origin.default_32, &offsets, 0..4096);
+    let into = |page: u32| plan.jumps.iter().any(|&t| t & !4095 == page);
+    let before = into(base.wrapping_sub(4096)) && code_page(base.wrapping_sub(4096));
+    let after = into(base.wrapping_add(4096)) && code_page(base.wrapping_add(4096));
     let first = if before { base.wrapping_sub(4096) } else { base };
     (first, 1 + before as u32 + after as u32)
 }
@@ -47,10 +50,27 @@ pub fn continues(origin: &CompileRequest, snapshot: &ImmutableCodeSnapshot, entr
     if snapshot.bytes.len() != 2 * analysis::PAGE || snapshot.mappings[0].linear.0 != base {
         return false;
     }
-    let base_pc = GuestEip(origin.pc.0.wrapping_sub(origin.linear.0 & 4095));
     let offsets: Vec<usize> = entries.iter().map(|e| (e.linear.0 & 4095) as usize).collect();
-    let plan = analysis::analyze(&snapshot.bytes, base_pc, LinearAddress(base), origin.default_32, &offsets, 0..4096);
-    plan.jumps.iter().any(|&t| (8192..12288).contains(&t))
+    let slots = analysis::Slots::new(vec![base, base.wrapping_add(4096)], origin.cpu_entry().cs_base());
+    let plan = analysis::analyze(&snapshot.bytes, slots, origin.default_32, &offsets, 0..4096);
+    plan.jumps.iter().any(|&t| t & !4095 == base.wrapping_add(8192))
+}
+
+/// Whether code from `entries` (linear addresses; those in the page of the
+/// one-page `snapshot` count) runs on into the next page: a cluster function
+/// taking the page as a partner then takes that one too, as a range would.
+pub fn runs_on(snapshot: &ImmutableCodeSnapshot, cs_base: u32, default_32: bool, entries: &[u32]) -> bool {
+    let Some(base) = snapshot.mappings.first().map(|m| m.linear.0)
+    else {
+        return false;
+    };
+    let offsets: Vec<usize> = entries.iter().filter(|&&e| e & !4095 == base).map(|&e| (e & 4095) as usize).collect();
+    if snapshot.bytes.len() != analysis::PAGE || offsets.is_empty() {
+        return false;
+    }
+    let slots = analysis::Slots::new(vec![base], cs_base);
+    let plan = analysis::analyze(&snapshot.bytes, slots, default_32, &offsets, 0..4096);
+    plan.jumps.iter().any(|&t| t & !4095 == base.wrapping_add(4096))
 }
 
 /// Compile a page function for `entries` (primary first, all in one page)
@@ -62,6 +82,9 @@ pub fn compile_page(
     origin: &CompileRequest,
     snapshot: &ImmutableCodeSnapshot,
     entries: &[CpuEntryKey],
+    // Block starts of the other pages (linear addresses), such as the entries
+    // of pages this one calls often (a cluster function).
+    extra: &[u32],
 ) -> Result<CompiledArtifact, CompileError> {
     let pages = snapshot.mappings.len();
     let Some(first) = snapshot.mappings.first().map(|m| m.linear)
@@ -69,18 +92,19 @@ pub fn compile_page(
         return Err(CompileError::InvalidIr("empty tier-0 snapshot".into()));
     };
     let primary = origin.linear.0 & !4095;
-    if !(1..=3).contains(&pages)
+    let cs_base = origin.cpu_entry().cs_base();
+    let slots = analysis::Slots::new(snapshot.mappings.iter().map(|m| m.linear.0).collect(), cs_base);
+    if !(1..=MAX_PAGES).contains(&pages)
         || snapshot.bytes.len() != pages * analysis::PAGE
+        || slots.pages.len() != pages
         || snapshot.mappings.iter().enumerate().any(|(k, m)| {
-            m.linear.0 != first.0.wrapping_add((k as u32) << 12)
-                || !snapshot.dependencies.iter().any(|d| d.page == m.physical)
+            m.linear.0 != slots.pages[k] || !snapshot.dependencies.iter().any(|d| d.page == m.physical)
         })
-        || primary.wrapping_sub(first.0) >= (pages as u32) << 12
+        || slots.offset(primary).is_none()
     {
         return Err(CompileError::InvalidIr("invalid tier-0 page snapshot".into()));
     }
     let base = first;
-    let base_pc = GuestEip(origin.pc.0.wrapping_sub(origin.linear.0.wrapping_sub(base.0)));
     if entries.is_empty()
         || entries.len() > 256
         || entries.iter().any(|e| {
@@ -91,30 +115,22 @@ pub fn compile_page(
     {
         return Err(CompileError::InvalidIr("invalid tier-0 page entries".into()));
     }
-    let offset_of = |e: &CpuEntryKey| e.linear.0.wrapping_sub(base.0) as usize;
+    let offset_of = |e: &CpuEntryKey| slots.offset(e.linear.0).unwrap();
     let mut offsets: Vec<usize> = entries.iter().map(offset_of).collect();
+    let own = offset_of(&entries[0]) & !(analysis::PAGE - 1);
     if pages > 1 {
-        // The primary page's own branches into its neighbors seed their blocks.
+        // The primary page's own branches into the other pages seed their
+        // blocks, then the given entries of those pages.
         let alone = analysis::analyze(
-            &snapshot.bytes[(primary - base.0) as usize..][..analysis::PAGE],
-            GuestEip(base_pc.0.wrapping_add(primary - base.0)),
-            LinearAddress(primary),
+            &snapshot.bytes[own..][..analysis::PAGE],
+            analysis::Slots::new(vec![primary], cs_base),
             origin.default_32,
             &entries.iter().map(|e| (e.linear.0 & 4095) as usize).collect::<Vec<_>>(),
             0..analysis::PAGE,
         );
-        let shift = (primary - base.0) as i64;
-        offsets.extend(
-            alone
-                .external
-                .iter()
-                .map(|t| t + shift)
-                .filter(|&t| (0..snapshot.bytes.len() as i64).contains(&t))
-                .map(|t| t as usize),
-        );
+        offsets.extend(alone.external.iter().chain(extra).filter_map(|&t| slots.offset(t)));
     }
-    let own = (primary - base.0) as usize;
-    let plan = analysis::analyze(&snapshot.bytes, base_pc, base, origin.default_32, &offsets, own..own + analysis::PAGE);
+    let plan = analysis::analyze(&snapshot.bytes, slots.clone(), origin.default_32, &offsets, own..own + analysis::PAGE);
     let served: Vec<CpuEntryKey> =
         entries.iter().copied().filter(|e| plan.block_at[offset_of(e)].is_some()).collect();
     if served.is_empty() {
@@ -128,7 +144,7 @@ pub fn compile_page(
     let flat = state.has_flat_segmentation() && state.ssize_32() && state.is_32() == origin.default_32;
     let mem8 = unsafe { crate::cpu::memory::mem8 as u32 };
     let hosts: Vec<u32> = snapshot.mappings.iter().map(|m| mem8.wrapping_add(m.physical.0)).collect();
-    let code = emit::emit_page(&plan, base.0, &served, flat, &hosts);
+    let code = emit::emit_page(&plan, &served, flat, &hosts);
     super::runtime::tier0::note_compiled(code.instructions, code.templated, code.bytes.len(), pages);
     let page_blocks = (0..pages)
         .map(|page| {

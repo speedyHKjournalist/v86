@@ -382,6 +382,11 @@ pub(super) fn tier0() -> bool { unsafe { TIER0 } }
 /// XP boot, neighbors rarely are the pages execution chains to (chains -5%)
 /// while code grew 38% and boot slowed 7%; only page-crossing loops gain.
 static mut T0_RANGES: bool = false;
+/// Frequent links from the page function of the page at `base` to the
+/// page of `target` (not a neighbor): recompile it with that page.
+pub(super) fn want_partner(base: u32, target: u32, cs_base: u32, default_32: bool) {
+    SCHEDULER.try_lock().unwrap().pages.want_partner(PageKey { base, cs_base, default_32 }, target);
+}
 /// Frequent links from the page function of the page at `base` to a
 /// neighbor page: recompile it with its neighbors (see tier0::range).
 pub(super) fn want_range(base: u32, cs_base: u32, default_32: bool) {
@@ -1256,31 +1261,53 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
     };
     // A Tier-0 page function also covers neighbor pages its code continues
     // into, where its links to them are frequent (or all, T0_RANGES).
-    let ranged = TIER0 && tier == 1 && (T0_RANGES || SCHEDULER.try_lock().unwrap().pages.range(key));
-    let snapshot = if ranged {
-        let known = |base| SCHEDULER.try_lock().unwrap().pages.known_code(PageKey { base, ..key });
-        let (first, mut pages) = crate::ir::tier0::range(&request, &snapshot, &entries, known);
-        // Code that runs on through the next page may continue into the one
-        // after it (the legacy JIT's three-page modules).
-        if pages == 2 && first == key.base && known(key.base.wrapping_add(8192)) {
-            let _clock = CompileScope::new(1);
-            if let Ok(two) = super::snapshot::capture_pages(first, 2) {
-                if crate::ir::tier0::continues(&request, &two, &entries) {
-                    pages = 3;
+    // ... and pages it often calls or returns to (a cluster function), with
+    // their entries as block starts.
+    let known = |base| SCHEDULER.try_lock().unwrap().pages.known_code(PageKey { base, ..key });
+    let mut list = vec![key.base];
+    let mut extra = vec![];
+    if TIER0 && tier == 1 {
+        let ranged = T0_RANGES || SCHEDULER.try_lock().unwrap().pages.range(key);
+        if ranged {
+            let (first, mut pages) = crate::ir::tier0::range(&request, &snapshot, &entries, known);
+            // Code that runs on through the next page may continue into the
+            // one after it (the legacy JIT's three-page modules).
+            if pages == 2 && first == key.base && known(key.base.wrapping_add(8192)) {
+                let _clock = CompileScope::new(1);
+                if let Ok(two) = super::snapshot::capture_pages(first, 2) {
+                    if crate::ir::tier0::continues(&request, &two, &entries) {
+                        pages = 3;
+                    }
                 }
             }
+            list = (0..pages).map(|k| first.wrapping_add(k << 12)).collect();
         }
-        // Links to a neighbor that its code only calls: the same function.
-        if pages == 1 && !T0_RANGES && SCHEDULER.try_lock().unwrap().pages.range_only(key) {
+        let partners = SCHEDULER.try_lock().unwrap().pages.partners(key);
+        for (partner, partner_entries) in partners {
+            if list.len() < crate::ir::tier0::MAX_PAGES && !list.contains(&partner) && known(partner) {
+                list.push(partner);
+                // A partner whose code runs on into the next page brings it
+                // (else the function would leave there at once).
+                let next = partner.wrapping_add(4096);
+                if list.len() < crate::ir::tier0::MAX_PAGES && !list.contains(&next) && known(next) {
+                    let _clock = CompileScope::new(1);
+                    if let Ok(one) = super::snapshot::capture_pages(partner, 1) {
+                        if crate::ir::tier0::runs_on(&one, key.cs_base, key.default_32, &partner_entries) {
+                            list.push(next);
+                        }
+                    }
+                }
+                extra.extend(partner_entries);
+            }
+        }
+        // A range or partner request that adds nothing: the same function.
+        if list.len() == 1 && !T0_RANGES && SCHEDULER.try_lock().unwrap().pages.range_only(key) {
             return false;
         }
-        if pages > 1 {
-            let _clock = CompileScope::new(1);
-            super::snapshot::capture_pages(first, pages).unwrap_or(snapshot)
-        }
-        else {
-            snapshot
-        }
+    }
+    let snapshot = if list.len() > 1 {
+        let _clock = CompileScope::new(1);
+        super::snapshot::capture_page_list(&list).unwrap_or(snapshot)
     }
     else {
         snapshot
@@ -1316,7 +1343,7 @@ unsafe fn compile_page(key: PageKey, entries: Vec<CpuEntryKey>, tier: u32) -> bo
     let compile_clock = CompileScope::new(0);
     let started = crate::profiler::performance_codegen_start();
     let compiled = if TIER0 && tier == 1 {
-        crate::ir::tier0::compile_page(&request, &snapshot, &entries)
+        crate::ir::tier0::compile_page(&request, &snapshot, &entries, &extra)
     }
     else {
         compile_cpu_page(&request, &snapshot, &entries, &ir_config)

@@ -39,6 +39,7 @@ bench-quick: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
 ir-tier0-tests: bench-build build/v86-ir-runtime.wasm build/libv86.mjs
 	node tests/ir/differential/tier0_fuzz.mjs 60 1
 	for kind in i0 i10 i13 i19 i22 i26 s1 s3 s7 x; do FUZZ_KIND=$$kind node tests/ir/differential/tier0_fuzz.mjs 6 2 || exit 1; done
+	node tests/ir/differential/tier0_fetch_fault.mjs
 
 .PHONY: glbridge test-glbridge
 glbridge:

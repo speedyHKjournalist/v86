@@ -366,6 +366,26 @@ pub unsafe fn capture_pages(linear: u32, pages: u32) -> Result<ImmutableCodeSnap
     Ok(snapshot)
 }
 
+/// Whole pages at the given linear page addresses (in address order): a
+/// Tier-0 function covering pages that need not be consecutive.
+pub unsafe fn capture_page_list(pages: &[u32]) -> Result<ImmutableCodeSnapshot, CaptureError> {
+    let mut sorted: Vec<u32> = pages.iter().map(|&page| page & !4095).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut snapshot = ImmutableCodeSnapshot { bytes: vec![], dependencies: vec![], mappings: vec![] };
+    for page in sorted {
+        let next = capture(page, 4096)?;
+        snapshot.bytes.extend_from_slice(&next.bytes);
+        snapshot.mappings.extend(next.mappings);
+        for dependency in next.dependencies {
+            if !snapshot.dependencies.iter().any(|d| d.page == dependency.page) {
+                snapshot.dependencies.push(dependency);
+            }
+        }
+    }
+    Ok(snapshot)
+}
+
 #[cfg(test)]
 #[path = "../../../../tests/ir/semantics/overlap_validation.rs"]
 mod overlap_tests;
