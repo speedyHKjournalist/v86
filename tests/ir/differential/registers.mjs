@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../../build/libv86.mjs";
+import {COMPILED_ARMS, compiled_activations} from "../../rust/compiled_arms.mjs";
 const programs = JSON.parse(fs.readFileSync("build/ir-integer/programs.json"));
 const inputs = [[0, 0, 2], [0x7FFFFFFF, 1, 0x8D7], [0x80000000, 0xFFFFFFFF, 3],
     [0xFFFFFFFF, 0xFFFFFFFF, 3], [0x80FF7FFF, 0x7F018001, 2], [0xFFFF, 0x8001, 0x8D7]];
@@ -59,8 +60,9 @@ for(let p = 0; p < programs.length; p++) for(const [a, b, flags] of inputs) {
 guest.push(0xFF, 0x05, ...u32(0x600)); // count full executions
 const back = -guest.length - 5; guest.push(0xE9, ...u32(back));
 const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
-for(const disable_jit of [true, false]) {
-    const vm = new V86({wasm_path: process.argv[2] || "build/v86.wasm", bios: {buffer: bios.slice(0)}, disable_jit,
+for(const {label, options} of [{label: "interpreter", options: {disable_jit: true}}, ...COMPILED_ARMS]) {
+    const interpreted = !!options.disable_jit;
+    const vm = new V86({wasm_path: process.argv[2] || "build/v86.wasm", bios: {buffer: bios.slice(0)}, ...options,
         memory_size: 32 << 20, disable_keyboard: true, disable_mouse: true, disable_speaker: true,
         net_device: {type: "none"}, autostart: false});
     try {
@@ -70,11 +72,11 @@ for(const disable_jit of [true, false]) {
         while(word(0x500) !== 0xCAFE) { assert(performance.now() < deadline, "BIOS timeout"); await sleep(1); }
         await vm.stop();
         const cpu = vm.v86.cpu, e = cpu.wm.exports;
-        e.set_jit_config(4, 1000); e.performance_recording_enable(1);
         vm.write_memory(Uint8Array.from(guest), CODE); vm.write_memory(new Uint8Array(4), 0x600);
         cpu.instruction_pointer[0] = CODE; cpu.in_hlt[0] = 0;
+        const start = compiled_activations(e);
         vm.run(); deadline = performance.now() + 30000;
-        while(word(0x600) < 2 || !disable_jit && e.performance_recording_get(1) === 0) {
+        while(word(0x600) < 2 || !interpreted && compiled_activations(e) === start) {
             assert(performance.now() < deadline, "integer matrix timeout"); await sleep(1);
         }
         await vm.stop();
@@ -83,8 +85,8 @@ for(const disable_jit of [true, false]) {
         for(let i = 0; i < expected.length; i++) {
             const item = expected[i]; const actual = Array.from({length: 9}, (_, r) => results.getUint32(i * 40 + r * 4, true));
             actual[8] &= 0x8D5; const wanted = item.regs.slice(); wanted[8] &= 0x8D5;
-            assert.deepEqual(actual, wanted, `${disable_jit ? "interpreter" : "legacy JIT"}: program ${item.p} bytes ${programs[item.p]} input ${item.a.toString(16)}/${item.b.toString(16)} flags ${item.flags.toString(16)}`);
+            assert.deepEqual(actual, wanted, `${label}: program ${item.p} bytes ${programs[item.p]} input ${item.a.toString(16)}/${item.b.toString(16)} flags ${item.flags.toString(16)}`);
         }
-        console.log(`PASS: ${expected.length} register/FLAGS cases: ${disable_jit ? "interpreter" : "legacy JIT (with runtime interpreter exits)"} vs unoptimized and optimized IR`);
+        console.log(`PASS: ${expected.length} register/FLAGS cases: ${label} vs unoptimized and optimized IR`);
     } finally { await vm.destroy(); }
 }

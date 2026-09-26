@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {V86} from "../../../build/libv86.mjs";
 const wasm=process.argv[2]||"build/v86-ir-cache-test.wasm",PC=0x100000;
-const vm=new V86({wasm_path:wasm,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
+// disable_jit: IR starts idle (no scheduler, no Tier-0); each case enables it.
+const vm=new V86({wasm_path:wasm,disable_jit:true,memory_size:32<<20,bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)),u32=n=>[n&255,n>>>8&255,n>>>16&255,n>>>24];
 const until=async(test,label)=>{const end=performance.now()+15000;while(!test()){assert(performance.now()<end,label);await sleep(1);}};
 try {
@@ -18,7 +19,7 @@ try {
     const stats=()=>Array.from({length:12},(_,i)=>e.ir_auto_stat(i));
     const publisher=cpu.ir_auto_publish;let cold_publications=0;
     cpu.ir_auto_publish=function(id,slot,ptr,len){
-        assert.equal(e.ir_entry_matches(cpu.instruction_pointer[0],cpu.segment_offsets[1],cpu.is_32[0]),1,"publication starts outside legacy guest frames");
+        assert.equal(e.ir_entry_matches(cpu.instruction_pointer[0],cpu.segment_offsets[1],cpu.is_32[0]),1,"publication starts outside JIT frames");
         assert.equal(e.ir_auto_stat(10),1);e.ir_auto_complete(id,1);assert.equal(e.ir_auto_stat(10),1,"premature completion cannot consume a pending task");
         cold_publications++;return publisher.call(this,id,slot,ptr,len);
     };
@@ -42,13 +43,13 @@ try {
     }
     e.performance_recording_enable(0);
     console.log(`PASS: ${wasm}: automatic Tier 1 compilation, safe optimized promotion and actual CPU execution with exact loop counts, recording off/on`);
-    await prepare();const disabled=e.get_jit_config(0),legacy_publisher=cpu.codegen_finalize;let legacy_calls=0;
-    cpu.codegen_finalize=function(...args){legacy_calls++;return legacy_publisher.apply(this,args);};e.set_jit_config(0,1);
+    await prepare();const legacy_publisher=cpu.codegen_finalize;let legacy_calls=0;
+    cpu.codegen_finalize=function(...args){legacy_calls++;return legacy_publisher.apply(this,args);};
     try {
-        const independent=stats(),independent_hits=e.ir_cache_stat(2);configure();vm.run();await until(()=>e.ir_auto_stat(5)>independent[5]&&e.ir_cache_stat(2)>independent_hits,"IR with legacy generation disabled");await vm.stop();
+        const independent=stats(),independent_hits=e.ir_cache_stat(2);configure();vm.run();await until(()=>e.ir_auto_stat(5)>independent[5]&&e.ir_cache_stat(2)>independent_hits,"IR compilation");await vm.stop();
         assert.equal(legacy_calls,0);const n=new Uint32Array(e.memory.buffer)[664>>2];assert.equal(n,(cpu.reg32[0]*2-(cpu.instruction_pointer[0]===PC+1?1:0))>>>0);
-    } finally {await vm.stop();e.set_jit_config(0,disabled);cpu.codegen_finalize=legacy_publisher;}
-    console.log(`PASS: ${wasm}: automatic IR compilation/promotion executes with legacy generation disabled and zero calls to the legacy publisher`);
+    } finally {await vm.stop();cpu.codegen_finalize=legacy_publisher;}
+    console.log(`PASS: ${wasm}: automatic IR compilation/promotion executes with zero calls to the legacy publisher`);
     await prepare();cpu.is_32[0]=0;cpu.segment_offsets[1]=PC-0x1000;cpu.reg32[0]=0x76540000;e.update_state_flags();let mode_before=stats();configure();vm.run();
     await until(()=>e.ir_auto_stat(5)>mode_before[5],"16-bit automatic promotion");await vm.stop();
     const mode_count=new Uint32Array(e.memory.buffer)[664>>2];assert([PC,PC+1].includes(cpu.instruction_pointer[0]));
@@ -61,30 +62,30 @@ try {
     console.log(`PASS: ${wasm}: a 42-instruction loop spans lightweight regions and preserves exact retirement through the larger optimized region`);
     await prepare([0x40,...Array(254).fill(0x90),0xE9,...u32(-260)]);
     const bounded_before=stats();
-    const legacy_disabled=e.get_jit_config(0);e.set_jit_config(0,1);configure();vm.run();
+    configure();vm.run();
     try {
         await until(()=>e.ir_auto_stat(5)>bounded_before[5],"budget-limited Tier 2 prefix publishes");
         await vm.stop();
         const offset=cpu.instruction_pointer[0]-PC;
         assert(offset>=0&&offset<=255);
         assert.equal(new Uint32Array(e.memory.buffer)[664>>2],((cpu.reg32[0]-(offset?1:0))*256+offset)>>>0);
-    } finally {await vm.stop();e.set_jit_config(0,legacy_disabled);}
+    } finally {await vm.stop();}
     console.log(`PASS: ${wasm}: a 256-instruction loop promotes a bounded Tier 2 prefix without legacy compilation and preserves exact retirement`);
     const ram=0x80000,rmw=Array.from({length:48},()=>[0xFF,0x05,...u32(ram)]).flat();
     await prepare([...rmw,0xE9,...u32(-rmw.length-5)]);vm.write_memory(Uint8Array.of(0,0,0,0),ram);
-    const memory_before=stats(),memory_legacy=e.get_jit_config(0);e.set_jit_config(0,1);configure();vm.run();
+    const memory_before=stats();configure();vm.run();
     try {
         await until(()=>e.ir_auto_stat(5)>memory_before[5],"fallthrough RAM region promotes");await vm.stop();
         const offset=cpu.instruction_pointer[0]-PC,position=offset/6;
         assert(Number.isInteger(position)&&position>=0&&position<=48);
         const increments=word(ram);assert(increments>=position);
         assert.equal(new Uint32Array(e.memory.buffer)[664>>2],((increments-position)/48*49+position)>>>0);
-    } finally {await vm.stop();e.set_jit_config(0,memory_legacy);}
+    } finally {await vm.stop();}
     console.log(`PASS: ${wasm}: automatic linear RAM/RMW regions preserve memory commits and exact instruction retirement`);
     // PUSH/POP used to split every CFG activation at the store, including warm
     // ordinary stack RAM. Require the guarded continuation to reach a backedge.
     await prepare([0x50,0x5A,0x40,0xEB,0xFB]);
-    const stack_legacy=e.get_jit_config(0);e.set_jit_config(0,1);configure();vm.run();
+    configure();vm.run();
     try {
         await until(()=>e.ir_cache_entry_stat(PC,0,1,5)===2 && e.ir_cache_entry_stat(PC,0,1,3)>4,"stack store CFG loop continues");
         await vm.stop();
@@ -93,14 +94,14 @@ try {
         assert.equal(new Uint32Array(e.memory.buffer)[664>>2],(eax*4+offset-(offset===3?4:0))>>>0);
         assert.equal(cpu.reg32[4]>>>0,0x90000-(offset===1?4:0));
         assert.equal(cpu.reg32[2]>>>0,(eax-(offset<2||offset===3?1:0))>>>0);
-    } finally {await vm.stop();e.set_jit_config(0,stack_legacy);}
+    } finally {await vm.stop();}
     console.log(`PASS: ${wasm}: guarded stack stores continue through the CFG backedge with exact ESP/register/retirement state`);
     {
         const other=PC+0x2000;
         await prepare([0x43,0xFF,0xE1]);
         vm.write_memory(Uint8Array.of(0xE6,0x80,0xFF,0xE2),other);
         cpu.reg32[1]=other;cpu.reg32[2]=PC;
-        const disabled=e.get_jit_config(0);e.set_jit_config(0,1);configure();vm.run();
+        configure();vm.run();
         try {
             await until(()=>[PC,other].some(at=>e.ir_cache_entry_stat(at,0,1,10)>=2 && e.ir_cache_entry_stat(at,0,1,3)>=3),
                 "an observed I/O cycle executes inside one fused owner");
@@ -113,7 +114,7 @@ try {
             assert(active.length>0);
             vm.write_memory(cpu.mem8.slice(other,other+1),other);
             for(const at of active) assert.equal(e.ir_cache_entry_stat(at,0,1,0),0,"peer code invalidates every executing fused owner");
-        } finally {await vm.stop();e.set_jit_config(0,disabled);}
+        } finally {await vm.stop();}
     }
     console.log(`PASS: ${wasm}: observed successor fusion preserves I/O state, retirement and source invalidation`);
     {
@@ -121,7 +122,7 @@ try {
         await prepare([0x40,0xFF,0xE2]);
         [[0x41,0xFF,0xE3],[0x45,0xFF,0xE6],[0x40,0xFF,0xE7]].forEach((code,i)=>vm.write_memory(Uint8Array.from(code),addresses[i+1]));
         cpu.reg32[2]=addresses[1];cpu.reg32[3]=addresses[2];cpu.reg32[6]=addresses[3];cpu.reg32[7]=PC;
-        const disabled=e.get_jit_config(0);e.set_jit_config(0,1);configure();vm.run();
+        configure();vm.run();
         try {
             await until(()=>addresses.some(p=>e.ir_cache_entry_stat(p,0,1,10)===4&&e.ir_cache_entry_stat(p,0,1,3)>16),"four witnessed hot sources fuse progressively");
             await vm.stop();const ip=cpu.instruction_pointer[0];
@@ -130,7 +131,7 @@ try {
             const root=addresses.find(p=>e.ir_cache_entry_stat(p,0,1,10)===4);
             vm.write_memory(cpu.mem8.slice(addresses[3],addresses[3]+1),addresses[3]);
             assert.equal(e.ir_cache_entry_stat(root,0,1,0),0,"fourth source write retires extended fusion");
-        } finally {await vm.stop();e.set_jit_config(0,disabled);}
+        } finally {await vm.stop();}
     }
     console.log(`PASS: ${wasm}: closed four-source fusion, exact carried state/count and fourth-source invalidation`);
     for(const recording of [0,1]) {
@@ -138,8 +139,8 @@ try {
         const other=PC+0x2000;
         vm.write_memory(Uint8Array.of(0x41,0xFF,0xE3),other);
         cpu.reg32[2]=other;cpu.reg32[3]=PC;
-        const disabled=e.get_jit_config(0),linked=e.ir_auto_stat(1),fused=e.ir_cache_stat(23),fused_hits=e.ir_cache_stat(24);
-        e.set_jit_config(0,1);e.performance_recording_enable(recording);configure();vm.run();
+        const linked=e.ir_auto_stat(1),fused=e.ir_cache_stat(23),fused_hits=e.ir_cache_stat(24);
+        e.performance_recording_enable(recording);configure();vm.run();
         try {
             await until(()=>e.ir_cache_entry_stat(PC,0,1,5)===2 && e.ir_cache_entry_stat(other,0,1,5)===2 && e.ir_auto_stat(1)>linked,"IR-to-IR successors execute and promote");
             await until(()=>e.ir_cache_stat(23)>fused && e.ir_cache_stat(24)>fused_hits,"hot indirect regions fuse and execute with retained state");
@@ -156,7 +157,7 @@ try {
                 vm.write_memory(cpu.mem8.slice(peer,peer+1),peer);
                 assert.equal(e.ir_cache_entry_stat(root,0,1,0),0,"same-byte write to peer invalidates fused root");
             }
-        } finally {await vm.stop();e.set_jit_config(0,disabled);e.performance_recording_enable(0);}
+        } finally {await vm.stop();e.performance_recording_enable(0);}
     }
     console.log(`PASS: ${wasm}: automatic hot-region fusion retains state over repeated indirect edges, preserves exact retirement with recording off/on, and invalidates on peer writes and restore`);
     {
@@ -173,8 +174,8 @@ try {
         // Isolate alias ownership from independent trace promotion, which can
         // legitimately replace only one alias while preserving the other owner.
         assert.equal(e.ir_cache_set_fusion(0),1);
-        const batches=e.ir_auto_stat(25),disabled=e.get_jit_config(0);
-        e.set_jit_config(0,1);configure();vm.run();
+        const batches=e.ir_auto_stat(25);
+        configure();vm.run();
         try {
             await until(()=>e.ir_auto_stat(25)>batches && e.ir_cache_entry_stat(PC,0,1,11)>=2 && e.ir_cache_entry_stat(PC,0,1,12)===e.ir_cache_entry_stat(peer,0,1,12),"hot entries share one automatically published body");
             await vm.stop();
@@ -185,7 +186,7 @@ try {
             assert(e.ir_cache_entry_stat(PC,0,1,11) >= 2);
             assert.equal(e.ir_cache_entry_stat(PC,0,1,12),e.ir_cache_entry_stat(peer,0,1,12),"aliases use the same table slot");
             configure(0);assert.equal(e.ir_auto_stat(17),0,"shared artifact has no queued duplicate body");
-        } finally {await vm.stop();e.set_jit_config(0,disabled);assert.equal(e.ir_cache_set_fusion(1),1);}
+        } finally {await vm.stop();assert.equal(e.ir_cache_set_fusion(1),1);}
     }
     console.log(`PASS: ${wasm}: automatic shared-body hot entries, one table slot, cancellation and independently checked retirement`);
     await prepare([0xEB,0x02,0xCC,0xCC,0x40,0xEB,0xF9]);let before=stats();let reachable_hits=e.ir_cache_stat(2);configure();vm.run();
@@ -213,7 +214,7 @@ try {
         const other=PC+0x2000;
         await prepare([0x40,0xFF,0xE2]);vm.write_memory(Uint8Array.of(0x41,0xFF,0xE3),other);
         cpu.reg32[2]=other;cpu.reg32[3]=PC;
-        const disabled=e.get_jit_config(0),published=e.ir_cache_stat(23);e.set_jit_config(0,1);
+        const published=e.ir_cache_stat(23);
         try {
             WebAssembly.instantiate=(code,imports)=>WebAssembly.Module.imports(new WebAssembly.Module(code)).some(i=>i.name==="ir_admission_epoch_address")
                 ?new Promise((resolve,reject)=>{held={code,imports,resolve,reject};}):original(code,imports);
@@ -223,7 +224,7 @@ try {
             held.resolve(await original(held.code,held.imports));await sleep(20);
             assert.equal(e.ir_cache_stat(23),published,"stale or disabled fusion cannot publish");
             assert.equal(e.ir_auto_stat(10),0);
-        } finally {await vm.stop();WebAssembly.instantiate=original;e.set_jit_config(0,disabled);assert.equal(e.ir_cache_set_fusion(1),1);}
+        } finally {await vm.stop();WebAssembly.instantiate=original;assert.equal(e.ir_cache_set_fusion(1),1);}
     }
     console.log(`PASS: ${wasm}: held fused publication rejects writes to its sources and fusion disable`);
     for(const invalidate of ["configure","SMC"]) {
@@ -235,7 +236,7 @@ try {
             cpu.instruction_pointer[0]=at;assert(await cpu.ir_compile_cached(length,1,1,1,256,64));
         }
         cpu.instruction_pointer[0]=PC;
-        const disabled=e.get_jit_config(0),shared=e.ir_auto_stat(25),published=e.ir_cache_stat(31);e.set_jit_config(0,1);
+        const shared=e.ir_auto_stat(25),published=e.ir_cache_stat(31);
         assert.equal(e.ir_cache_set_fusion(0),1);
         try {
             WebAssembly.instantiate=(code,imports)=>is_ir(code)&&e.ir_auto_stat(25)>shared
@@ -250,7 +251,7 @@ try {
             assert.equal(e.ir_auto_stat(10),0);
             assert.equal(e.ir_cache_stat(31),published,"a cancelled shared owner never publishes");
             assert(e.ir_cache_entry_stat(peer,0,1,11)<=1,"only a prior independent owner may survive cancellation");
-        } finally {await vm.stop();WebAssembly.instantiate=original;e.set_jit_config(0,disabled);assert.equal(e.ir_cache_set_fusion(1),1);}
+        } finally {await vm.stop();WebAssembly.instantiate=original;assert.equal(e.ir_cache_set_fusion(1),1);}
     }
     console.log(`PASS: ${wasm}: held shared-body publication rejects all aliases after configuration changes and same-byte SMC`);
     try {
@@ -274,22 +275,6 @@ try {
     const saved=await vm.save_state();await vm.restore_state(saved);assert.equal(e.ir_auto_stat(11),1);assert.equal(e.ir_cache_stat(0),0);before=stats();vm.run();
     await until(()=>e.ir_auto_stat(4)>before[4],"automatic rebuild after snapshot restore");await vm.stop();
     console.log(`PASS: ${wasm}: snapshot restore drops runtime entries and automatic compilation rebuilds them`);
-    if(e.jit_force_generate_unsafe){
-        await prepare([0x40,0xFF,0xE2]);const other=PC+0x2000;vm.write_memory(Uint8Array.of(0x41,0xFF,0xE3),other);cpu.reg32[2]=other;cpu.reg32[3]=PC;
-        const pages=e.get_jit_config(1),tiered=e.get_jit_config(7);e.set_jit_config(1,1);e.set_jit_config(7,0);e.set_jit_config(5,1);
-        for(const address of [PC,other]){
-            cpu.instruction_pointer[0]=address;
-            await new Promise((resolve,reject)=>{
-                const timer=setTimeout(()=>reject(new Error("linked legacy warmup timeout")),10000);
-                cpu.test_hook_did_finalize_wasm=()=>{clearTimeout(timer);resolve();};
-                try {assert(e.jit_force_generate_unsafe(address));} catch(error){clearTimeout(timer);reject(error);}
-            });
-        }
-        cpu.test_hook_did_finalize_wasm=undefined;cpu.instruction_pointer[0]=PC;before=stats();const links=e.get_jit_link_count();configure(1,32,1000000);vm.run();
-        await until(()=>e.ir_auto_stat(4)>=before[4]+2,"linked heat reaches cold compilation");await vm.stop();
-        assert(e.ir_auto_stat(1)>before[1]);assert(e.get_jit_link_count()>links);e.set_jit_config(1,pages);e.set_jit_config(7,tiered);
-        console.log(`PASS: ${wasm}: recording-off legacy links accumulate entry heat; both linked targets compile only after returning to cold dispatch`);
-    }
     // Automatic eviction preserves manually published entries and the shared pool bound.
     await prepare([0x40,0xF4]);assert(await cpu.ir_compile_cached(1,1,1,1,64,8));configure(1,1,1000000);
     // The default holds a whole XP working set; bound the smallest pool here.

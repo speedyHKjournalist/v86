@@ -1,7 +1,7 @@
 # v86 CPU benchmark suite
 
-A SPEC CPU 2017-style suite for comparing the IR backend with the legacy JIT
-on identical guest work. Every benchmark is a freestanding 32-bit program that
+A SPEC CPU 2017-style suite for comparing IR cores (a build against a baseline
+build) on identical guest work. Every benchmark is a freestanding 32-bit program that
 runs under a small benchmark BIOS (flat protected mode, 4 KiB paging over
 64 MiB, x87/SSE enabled, interrupts off). Nothing else runs in the guest, so
 the timings measure CPU emulation only.
@@ -13,11 +13,11 @@ make bench-build                      # build/bench/*.exe (needs nasm, i686-w64-
 make bench                            # full run: 5 warm runs, 3 cold samples per arm
 make bench-quick                      # half-size work, 3 warm runs, 1 cold sample
 node tests/bench/run.mjs --filter 'x87|sse' --runs 7
-node tests/bench/run.mjs --baseline build/older-ir.wasm   # add an IR arm on another core
+node tests/bench/run.mjs --baseline build/older-ir.wasm   # reference arm: another core
 node tests/bench/run.mjs --xp windowsxp.img --xp-runs 3   # add the XP boot benchmark
-node tests/bench/run.mjs --ir-setup ir_auto_set_tier0=1    # call IR exports after boot
+node tests/bench/run.mjs --ir-setup ir_t0_set_ranges=1     # call IR exports after boot, on every arm
 node tests/bench/report.mjs build/bench/results-new.json build/bench/results-old.json
-node tests/bench/run.mjs --ir-setup ir_auto_set_tier0=1 --fallbacks   # IR Tier-0; list interpreted opcodes
+node tests/bench/run.mjs --fallbacks                       # list the opcodes Tier-0 interprets
 ```
 
 `BENCH_ARGS` passes options through the make targets. Results are written to
@@ -26,7 +26,8 @@ git revision and every raw sample.
 
 ## Method
 
-For each benchmark and arm (IR, legacy, optional baseline IR core):
+For each benchmark and arm (the core under test, `ir`, and the optional
+`--baseline` core; both in the default IR configuration, Tier-0 on):
 
 - **cold**: the first run in a fresh VM. This includes JIT discovery,
   compilation and early interpretation, so it reflects short-lived code.
@@ -38,9 +39,11 @@ For each benchmark and arm (IR, legacy, optional baseline IR core):
   same checksum and the same retired-instruction count; any difference is an
   error, not a timing.
 
-The ratio is `legacy time / arm time`: above 1 means faster than legacy. The
-suite score is the geometric mean of the ratios, reported overall and per
-category, for warm and cold runs separately. MIPS are retired guest
+The ratio is `baseline time / arm time`: above 1 means faster than the
+baseline core. Without `--baseline` only MIPS are reported. The suite score is
+the geometric mean of the ratios, reported overall and per category, for warm
+and cold runs separately. Result files recorded before IR became the only
+backend carry a `legacy` arm instead; `report.mjs` uses it as their reference. MIPS are retired guest
 instructions per second (a REP string instruction counts once).
 
 ## Benchmarks
@@ -75,7 +78,7 @@ C kernels are compiled by MinGW-w64 GCC with era-appropriate profiles (see
 `tests/bench/suite.json`): integer code for i686 without SSE, x87 code with
 `-mfpmath=387`, an i586 profile without FCOMI/CMOV, SSE2 and MMX. The micro
 benchmarks are nasm sources. Adding a benchmark means adding a source file and
-one line in `suite.json`; `iterations` should give a legacy warm run of about
+one line in `suite.json`; `iterations` should give a warm run of about
 250 ms.
 
 ## Layout

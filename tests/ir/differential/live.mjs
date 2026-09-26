@@ -146,13 +146,4 @@ try {
     cpu.in_hlt[0]=0;raw[648]=1;assert.equal(compile(1),0n);assert.equal(e.ir_live_error(),2);raw[648]=0;
     assert.equal(e.ir_live_info(0xFFFFFFFFFFFFFFFFn,0),0);assert.equal(e.ir_live_release(0xFFFFFFFFFFFFFFFFn),0);
     console.log(`PASS: ${wasm}: immutable byte ownership, raw/notified/unrelated writes, mode changes, obsolete handles, restore/cache reset, release and compile failures`);
-    defaults(PC,PC);cpu.jit_clear_cache();let busy=0;
-    cpu.io.register_write(0x502,null,()=>{
-        if(!busy && !e.ir_entry_matches(cpu.instruction_pointer[0],cpu.segment_offsets[1],cpu.is_32[0])){
-            assert.equal(compile(1),0n);assert.equal(e.ir_live_error(),2);busy++;
-        }
-    });
-    vm.write_memory(Uint8Array.from([0xBA,2,5,0,0,0xB9,0x40,0x0D,3,0,0xEE,0xE2,0xFD,0xF4]),PC);
-    vm.run();const until=performance.now()+10000;while(!cpu.in_hlt[0]){assert(performance.now()<until);await sleep(5);} await vm.stop();assert.equal(busy,1);
-    console.log(`PASS: ${wasm}: live compilation refuses a real legacy JIT callback without guest/MMIO/TLB mutation`);
 } finally {await vm.destroy();}

@@ -124,36 +124,31 @@ export class PerformanceRecorder
         cpu.main_loop = timed_loop;
         this.cleanup.push(() => { if(cpu.main_loop === timed_loop) cpu.main_loop = main_loop; });
 
-        const finalize = cpu.codegen_finalize;
-        const timed_finalize = (index, address, flags, ptr, bytes, ticket_low, ticket_high) => {
-            if(live())
-            {
-                run["jit_requests"]++;
-                run["jit_wasm_bytes"] += bytes;
-                this.pending_jit.set(index, { address, flags, bytes, ticket_low, ticket_high, start: this.now() });
-            }
-            return finalize.call(cpu, index, address, flags, ptr, bytes, ticket_low, ticket_high);
+        // IR modules are published through ir_publish_cached, which resolves
+        // to whether the module was installed. Each call has its own token, so
+        // a completion after stop/restart never reaches a later recording.
+        const publish = cpu.ir_publish_cached;
+        const timed_publish = (owner, id, slot, code, automatic) => {
+            if(!live()) return publish.call(cpu, owner, id, slot, code, automatic);
+            const token = {}, start = this.now(), bytes = code.length;
+            run["jit_requests"]++;
+            run["jit_wasm_bytes"] += bytes;
+            this.pending_jit.set(token, start);
+            return publish.call(cpu, owner, id, slot, code, automatic).then(success => {
+                if(this.pending_jit.delete(token) && success)
+                {
+                    const ms = this.now() - start;
+                    run["jit_finished"]++;
+                    run["jit_compile_publish_latency_ms"] += ms;
+                    run["jit_compile_publish_max_ms"] = Math.max(run["jit_compile_publish_max_ms"], ms);
+                    this.keep_slowest(this.slow_jit, { "start_ms": start - this.started,
+                        "duration_ms": ms, "slot": slot, "wasm_bytes": bytes });
+                }
+                return success;
+            });
         };
-        cpu.codegen_finalize = timed_finalize;
-        this.cleanup.push(() => { if(cpu.codegen_finalize === timed_finalize) cpu.codegen_finalize = finalize; });
-        const finished = cpu.codegen_finalize_finished;
-        const timed_finished = (index, address, flags, ticket_low, ticket_high) => {
-            const entry = live() && this.pending_jit.get(index);
-            if(entry && entry.address === address && entry.flags === flags &&
-                entry.ticket_low === ticket_low && entry.ticket_high === ticket_high)
-            {
-                const ms = this.now() - entry.start;
-                this.pending_jit.delete(index);
-                run["jit_finished"]++;
-                run["jit_compile_publish_latency_ms"] += ms;
-                run["jit_compile_publish_max_ms"] = Math.max(run["jit_compile_publish_max_ms"], ms);
-                this.keep_slowest(this.slow_jit, { "start_ms": entry.start - this.started,
-                    "duration_ms": ms, "physical_entry": address >>> 0, "wasm_bytes": entry.bytes });
-            }
-            return finished.call(cpu, index, address, flags, ticket_low, ticket_high);
-        };
-        cpu.codegen_finalize_finished = timed_finished;
-        this.cleanup.push(() => { if(cpu.codegen_finalize_finished === timed_finished) cpu.codegen_finalize_finished = finished; });
+        cpu.ir_publish_cached = timed_publish;
+        this.cleanup.push(() => { if(cpu.ir_publish_cached === timed_publish) cpu.ir_publish_cached = publish; });
         const clear_all = cpu.jit_clear_all_funcs;
         const count_all = () => { if(live()) run["jit_all_clear_calls"]++; return clear_all.call(cpu); };
         cpu.jit_clear_all_funcs = count_all;

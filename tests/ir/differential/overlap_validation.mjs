@@ -26,7 +26,6 @@ try {
     vm.run(); await until(() => memory().getUint16(0x500, true) === 0xCAFE, "BIOS");
     await vm.stop();
     assert.equal(e.ir_cache_set_merged_validation(2), 0, "reject invalid policy");
-    e.set_jit_config(0, 1);
     let comparisons = 0, observerChecks = 0, savedBytes = 0;
     for(const PC of [0x100000, 0x100FE0]) {
         const peer = PC + 32;

@@ -4,7 +4,7 @@
 // frames the guest submits per second.
 //
 //   node tests/ir/performance/game_state.mjs --state kartrider.bin \
-//       --hda windowsxp.img [--hdb game.img] [--backend ir|legacy] [--tier0 1]
+//       --hda windowsxp.img [--hdb game.img] [--wasm core.wasm] [--tier0 0|1]
 //       [--seconds 60] [--profile-from 30 --profile-out game.cpuprofile]
 //
 // Memory and VRAM sizes come from the state. Graphics: an infinitely fast
@@ -20,10 +20,9 @@ const args = process.argv.slice(2);
 const option = (name, fallback) => { const i = args.indexOf("--" + name); return i < 0 ? fallback : args[i + 1]; };
 const state_path = option("state"), hda = option("hda"), hdb = option("hdb");
 if(!state_path || !hda) {
-    console.error("usage: game_state.mjs --state file.bin --hda disk.img [--hdb disk.img] [--backend ir|legacy] [--seconds 60]");
+    console.error("usage: game_state.mjs --state file.bin --hda disk.img [--hdb disk.img] [--wasm core.wasm] [--tier0 0|1] [--seconds 60]");
     process.exit(2);
 }
-const backend = option("backend", "ir");
 const seconds = Number(option("seconds", 60));
 const profile_from = option("profile-from");
 const profile_out = option("profile-out", "game.cpuprofile");
@@ -126,8 +125,8 @@ function onSubmit(event) {
 }
 
 const vm = new V86({
-    wasm_path: option("wasm", backend === "ir" ? "build/v86-ir-runtime.wasm" : "build/v86.wasm"),
-    jit_backend: backend,
+    wasm_path: option("wasm", "build/v86-ir-runtime.wasm"),
+    ir_tier0: option("tier0", "1") === "1",
     memory_size, vga_memory_size,
     bios: { url: "bios/seabios.bin" }, vga_bios: { url: "bios/vgabios.bin" },
     hda: new SyncDisk(hda), ...(hdb ? { hdb: new SyncDisk(hdb) } : {}),
@@ -139,7 +138,6 @@ const vm = new V86({
 });
 await new Promise((resolve, reject) => { vm.add_listener("emulator-loaded", resolve); vm.add_listener("emulator-error", reject); });
 const e = vm.v86.cpu.wm.exports;
-if(backend === "ir" && option("tier0", "1") === "1" && !e.ir_auto_set_tier0(1)) throw new Error("ir_auto_set_tier0 refused");
 await vm.restore_state(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
 
 // --- speaker ------------------------------------------------------------------
@@ -171,7 +169,7 @@ await new Promise(resolve => {
             mips: +((instructions - prev.instructions) / dt / 1e6).toFixed(1),
             fps: +((g.presents - prev.presents) / dt).toFixed(1),
             draws: Math.round((g.draws - prev.draws) / dt),
-            ...(backend === "ir" ? { t0_compiles: e.ir_t0_stat?.(0), t0_chains: e.ir_t0_chains?.() >>> 0 } : {}),
+            t0_compiles: e.ir_t0_stat?.(0), t0_chains: e.ir_t0_chains?.() >>> 0,
         };
         console.log(JSON.stringify(line));
         if(s >= seconds / 2) { steady.push(line); measuring = true; }
@@ -184,7 +182,7 @@ await vm.stop();
 clearInterval(speaker);
 if(profiling) fs.writeFileSync(profile_out, JSON.stringify((await post("Profiler.stop")).profile));
 const mean = key => steady.reduce((t, l) => t + l[key], 0) / Math.max(1, steady.length);
-console.log(JSON.stringify({ event: "summary", backend, seconds, second_half: { mips: +mean("mips").toFixed(1), fps: +mean("fps").toFixed(1), draws: Math.round(mean("draws")) },
+console.log(JSON.stringify({ event: "summary", seconds, second_half: { mips: +mean("mips").toFixed(1), fps: +mean("fps").toFixed(1), draws: Math.round(mean("draws")) },
     frame_ms: Object.fromEntries([...intervals].sort((a, b) => b[1] - a[1]).slice(0, 8)) }));
 await vm.destroy();
 process.exit(0);

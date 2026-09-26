@@ -1,5 +1,6 @@
 // Run from the repository root. Fixed-work timings follow bounded code warmup.
 // node tests/ir/performance/boundaries.mjs [current.wasm] [baseline.wasm]
+// Measures the IR region tiers, so Tier-0 is off.
 // IR_FUSION defaults to 0 so separated pages remain separate compiled regions.
 // Set IR_FUSION=1 explicitly to measure how much fusion recovers instead.
 import assert from "node:assert/strict";
@@ -116,13 +117,13 @@ const rows = [];
 const paired_states = new Map();
 for(const work of workloads) for(let round = 0; round < repetitions; round++) {
     // Rotate all arms, including optional baseline arms, to distribute drift.
-    const arms = variants.flatMap(variant => ["ir", "legacy"].map(backend => ({ ...variant, backend })));
+    const arms = variants;
     const ordered = arms.slice(round % arms.length).concat(arms.slice(0, round % arms.length));
     for(const arm of ordered) {
-        const { backend, label, wasm } = arm;
-        const context = `${work.name}/${label}/${backend}/round=${round}`;
+        const { label, wasm } = arm;
+        const context = `${work.name}/${label}/round=${round}`;
         const vm = new V86({
-            wasm_path: wasm, jit_backend: backend, memory_size: 32 << 20,
+            wasm_path: wasm, ir_tier0: false, memory_size: 32 << 20,
             bios: { buffer: bios.slice(0) }, disable_keyboard: true,
             disable_mouse: true, disable_speaker: true,
             net_device: { type: "none" }, autostart: false,
@@ -134,10 +135,8 @@ for(const work of workloads) for(let round = 0; round < repetitions; round++) {
             });
             const cpu = vm.v86.cpu, e = cpu.wm.exports;
             const data = () => new DataView(cpu.mem8.buffer, cpu.mem8.byteOffset);
-            if(backend === "ir") {
-                assert.equal(typeof e.ir_cache_set_fusion, "function", `${context}: requires an IR runtime wasm`);
-                assert.equal(e.ir_cache_set_fusion(fusion), 1, context);
-            }
+            assert.equal(typeof e.ir_cache_set_fusion, "function", `${context}: requires an IR runtime wasm`);
+            assert.equal(e.ir_cache_set_fusion(fusion), 1, context);
             vm.run();
             const boot_deadline = performance.now() + 15_000;
             while(data().getUint16(0x500, true) !== 0xCAFE) {
@@ -196,28 +195,24 @@ for(const work of workloads) for(let round = 0; round < repetitions; round++) {
                 await run(warm_iterations);
                 await sleep(1);
                 warmed++;
-            } while(warmed < warm_runs || (backend === "ir" && warmed < warm_runs + 40 &&
+            } while(warmed < warm_runs || (warmed < warm_runs + 40 &&
                 work.entries.some(pc => entry_tier(pc) !== 2)));
-            if(backend === "ir") {
-                for(const pc of work.entries) {
-                    assert.equal(entry_tier(pc), 2, `${context}: 0x${pc.toString(16)} must reach Tier 2`);
-                    if(!fusion) assert.equal(e.ir_cache_entry_stat(pc, 0, 1, 10), 1, `${context}: entry must not be fused`);
-                }
+            for(const pc of work.entries) {
+                assert.equal(entry_tier(pc), 2, `${context}: 0x${pc.toString(16)} must reach Tier 2`);
+                if(!fusion) assert.equal(e.ir_cache_entry_stat(pc, 0, 1, 10), 1, `${context}: entry must not be fused`);
             }
             const result = await run(work.iterations);
             const coverage = result.ir.guest_steps / result.steps;
-            if(backend === "ir") {
-                assert(coverage >= 0.99, `${context}: IR coverage ${coverage} must be >= 99%`);
-                if(!fusion) assert.equal(result.ir.fused_steps, 0, `${context}: fusion must stay disabled`);
-            }
+            assert(coverage >= 0.99, `${context}: IR coverage ${coverage} must be >= 99%`);
+            if(!fusion) assert.equal(result.ir.fused_steps, 0, `${context}: fusion must stay disabled`);
             // All workloads perform the same update count, not merely each
-            // backend pair. Their PCs differ, but architectural data must agree.
+            // core pair. Their PCs differ, but architectural data must agree.
             const key = `${round}`;
             if(paired_states.has(key)) assert.deepEqual(result.state, paired_states.get(key), `${context}: architectural parity`);
             else paired_states.set(key, result.state);
             const row = {
                 event: "sample", workload: work.name, shape: work.shape,
-                arithmetic_per_fragment: work.body * 3, variant: label, backend,
+                arithmetic_per_fragment: work.body * 3, variant: label,
                 wasm, fusion, round, warm_runs: warmed, ...result,
                 mips: result.steps / result.ms / 1000,
                 ns_per_update: result.ms * 1e6 / result.updates,
@@ -237,36 +232,32 @@ const median = values => {
     const sorted = [...values].sort((a, b) => a - b), mid = Math.floor(sorted.length / 2);
     return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 };
-const timing = (variant, backend, body, shape) => {
-    const samples = rows.filter(row => row.variant === variant && row.backend === backend &&
+const timing = (variant, body, shape) => {
+    const samples = rows.filter(row => row.variant === variant &&
         row.arithmetic_per_fragment === body * 3 && row.shape === shape);
     return {
         ns_per_update: median(samples.map(row => row.ns_per_update)),
         ns_per_iteration: median(samples.map(row => row.ns_per_iteration)),
         min_ms: Math.min(...samples.map(row => row.ms)),
         max_ms: Math.max(...samples.map(row => row.ms)),
-        instructions_per_activation: backend === "ir" ? median(samples.map(row => row.instructions_per_activation)) : null,
+        instructions_per_activation: median(samples.map(row => row.instructions_per_activation)),
     };
 };
 const matrix = variants.flatMap(({ label }) => bodies.map(body => {
-    const by_backend = Object.fromEntries(["ir", "legacy"].map(backend => [backend,
-        Object.fromEntries(shapes.map(shape => [shape, timing(label, backend, body, shape)]))]));
+    const by_shape = Object.fromEntries(shapes.map(shape => [shape, timing(label, body, shape)]));
     return {
-        variant: label, arithmetic_per_fragment: body * 3, ...by_backend,
-        ir_over_legacy: Object.fromEntries(shapes.map(shape => [shape,
-            by_backend.legacy[shape].ns_per_update / by_backend.ir[shape].ns_per_update])),
+        variant: label, arithmetic_per_fragment: body * 3, ...by_shape,
         // compact_jumps and page_boundaries have identical guest retirement;
         // this delta includes layout/compilation effects as well as admission.
-        boundary_penalty_ns_per_iteration: Object.fromEntries(["ir", "legacy"].map(backend => [backend,
-            shapes.includes("page_boundaries") && shapes.includes("compact_jumps")
-                ? by_backend[backend].page_boundaries.ns_per_iteration - by_backend[backend].compact_jumps.ns_per_iteration : null])),
+        boundary_penalty_ns_per_iteration: shapes.includes("page_boundaries") && shapes.includes("compact_jumps")
+            ? by_shape.page_boundaries.ns_per_iteration - by_shape.compact_jumps.ns_per_iteration : null,
     };
 }));
-const comparison = baselineWasm ? bodies.flatMap(body => ["ir", "legacy"].flatMap(backend => shapes.map(shape => ({
-    arithmetic_per_fragment: body * 3, backend, shape,
-    current_over_baseline: timing("baseline", backend, body, shape).ns_per_update /
-        timing("current", backend, body, shape).ns_per_update,
-})))) : [];
+const comparison = baselineWasm ? bodies.flatMap(body => shapes.map(shape => ({
+    arithmetic_per_fragment: body * 3, shape,
+    current_over_baseline: timing("baseline", body, shape).ns_per_update /
+        timing("current", body, shape).ns_per_update,
+}))) : [];
 console.log(JSON.stringify({ event: "summary", repetitions, updates, fusion, matrix, comparison }));
 // Diagnostic benchmark: correctness/warmup failures fail the process. No noisy
 // speed threshold, and no aggregation that hides a short-region regression.

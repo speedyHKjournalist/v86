@@ -192,7 +192,7 @@ if(xp_image) {
     const row = { name: "900.xpboot", category: "system", about: "Windows XP boot to the first 800x600x32 desktop mode, synchronous disk", arms: {} };
     for(const arm of arms) row.arms[arm.label] = { boot_ms: [], avg_mips: [] };
     for(let r = 0; r < xp_runs; r++) for(const arm of r % 2 ? [...arms].reverse() : arms) {
-        const child = spawnSync(process.execPath, ["tests/ir/performance/xp_boot.mjs", xp_image, "ir", arm.wasm], {
+        const child = spawnSync(process.execPath, ["tests/ir/performance/xp_boot.mjs", xp_image, arm.wasm], {
             env: { ...process.env, IR_SYNC_DISK: "1", IR_BOOT_TARGET: "desktop", IR_BOOT_MS: "180000", IR_DIAGNOSTICS: "0" },
             encoding: "utf8", timeout: 400000, maxBuffer: 1 << 28,
         });

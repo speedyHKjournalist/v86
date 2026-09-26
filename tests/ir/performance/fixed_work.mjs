@@ -1,4 +1,7 @@
-// Equal guest work, warmed code, fresh VM for each policy. No timer-limited loops.
+// Equal guest work, warmed code, fresh VM for each core. No timer-limited loops.
+// Measures the IR region tiers (Tier-0 off). An interpreter-only arm is the
+// architectural reference. Correctness and warmup failures fail the process;
+// speed is reported against an optional baseline core.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { finish_halted_timing } from "./timing.mjs";
@@ -36,21 +39,20 @@ const workloads=suite==="game"?[
  {name:"indirect_regions",code:[0x40,0xFF,0xE2],peer:[0x49,0x74,0x02,0xFF,0xE3,0xF4],iterations:3000000,per:5},
  {name:"sse_register",code:[0x0F,0x58,0xC1,0x49,0x75,0xFA,0xF4],iterations:2000000,per:3},
 ];
-// Development filters: IR_FIXED_ONLY=name[,name] and IR_FIXED_BACKENDS=ir|legacy.
+// Development filter: IR_FIXED_ONLY=name[,name].
 if(process.env.IR_FIXED_ONLY){const only=process.env.IR_FIXED_ONLY.split(",");workloads.splice(0,workloads.length,...workloads.filter(w=>only.includes(w.name)));assert(workloads.length,"IR_FIXED_ONLY matched no workload");}
-const backends=(process.env.IR_FIXED_BACKENDS||"ir,legacy").split(",");
 const [wasmPath="build/v86-ir-runtime.wasm",baselineWasm,...extra]=process.argv.slice(2);
 assert.equal(extra.length,0,"usage: fixed_work.mjs [current.wasm] [baseline.wasm]");
 const variants=[{label:"current",wasm:wasmPath}];
 if(baselineWasm) variants.push({label:"baseline",wasm:baselineWasm});
+variants.push({label:"interpreter",wasm:wasmPath,interpreter:true});
 const scale=Number(process.env.IR_FIXED_SCALE||1);
 assert(Number.isInteger(scale)&&scale>=1&&scale<=50,"IR_FIXED_SCALE must be an integer 1..50");
 for(const work of workloads) work.iterations*=scale;
 const results=[];
-const arms=variants.flatMap(v=>backends.map(backend=>({...v,backend})));
-for(const work of workloads) for(let round=0;round<repetitions;round++) for(const {label,wasm,backend} of round%2?[...arms].reverse():arms) {
- const vm=new V86({wasm_path:wasm,jit_backend:backend,memory_size:32<<20,
-  ...backend==="ir"?{ir_region_budget:{promotion_threshold}}:{},
+const arms=variants;
+for(const work of workloads) for(let round=0;round<repetitions;round++) for(const {label,wasm,interpreter} of round%2?[...arms].reverse():arms) {
+ const vm=new V86({wasm_path:wasm,memory_size:32<<20,...interpreter?{disable_jit:true}:{ir_tier0:false,ir_region_budget:{promotion_threshold}},
   bios:{buffer:Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer},disable_keyboard:true,disable_mouse:true,disable_speaker:true,net_device:{type:"none"},autostart:false});
  try {
   await new Promise((r,j)=>{vm.add_listener("emulator-loaded",r);vm.add_listener("emulator-error",j);});
@@ -81,12 +83,12 @@ for(const work of workloads) for(let round=0;round<repetitions;round++) for(cons
    }new Uint32Array(e.memory.buffer)[664>>2]=0;e.update_state_flags();
   };
   const run=async n=>{prepare(n);const start=performance.now();vm.run();const until=start+30000;
-   while(!cpu.in_hlt[0]){assert(performance.now()<until,`${work.name}/${backend} timeout`);await sleep(1);}
+   while(!cpu.in_hlt[0]){assert(performance.now()<until,`${work.name}/${label} timeout`);await sleep(1);}
    const timing=await finish_halted_timing(vm,start),ms=timing.ms,steps=counter();
    assert.equal(steps,n*work.per+(work.peer?0:1),"identical exact retired guest work");
    const state={gpr:Array.from(cpu.reg32),flags:e.get_eflags(),xmm:Array.from(cpu.reg_xmm32s),data:data().getUint32(DATA,true),data16:Array.from(cpu.mem8.slice(DATA,DATA+16)),pc:cpu.instruction_pointer[0]};
    if(fpu_suite) {
-    // Synchronize cached legacy values only after timing has stopped. Compare
+    // Synchronize cached F80 values only after timing has stopped. Compare
     // all physical F80 registers, including empty slots, excluding ABI padding.
     e.fpu_sync_all();
     const bytes=new Uint8Array(cpu.fpu_st.buffer,cpu.fpu_st.byteOffset,cpu.fpu_st.byteLength);
@@ -97,23 +99,22 @@ for(const work of workloads) for(let round=0;round<repetitions;round++) for(cons
   };
   // Yield between bounded warm runs so asynchronous publications can finish.
   for(let n=0;n<20;n++){await run(20000);await sleep(1);}
-  if(backend==="ir") assert.equal(e.ir_cache_entry_stat(PC,0,1,5),2,"fixed work must warm the measured entry to Tier 2");
+  if(!interpreter) assert.equal(e.ir_cache_entry_stat(PC,0,1,5),2,"fixed work must warm the measured entry to Tier 2");
   const ir_before=e.ir_cache_stat(10);
-  const row={workload:work.name,suite,label,backend,round,wasm,scale,...await run(work.iterations)};
+  const row={workload:work.name,suite,label,round,wasm,scale,...await run(work.iterations)};
   row.budget_batch_blocks=e.ir_cache_entry_stat(PC,0,1,13);
   row.ir_steps=(e.ir_cache_stat(10)-ir_before)>>>0;
   row.ir_coverage=row.ir_steps/row.steps;
-  if(backend==="ir") assert(row.ir_coverage>=0.95,"fixed work must actually execute through cached IR");
-  const paired=results.find(r=>r.workload===work.name&&r.round===round&&r.backend!==backend);
+  if(!interpreter) assert(row.ir_coverage>=0.95,"fixed work must actually execute through cached IR");
+  const paired=results.find(r=>r.workload===work.name&&r.round===round&&r.label!==label);
   if(paired)assert.deepEqual(row.state,paired.state,`${work.name}: final architectural state differs`);
-  results.push(row);if(!process.env.IR_FIXED_QUIET)console.log(JSON.stringify(row));else console.log(`${row.workload} ${backend} r${round}: ${row.mips.toFixed(1)} MIPS`);
+  results.push(row);if(!process.env.IR_FIXED_QUIET)console.log(JSON.stringify(row));else console.log(`${row.workload} ${label} r${round}: ${row.mips.toFixed(1)} MIPS`);
  } finally {await vm.destroy();}
 }
 const median=a=>a.sort((a,b)=>a-b)[Math.floor(a.length/2)];
-const matrix_for=label=>workloads.map(({name})=>{const ir=median(results.filter(r=>r.label===label&&r.workload===name&&r.backend==="ir").map(r=>r.mips));const legacy=median(results.filter(r=>r.label===label&&r.workload===name&&r.backend==="legacy").map(r=>r.mips));return {name,ir,legacy,ratio:ir/legacy};});
+const matrix_for=label=>workloads.map(({name})=>({name,mips:median(results.filter(r=>r.label===label&&r.workload===name).map(r=>r.mips))}));
 const matrix=matrix_for("current");
 const baseline=baselineWasm?matrix_for("baseline"):null;
-const geomean=Math.exp(matrix.reduce((sum,r)=>sum+Math.log(r.ratio),0)/matrix.length);
-console.log(JSON.stringify({event:"summary",suite,timing_scope:"start-to-observed-halt",wasm:wasmPath,baseline_wasm:baselineWasm||null,scale,repetitions,matrix,baseline,comparison:baseline?matrix.map((r,i)=>({name:r.name,current_over_baseline:r.ir/baseline[i].ir})):null,geomean,pass:geomean>=1&&matrix.every(r=>r.ratio>=0.9)}));
-
-process.exitCode=geomean>=1&&matrix.every(r=>r.ratio>=0.9)?0:1;
+const comparison=baseline?matrix.map((r,i)=>({name:r.name,current_over_baseline:r.mips/baseline[i].mips})):null;
+const geomean=comparison?Math.exp(comparison.reduce((sum,r)=>sum+Math.log(r.current_over_baseline),0)/comparison.length):null;
+console.log(JSON.stringify({event:"summary",suite,timing_scope:"start-to-observed-halt",wasm:wasmPath,baseline_wasm:baselineWasm||null,scale,repetitions,matrix,baseline,comparison,geomean}));

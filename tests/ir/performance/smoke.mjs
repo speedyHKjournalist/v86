@@ -101,7 +101,8 @@ function target_entry_stats(exports)
 async function sample_ir(execution_budget, round)
 {
     const budget = { ...base_budget, execution_budget };
-    const { vm, load_ms } = await create({ jit_backend: "ir", ir_region_budget: budget });
+    // The matrix measures the region tiers, so Tier-0 is off.
+    const { vm, load_ms } = await create({ ir_tier0: false, ir_region_budget: budget });
     try
     {
         const exports = vm.v86.cpu.wm.exports;
@@ -218,39 +219,6 @@ async function sample_ir(execution_budget, round)
     finally { await vm.destroy(); }
 }
 
-async function sample_legacy(round)
-{
-    // Use the same experimental release core so host/core build differences do not
-    // contaminate this smoke. Only the selected compiler policy differs.
-    const { vm, load_ms } = await create({});
-    try
-    {
-        const boot_ms = await boot(vm);
-        const before = await vm.get_jit_info();
-        assert.equal(before.backend, "legacy");
-        assert.equal(before.legacy_generation_enabled, true);
-
-        await vm.write_memory(Uint8Array.of(0x40, 0xEB, 0xFD), loop_pc);
-        const cold_started = performance.now();
-        await vm.write_memory(bytes(loop_pc), 0x600);
-        await until(async () => (await vm.get_jit_info()).legacy_compile_requests > before.legacy_compile_requests,
-            "legacy compilation in paired performance smoke");
-        const first_compile_ms = performance.now() - cold_started;
-        const warm = await warm_rate(vm);
-        await vm.stop();
-        const after = await vm.get_jit_info();
-        return {
-            round,
-            load_ms,
-            boot_ms,
-            cold_region: { first_compile_ms },
-            warm,
-            legacy_compile_requests: after.legacy_compile_requests - before.legacy_compile_requests,
-        };
-    }
-    finally { await vm.destroy(); }
-}
-
 function summarize_ir(samples, execution_budget)
 {
     assert.equal(samples.length, repetitions, "IR budget matrix requires every repetition");
@@ -287,24 +255,9 @@ function summarize_ir(samples, execution_budget)
     };
 }
 
-function summarize_legacy(samples)
-{
-    assert.equal(samples.length, repetitions, "legacy matrix requires every repetition");
-    return {
-        samples: samples.length,
-        median_load_ms: median(samples.map(sample => sample.load_ms)),
-        median_boot_ms: median(samples.map(sample => sample.boot_ms)),
-        median_first_compile_ms: median(samples.map(sample => sample.cold_region.first_compile_ms)),
-        median_instruction_steps_per_ms: median(samples.map(sample => sample.warm.instruction_steps_per_ms)),
-        median_legacy_compile_requests: median(samples.map(sample => sample.legacy_compile_requests)),
-    };
-}
-
 const ir_runs = Object.fromEntries(execution_budgets.map(budget => [String(budget), []]));
-const legacy_runs = [];
 for(let round = 0; round < repetitions; round++)
 {
-    legacy_runs.push(await sample_legacy(round));
     const order = round & 1 ? [...execution_budgets].reverse() : execution_budgets;
     for(const execution_budget of order)
     {
@@ -317,15 +270,12 @@ for(const execution_budget of execution_budgets)
 {
     ir_summary[String(execution_budget)] = summarize_ir(ir_runs[String(execution_budget)], execution_budget);
 }
-const legacy_summary = summarize_legacy(legacy_runs);
 const baseline_128 = ir_summary["128"].median_instruction_steps_per_ms;
 let previous;
 for(const execution_budget of execution_budgets)
 {
     const summary = ir_summary[String(execution_budget)];
     summary.throughput_relative_to_ir_128 = summary.median_instruction_steps_per_ms / baseline_128;
-    summary.throughput_relative_to_legacy =
-        summary.median_instruction_steps_per_ms / legacy_summary.median_instruction_steps_per_ms;
     summary.throughput_relative_to_previous_budget = previous
         ? summary.median_instruction_steps_per_ms / previous.median_instruction_steps_per_ms
         : 1;
@@ -334,7 +284,7 @@ for(const execution_budget of execution_budgets)
 
 const result = {
     format: "v86-ir13-execution-budget-matrix",
-    version: 3,
+    version: 4,
     policy: {
         note: "Diagnostic matrix only; CI timing has no release threshold and is not an end-to-end speed claim.",
         accounting_note: "execution_budget is dispatcher work units, not guest instructions; no guest-step/budget utilization percentage is reported.",
@@ -345,14 +295,12 @@ const result = {
         warm_window_ms,
         fresh_vm_per_sample: true,
         target_entry_scoped: true,
-        order: "legacy once per round; IR budgets alternate ascending/descending to reduce fixed order bias",
+        order: "IR budgets alternate ascending/descending to reduce fixed order bias",
     },
     summary: {
-        legacy: legacy_summary,
         ir: ir_summary,
     },
     raw: {
-        legacy: legacy_runs,
         ir: ir_runs,
     },
 };

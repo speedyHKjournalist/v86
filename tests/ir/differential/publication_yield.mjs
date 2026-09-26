@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../../build/libv86.mjs";
 const wasm = process.argv[2] || "build/v86-ir-runtime.wasm";
-const vm = new V86({ wasm_path: wasm, memory_size: 32 << 20,
+// disable_jit: IR starts idle (no scheduler, no Tier-0); each case enables it.
+const vm = new V86({ wasm_path: wasm, disable_jit: true, memory_size: 32 << 20,
     bios: { buffer: Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer },
     disable_keyboard: true, disable_mouse: true, disable_speaker: true,
     net_device: { type: "none" }, autostart: false });
@@ -19,8 +20,6 @@ try {
         assert(performance.now() < deadline, "BIOS timeout"); await sleep(1);
     }
     await vm.stop();
-    const disabled = e.get_jit_config(0);
-    e.set_jit_config(0, 1);
     for(const completion of ["success", "reject", "cancel"]) {
         cpu.jit_clear_cache();
         assert.equal(e.ir_auto_config(0, 1, 1000000, 192, 256, 64), 1);
@@ -68,6 +67,5 @@ try {
         assert.equal(((count() - 0xFFFFFFFC) >>> 0), cpu.reg32[3] * 2 - (cpu.instruction_pointer[0] === PC + 1 ? 1 : 0));
         assert.equal(e.ir_auto_config(0, 1, 1000000, 192, 256, 64), 1);
     }
-    e.set_jit_config(0, disabled);
     console.log(`PASS: ${wasm}: one-shot automatic publication handoff, pending progress, success/rejection/cancellation and wrapped retirement`);
 } finally { WebAssembly.instantiate = instantiate; await vm.destroy(); }

@@ -1,5 +1,6 @@
-// Fixed retired work, cold code, serial alternating VMs. This is a publication
-// latency workload, not an XP boot benchmark or a substitute for system tests.
+// Fixed retired work, cold code, serial alternating VMs. This is a region-tier
+// publication latency workload (Tier-0 off), not an XP boot benchmark or a
+// substitute for system tests.
 // node tests/ir/performance/cold_publication.mjs [current.wasm] [baseline.wasm]
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -23,12 +24,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const word = n => [n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24];
 const variants = [{ label: "current", wasm: current }];
 if(baseline) variants.push({ label: "baseline", wasm: baseline });
-const arms = variants.flatMap(variant => ["ir", "legacy"].map(backend => ({ ...variant, backend })));
+const arms = variants;
 const rows = [];
 for(let round = 0; round < rounds; round++) {
     const ordered = arms.slice(round % arms.length).concat(arms.slice(0, round % arms.length));
     for(const arm of ordered) {
-        const vm = new V86({ wasm_path: arm.wasm, jit_backend: arm.backend, memory_size: 32 << 20,
+        const vm = new V86({ wasm_path: arm.wasm, ir_tier0: false, memory_size: 32 << 20,
             bios: { buffer: bios.slice(0) }, autostart: false, disable_keyboard: true,
             disable_mouse: true, disable_speaker: true, net_device: { type: "none" } });
         try {
@@ -104,6 +105,6 @@ for(let round = 0; round < rounds; round++) {
 }
 const median = values => { const a = values.toSorted((a, b) => a - b); return (a[Math.floor((a.length - 1) / 2)] + a[Math.floor(a.length / 2)]) / 2; };
 console.log(JSON.stringify({ event: "summary", probe, rounds, stages, iterations, retired,
-    matrix: arms.map(arm => { const samples = rows.filter(r => r.label === arm.label && r.backend === arm.backend);
+    matrix: arms.map(arm => { const samples = rows.filter(r => r.label === arm.label);
         return { ...arm, ms: median(samples.map(r => r.ms)), mips: median(samples.map(r => r.mips)),
             ir_coverage: median(samples.map(r => r.ir_coverage)) }; }) }));

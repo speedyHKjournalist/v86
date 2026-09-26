@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { V86 } from "../../build/libv86.mjs";
+import { COMPILED_ARMS, compiled_activations } from "./compiled_arms.mjs";
 
+// Compiled code against independent oracles, once per IR arm (Tier-0 and regions).
 const wasm = process.argv[2] || "build/v86.wasm";
 const bios = Uint8Array.from(fs.readFileSync("build/jit-capacity.bin")).buffer;
-const vm = new V86({ wasm_path: wasm, bios: { buffer: bios }, memory_size: 32 << 20,
-    disable_keyboard: true, disable_mouse: true, disable_speaker: true,
-    net_device: { type: "none" }, autostart: false });
+let vm;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const word = address => new DataView(Uint8Array.from(vm.read_memory(address, 4)).buffer).getUint32(0, true);
 const u32 = n => [n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255];
@@ -22,19 +22,22 @@ async function run(address) {
     await vm.stop();
 }
 async function compile(address) {
-    e.performance_recording_enable(1);
     cpu.instruction_pointer[0] = address;
     cpu.in_hlt[0] = 0;
+    const start = compiled_activations(e);
     vm.run();
     const deadline = performance.now() + 10000;
-    while(e.performance_recording_get(1) === 0) {
+    while(compiled_activations(e) === start) {
         assert(performance.now() < deadline, "natural JIT warmup timeout");
         await sleep(1);
     }
     await vm.stop();
-    e.performance_recording_enable(0);
 }
 const done = [0xC7, 0x05, ...u32(0x600), ...u32(0xCAFE)];
+for(const { label, options } of COMPILED_ARMS) {
+vm = new V86({ wasm_path: wasm, bios: { buffer: bios.slice(0) }, memory_size: 32 << 20, ...options,
+    disable_keyboard: true, disable_mouse: true, disable_speaker: true,
+    net_device: { type: "none" }, autostart: false });
 try {
     await new Promise(resolve => vm.add_listener("emulator-loaded", resolve));
     vm.run();
@@ -42,20 +45,6 @@ try {
     while(word(0x500) !== 0xCAFE) { assert(performance.now() < deadline); await sleep(1); }
     await vm.stop();
     cpu = vm.v86.cpu; e = cpu.wm.exports;
-    for(const [index, input, expected] of [[1,0,1],[1,100,16],[3,5000,1024],[4,0,1000],[4,3000000,2000000]]) {
-        const previous = e.get_jit_config(index);
-        e.set_jit_config(index,input);
-        assert.equal(e.get_jit_config(index),expected,"bounded JIT experiment setting");
-        e.set_jit_config(index,previous);
-    }
-    assert.equal(e.get_jit_config(2),1,"experiments keep loop safety enabled");
-    for(const [index, option] of [[8, "JIT_TARGET_CACHE"], [10, "JIT_EXTENDED_FLAGS"],
-        [11, "JIT_STACK_CACHE"], [12, "JIT_LINEAR_REGIONS"]]) {
-        assert.equal(e.get_jit_config(index), 0, "recent JIT policies default off");
-        if(process.env[option] !== undefined) e.set_jit_config(index, Number(process.env[option]));
-    }
-    if(process.env.JIT_LINKS) e.set_jit_config(5, Number(process.env.JIT_LINKS));
-    if(process.env.JIT_RMW_CACHE !== undefined) e.set_jit_config(9, Number(process.env.JIT_RMW_CACHE));
     const patterns = new Uint8Array(512);
     let seed = 0x9132913;
     for(let i = 0; i < patterns.length; i++) {
@@ -97,10 +86,9 @@ try {
         assert(program.length < 4096);
         vm.write_memory(Uint8Array.from(program), address);
         await compile(address);
-        e.performance_recording_enable(1);
+        const before = compiled_activations(e);
         await run(address);
-        assert(e.performance_recording_get(1) > 0, "execute real JIT");
-        e.performance_recording_enable(0);
+        assert(compiled_activations(e) !== before, "execute compiled IR");
         const result = Uint8Array.from(vm.read_memory(RESULT, expected.length));
         for(let n = 0; n < 64; n++) {
             assert.deepEqual(result.slice(n * 20, n * 20 + 16), expected.slice(n * 20, n * 20 + 16), `${op} ${index} register pair ${n}`);
@@ -130,9 +118,6 @@ try {
         await run(address);
         assert.equal(word(RESULT), 1100, "indirect targets after save/restore");
     }
-    if(process.env.JIT_LINKS === "1") assert(e.get_jit_link_count() > 0, "actual cross-module links executed");
-    if(process.env.JIT_LINKS === "1" && e.get_jit_config(8) && wasm.includes("debug") && e.get_jit_target_cache_hits)
-        assert(e.get_jit_target_cache_hits() > 0, "actual cached cross-module targets executed");
     console.log("PASS: same/cross-module indirect CALL/RET, SMC and save/restore");
     const arith = [[0x01, 0xD8, false, true], [0x03, 0xC3, false, true],
         [0x29, 0xD8, true, true], [0x2B, 0xC3, true, true],
@@ -289,7 +274,9 @@ try {
         p.push(0xE9,...u32(-p.length-5));
         vm.write_memory(Uint8Array.from(p),0x386000);
         await compile(0x386000); device_writes.length=0; await run(0x386000);
-        assert(device_writes.length >= 2 && device_writes.length % 2 === 0);
+        // The VM may stop between the two stores (regions exit after every
+        // MMIO store), so the last pair can be incomplete; the order cannot.
+        assert(device_writes.length >= 2);
         for(let i=0;i<device_writes.length;i++) assert.deepEqual(device_writes[i],
             [0xA0000+(i%2)*4,0x12345678]);
     } finally { cpu.memory_map_write32[write_index]=old_write; }
@@ -385,23 +372,27 @@ try {
         }
         const resume=base+p.length;
         p.push(...done,0xE9,...u32(-p.length-done.length-5));
+        // The handler also copies the 48 target bytes (REP MOVSD into
+        // RESULT+64): the state at the fault, not wherever the VM stops later
+        // (the rmw kinds zero the bytes again at the start of each iteration).
         vm.write_memory(Uint8Array.from([
             0x89,0x0D,...u32(RESULT),0x89,0x35,...u32(RESULT+4),0x89,0x3D,...u32(RESULT+8),
             0xA3,...u32(RESULT+16),0x8B,0x44,0x24,4,0xA3,...u32(RESULT+12),
+            0xBE,...u32(0x801FD0),0xBF,...u32(RESULT+64),0xB9,...u32(12),0xF3,0xA5,
             0xC7,0x44,0x24,4,...u32(resume),0x83,0xC4,4,0xCF,
         ]),pf_handler);
         vm.write_memory(Uint8Array.from(p),base);
         await compile(base); await run(base);
         assert.equal(word(RESULT+12),fault_eip_local_local,kind+" precise fault EIP");
         if(kind === "stores" || kind === "rmw-stores") {
-            assert.equal(word(0x101FFC),0x12345678,"first cached store committed");
+            assert.equal(word(RESULT+64+0x2C),0x12345678,"first cached store committed");
         } else {
             assert.equal(word(RESULT),64-copied,kind+" remaining count");
             assert.equal(word(RESULT+8),0x802000,kind+" destination progress");
             assert.equal(word(RESULT+4),DATA+(kind.endsWith("loop") ? 48 : 0),kind+" source progress");
             const expected = kind.endsWith("loop") ? Uint8Array.from(vm.read_memory(DATA,48)) :
                 Uint8Array.from({length:48},(_,i)=>(0x12345678 >>> (i%size*8))&255);
-            assert.deepEqual(Uint8Array.from(vm.read_memory(0x101FD0,48)),expected,kind+" partial writes");
+            assert.deepEqual(Uint8Array.from(vm.read_memory(RESULT+64,48)),expected,kind+" partial writes");
         }
     }
     console.log("PASS: cached MMIO stores and batched copies/fills retain precise partial write faults");
@@ -425,5 +416,6 @@ try {
     assert.equal(word(RESULT+12),overlap_eip,"fault restarts the REP instruction");
     assert.deepEqual(Uint8Array.from(vm.read_memory(0x101FD0,48)),new Uint8Array(48).fill(17));
     console.log("PASS: MMIO reads are not cached; overlapping REP preserves partial progress at #PF");
-    console.log(`PASS: ${cases} real-JIT SSE logical register cases, aliases and carry; ${wasm}`);
+    console.log(`PASS: ${cases} real-JIT SSE logical register cases, aliases and carry; ${wasm} ${label}`);
 } finally { await vm.destroy(); }
+}

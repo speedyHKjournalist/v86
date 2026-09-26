@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
     let time = 0, instructions = 0, counterEnabled = false;
     let counters = [0, 0, 0];
     const reads = [], publicationCalls = [];
+    let resolvePublish;
     const buffer = { get(offset, length, callback) {
         if (offset === 0) callback(new Uint8Array(length));
         else if (offset === 999) throw new Error("disk failed");
@@ -18,7 +19,11 @@ const assert = require("node:assert/strict");
             performance_recording_get(index) { return counters[index]; },
         }, wasm_table: { get() { return null; } } },
         main_loop() { time += 4; instructions = instructions + 100 >>> 0; counters[0] += 25; counters[1] += 75; return 0; },
-        codegen_finalize(...args) { publicationCalls.push(args); }, codegen_finalize_finished(...args) { publicationCalls.push(args); }, jit_clear_all_funcs() {}, jit_clear_func() {},
+        ir_publish_cached(owner, id, slot, code, automatic) {
+            publicationCalls.push([id, slot, code.length, automatic]);
+            return new Promise(resolve => { resolvePublish = resolve; });
+        },
+        jit_clear_all_funcs() {}, jit_clear_func() {},
     };
     const runtime = { cpu, restore_state() {}, restart() {}, destroy() {} };
     const emulator = { v86: runtime, is_running: () => true, get_instruction_counter: () => instructions };
@@ -33,9 +38,10 @@ const assert = require("node:assert/strict");
     time = 15; reads.shift()();
     time = 20; reads.shift()();
     cpu.main_loop();
-    cpu.codegen_finalize(1, 4096, 0, 0, 200);
+    const published = cpu.ir_publish_cached({}, 1n, 1, new Uint8Array(200), true);
     time += 10;
-    cpu.codegen_finalize_finished(1, 4096, 0);
+    resolvePublish(true);
+    assert.equal(await published, true, "the wrapper forwards the publication result");
     cpu.jit_clear_all_funcs();
     counters[2]++;
     recorder.mark("scene_ready");
@@ -55,15 +61,21 @@ const assert = require("node:assert/strict");
     assert.equal(recorder.timer, null);
 
     recorder.start();
-    cpu.codegen_finalize(1, 4096, 0, 0, 200, 7, 1);
-    cpu.codegen_finalize(1, 4096, 0, 0, 200, 8, 1);
-    cpu.codegen_finalize_finished(1, 4096, 0, 7, 1);
-    assert.equal(recorder.pending_jit.size, 1, "old ticket cannot finish the reused slot's measurement");
-    cpu.codegen_finalize_finished(1, 4096, 0, 8, 1);
-    assert.equal(recorder.stop().summary.jit_finished, 1);
-    assert.deepEqual(publicationCalls.slice(-4).map(args => args.slice(-2)), [[7,1],[8,1],[7,1],[8,1]], "wrappers forward both ticket words");
+    const late = cpu.ir_publish_cached({}, 2n, 1, new Uint8Array(100), true), resolveLate = resolvePublish;
+    const failed = cpu.ir_publish_cached({}, 3n, 2, new Uint8Array(100), false), resolveFailed = resolvePublish;
+    assert.equal(recorder.pending_jit.size, 2);
+    resolveFailed(false);
+    assert.equal(await failed, false);
+    assert.equal(recorder.pending_jit.size, 1, "a failed publication is no longer pending");
+    const second = recorder.stop();
+    assert.equal(second.summary.jit_requests, 2);
+    assert.equal(second.summary.jit_finished, 0, "a failed publication is not a finished one");
+    assert.deepEqual(publicationCalls.slice(-2), [[2n, 1, 100, true], [3n, 2, 100, false]], "the wrapper forwards the publication arguments");
 
     recorder.start();
+    resolveLate(true);
+    assert.equal(await late, true);
+    assert.equal(recorder.stats.jit_finished, 0, "a completion from an earlier recording is not counted");
     const abort = new AbortController();
     buffer.get(512, 4096, () => {}, { signal: abort.signal });
     abort.abort();
@@ -261,5 +273,5 @@ const assert = require("node:assert/strict");
     assert.deepEqual(persistent.samples.at(-1).x87.jit_cache, persistent.x87.jit_cache);
     assert.equal(comparisons.x87.jit_cache.persistent_hits, undefined);
 
-    console.log("performance_recorder_test: recording lifecycle, legacy Wasm and x87 reports passed");
+    console.log("performance_recorder_test: recording lifecycle, older Wasm cores and x87 reports passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

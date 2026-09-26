@@ -1,5 +1,11 @@
 # Transactional asynchronous JIT publication foundation
 
+> Historical: this describes the legacy JIT's publication bridge. IR is now the
+> only backend, so legacy modules are never generated, and `jit-publication-tests`
+> and `jit-capacity-tests` were removed. IR publication, failure handling and
+> table capacity are covered by `make ir-cache-tests`
+> (`tests/ir/differential/cache.mjs`) and `make ir-auto-tests`.
+
 The actual Rust-to-JS JIT publication bridge now validates a task before installing
 its function in the Wasm table and reclaims reservations after browser failures.
 This hardens the shared online infrastructure while production still emits legacy

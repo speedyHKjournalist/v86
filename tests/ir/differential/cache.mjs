@@ -360,46 +360,16 @@ try {
     assert.equal(e.ir_cache_stat(2)-hits,1);assert.equal(cpu.reg32[1],0);assert.deepEqual(Array.from(vm.read_memory(DATA+16,3)),[11,22,33]);
     assert.equal(e.ir_cache_stat(1),0);
     console.log(`PASS: ${wasm}: active I/O write/reset retains its table slot until return, rejects nested compilation, and zero-retirement REP exits resume interpretation`);
-    // Table capacity accounting includes IR reservations while legacy compilation continues.
+    // Table capacity accounting includes IR reservations.
     prepare([0x40,0xF4]);const free=e.jit_get_wasm_table_index_free_list_count();assert.equal(e.ir_cache_capacity(),768);assert.equal(e.ir_cache_set_capacity(255),0);assert.equal(e.ir_cache_set_capacity(769),0);assert.equal(e.ir_cache_set_capacity(256),1);const capacity=e.ir_cache_capacity();assert.equal(capacity,256);
     for(let i=0;i<capacity;i++){const address=PC+i*4096;vm.write_memory(Uint8Array.of(0x40,0xF4),address);cpu.instruction_pointer[0]=address;assert(await request(1));}
     assert.equal(e.ir_cache_stat(0),capacity);assert.equal(e.jit_get_wasm_table_index_free_list_count(),free-capacity);
     cpu.instruction_pointer[0]=PC+capacity*4096;vm.write_memory(Uint8Array.of(0x40,0xF4),PC+capacity*4096);assert.equal(await request(1),false);
-    if(e.jit_force_generate_unsafe){
-        for(let i=0;i<900;i++){
-            const address=PC+(capacity+8+i)*4096;vm.write_memory(Uint8Array.from([0x40,0xF4]),address);cpu.instruction_pointer[0]=address;
-            await new Promise((resolve,reject)=>{
-                const timer=setTimeout(()=>reject(new Error("legacy publication timeout")),10000);
-                cpu.test_hook_did_finalize_wasm=()=>{clearTimeout(timer);resolve();};
-                try {assert(e.jit_force_generate_unsafe(address));} catch(error){clearTimeout(timer);reject(error);}
-            });
-        }
-        cpu.test_hook_did_finalize_wasm=undefined;assert.equal(e.ir_cache_stat(0),capacity);
-        hits=e.ir_cache_stat(2);await run(PC);assert.equal(e.ir_cache_stat(2)-hits,1);
-        console.log(`PASS: ${wasm}: 900 actual legacy publications/evictions preserve all ${capacity} IR reservations and an executable IR entry`);
-    }
     clear();assert.equal(e.jit_get_wasm_table_index_free_list_count(),899);
-    console.log(`PASS: ${wasm}: ${capacity} IR entries share the bounded 899-slot pool, capacity rejection and complete reclamation, legacy coexistence`);
+    console.log(`PASS: ${wasm}: ${capacity} IR entries share the bounded 899-slot pool, capacity rejection and complete reclamation`);
     // Browser failures and out-of-order completion use the production JS bridge.
     const original=WebAssembly.instantiate;
     try {
-        if(e.jit_force_generate_unsafe){
-            prepare([0x40,0xF4]);r=reserve();let checked=0;
-            WebAssembly.instantiate=(code,imports)=>{
-                // The legacy generator holds JIT_STATE during this host call.
-                assert.equal(e.ir_cache_cancel(r.id,r.slot),1);
-                assert.equal(e.ir_cache_collect(),0);assert.equal(e.ir_cache_stat(1),1);
-                assert.equal(e.ir_cache_validate(r.id,r.slot),0);checked++;
-                return original(code,imports);
-            };
-            await new Promise((resolve,reject)=>{
-                const timer=setTimeout(()=>reject(new Error("legacy bridge callback timeout")),10000);
-                cpu.test_hook_did_finalize_wasm=()=>{clearTimeout(timer);resolve();};
-                try {assert(e.jit_force_generate_unsafe(PC));} catch(error){clearTimeout(timer);reject(error);}
-            });
-            cpu.test_hook_did_finalize_wasm=undefined;assert.equal(checked,1);e.ir_cache_collect();assert.equal(e.ir_cache_stat(1),0);
-            console.log(`PASS: ${wasm}: publication/collection refuse a synchronous legacy-generator host callback while its JIT lock is held`);
-        }
         for(const kind of ["sync","async","missing","table"]){
             prepare([0x40,0xF4]);
             WebAssembly.instantiate=kind==="sync"?()=>{throw new WebAssembly.CompileError("controlled");}:kind==="async"?()=>Promise.reject(new WebAssembly.CompileError("controlled")):kind==="missing"?()=>Promise.resolve({instance:{exports:{}}}):original;

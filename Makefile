@@ -422,14 +422,7 @@ flags-provenance-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
 
 .PHONY: cpu-plan-tests jit-policy-benchmark
 cpu-plan-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
-	CACHE_CONTROL=1 node tests/rust/cpu_plan_sequences.mjs
-	SEQUENCE_FILTER=nonfloating node tests/rust/cpu_plan_sequences.mjs
-	JIT_RMW_CACHE=1 SEQUENCE_FILTER="rmw cache" node tests/rust/cpu_plan_sequences.mjs
-	JIT_LINKS=1 JIT_RMW_CACHE=1 node tests/rust/cpu_optimizations.mjs
-
-.PHONY: cpu-experimental-policy-tests
-cpu-experimental-policy-tests: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
-	JIT_TARGET_CACHE=1 JIT_EXTENDED_FLAGS=1 JIT_STACK_CACHE=1 JIT_LINEAR_REGIONS=1 SEQUENCE_FILTER=nonfloating node tests/rust/cpu_plan_sequences.mjs
+	node tests/rust/cpu_plan_sequences.mjs
 
 jit-policy-benchmark: build/jit-capacity.bin build/v86.wasm build/libv86.mjs
 	node tests/rust/jit_policy_benchmark.mjs
@@ -452,9 +445,6 @@ build/jit-capacity.bin: tests/rust/jit_capacity.asm
 build/v86-jit-test.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	cargo rustc --features jit-invariants $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/debug/v86.wasm $@
-
-jit-capacity-tests: build/jit-capacity.bin build/v86-jit-test.wasm build/libv86.mjs
-	node tests/rust/jit_capacity.mjs
 
 build/performance-recording-test: tests/rust/performance_recording.rs src/rust/profiler.rs
 	rustc --edition=2021 --test -O $< -o $@
@@ -489,12 +479,13 @@ build/capstone-x86.min.js:
 	mkdir -p build
 	wget -nv -P build https://github.com/AlexAltea/capstone.js/releases/download/v3.0.5-rc1/capstone-x86.min.js
 
+# Recent enough for the SIMD and multi-value code the IR compiler emits.
 build/libwabt.cjs:
 	mkdir -p build
-	wget -nv -P build https://github.com/WebAssembly/wabt/archive/1.0.6.zip
-	unzip -j -d build/ build/1.0.6.zip wabt-1.0.6/demo/libwabt.js
-	mv build/libwabt.js build/libwabt.cjs
-	rm build/1.0.6.zip
+	wget -nv -O build/wabt-1.0.39.tgz https://registry.npmjs.org/wabt/-/wabt-1.0.39.tgz
+	tar -xzf build/wabt-1.0.39.tgz -C build package/index.js
+	mv build/package/index.js build/libwabt.cjs
+	rm -r build/wabt-1.0.39.tgz build/package
 
 # The page always loads the serial terminal; its CSS is included in v86.css.
 # Never leave an empty/partial target behind when a download fails.
@@ -844,14 +835,9 @@ ir-simd-masked-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-tes
 	cargo test ir::simd_masked_tests
 	node tests/ir/differential/simd_masked.mjs
 
-.PHONY: jit-publication-tests
 build/v86-publication-test-release.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	cargo rustc --release --features jit-invariants $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/release/v86.wasm $@
-
-jit-publication-tests: build/jit-capacity.bin build/v86-jit-test.wasm build/v86-publication-test-release.wasm build/libv86.mjs
-	node tests/rust/jit_publication.mjs
-	node tests/rust/jit_publication.mjs build/v86-publication-test-release.wasm
 
 .PHONY: ir-entry-tests
 ir-entry-tests: ir-generated-check build/v86-ir-test.wasm build/v86-ir-test-release.wasm build/libv86.mjs build/jit-capacity.bin

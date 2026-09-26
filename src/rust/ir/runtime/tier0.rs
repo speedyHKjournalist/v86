@@ -180,7 +180,9 @@ pub unsafe fn ir_t0_write_slow(address: u32, value: u32, bytes: u32) -> u32 {
             return 1;
         }
     }
-    let epoch = super::entry::continuation_epoch();
+    // A page-crossing store goes through memory::write8, which dirties the
+    // page unconditionally and so advances the continuation epoch, but the
+    // loop above found no IR code on either page: nothing is invalidated.
     let a = address as i32;
     let written = match bytes {
         1 => cpu::safe_write8(a, value as i32),
@@ -188,8 +190,6 @@ pub unsafe fn ir_t0_write_slow(address: u32, value: u32, bytes: u32) -> u32 {
         _ => cpu::safe_write32(a, value as i32),
     };
     dbg_assert!(written.is_ok(), "tier-0 probe accepted a faulting write");
-    dbg_assert!(super::entry::continuation_epoch() == epoch, "tier-0 store invalidated IR code");
-    let _ = epoch;
     0
 }
 

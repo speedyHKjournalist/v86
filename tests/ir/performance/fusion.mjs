@@ -17,7 +17,7 @@ try {
  cpu.reg32[2]=B;cpu.reg32[3]=A;cpu.reg32[4]=0x90000;cpu.instruction_pointer[0]=A;e.update_state_flags();
  vm.write_memory(Uint8Array.of(0x40,0xFF,0xE2),A);vm.write_memory(Uint8Array.of(0x41,0xFF,0xE3),B);w[664>>2]=0;
  if(process.env.IR_DIAGNOSTICS!==undefined)assert.equal(await vm.configure_ir_diagnostics(Number(process.env.IR_DIAGNOSTICS)),true);
- e.set_jit_config(0,1);assert.equal(e.ir_cache_set_fusion(enabled),1);assert.equal(e.ir_auto_config(1,2,4,192,256,64),1);
+ assert.equal(e.ir_cache_set_fusion(enabled),1);assert.equal(e.ir_auto_config(1,2,4,192,256,64),1);
  vm.run();await sleep(1500);await vm.stop();
  assert.equal(e.ir_cache_entry_stat(A,0,1,5),2);assert.equal(e.ir_cache_entry_stat(B,0,1,5),2);
  if(enabled)assert(e.ir_cache_stat(24)>0);

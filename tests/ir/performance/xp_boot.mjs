@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { V86 } from "../../../build/libv86.mjs";
 
 // Headless CPU/disk diagnostic. Disk writes stay in AsyncXHRBuffer's RAM overlay.
-// Run one process per backend so 2 GiB guest memories do not overlap.
-const [disk, backend = "ir", wasm = "build/v86-ir-runtime.wasm"] = process.argv.slice(2);
-assert(disk && ["ir", "legacy"].includes(backend));
+// Run one process per core so 2 GiB guest memories do not overlap.
+// node tests/ir/performance/xp_boot.mjs disk.img [core.wasm]; IR_TIER0=0 turns Tier-0 off.
+const [disk, wasm = "build/v86-ir-runtime.wasm", ...extra] = process.argv.slice(2);
+assert(disk && !extra.length, "usage: xp_boot.mjs disk.img [core.wasm]");
 const duration = Number(process.env.IR_BOOT_MS || 30000);
 assert(Number.isFinite(duration) && duration >= 1000);
 const recording = process.env.IR_BENCH_RECORD === "1";
@@ -57,12 +58,9 @@ class SyncDisk {
 let milestone = null;
 let phase = "bios";
 const vm = new V86({
-    wasm_path: wasm, jit_backend: backend,
-    ...(backend === "ir" ? {ir_region_budget: region_budget} : {}),
-    ...(backend === "ir" && process.env.IR_SYNC_PUB !== undefined
-        ? {ir_sync_publication: process.env.IR_SYNC_PUB === "1"} : {}),
-    ...(backend === "ir" && process.env.IR_OPT_LEVEL !== undefined
-        ? {ir_opt_level: Number(process.env.IR_OPT_LEVEL)} : {}),
+    wasm_path: wasm, ir_region_budget: region_budget,
+    ...(process.env.IR_SYNC_PUB !== undefined ? {ir_sync_publication: process.env.IR_SYNC_PUB === "1"} : {}),
+    ...(process.env.IR_OPT_LEVEL !== undefined ? {ir_opt_level: Number(process.env.IR_OPT_LEVEL)} : {}),
     memory_size: 2048 * 1024 * 1024, vga_memory_size: 16 * 1024 * 1024,
     bios: { url: "bios/seabios.bin" }, vga_bios: { url: "bios/vgabios.bin" },
     hda: process.env.IR_SYNC_DISK === "1" ? new SyncDisk(disk) : { url: disk, size: fs.statSync(disk).size, async: true },
@@ -75,11 +73,11 @@ let started, previous, count, total = 0;
 vm.add_listener("screen-set-size", size => {
     const ms = started ? performance.now() - started : 0;
     phase = size.join("x");
-    console.log(JSON.stringify({ event: "screen", backend, ms, size }));
+    console.log(JSON.stringify({ event: "screen", ms, size }));
     // This is a reproducible display-mode milestone, not proof of desktop idle.
     if(started && !milestone && size[0] === 800 && size[1] === 600 && size[2] === 32) {
         milestone = {ms, instructions: total + (((vm.get_instruction_counter() >>> 0) - count) >>> 0)};
-        console.log(JSON.stringify({event:"milestone", name:"800x600x32", backend, ...milestone}));
+        console.log(JSON.stringify({event:"milestone", name:"800x600x32", ...milestone}));
     }
 });
 try {
@@ -89,7 +87,6 @@ try {
     });
     const cpu = vm.v86.cpu, e = cpu.wm.exports;
     if(process.env.IR_RESIDENT_PROMOTION !== undefined) {
-        assert.equal(backend, "ir", "IR_RESIDENT_PROMOTION requires the IR backend");
         assert(["0", "1"].includes(process.env.IR_RESIDENT_PROMOTION));
         assert.equal(typeof e.ir_cache_set_resident_promotion, "function",
             "core does not support IR_RESIDENT_PROMOTION");
@@ -102,7 +99,6 @@ try {
         assert.equal(e.ir_auto_config(enabled, ...args), 1);
     }
     if(process.env.IR_HOT_CAPACITY !== undefined) {
-        assert.equal(backend, "ir", "IR_HOT_CAPACITY requires the IR backend");
         const capacity = Number(process.env.IR_HOT_CAPACITY);
         assert(Number.isInteger(capacity) && capacity >= 128 && capacity <= 512,
             "IR_HOT_CAPACITY must be an integer from 128 through 512");
@@ -146,7 +142,7 @@ try {
     }
     // Opt-in immutable input corpus; no guest memory reads, never enabled in timing runs.
     if(process.env.IR_CAPTURE_FILE) {
-        assert.equal(backend,"ir");assert(e.ir_cache_replay_info);
+        assert(e.ir_cache_replay_info);
         fs.writeFileSync(process.env.IR_CAPTURE_FILE,"");
         const publish=cpu.ir_auto_publish;
         cpu.ir_auto_publish=function(id,...args) {
@@ -180,7 +176,7 @@ try {
         const steps = (next - count) >>> 0;
         total += steps;
         const delta = sample_ir();
-        console.log(JSON.stringify({ backend, wasm, ms: now - started,
+        console.log(JSON.stringify({ wasm, ms: now - started,
             phase, instructions: total,
             interval_ir: {steps:delta[0], activations:delta[1], full_checks:delta[2], observer_checks:delta[3],
                 warm_handoffs:delta[4], missing_hint_hits:delta[5],
@@ -205,7 +201,7 @@ try {
         kinds.sort((a, b) => b[1] - a[1]);
         console.log(JSON.stringify({event:"tier0_bytes", kinds: kinds.map(([k, b, n]) => `${k}:${b}/${n}=${(b / n).toFixed(0)}`)}));
     }
-    console.log(JSON.stringify({event:"result", backend, target, completed:target === "time" || !!milestone,
+    console.log(JSON.stringify({event:"result", target, completed:target === "time" || !!milestone,
         ms:performance.now()-started, instructions:total, milestone, jit:vm.get_jit_info(),
         // Accumulate wrapping counters per interval; long boots can exceed 2^32.
         ir_work:{guest_steps:total_ir[0],activations:total_ir[1],full_checks:total_ir[2],observer_checks:total_ir[3],
@@ -223,7 +219,7 @@ try {
     if(recording) {
         const rows = Array.from({ length: e.performance_recording_hotspot_count() }, (_, i) =>
             Array.from({ length: 10 }, (_, j) => e.performance_recording_hotspot_get(i, j)));
-        console.log(JSON.stringify({ event: "samples", backend, rows }));
+        console.log(JSON.stringify({ event: "samples", rows }));
         const counts = new Map();
         for(const row of rows) counts.set(row[9], (counts.get(row[9]) || 0) + 1);
         const hot = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([pc, samples]) => ({
@@ -231,7 +227,7 @@ try {
             // Physical bytes are useful for early identity-mapped BIOS code only.
             physical_bytes: Buffer.from(cpu.mem8.subarray(pc, pc + 32)).toString("hex"),
         }));
-        console.log(JSON.stringify({ event: "hot", backend, hot }));
+        console.log(JSON.stringify({ event: "hot", hot }));
     }
 } finally {
     await vm.destroy();

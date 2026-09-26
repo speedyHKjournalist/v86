@@ -9,7 +9,8 @@ const release=process.argv.includes("--release");
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const little=value=>Array.from({length:4},(_,i)=>value>>>(i*8)&255);
 let observer=null;
-const vm=new V86({jit_backend:"ir",wasm_fn:async imports=>{
+// The region scheduler is under test: Tier-0 (on by default) is off.
+const vm=new V86({ir_tier0:false,wasm_fn:async imports=>{
     const original=imports.env.log_from_wasm;
     imports.env.log_from_wasm=(...args)=>observer?observer(...args):original(...args);
     return (await WebAssembly.instantiate(fs.readFileSync(wasm),imports)).instance.exports;
